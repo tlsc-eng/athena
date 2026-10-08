@@ -21,6 +21,10 @@ const CLIENT_QUEUE: usize = 256;
 /// How long a full client queue may stay full before the daemon hangs up on that client.
 const LAG_GRACE: Duration = Duration::from_secs(2);
 const LAG_POLL: Duration = Duration::from_millis(5);
+/// A client dropped for falling behind and back within this long replays only a short history,
+/// so a flood cannot make it fall behind again on the whole scrollback.
+const LAG_REATTACH: Duration = Duration::from_secs(10);
+const LAG_REPLAY_BYTES: usize = 256 * 1024;
 const IDLE_EXIT: Duration = Duration::from_secs(60);
 /// How long programs get to exit after a hangup when the whole daemon stops.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
@@ -236,7 +240,7 @@ impl Server {
                 let _ = writer.shutdown(std::net::Shutdown::Both);
             });
         if writer_thread.is_err() {
-            self.forget(id);
+            self.forget(id, false);
             return;
         }
 
@@ -246,14 +250,17 @@ impl Server {
             }
         }
 
-        self.forget(id);
+        self.forget(id, false);
     }
 
     /// Detaches a client from everything; returns it so the caller may also hang up.
-    fn forget(&self, id: ClientId) -> Option<Client> {
+    fn forget(&self, id: ClientId, lagging: bool) -> Option<Client> {
         let mut st = self.lock();
         st.subscribers.retain(|c| *c != id);
         for pane in st.panes.values_mut() {
+            if lagging && pane.attached.contains(&id) {
+                pane.lag_dropped = Some(Instant::now());
+            }
             pane.attached.retain(|c| *c != id);
         }
         st.clients.remove(&id)
@@ -262,7 +269,7 @@ impl Server {
     /// Disconnects a client that stopped reading, so it cannot hold up output for anyone else.
     /// It reattaches and replays the scrollback, as after any lost connection.
     fn hang_up(&self, id: ClientId) {
-        if let Some(client) = self.forget(id) {
+        if let Some(client) = self.forget(id, true) {
             tracing::warn!("client {id} stopped reading; disconnecting it");
             let _ = client.stream.shutdown(std::net::Shutdown::Both);
         }
@@ -346,13 +353,23 @@ impl Server {
                     rows: p.rows,
                     cols: p.cols,
                 };
-                let history = p
-                    .ring
-                    .chunks(MAX_OUTPUT_CHUNK)
-                    .map(|chunk| ServerMsg::Output {
-                        pane,
-                        data: chunk.to_vec(),
-                    });
+                let lagged = p
+                    .lag_dropped
+                    .take()
+                    .is_some_and(|t| t.elapsed() < LAG_REATTACH);
+                let limit = if lagged {
+                    LAG_REPLAY_BYTES
+                } else {
+                    SCROLLBACK_BYTES
+                };
+                let history =
+                    p.ring
+                        .tail(limit)
+                        .chunks(MAX_OUTPUT_CHUNK)
+                        .map(|chunk| ServerMsg::Output {
+                            pane,
+                            data: chunk.to_vec(),
+                        });
                 let tail = [
                     Some(ServerMsg::ReplayDone { pane }),
                     Some(ServerMsg::Foreground {

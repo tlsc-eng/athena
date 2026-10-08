@@ -21,8 +21,17 @@ impl Ring {
         self.buf.extend(bytes);
     }
 
-    pub fn chunks(&mut self, size: usize) -> impl Iterator<Item = &[u8]> {
-        self.buf.make_contiguous().chunks(size)
+    /// The newest `max` bytes at most, starting at a line when older bytes are cut off.
+    pub fn tail(&mut self, max: usize) -> &[u8] {
+        let all = self.buf.make_contiguous();
+        if all.len() <= max {
+            return all;
+        }
+        let cut = &all[all.len() - max..];
+        match cut.iter().position(|&b| b == b'\n') {
+            Some(newline) => &cut[newline + 1..],
+            None => cut,
+        }
     }
 }
 
@@ -31,7 +40,7 @@ mod tests {
     use super::*;
 
     fn contents(r: &mut Ring) -> Vec<u8> {
-        r.chunks(3).flatten().copied().collect()
+        r.tail(usize::MAX).to_vec()
     }
 
     #[test]
@@ -42,5 +51,14 @@ mod tests {
         assert_eq!(contents(&mut r), b"cdefg");
         r.push(b"0123456789");
         assert_eq!(contents(&mut r), b"56789");
+    }
+
+    #[test]
+    fn a_tail_starts_after_the_first_cut_line() {
+        let mut r = Ring::new(64);
+        r.push(b"one\ntwo\nthree\n");
+        assert_eq!(r.tail(9), b"three\n");
+        assert_eq!(r.tail(4), b"");
+        assert_eq!(r.tail(100), b"one\ntwo\nthree\n");
     }
 }

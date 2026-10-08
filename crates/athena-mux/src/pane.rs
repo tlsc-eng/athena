@@ -28,6 +28,8 @@ pub struct Pane {
     pub spawned_at: Instant,
     /// Whether any client ever attached; a pane nobody attached to has no tab to come back to.
     pub ever_attached: bool,
+    /// When a client was dropped from this pane for falling behind.
+    pub lag_dropped: Option<Instant>,
     /// Device number of the pane's terminal; `None` once it has been hung up.
     tty: Option<u32>,
     master: Box<dyn MasterPty + Send>,
@@ -131,6 +133,7 @@ impl Pane {
             foreground: None,
             spawned_at: Instant::now(),
             ever_attached: false,
+            lag_dropped: None,
             tty: Some(tty),
             master: pair.master,
             input,

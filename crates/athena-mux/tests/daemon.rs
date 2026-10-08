@@ -575,3 +575,52 @@ fn a_pane_no_client_ever_attached_to_is_ended_but_a_detached_one_is_kept() {
         thread::sleep(Duration::from_millis(200));
     }
 }
+
+/// Bytes of history replayed by an attach, up to `ReplayDone`.
+fn replayed_bytes(conn: &Connection, reader: &mut UnixStream, pane: u64) -> usize {
+    conn.send(&ClientMsg::Attach { pane }).unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut bytes = 0;
+    loop {
+        match next(reader) {
+            ServerMsg::Output { data, .. } => bytes += data.len(),
+            ServerMsg::ReplayDone { .. } => return bytes,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_client_dropped_for_lagging_reattaches_to_a_short_replay() {
+    let daemon = Daemon::start("relag");
+    let (stalled, mut stalled_reader) = daemon.connect();
+    let flood = spawn_pane(&stalled, &mut stalled_reader);
+    stalled.send(&ClientMsg::Attach { pane: flood }).unwrap();
+    stalled
+        .send(&ClientMsg::Input {
+            pane: flood,
+            data: b"yes athena-flood\r".to_vec(),
+        })
+        .unwrap();
+    stalled_reader
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    // Not reading lets the queue fill; once dropped, the rest drains and the stream ends.
+    thread::sleep(Duration::from_secs(6));
+    while let Ok(Some(_)) = read_frame::<_, ServerMsg>(&mut stalled_reader) {}
+
+    let (conn, mut reader) = daemon.connect();
+    let short = replayed_bytes(&conn, &mut reader, flood);
+    assert!(short <= 256 * 1024, "replayed {short} bytes after lagging");
+    drop((conn, reader));
+
+    let (conn, mut reader) = daemon.connect();
+    let full = replayed_bytes(&conn, &mut reader, flood);
+    assert!(
+        full > 1024 * 1024,
+        "replayed only {full} bytes on a normal attach"
+    );
+    conn.send(&ClientMsg::Kill { pane: flood }).unwrap();
+}
