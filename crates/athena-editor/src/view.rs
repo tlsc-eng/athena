@@ -196,6 +196,8 @@ pub enum EditorEvent {
     ContextMenu {
         open: bool,
     },
+    /// A file that could not be opened opened after all, so language servers can now be told.
+    Opened,
 }
 
 /// A change bar in the gutter, in zero-based lines of the saved file.
@@ -1444,6 +1446,7 @@ impl EditorView {
         self.cursor = Cursor::default();
         self.buffer = Some(shared);
         self.changed(cx);
+        cx.emit(EditorEvent::Opened);
     }
 
     /// Replaces the buffer with the file on disk, as a step that undo can take back; a large file

@@ -212,12 +212,16 @@ impl Shell {
                     v.set_autosave(delay, cx);
                     v.set_format_on_save(format_on_save);
                 });
-                let menu_key = key.clone();
+                let tab = key.clone();
                 cx.subscribe(&view, move |this, view, event: &EditorEvent, cx| {
                     match event {
                         EditorEvent::Changed => {}
                         EditorEvent::ContextMenu { open } => {
-                            return this.note_item_menu(menu_key.clone(), *open, cx);
+                            return this.note_item_menu(tab.clone(), *open, cx);
+                        }
+                        EditorEvent::Opened => {
+                            this.lsp_opened(&tab.0, &view, cx);
+                            this.git_opened(&view, cx);
                         }
                         EditorEvent::Edited { .. } => {
                             this.lsp_edited(&view, cx);
