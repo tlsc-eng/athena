@@ -67,6 +67,39 @@ impl Closing {
     }
 }
 
+/// Marks when an element started animating in, for [`animate_enter`]'s `fresh`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Opening {
+    pub since: Instant,
+}
+
+impl Opening {
+    pub fn now() -> Self {
+        Self {
+            since: Instant::now(),
+        }
+    }
+
+    pub fn running(&self, duration: Duration) -> bool {
+        self.since.elapsed() < duration
+    }
+}
+
+/// Enter animation that plays only while `fresh`, so a parent whose id changes (a project switch)
+/// cannot replay it; the wrapper stays either way, keeping its children's element state.
+pub fn animate_enter<E: IntoElement + AnimationExt + 'static>(
+    reduced: bool,
+    fresh: bool,
+    element: E,
+    id: impl Into<ElementId>,
+    animation: Animation,
+    animator: impl Fn(E, f32) -> E + 'static,
+) -> AnyElement {
+    animate_if(reduced, element, id, animation, move |el, d| {
+        if fresh { animator(el, d) } else { el }
+    })
+}
+
 /// Exit counterpart of [`animate_if`]: eases out, and renders the final (gone) frame when motion is reduced.
 pub fn animate_exit<E: IntoElement + AnimationExt + 'static>(
     reduced: bool,
@@ -124,6 +157,13 @@ mod tests {
         let d = Duration::from_millis(120);
         assert_eq!(exit_delay(true, d), Duration::ZERO);
         assert_eq!(exit_delay(false, d), d);
+    }
+
+    #[test]
+    fn opening_stops_running_after_its_duration() {
+        let opening = Opening::now();
+        assert!(opening.running(Duration::from_secs(60)));
+        assert!(!opening.running(Duration::ZERO));
     }
 
     #[test]
