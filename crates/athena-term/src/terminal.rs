@@ -83,6 +83,10 @@ impl Terminal {
         &self.term
     }
 
+    pub fn size(&self) -> GridSize {
+        self.size
+    }
+
     pub fn mode(&self) -> TermMode {
         *self.term.mode()
     }
@@ -156,6 +160,14 @@ impl Terminal {
         self.term.clear_screen(ClearMode::Saved);
         if !self.mode().contains(TermMode::ALT_SCREEN) {
             self.transport.write(vec![0x0c]);
+        }
+    }
+
+    /// Nudges the PTY size so a full-screen program repaints; replayed bytes alone can leave it stale.
+    pub fn force_redraw(&self) {
+        if self.mode().contains(TermMode::ALT_SCREEN) && self.size.cols > 1 {
+            self.transport.resize(self.size.rows, self.size.cols - 1);
+            self.transport.resize(self.size.rows, self.size.cols);
         }
     }
 

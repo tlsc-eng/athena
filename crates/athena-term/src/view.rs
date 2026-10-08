@@ -250,7 +250,12 @@ impl TerminalView {
                     if std::mem::take(&mut self.session_lost) {
                         terminal.handle(PaneEvent::Output(SESSION_LOST.to_vec()), &palette);
                     }
+                    let unchanged = (terminal.size().rows, terminal.size().cols)
+                        == (self.grid.rows, self.grid.cols);
                     terminal.resize(self.grid);
+                    if unchanged {
+                        terminal.force_redraw();
+                    }
                 }
             }
             ServerMsg::Exited { code, .. } => {
