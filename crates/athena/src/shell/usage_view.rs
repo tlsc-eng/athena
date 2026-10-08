@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use athena_proto::NoticeKind;
+use athena_ui::motion::{self, Closing};
 use athena_ui::{ActiveTheme, ButtonKind};
 use gpui::{
-    AnyElement, Context, FontWeight, Hsla, MouseButton, PromptLevel, Window, div, prelude::*, px,
+    Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, PromptLevel, Window, div,
+    prelude::*, px,
 };
 
 use super::Shell;
@@ -20,6 +22,9 @@ pub(super) struct UsageState {
     readings: Vec<(Profile, Status)>,
     fetched: Option<Instant>,
     open: bool,
+    /// Generation of the current opening, keying its enter animation.
+    opened: u64,
+    closing: Option<Closing>,
     /// Highest threshold already announced per profile and window, reset when usage drops.
     announced: HashMap<(String, String), f32>,
 }
@@ -245,7 +250,12 @@ impl Shell {
             .cursor_pointer()
             .hover(|s| s.bg(t.color.surface_hover))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.usage.open = !this.usage.open;
+                // An open popover already closed on this click's mouse-down; don't reopen it.
+                if this.usage_open() {
+                    return;
+                }
+                this.usage.open = true;
+                this.usage.opened = this.next_generation();
                 cx.notify();
             }))
             .when(five.is_some() || week.is_some(), |el| {
@@ -262,12 +272,39 @@ impl Shell {
             .into_any_element()
     }
 
+    /// Open or still fading out; either way it covers web previews.
     pub(super) fn usage_open(&self) -> bool {
-        self.usage.open
+        self.usage.open || self.usage.closing.is_some()
+    }
+
+    fn close_usage(&mut self, cx: &mut Context<Self>) {
+        if !self.usage.open {
+            return;
+        }
+        self.usage.open = false;
+        let generation = self.next_generation();
+        self.usage.closing = Some(Closing::new(generation));
+        let t = cx.theme();
+        let delay = motion::exit_delay(t.motion.reduced, t.motion.fast);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .usage
+                    .closing
+                    .is_some_and(|c| c.generation == generation)
+                {
+                    this.usage.closing = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     pub(super) fn render_usage_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.usage.open {
+        if !self.usage_open() {
             return None;
         }
         let t = cx.theme().clone();
@@ -347,34 +384,48 @@ impl Shell {
         let empty = sections.is_empty();
         let refresh = athena_ui::Button::new("usage-refresh", "Refresh", ButtonKind::Ghost)
             .on_click(cx.listener(|this, _, window, cx| this.refresh_usage(window, cx)));
-        Some(
-            div()
-                .id("usage-popover")
-                .absolute()
-                .top(px(40.))
-                .right(px(8.))
-                .w(px(300.))
-                .p(px(16.))
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .bg(t.color.surface)
-                .border_1()
-                .border_color(t.color.border)
-                .rounded(t.shape.radius_panel)
-                .shadow(vec![t.popover_shadow()])
-                .text_size(t.typography.caption)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .children(sections)
-                .when(empty, |el| {
-                    el.child(
-                        div()
-                            .text_color(t.color.content_muted)
-                            .child("No Claude Code sign-in found."),
-                    )
-                })
-                .child(div().flex().justify_end().child(refresh))
-                .into_any_element(),
-        )
+        let popover = div()
+            .id("usage-popover")
+            .absolute()
+            .top(px(40.))
+            .right(px(8.))
+            .w(px(300.))
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .bg(t.color.surface)
+            .border_1()
+            .border_color(t.color.border)
+            .rounded(t.shape.radius_panel)
+            .shadow(vec![t.popover_shadow()])
+            .text_size(t.typography.caption)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_usage(cx)))
+            .children(sections)
+            .when(empty, |el| {
+                el.child(
+                    div()
+                        .text_color(t.color.content_muted)
+                        .child("No Claude Code sign-in found."),
+                )
+            })
+            .child(div().flex().justify_end().child(refresh));
+        Some(match self.usage.closing {
+            Some(closing) => motion::animate_exit(
+                t.motion.reduced,
+                popover,
+                ("usage-close", closing.generation),
+                t.motion.fast,
+                |el, d| el.opacity(1. - d).top(px(40. - 4. * d)),
+            ),
+            None => motion::animate_if(
+                t.motion.reduced,
+                popover,
+                ("usage-open", self.usage.opened),
+                Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+                |el, d| el.opacity(d).top(px(36. + 4. * d)),
+            ),
+        })
     }
 }

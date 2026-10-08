@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use athena_ui::{ActiveTheme, InputEvent, TextInput, motion};
+use athena_ui::motion::{self, Closing};
+use athena_ui::{ActiveTheme, InputEvent, TextInput};
 use gpui::{
     Action, Animation, AnyElement, ClickEvent, Context, Entity, Focusable, FontWeight,
     HighlightStyle, MouseButton, SharedString, StyledText, Subscription, Window, div, prelude::*,
@@ -19,6 +20,16 @@ pub(super) enum Target {
     Command(Box<dyn Action>),
     /// A command that starts Claude Code in this project.
     Claude(String),
+}
+
+impl Clone for Target {
+    fn clone(&self) -> Self {
+        match self {
+            Self::File(path) => Self::File(path.clone()),
+            Self::Command(action) => Self::Command(action.boxed_clone()),
+            Self::Claude(command) => Self::Claude(command.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -172,6 +183,7 @@ impl Shell {
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
+        self.palette_closing = None;
         self.palette = Some(Palette {
             mode,
             input,
@@ -256,9 +268,33 @@ impl Shell {
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
+        if let Some(palette) = self.palette.take() {
+            self.fade_out_palette(palette, cx);
+        }
         self.focus_active_item(window, cx);
         cx.notify();
+    }
+
+    /// Keeps a dismissed palette drawn while it fades; focus has already moved on.
+    fn fade_out_palette(&mut self, palette: Palette, cx: &mut Context<Self>) {
+        let generation = self.next_generation();
+        self.palette_closing = Some((palette, Closing::new(generation)));
+        let t = cx.theme();
+        let delay = motion::exit_delay(t.motion.reduced, t.motion.fast);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .palette_closing
+                    .as_ref()
+                    .is_some_and(|(_, c)| c.generation == generation)
+                {
+                    this.palette_closing = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Runs the selected row, or `row`; `beside` opens a file in a new pane next to the focused one.
@@ -277,9 +313,10 @@ impl Shell {
             return;
         };
         let beside = beside || palette.mode == Mode::FilesBeside;
-        let entry = palette.entries.into_iter().nth(*index);
+        let target = palette.entries.get(*index).map(|e| e.target.clone());
+        self.fade_out_palette(palette, cx);
         self.focus_active_item(window, cx);
-        match entry.map(|e| e.target) {
+        match target {
             Some(Target::File(path)) if beside => self.open_file_beside(path, window, cx),
             Some(Target::File(path)) => self.open_file(path, window, cx),
             Some(Target::Command(action)) => window.dispatch_action(action, cx),
@@ -290,7 +327,11 @@ impl Shell {
     }
 
     pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let palette = self.palette.as_ref()?;
+        let (palette, closing) = match (&self.palette, &self.palette_closing) {
+            (Some(palette), _) => (palette, None),
+            (None, Some((palette, closing))) => (palette, Some(*closing)),
+            (None, None) => return None,
+        };
         let t = cx.theme().clone();
         let rows: Vec<AnyElement> = palette
             .hits
@@ -419,13 +460,22 @@ impl Shell {
                         )
                     }),
             );
-        let panel = motion::animate_if(
-            t.motion.reduced,
-            panel,
-            "palette-enter",
-            Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
-            |el, d| el.opacity(d).top(px(2. * (1. - d))),
-        );
+        let panel = match closing {
+            Some(closing) => motion::animate_exit(
+                t.motion.reduced,
+                panel,
+                ("palette-exit", closing.generation),
+                t.motion.fast,
+                |el, d| el.opacity(1. - d).top(px(2. * d)),
+            ),
+            None => motion::animate_if(
+                t.motion.reduced,
+                panel,
+                "palette-enter",
+                Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+                |el, d| el.opacity(d).top(px(2. * (1. - d))),
+            ),
+        };
         Some(
             div()
                 .id("palette-layer")

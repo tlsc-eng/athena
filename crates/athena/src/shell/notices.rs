@@ -3,7 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
-use athena_ui::{ActiveTheme, motion};
+use athena_ui::ActiveTheme;
+use athena_ui::motion::{self, Closing};
 use athena_workspace::{ItemId, ItemKind};
 use gpui::{Animation, AnyElement, Context, FontWeight, Hsla, Task, Window, div, prelude::*, px};
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,7 @@ pub(super) struct Toast {
     id: u64,
     /// Title and body of a toast that is not kept in the Notifications list.
     transient: Option<(String, String)>,
+    closing: Option<Closing>,
     _dismiss: Task<()>,
 }
 
@@ -294,6 +296,17 @@ impl Shell {
     fn show_toast(&mut self, id: u64, transient: Option<(String, String)>, cx: &mut Context<Self>) {
         let dismiss = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
+            let Ok(delay) = this.update(cx, |this, cx| {
+                if let Some(toast) = this.toasts.iter_mut().find(|t| t.id == id) {
+                    toast.closing = Some(Closing::new(id));
+                }
+                cx.notify();
+                let t = cx.theme();
+                motion::exit_delay(t.motion.reduced, t.motion.fast)
+            }) else {
+                return;
+            };
+            cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, cx| {
                 this.toasts.retain(|t| t.id != id);
                 cx.notify();
@@ -302,6 +315,7 @@ impl Shell {
         self.toasts.push(Toast {
             id,
             transient,
+            closing: None,
             _dismiss: dismiss,
         });
         if self.toasts.len() > MAX_TOASTS {
@@ -375,9 +389,13 @@ impl Shell {
             .toasts
             .iter()
             .filter_map(|toast| match &toast.transient {
-                Some((title, body)) => {
-                    Some((toast.id, title.clone(), body.clone(), t.color.content_muted))
-                }
+                Some((title, body)) => Some((
+                    toast.id,
+                    toast.closing,
+                    title.clone(),
+                    body.clone(),
+                    t.color.content_muted,
+                )),
                 None => self
                     .notifications
                     .iter()
@@ -385,10 +403,16 @@ impl Shell {
                     .map(|n| {
                         let (title, body) =
                             describe(&n.kind, self.project_name(&n.project).as_deref());
-                        (n.id, title, body, self.kind_color(&n.kind, cx))
+                        (
+                            n.id,
+                            toast.closing,
+                            title,
+                            body,
+                            self.kind_color(&n.kind, cx),
+                        )
                     }),
             })
-            .map(|(id, title, body, color)| {
+            .map(|(id, closing, title, body, color)| {
                 let card = div()
                     .id(("toast", id))
                     .w(px(360.))
@@ -424,13 +448,22 @@ impl Shell {
                                     .child(body),
                             ),
                     );
-                motion::animate_if(
-                    t.motion.reduced,
-                    card,
-                    ("toast-in", id),
-                    Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
-                    |el, d| el.opacity(d).top(px(2. * (1. - d))),
-                )
+                match closing {
+                    Some(_) => motion::animate_exit(
+                        t.motion.reduced,
+                        card,
+                        ("toast-out", id),
+                        t.motion.fast,
+                        |el, d| el.opacity(1. - d).top(px(-2. * d)),
+                    ),
+                    None => motion::animate_if(
+                        t.motion.reduced,
+                        card,
+                        ("toast-in", id),
+                        Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+                        |el, d| el.opacity(d).top(px(2. * (1. - d))),
+                    ),
+                }
             })
             .collect();
         Some(

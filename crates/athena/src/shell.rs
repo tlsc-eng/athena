@@ -56,12 +56,19 @@ pub struct Shell {
     pane_area: Rc<RefCell<Bounds<Pixels>>>,
     drag: Option<panes::Drag>,
     palette: Option<palette::Palette>,
+    palette_closing: Option<(palette::Palette, motion::Closing)>,
     tree: tree::FileTree,
+    tree_opening: Option<motion::Opening>,
+    tree_closing: Option<motion::Closing>,
     notifications: Vec<notices::Notification>,
     notices_path: PathBuf,
     next_notice: u64,
     toasts: Vec<notices::Toast>,
     drawer: Option<drawer::DrawerTab>,
+    /// The drawer state `drawer_changed` last saw, to tell opening from closing.
+    drawer_shown: Option<drawer::DrawerTab>,
+    drawer_opening: Option<motion::Opening>,
+    drawer_closing: Option<(drawer::DrawerTab, motion::Closing)>,
     last_drawer_tab: drawer::DrawerTab,
     containers: containers_view::ContainersState,
     playwright: playwright_view::PlaywrightState,
@@ -78,7 +85,11 @@ pub struct Shell {
     _usage: Option<Task<()>>,
     zoomed: Option<PaneId>,
     entering: Option<PaneId>,
+    pane_opening: Option<(PaneId, motion::Opening)>,
     leaving: Option<PaneId>,
+    tab_born: Option<(ItemId, motion::Opening)>,
+    /// A tab fading out before it is closed, with its project.
+    tab_leaving: Option<(PathBuf, ItemId, motion::Closing)>,
     tab_switches: u64,
     /// Each pane's tab strip scroll, and the tab it last scrolled into view.
     tab_scroll: HashMap<(PathBuf, PaneId), (gpui::ScrollHandle, Option<ItemId>)>,
@@ -169,12 +180,18 @@ impl Shell {
             pane_area: Rc::default(),
             drag: None,
             palette: None,
+            palette_closing: None,
             tree: tree::FileTree::default(),
+            tree_opening: None,
+            tree_closing: None,
             next_notice: notifications.iter().map(|n| n.id()).max().unwrap_or(0),
             notifications,
             notices_path,
             toasts: Vec::new(),
             drawer: None,
+            drawer_shown: None,
+            drawer_opening: None,
+            drawer_closing: None,
             last_drawer_tab: drawer::DrawerTab::Notifications,
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
@@ -189,7 +206,10 @@ impl Shell {
             _usage: None,
             zoomed: None,
             entering: None,
+            pane_opening: None,
             leaving: None,
+            tab_born: None,
+            tab_leaving: None,
             tab_switches: 0,
             tab_scroll: HashMap::new(),
             tab_revealed: false,
@@ -698,11 +718,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &DisablePlaywrightMcp, w, cx| {
                 this.set_playwright_mcp(false, w, cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| {
-                this.workspace.ui.tree_visible = !this.workspace.ui.tree_visible;
-                this.schedule_save(cx);
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| this.toggle_tree(cx)))
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)

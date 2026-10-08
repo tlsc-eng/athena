@@ -8,10 +8,9 @@ use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, ElementId, Entity,
-    FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel,
-    SharedString, Window, canvas, div, linear_color_stop, linear_gradient, point, prelude::*, px,
-    relative, size,
+    Animation, AnyElement, Bounds, Context, CursorStyle, ElementId, Entity, FontWeight, Hsla,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel, SharedString, Window, canvas,
+    div, linear_color_stop, linear_gradient, point, prelude::*, px, relative, size,
 };
 
 use super::Shell;
@@ -329,7 +328,7 @@ impl Shell {
     /// Web previews float above gpui, so only those in a visible tab with nothing drawn over them show.
     pub(super) fn sync_previews(&mut self, cx: &mut Context<Self>) {
         let mut shown = std::collections::HashSet::new();
-        let covered = self.palette.is_some() || self.usage_open();
+        let covered = self.palette.is_some() || self.palette_closing.is_some() || self.usage_open();
         if let Some(project) = self.workspace.active_project().filter(|_| !covered)
             && let Some(layout) = &project.layout
         {
@@ -359,12 +358,19 @@ impl Shell {
         match self.workspace.projects[i].layout.as_mut() {
             Some(layout) => {
                 let focused = layout.focused;
-                layout.add_item(focused, kind);
+                let born = layout.add_item(focused, kind);
+                self.note_tab_born(born);
             }
             None => self.workspace.projects[i].layout = Some(Layout::new(kind)),
         }
         self.tab_switches += 1;
         self.after_layout_change(window, cx);
+    }
+
+    fn note_tab_born(&mut self, item: Option<ItemId>) {
+        if let Some(item) = item {
+            self.tab_born = Some((item, motion::Opening::now()));
+        }
     }
 
     pub(super) fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
@@ -450,6 +456,16 @@ impl Shell {
             .active_project()
             .and_then(|p| p.layout.as_ref())
             .map_or(0, |l| l.panes().len());
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        if self
+            .tab_leaving
+            .as_ref()
+            .is_some_and(|(r, i, _)| *r == root && *i == item)
+        {
+            return;
+        }
         if pane.items.len() == 1 && panes > 1 && !cx.theme().motion.reduced {
             // Fade the pane out first; its sibling takes the space once it is gone.
             self.leaving = Some(pane.id);
@@ -459,30 +475,63 @@ impl Shell {
                 cx.background_executor().timer(delay).await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.leaving = None;
-                    this.remove_item(item, window, cx);
+                    this.remove_item_from(&root, item, window, cx);
                 });
             })
             .detach();
             return;
         }
-        self.remove_item(item, window, cx);
+        if cx.theme().motion.reduced {
+            return self.remove_item(item, window, cx);
+        }
+        // One tab fades at a time; a second close finishes the first at once.
+        if let Some((root, item, _)) = self.tab_leaving.take() {
+            self.remove_item_from(&root, item, window, cx);
+        }
+        let generation = self.next_generation();
+        self.tab_leaving = Some((root.clone(), item, motion::Closing::new(generation)));
+        let delay = cx.theme().motion.fast;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this
+                    .tab_leaving
+                    .as_ref()
+                    .is_some_and(|l| l.2.generation == generation)
+                {
+                    this.tab_leaving = None;
+                    this.remove_item_from(&root, item, window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn remove_item(&mut self, item: ItemId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.active_root() else {
-            return;
-        };
-        if let Some(view) = self.items.remove(&(root, item)) {
+        if let Some(root) = self.active_root() {
+            self.remove_item_from(&root, item, window, cx);
+        }
+    }
+
+    /// Closes a tab of the project at `root`, which may no longer be the active one after a fade.
+    fn remove_item_from(
+        &mut self,
+        root: &Path,
+        item: ItemId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.items.remove(&(root.to_path_buf(), item)) {
             view.close(cx);
             if let ItemView::Editor(editor) = &view {
                 let path = editor.read(cx).path().to_path_buf();
                 self.lsp_closed(&path, cx);
             }
         }
-        let Some(i) = self.workspace.active else {
+        let Some(project) = self.workspace.projects.iter_mut().find(|p| p.root == root) else {
             return;
         };
-        let project = &mut self.workspace.projects[i];
         if let Some(layout) = project.layout.as_mut()
             && !layout.close_item(item)
         {
@@ -538,7 +587,8 @@ impl Shell {
         match target {
             Some(pane) => {
                 layout.focused = pane;
-                layout.add_item(pane, kind);
+                let born = layout.add_item(pane, kind);
+                self.note_tab_born(born);
                 self.tab_switches += 1;
             }
             None => {
@@ -896,7 +946,15 @@ impl Shell {
                     .items
                     .get(&(root.to_path_buf(), item.id))
                     .is_some_and(|v| v.is_dirty(cx));
-                div()
+                let leaving = self
+                    .tab_leaving
+                    .as_ref()
+                    .filter(|(r, i, _)| r == root && *i == item.id)
+                    .map(|(_, _, closing)| closing.generation);
+                let born = self
+                    .tab_born
+                    .is_some_and(|(i, opening)| i == item.id && opening.running(t.motion.fast));
+                let tab = div()
                     .id(("tab", item.id.0))
                     .group(group.clone())
                     .relative()
@@ -925,7 +983,9 @@ impl Shell {
                         })
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_tab(pane_id, index, window, cx)
+                        if leaving.is_none() {
+                            this.activate_tab(pane_id, index, window, cx)
+                        }
                     }))
                     .children(
                         item.kind
@@ -980,8 +1040,25 @@ impl Shell {
                                 .h(px(1.))
                                 .bg(t.color.accent),
                         )
-                    })
-                    .into_any_element()
+                    });
+                // Opacity and offset only; the strip never animates a tab's width.
+                match leaving {
+                    Some(generation) => motion::animate_exit(
+                        t.motion.reduced,
+                        tab,
+                        ("tab-leave", generation),
+                        t.motion.fast,
+                        |el, d| el.opacity(1. - d),
+                    ),
+                    None => motion::animate_enter(
+                        t.motion.reduced,
+                        born,
+                        tab,
+                        ("tab-in", item.id.0),
+                        Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+                        |el, d| el.opacity(d).top(px(4. * (1. - d))),
+                    ),
+                }
             })
             .collect();
 
@@ -1067,24 +1144,28 @@ impl Shell {
             .child(content);
 
         if self.leaving == Some(pane_id) {
-            return body
-                .with_animation(
-                    ("pane-leave", pane_id.0),
-                    Animation::new(t.motion.fast).with_easing(motion::ease_exit()),
-                    |el, d| el.opacity(1. - d),
-                )
-                .into_any_element();
+            return motion::animate_exit(
+                t.motion.reduced,
+                body,
+                ("pane-leave", pane_id.0),
+                t.motion.fast,
+                |el, d| el.opacity(1. - d),
+            );
         }
-        let entering = self.entering == Some(pane_id);
-        if entering {
+        if self.entering == Some(pane_id) {
             self.entering = None;
+            self.pane_opening = Some((pane_id, motion::Opening::now()));
         }
-        motion::animate_if(
-            t.motion.reduced || !entering,
+        let fresh = self
+            .pane_opening
+            .is_some_and(|(p, o)| p == pane_id && o.running(t.motion.base));
+        motion::animate_enter(
+            t.motion.reduced,
+            fresh,
             body,
             ("pane-enter", pane_id.0),
             Animation::new(t.motion.base).with_easing(motion::ease_enter()),
-            |el, d| el.opacity(d),
+            |el, d| el.opacity(d).top(px(4. * (1. - d))),
         )
     }
 

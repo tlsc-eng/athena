@@ -1,4 +1,5 @@
-use athena_ui::{ActiveTheme, ButtonKind, motion};
+use athena_ui::motion::{self, Closing, Opening};
+use athena_ui::{ActiveTheme, ButtonKind};
 use athena_workspace::{Axis, UiState};
 use gpui::{
     Animation, AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, Window, div,
@@ -53,6 +54,35 @@ impl Shell {
     }
 
     fn drawer_changed(&mut self, cx: &mut Context<Self>) {
+        match (
+            std::mem::replace(&mut self.drawer_shown, self.drawer),
+            self.drawer,
+        ) {
+            (None, Some(_)) => {
+                self.drawer_closing = None;
+                self.drawer_opening = Some(Opening::now());
+            }
+            (Some(tab), None) => {
+                let generation = self.next_generation();
+                self.drawer_closing = Some((tab, Closing::new(generation)));
+                let t = cx.theme();
+                let delay = motion::exit_delay(t.motion.reduced, t.motion.fast);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this
+                            .drawer_closing
+                            .is_some_and(|(_, c)| c.generation == generation)
+                        {
+                            this.drawer_closing = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            _ => {}
+        }
         if let Some(tab) = self.drawer {
             self.last_drawer_tab = tab;
         }
@@ -73,7 +103,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let tab = self.drawer?;
+        let (tab, closing) = match (self.drawer, self.drawer_closing) {
+            (Some(tab), _) => (tab, None),
+            (None, Some((tab, closing))) => (tab, Some(closing)),
+            (None, None) => return None,
+        };
         let t = cx.theme().clone();
         let tabs = [
             DrawerTab::Containers,
@@ -134,8 +168,7 @@ impl Shell {
             DrawerTab::References => self.render_references(cx),
         };
         let drawer = div()
-            .h(px(self.drawer_height(window)))
-            .flex_none()
+            .size_full()
             .flex()
             .flex_col()
             .border_t_1()
@@ -158,13 +191,33 @@ impl Shell {
                     .children(action),
             )
             .child(div().flex_1().min_h_0().child(content));
-        Some(motion::animate_if(
-            t.motion.reduced,
-            drawer,
-            "drawer-open",
-            Animation::new(t.motion.base).with_easing(motion::ease_enter()),
-            |el, d| el.opacity(d),
-        ))
+        // The box keeps its full height throughout, so the panes above resize once, not per frame.
+        let drawer = match closing {
+            Some(closing) => motion::animate_exit(
+                t.motion.reduced,
+                drawer,
+                ("drawer-close", closing.generation),
+                t.motion.fast,
+                |el, d| el.opacity(1. - d).top(px(16. * d)),
+            ),
+            None => motion::animate_enter(
+                t.motion.reduced,
+                self.drawer_opening
+                    .is_some_and(|o| o.running(t.motion.base)),
+                drawer,
+                "drawer-open",
+                Animation::new(t.motion.base).with_easing(motion::ease_enter()),
+                |el, d| el.opacity(d).top(px(16. * (1. - d))),
+            ),
+        };
+        Some(
+            div()
+                .h(px(self.drawer_height(window)))
+                .flex_none()
+                .overflow_hidden()
+                .child(drawer)
+                .into_any_element(),
+        )
     }
 
     /// The drag strip on the drawer's top edge; a double-click restores the default height.

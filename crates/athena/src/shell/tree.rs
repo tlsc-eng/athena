@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use athena_ui::ActiveTheme;
+use athena_ui::motion::{self, Closing, Opening};
 use athena_workspace::{Axis, UiState};
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, Window, div,
-    prelude::*, px, uniform_list,
+    Animation, AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, Window,
+    div, prelude::*, px, uniform_list,
 };
 
 use super::Shell;
@@ -116,8 +117,38 @@ impl Shell {
         pane.active_item()?.kind.file().cloned()
     }
 
+    /// Cmd+B: shows or hides the tree, sliding it in from or out to the left.
+    pub(super) fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        let visible = !self.workspace.ui.tree_visible;
+        self.workspace.ui.tree_visible = visible;
+        if visible {
+            self.tree_closing = None;
+            self.tree_opening = Some(Opening::now());
+        } else {
+            let generation = self.next_generation();
+            self.tree_closing = Some(Closing::new(generation));
+            let t = cx.theme();
+            let delay = motion::exit_delay(t.motion.reduced, t.motion.fast);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this
+                        .tree_closing
+                        .is_some_and(|c| c.generation == generation)
+                    {
+                        this.tree_closing = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.workspace.ui.tree_visible {
+        if !self.workspace.ui.tree_visible && self.tree_closing.is_none() {
             return None;
         }
         let root = self.workspace.active_project()?.root.clone();
@@ -216,30 +247,54 @@ impl Shell {
             }),
         )
         .flex_1();
+        let w = clamp_tree_width(self.workspace.ui.tree_width);
+        let panel = div()
+            .w(px(w))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(t.color.surface)
+            .border_r_1()
+            .border_color(t.color.border)
+            .child(
+                div()
+                    .h(px(32.))
+                    .flex_none()
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(t.color.border)
+                    .text_size(t.typography.caption)
+                    .text_color(t.color.content_muted)
+                    .child("Files"),
+            )
+            .child(list);
+        // The box keeps its width throughout, so the panes beside it resize once, not per frame.
+        let panel = match self.tree_closing {
+            Some(closing) => motion::animate_exit(
+                t.motion.reduced,
+                panel,
+                ("tree-close", closing.generation),
+                t.motion.fast,
+                move |el, d| el.ml(px(-w * d)).opacity(1. - d),
+            ),
+            None => motion::animate_enter(
+                t.motion.reduced,
+                self.tree_opening.is_some_and(|o| o.running(t.motion.base)),
+                panel,
+                "tree-open",
+                Animation::new(t.motion.base).with_easing(motion::ease_enter()),
+                move |el, d| el.ml(px(-w * (1. - d))).opacity(d),
+            ),
+        };
         Some(
             div()
-                .w(px(clamp_tree_width(self.workspace.ui.tree_width)))
+                .w(px(w))
                 .flex_none()
                 .h_full()
-                .flex()
-                .flex_col()
-                .bg(t.color.surface)
-                .border_r_1()
-                .border_color(t.color.border)
-                .child(
-                    div()
-                        .h(px(32.))
-                        .flex_none()
-                        .px(px(12.))
-                        .flex()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(t.color.border)
-                        .text_size(t.typography.caption)
-                        .text_color(t.color.content_muted)
-                        .child("Files"),
-                )
-                .child(list)
+                .overflow_hidden()
+                .child(panel)
                 .into_any_element(),
         )
     }
