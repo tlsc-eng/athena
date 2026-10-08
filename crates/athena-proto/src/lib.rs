@@ -58,6 +58,12 @@ pub enum AppMsg {
     Diagnostics {
         path: Option<PathBuf>,
     },
+    /// A Claude Code session edited `path`; its version before the session's first edit is
+    /// in the snapshot store under `session`.
+    ClaudeEdited {
+        path: PathBuf,
+        session: String,
+    },
     /// Shows a file's uncommitted changes in a diff tab, the staged ones when `staged`.
     OpenDiff {
         path: PathBuf,

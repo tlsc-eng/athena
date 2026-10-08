@@ -6,7 +6,7 @@ use std::process::Command;
 
 use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
 
-const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running> | notify --title <t> [--body <b>]]";
+const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
 
 /// Hook input larger than this is ignored; Claude Code sends a small JSON object.
 const MAX_HOOK_INPUT: u64 = 64 * 1024;
@@ -92,22 +92,41 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
             .and_then(|i| args.get(i + 1))
             .map(|s| s.to_string())
     };
-    let hook_message = || {
-        let mut input = String::new();
+    // Only hook events read stdin; a script's `--title` call may have a pipe left open there.
+    let hook_input = || -> serde_json::Value {
+        let mut text = String::new();
         if !std::io::stdin().is_terminal() {
             let _ = std::io::stdin()
                 .take(MAX_HOOK_INPUT)
-                .read_to_string(&mut input);
+                .read_to_string(&mut text);
         }
-        serde_json::from_str::<serde_json::Value>(&input)
-            .ok()
-            .and_then(|v| {
-                v.get("message")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-            })
+        serde_json::from_str(&text).unwrap_or_default()
     };
-    let kind = match (flag("--event").as_deref(), flag("--title")) {
+    let hook_message = || hook_input()["message"].as_str().map(str::to_string);
+    let event = flag("--event");
+    if event.as_deref() == Some("claude-will-edit") {
+        // A failing PreToolUse hook would get in Claude's way; a missed snapshot only costs the diff.
+        if let (Some((path, session)), Ok(store)) =
+            (edited_file(&hook_input(), None), crate::snapshots::store())
+            && let Some(session) = session
+        {
+            let _ = crate::snapshots::take(&store, &session, &path);
+        }
+        return Ok(());
+    }
+    if event.as_deref() == Some("claude-edited") || flag("--edited").is_some() {
+        let input = if event.is_some() {
+            hook_input()
+        } else {
+            serde_json::Value::Null
+        };
+        if let Some((path, session)) = edited_file(&input, flag("--edited")) {
+            let session = flag("--session").or(session).unwrap_or_default();
+            let _ = tell_window(AppMsg::ClaudeEdited { path, session });
+        }
+        return Ok(());
+    }
+    let kind = match (event.as_deref(), flag("--title")) {
         (Some("claude-stop"), _) => NoticeKind::ClaudeStopped,
         (Some("claude-running"), _) => NoticeKind::ClaudeRunning,
         (Some("claude-needs-input"), _) => NoticeKind::ClaudeNeedsInput {
@@ -125,6 +144,52 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
     if let Ok((conn, _)) = athena_proto::connect(&athena_proto::socket_path()?) {
         conn.send(&ClientMsg::Notify { pane, kind })?;
     }
+    Ok(())
+}
+
+/// The file a Claude Code edit hook is about, made absolute against the session's folder, and
+/// the session id; `given` (from `--edited`) wins over the hook input.
+fn edited_file(
+    input: &serde_json::Value,
+    given: Option<String>,
+) -> Option<(PathBuf, Option<String>)> {
+    let file = given.or_else(|| {
+        input["tool_input"]["file_path"]
+            .as_str()
+            .map(str::to_string)
+    })?;
+    let mut path = PathBuf::from(file);
+    if path.is_relative() {
+        let cwd = input["cwd"]
+            .as_str()
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())?;
+        path = cwd.join(path);
+    }
+    // Projects are opened by their real path (/private/tmp, not /tmp); a new file has none yet.
+    if let (Some(dir), Some(name)) = (path.parent(), path.file_name())
+        && let Ok(real) = dir.canonicalize()
+    {
+        path = real.join(name);
+    }
+    let session = input["session_id"].as_str().map(str::to_string);
+    Some((path, session))
+}
+
+/// One request to the window over app.sock, giving up quickly: hooks must not stall Claude.
+fn tell_window(msg: AppMsg) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(athena_proto::app_socket_path()?)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
+    if let Some(session) = std::env::var("ATHENA_PANE_ID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        athena_proto::write_frame(&mut stream, &AppMsg::Identify { session })?;
+        athena_proto::read_frame::<_, athena_proto::AppReply>(&mut stream)?;
+    }
+    athena_proto::write_frame(&mut stream, &msg)?;
+    athena_proto::read_frame::<_, athena_proto::AppReply>(&mut stream)?;
     Ok(())
 }
 
@@ -193,4 +258,37 @@ pub fn startup_folder() -> Option<PathBuf> {
 fn launched_by_launchd() -> bool {
     // SAFETY: getppid has no preconditions.
     unsafe { libc::getppid() == 1 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_hook_input_names_an_absolute_file_and_the_session() {
+        let input = serde_json::json!({
+            "session_id": "abc-123",
+            "cwd": "/nonexistent-athena-test/app",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "src/main.go", "old_string": "a", "new_string": "b" }
+        });
+        let (path, session) = edited_file(&input, None).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/nonexistent-athena-test/app/src/main.go")
+        );
+        let tmp = serde_json::json!({ "tool_input": { "file_path": "/tmp/new-file.go" } });
+        let (real, _) = edited_file(&tmp, None).unwrap();
+        assert_eq!(
+            real,
+            Path::new("/tmp")
+                .canonicalize()
+                .unwrap()
+                .join("new-file.go")
+        );
+        assert_eq!(session.as_deref(), Some("abc-123"));
+        let (path, _) = edited_file(&input, Some("/x/y.go".into())).unwrap();
+        assert_eq!(path, PathBuf::from("/x/y.go"));
+        assert!(edited_file(&serde_json::json!({}), None).is_none());
+    }
 }

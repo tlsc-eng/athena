@@ -178,6 +178,7 @@ impl Shell {
             Mode::Commands => {
                 let root = self.workspace.active_project().map(|p| p.root.as_path());
                 let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
+                let hooks_any = root.is_some_and(crate::claude_hooks::installed);
                 let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
                 let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
                 let mut commands = commands();
@@ -192,7 +193,7 @@ impl Shell {
                     .into_iter()
                     .filter(|(label, _)| {
                         !(label.starts_with("Enable Claude Code hooks") && hooks_on
-                            || label.starts_with("Disable Claude Code hooks") && !hooks_on
+                            || label.starts_with("Disable Claude Code hooks") && !hooks_any
                             || label.starts_with("Enable Playwright MCP")
                                 && (mcp_on || !playwright)
                             || label.starts_with("Disable Playwright MCP") && !mcp_on

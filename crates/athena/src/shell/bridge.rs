@@ -66,6 +66,10 @@ impl Shell {
                     Err(e) => AppReply::Error(e),
                 }
             }
+            AppMsg::ClaudeEdited { path, session } => {
+                self.claude_edited(path, session, cx);
+                AppReply::Ok
+            }
             AppMsg::OpenDiff { path, staged } => {
                 let roots: Vec<PathBuf> = self
                     .workspace

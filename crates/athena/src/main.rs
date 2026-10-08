@@ -5,6 +5,7 @@ mod cli;
 mod mcp;
 mod procinfo;
 mod shell;
+mod snapshots;
 mod system_notify;
 mod usage;
 

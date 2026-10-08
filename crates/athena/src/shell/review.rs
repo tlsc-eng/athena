@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
@@ -9,11 +11,19 @@ use gpui::{AppContext as _, Context, Entity, Window};
 
 use super::Shell;
 use super::item::{ItemView, file_label};
+use super::notices::ToastAction;
+use crate::snapshots::{self, Before};
 
 /// Bigger files are not diffed; shaping and highlighting them would stall the window.
 const MAX_DIFF_BYTES: usize = 20 * 1024 * 1024;
 /// Copies kept by revert and discard are deleted after this long.
 const KEEP_COPIES: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// Toasts for Claude's edits, one per file, so a burst of edits replaces rather than stacks.
+#[derive(Default)]
+pub(super) struct ReviewState {
+    edit_toasts: HashMap<PathBuf, u64>,
+}
 
 /// The tab title VS Code gives a diff.
 pub(super) fn diff_title(path: &Path, base: &DiffBase) -> String {
@@ -97,7 +107,17 @@ fn load(
             )
         }
         DiffBase::Index => (git::show(root, Rev::Index, &rel()?)?, read_file(path)?),
-        DiffBase::Snapshot { .. } => bail!("Claude's edits are not kept yet."),
+        DiffBase::Snapshot { session } => {
+            let old = match snapshots::read(&snapshots::store()?, session, path) {
+                Before::Text(t) => Some(t),
+                Before::Absent => None,
+                Before::Unknown => bail!(
+                    "No copy of the file from before Claude's edits was kept. Enable Claude Code \
+                     hooks for this project to keep one from the next session on."
+                ),
+            };
+            (old, read_file(path)?)
+        }
     };
     Ok((text(old)?, text(new)?))
 }
@@ -264,6 +284,52 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// A Claude Code hook reported an edit: refresh its diffs and offer a review of the session's
+    /// changes to the file.
+    pub(super) fn claude_edited(&mut self, path: PathBuf, session: String, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .find(|r| path.starts_with(r))
+        else {
+            tracing::debug!(path = %path.display(), "Claude edited a file outside the open projects");
+            return;
+        };
+        self.reload_diffs(&root, Some(&path), cx);
+        let kept = snapshots::store()
+            .map(|store| snapshots::read(&store, &session, &path) != Before::Unknown)
+            .unwrap_or(false);
+        tracing::debug!(path = %path.display(), kept, "Claude edited a file");
+        let base = if kept {
+            DiffBase::Snapshot { session }
+        } else {
+            DiffBase::Index
+        };
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let open = path.clone();
+        let action = ToastAction {
+            label: "Review diff",
+            run: Rc::new(move |this: &mut Shell, window, cx| {
+                if let Some(i) = this.workspace.projects.iter().position(|p| p.root == root) {
+                    this.switch_to(i, cx);
+                }
+                this.open_diff(open.clone(), base.clone(), window, cx);
+            }),
+        };
+        if let Some(old) = self.review.edit_toasts.remove(&path) {
+            self.dismiss_toast(old, cx);
+        }
+        let title = format!("Claude edited {}", file_label(&path));
+        let id = self.action_toast(title, rel, action, cx);
+        self.review.edit_toasts.insert(path, id);
     }
 }
 

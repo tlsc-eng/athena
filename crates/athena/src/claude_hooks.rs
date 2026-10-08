@@ -1,4 +1,5 @@
-//! Claude Code hooks that tell Athena when a session starts working, stops, or needs input.
+//! Claude Code hooks that tell Athena when a session starts working, stops, needs input, or
+//! edits a file.
 //! Written only on request, into the project's `.claude/settings.local.json`, which Claude Code
 //! keeps out of version control.
 
@@ -16,7 +17,10 @@ pub fn settings_path(root: &Path) -> PathBuf {
     root.join(".claude/settings.local.json")
 }
 
-fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 3] {
+/// Claude's file-writing tools; their hook input names the file in `tool_input.file_path`.
+const EDIT_TOOLS: &str = "Edit|MultiEdit|Write";
+
+fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 5] {
     let cmd = |event: &str| format!("\"{}\" notify --event {event}", athena.display());
     [
         ("UserPromptSubmit", None, cmd("claude-running")),
@@ -26,6 +30,9 @@ fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 3] {
             Some("permission_prompt|idle_prompt"),
             cmd("claude-needs-input"),
         ),
+        // Before the first edit, to keep the file as it was; after each, to offer the diff.
+        ("PreToolUse", Some(EDIT_TOOLS), cmd("claude-will-edit")),
+        ("PostToolUse", Some(EDIT_TOOLS), cmd("claude-edited")),
     ]
 }
 
@@ -68,7 +75,8 @@ pub fn merge(settings: Value, athena: &Path, enable: bool) -> Value {
     Value::Object(settings)
 }
 
-pub fn enabled(root: &Path) -> bool {
+/// Whether any Athena hook is installed, so there is something to remove.
+pub fn installed(root: &Path) -> bool {
     let Some(settings) = fs::read_to_string(settings_path(root))
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
@@ -82,6 +90,34 @@ pub fn enabled(root: &Path) -> bool {
             .flatten()
             .any(is_ours)
     })
+}
+
+/// Whether every current Athena hook is installed; an install from an older Athena is not, so
+/// enabling again adds the hooks it lacks.
+pub fn enabled(root: &Path) -> bool {
+    let Some(settings) = fs::read_to_string(settings_path(root))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return false;
+    };
+    hooks(Path::new("athena"))
+        .iter()
+        .all(|(event, _, command)| {
+            let event_flag = command.rsplit(' ').next().unwrap_or_default();
+            settings["hooks"][event].as_array().is_some_and(|entries| {
+                entries.iter().any(|e| {
+                    is_ours(e)
+                        && e["hooks"].as_array().is_some_and(|hs| {
+                            hs.iter().any(|h| {
+                                h["command"]
+                                    .as_str()
+                                    .is_some_and(|c| c.ends_with(&format!(" {event_flag}")))
+                            })
+                        })
+                })
+            })
+        })
 }
 
 /// Adds or removes Athena's hooks in the project's local Claude settings.
@@ -158,12 +194,88 @@ mod tests {
         write(&dir, Path::new(ATHENA), true).unwrap();
         assert!(enabled(&dir));
         write(&dir, Path::new(ATHENA), false).unwrap();
-        assert!(!enabled(&dir));
+        assert!(!enabled(&dir) && !installed(&dir));
         fs::write(settings_path(&dir), "{ not json").unwrap();
         assert!(
             write(&dir, Path::new(ATHENA), true).is_err(),
             "never overwrite a file we can't parse"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A settings file as a user might have it: their own hooks on the same events Athena uses.
+    fn user_settings() -> Value {
+        json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    { "matcher": "Bash", "hooks": [{ "type": "command", "command": "guard.sh" }] }
+                ],
+                "PostToolUse": [
+                    { "matcher": "Edit|Write", "hooks": [{ "type": "command", "command": "prettier --write" }] }
+                ],
+                "SessionStart": [{ "hooks": [{ "type": "command", "command": "echo hi" }] }]
+            }
+        })
+    }
+
+    #[test]
+    fn edit_hooks_are_appended_after_the_users_own_and_removed_cleanly() {
+        let out = merge(user_settings(), Path::new(ATHENA), true);
+        let pre = out["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[0]["hooks"][0]["command"], "guard.sh");
+        assert_eq!(pre[1]["matcher"], "Edit|MultiEdit|Write");
+        assert_eq!(
+            pre[1]["hooks"][0]["command"],
+            "\"/opt/homebrew/bin/athena\" notify --event claude-will-edit"
+        );
+        let post = out["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post[0]["hooks"][0]["command"], "prettier --write");
+        assert_eq!(
+            post[1]["hooks"][0]["command"],
+            "\"/opt/homebrew/bin/athena\" notify --event claude-edited"
+        );
+        assert_eq!(
+            out["hooks"]["SessionStart"],
+            user_settings()["hooks"]["SessionStart"]
+        );
+        assert_eq!(out["model"], "opus");
+
+        let again = merge(out.clone(), Path::new(ATHENA), true);
+        assert_eq!(again, out, "enabling twice changes nothing");
+        assert_eq!(merge(again, Path::new(ATHENA), false), user_settings());
+    }
+
+    #[test]
+    fn an_install_from_an_older_athena_reads_as_not_enabled_until_upgraded() {
+        let dir = std::env::temp_dir().join(format!("athena-hooks-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let mut old = merge(user_settings(), Path::new(ATHENA), true);
+        let hooks = old["hooks"].as_object_mut().unwrap();
+        for event in ["PreToolUse", "PostToolUse"] {
+            let kept: Vec<Value> = hooks[event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| !is_ours(e))
+                .cloned()
+                .collect();
+            hooks.insert(event.into(), Value::Array(kept));
+        }
+        fs::write(settings_path(&dir), old.to_string()).unwrap();
+        assert!(!enabled(&dir));
+        assert!(installed(&dir), "an older install can still be removed");
+        write(&dir, Path::new(ATHENA), true).unwrap();
+        assert!(enabled(&dir));
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
+        assert_eq!(
+            written["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "guard.sh"
+        );
+        assert_eq!(written["hooks"]["Stop"].as_array().unwrap().len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -16,6 +16,8 @@ const KEEP: usize = 200;
 const TOAST_FOR: Duration = Duration::from_secs(5);
 /// Recovered files are announced at launch, when the user may not be looking yet.
 const RECOVERY_TOAST_FOR: Duration = Duration::from_secs(30);
+/// A toast that offers an action stays long enough to be noticed from another pane.
+const ACTION_TOAST_FOR: Duration = Duration::from_secs(15);
 const MAX_TOASTS: usize = 3;
 const RECONNECT_AFTER: Duration = Duration::from_secs(2);
 
@@ -41,8 +43,18 @@ pub(super) struct Toast {
     transient: Option<(String, String)>,
     /// Files a click opens, for a toast that is about files rather than a notification.
     open: Vec<PathBuf>,
+    action: Option<ToastAction>,
     closing: Option<Closing>,
     _dismiss: Task<()>,
+}
+
+type ShellAction = dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>);
+
+/// What a toast offers to do, shown as a link on it and run when it is clicked.
+#[derive(Clone)]
+pub(super) struct ToastAction {
+    pub label: &'static str,
+    pub run: std::rc::Rc<ShellAction>,
 }
 
 /// Loads saved notifications; a missing or unreadable file starts empty.
@@ -315,6 +327,29 @@ impl Shell {
         cx.notify();
     }
 
+    /// A transient toast with an action; returns its id so a newer one can replace it.
+    pub(super) fn action_toast(
+        &mut self,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        action: ToastAction,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        self.next_notice += 1;
+        let id = self.next_notice;
+        self.show_toast(id, Some((title.into(), body.into())), ACTION_TOAST_FOR, cx);
+        if let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id) {
+            toast.action = Some(action);
+        }
+        cx.notify();
+        id
+    }
+
+    pub(super) fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.toasts.retain(|t| t.id != id);
+        cx.notify();
+    }
+
     pub(super) fn unread(&self) -> usize {
         self.notifications.iter().filter(|n| !n.read).count()
     }
@@ -354,6 +389,7 @@ impl Shell {
             id,
             transient,
             open: Vec::new(),
+            action: None,
             closing: None,
             _dismiss: dismiss,
         });
@@ -369,13 +405,17 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let files = self
+        let (files, action) = self
             .toasts
             .iter_mut()
             .find(|t| t.id == id)
-            .map(|t| std::mem::take(&mut t.open))
+            .map(|t| (std::mem::take(&mut t.open), t.action.take()))
             .unwrap_or_default();
         self.toasts.retain(|t| t.id != id);
+        if let Some(action) = action {
+            (action.run)(self, window, cx);
+            return cx.notify();
+        }
         if !files.is_empty() {
             return self.open_recovered(files, window, cx);
         }
@@ -457,6 +497,7 @@ impl Shell {
                     title.clone(),
                     body.clone(),
                     t.color.content_muted,
+                    toast.action.as_ref().map(|a| a.label),
                 )),
                 None => self
                     .notifications
@@ -471,10 +512,11 @@ impl Shell {
                             title,
                             body,
                             self.kind_color(&n.kind, cx),
+                            None,
                         )
                     }),
             })
-            .map(|(id, closing, title, body, color)| {
+            .map(|(id, closing, title, body, color, action)| {
                 let card = div()
                     .id(("toast", id))
                     .w(px(360.))
@@ -508,7 +550,15 @@ impl Shell {
                                     .text_size(t.typography.caption)
                                     .text_color(t.color.content_muted)
                                     .child(body),
-                            ),
+                            )
+                            .children(action.map(|label| {
+                                div()
+                                    .pt(px(4.))
+                                    .text_size(t.typography.caption)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(t.color.accent)
+                                    .child(label)
+                            })),
                     );
                 match closing {
                     Some(_) => motion::animate_exit(

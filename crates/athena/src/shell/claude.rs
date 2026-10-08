@@ -71,8 +71,10 @@ impl Shell {
         };
         let detail = format!(
             "Athena will edit {}, adding entries that run `athena notify` when Claude starts working, \
-             finishes, or needs your input. Your other settings are kept. Claude Code keeps this file \
-             out of version control.",
+             finishes, needs your input, or edits a file. Before Claude's first edit to a file in a \
+             session, a copy is kept in Application Support/athena/snapshots (pruned after 7 days) so \
+             you can review the session's changes as one diff. Your other settings are kept. Claude \
+             Code keeps this file out of version control.",
             file.display()
         );
         let answer = window.prompt(
