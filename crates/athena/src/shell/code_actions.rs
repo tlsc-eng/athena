@@ -148,8 +148,14 @@ impl Shell {
             return;
         };
         let weak = editor.downgrade();
-        self.code_actions.lightbulb_task = Some(cx.spawn(async move |_, cx| {
+        self.code_actions.lightbulb_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(LIGHTBULB_DELAY).await;
+            // Sent only now, as the cursor rests, so typing still batches its changes.
+            let Some(editor) = weak.upgrade() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.flush_change(&doc, &editor, cx));
+            drop(editor);
             let Ok(Some(at)) = weak.read_with(cx, |e, _| e.cursor_utf16()) else {
                 return;
             };
