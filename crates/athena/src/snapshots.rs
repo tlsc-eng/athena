@@ -19,7 +19,7 @@ const MAX_FILE: u64 = 20 * 1024 * 1024;
 /// What a session's snapshot says about a file before its first edit.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Before {
-    /// No snapshot was taken (hooks off, file too large, another session).
+    /// No snapshot was taken (hooks off, file too large or not a regular file, another session).
     Unknown,
     /// The session created the file.
     Absent,
@@ -53,14 +53,19 @@ pub fn take(store: &Path, session: &str, path: &Path) -> Result<()> {
     let fresh = !dir.exists();
     let base = dir.join(key(path));
     let marker = base.with_extension("new");
-    if base.exists() || marker.exists() {
+    // Without a skip marker, a later edit would snapshot the file as Claude already changed it.
+    let skip = base.with_extension("skip");
+    if base.exists() || marker.exists() || skip.exists() {
         return Ok(());
     }
     fs::create_dir_all(&dir)?;
     let mut sidecar = fs::File::create(base.with_extension("path"))?;
     sidecar.write_all(path.as_os_str().as_encoded_bytes())?;
     match fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_FILE => {}
+        // Copying a FIFO or device would block the hook or never end.
+        Ok(meta) if meta.len() > MAX_FILE || !meta.is_file() => {
+            fs::File::create(&skip)?;
+        }
         Ok(_) => {
             let tmp = base.with_extension("tmp");
             fs::copy(path, &tmp)?;
@@ -82,6 +87,9 @@ pub fn read(store: &Path, session: &str, path: &Path) -> Before {
         return Before::Unknown;
     }
     let base = store.join(session).join(key(path));
+    if base.with_extension("skip").exists() {
+        return Before::Unknown;
+    }
     if base.with_extension("new").exists() {
         return Before::Absent;
     }
@@ -195,6 +203,51 @@ mod tests {
         assert!(
             !left("new") && left("live"),
             "the live session is never pruned"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_too_large_to_copy_stays_unknown_after_claude_shrinks_it() {
+        let dir = temp("large");
+        let (store, file) = (dir.join("store"), dir.join("big.log"));
+        fs::File::create(&file)
+            .unwrap()
+            .set_len(MAX_FILE + 1)
+            .unwrap();
+        take(&store, "s-1", &file).unwrap();
+        assert_eq!(read(&store, "s-1", &file), Before::Unknown);
+        fs::write(&file, "edited by Claude\n").unwrap();
+        take(&store, "s-1", &file).unwrap();
+        assert_eq!(read(&store, "s-1", &file), Before::Unknown);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_fifo_is_skipped_without_blocking() {
+        let dir = temp("fifo");
+        let (store, fifo) = (dir.join("store"), dir.join("pipe"));
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c_path is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (thread_store, thread_fifo) = (store.clone(), fifo.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(take(&thread_store, "s-1", &thread_fifo).is_ok());
+        });
+        let taken = rx.recv_timeout(Duration::from_secs(5));
+        if taken.is_err() {
+            // Unblock the stuck reader so the test process can exit.
+            let _ = fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        assert_eq!(taken, Ok(true), "take must not block on a FIFO");
+        assert_eq!(read(&store, "s-1", &fifo), Before::Unknown);
+        assert!(
+            store
+                .join("s-1")
+                .join(key(&fifo))
+                .with_extension("skip")
+                .exists()
         );
         fs::remove_dir_all(dir).unwrap();
     }

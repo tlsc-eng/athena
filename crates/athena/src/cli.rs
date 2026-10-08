@@ -8,8 +8,27 @@ use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
 
 const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
 
-/// Hook input larger than this is ignored; Claude Code sends a small JSON object.
-const MAX_HOOK_INPUT: u64 = 64 * 1024;
+/// Hook input past this is cut off; a Write of a file up to the snapshot limit fits easily.
+const MAX_HOOK_INPUT: u64 = 256 * 1024 * 1024;
+
+/// The fields Athena reads from a Claude Code hook's input; the rest, such as a Write's whole
+/// file content, is skipped while parsing rather than held in memory.
+#[derive(Debug, Default, serde::Deserialize)]
+struct HookInput {
+    session_id: Option<String>,
+    cwd: Option<String>,
+    message: Option<String>,
+    tool_input: Option<ToolInput>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct ToolInput {
+    file_path: Option<String>,
+}
+
+fn read_hook_input(input: impl Read) -> HookInput {
+    serde_json::from_reader(std::io::BufReader::new(input.take(MAX_HOOK_INPUT))).unwrap_or_default()
+}
 
 /// Handles command-line subcommands; `None` means start the app.
 pub fn run(args: Vec<String>) -> Option<i32> {
@@ -93,16 +112,14 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
             .map(|s| s.to_string())
     };
     // Only hook events read stdin; a script's `--title` call may have a pipe left open there.
-    let hook_input = || -> serde_json::Value {
-        let mut text = String::new();
-        if !std::io::stdin().is_terminal() {
-            let _ = std::io::stdin()
-                .take(MAX_HOOK_INPUT)
-                .read_to_string(&mut text);
+    let hook_input = || {
+        if std::io::stdin().is_terminal() {
+            HookInput::default()
+        } else {
+            read_hook_input(std::io::stdin().lock())
         }
-        serde_json::from_str(&text).unwrap_or_default()
     };
-    let hook_message = || hook_input()["message"].as_str().map(str::to_string);
+    let hook_message = || hook_input().message;
     let event = flag("--event");
     if event.as_deref() == Some("claude-will-edit") {
         // A failing PreToolUse hook would get in Claude's way; a missed snapshot only costs the diff.
@@ -118,7 +135,7 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
         let input = if event.is_some() {
             hook_input()
         } else {
-            serde_json::Value::Null
+            HookInput::default()
         };
         if let Some((path, session)) = edited_file(&input, flag("--edited")) {
             let session = flag("--session").or(session).unwrap_or_default();
@@ -149,19 +166,13 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
 
 /// The file a Claude Code edit hook is about, made absolute against the session's folder, and
 /// the session id; `given` (from `--edited`) wins over the hook input.
-fn edited_file(
-    input: &serde_json::Value,
-    given: Option<String>,
-) -> Option<(PathBuf, Option<String>)> {
-    let file = given.or_else(|| {
-        input["tool_input"]["file_path"]
-            .as_str()
-            .map(str::to_string)
-    })?;
+fn edited_file(input: &HookInput, given: Option<String>) -> Option<(PathBuf, Option<String>)> {
+    let file = given.or_else(|| input.tool_input.as_ref()?.file_path.clone())?;
     let mut path = PathBuf::from(file);
     if path.is_relative() {
-        let cwd = input["cwd"]
-            .as_str()
+        let cwd = input
+            .cwd
+            .as_ref()
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())?;
         path = cwd.join(path);
@@ -172,7 +183,7 @@ fn edited_file(
     {
         path = real.join(name);
     }
-    let session = input["session_id"].as_str().map(str::to_string);
+    let session = input.session_id.clone();
     Some((path, session))
 }
 
@@ -264,20 +275,25 @@ fn launched_by_launchd() -> bool {
 mod tests {
     use super::*;
 
+    fn hook_input(value: serde_json::Value) -> HookInput {
+        read_hook_input(value.to_string().as_bytes())
+    }
+
     #[test]
     fn edit_hook_input_names_an_absolute_file_and_the_session() {
-        let input = serde_json::json!({
+        let input = hook_input(serde_json::json!({
             "session_id": "abc-123",
             "cwd": "/nonexistent-athena-test/app",
             "tool_name": "Edit",
             "tool_input": { "file_path": "src/main.go", "old_string": "a", "new_string": "b" }
-        });
+        }));
         let (path, session) = edited_file(&input, None).unwrap();
         assert_eq!(
             path,
             PathBuf::from("/nonexistent-athena-test/app/src/main.go")
         );
-        let tmp = serde_json::json!({ "tool_input": { "file_path": "/tmp/new-file.go" } });
+        let tmp =
+            hook_input(serde_json::json!({ "tool_input": { "file_path": "/tmp/new-file.go" } }));
         let (real, _) = edited_file(&tmp, None).unwrap();
         assert_eq!(
             real,
@@ -289,6 +305,34 @@ mod tests {
         assert_eq!(session.as_deref(), Some("abc-123"));
         let (path, _) = edited_file(&input, Some("/x/y.go".into())).unwrap();
         assert_eq!(path, PathBuf::from("/x/y.go"));
-        assert!(edited_file(&serde_json::json!({}), None).is_none());
+        assert!(edited_file(&hook_input(serde_json::json!({})), None).is_none());
+    }
+
+    #[test]
+    fn a_write_hook_with_a_large_file_still_records_the_baseline() {
+        let dir = std::env::temp_dir().join(format!("athena-cli-large-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let file = dir.join("big.txt");
+        std::fs::write(&file, "before\n").unwrap();
+        let content: String = std::iter::repeat_n('x', 200 * 1024).collect();
+        // The file path comes after the content, so a cut-off read would lose it.
+        let text = format!(
+            r#"{{"session_id":"s-big","cwd":"{}","tool_name":"Write","tool_input":{{"content":"{content}","file_path":"big.txt"}}}}"#,
+            dir.display()
+        );
+        assert!(text.len() > 64 * 1024);
+        let input = read_hook_input(text.as_bytes());
+        let (path, session) = edited_file(&input, None).unwrap();
+        assert_eq!(path, file);
+        let store = dir.join("store");
+        crate::snapshots::take(&store, session.as_deref().unwrap(), &path).unwrap();
+        std::fs::write(&file, &content).unwrap();
+        assert_eq!(
+            crate::snapshots::read(&store, "s-big", &file),
+            crate::snapshots::Before::Text(b"before\n".to_vec())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
