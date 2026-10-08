@@ -105,7 +105,7 @@ fn server_for(lang: Lang) -> Option<(ServerKind, &'static str)> {
 }
 
 /// Servers may report a file by its real path while the editor holds a symlinked one (/tmp).
-fn document_key(path: &Path) -> PathBuf {
+pub(super) fn document_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 

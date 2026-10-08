@@ -1377,7 +1377,7 @@ impl EditorView {
             .buffer
             .clone()
             .ok_or_else(|| anyhow::anyhow!("nothing to save"))?;
-        // Only this view and the store's weak entry hold an unshared buffer.
+        // Two strong counts are this view's and the clone above; more means another tab shares it.
         if Rc::strong_count(&shared) > 2 {
             let mut fork = {
                 let b = shared.buffer.borrow();

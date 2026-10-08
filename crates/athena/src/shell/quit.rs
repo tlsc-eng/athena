@@ -11,7 +11,8 @@ impl Shell {
             .values()
             .filter_map(|v| match v {
                 ItemView::Editor(e)
-                    if e.read(cx).is_dirty() && paths.insert(e.read(cx).path().to_path_buf()) =>
+                    if e.read(cx).is_dirty()
+                        && paths.insert(super::lsp::document_key(e.read(cx).path())) =>
                 {
                     Some(e.clone())
                 }
