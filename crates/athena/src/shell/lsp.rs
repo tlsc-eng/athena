@@ -924,3 +924,29 @@ mod tests {
         );
     }
 }
+
+/// A file's language server as the status bar shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum LspStatus {
+    Starting(&'static str),
+    Ready(&'static str),
+    Failed(&'static str, String),
+}
+
+impl Shell {
+    /// The server for `lang` files in the project at `root`; `None` when none runs for them.
+    pub(super) fn lsp_status(&self, root: &Path, lang: Lang) -> Option<LspStatus> {
+        let (kind, _) = server_for(lang)?;
+        let key = (root.to_path_buf(), kind);
+        let program = kind.program();
+        if let Some(error) = self.lsp.failed.get(&key) {
+            return Some(LspStatus::Failed(program, error.clone()));
+        }
+        let server = self.lsp.servers.get(&key)?;
+        Some(if server.ready {
+            LspStatus::Ready(program)
+        } else {
+            LspStatus::Starting(program)
+        })
+    }
+}

@@ -1,0 +1,273 @@
+use athena_editor::{EditorView, Indent, Lang, LineEnding};
+use athena_ui::{ActiveTheme, MenuItem, Tooltip};
+use gpui::{
+    ClickEvent, Context, Entity, Focusable, IntoElement, SharedString, div, prelude::*, px,
+};
+
+use super::Shell;
+use super::drawer::DrawerTab;
+use super::lsp::LspStatus;
+
+const HEIGHT: f32 = 22.;
+
+/// "Ln 12, Col 5", with the selection's size when there is one, as VS Code words it.
+fn position_label(line: usize, column: usize, selected: usize) -> String {
+    match selected {
+        0 => format!("Ln {line}, Col {column}"),
+        n => format!("Ln {line}, Col {column} ({n} selected)"),
+    }
+}
+
+fn indent_label(indent: Indent) -> String {
+    match indent {
+        Indent::Spaces(n) => format!("Spaces: {n}"),
+        Indent::Tab => format!("Tab Size: {}", indent.size()),
+    }
+}
+
+fn eol_label(eol: LineEnding) -> &'static str {
+    match eol {
+        LineEnding::Lf => "LF",
+        LineEnding::CrLf => "CRLF",
+    }
+}
+
+fn lang_name(lang: Option<Lang>) -> &'static str {
+    match lang {
+        None => "Plain Text",
+        Some(Lang::Go) => "Go",
+        Some(Lang::TypeScript) => "TypeScript",
+        Some(Lang::Tsx) => "TypeScript JSX",
+        Some(Lang::JavaScript) => "JavaScript",
+        Some(Lang::Yaml) => "YAML",
+        Some(Lang::Json) => "JSON",
+        Some(Lang::Toml) => "TOML",
+        Some(Lang::Shell) => "Shell Script",
+        Some(Lang::Rust) => "Rust",
+        Some(Lang::Python) => "Python",
+        Some(Lang::Css) => "CSS",
+        Some(Lang::Html) => "HTML",
+        Some(Lang::Markdown) => "Markdown",
+        Some(Lang::Swift) => "Swift",
+        Some(Lang::Dockerfile) => "Dockerfile",
+        Some(Lang::DotEnv) => "Environment Variables",
+    }
+}
+
+fn lsp_tooltip(status: &LspStatus) -> String {
+    match status {
+        LspStatus::Starting(program) => format!("{program} is starting"),
+        LspStatus::Ready(program) => format!("{program} is running"),
+        LspStatus::Failed(program, error) => format!("{program} failed: {error}"),
+    }
+}
+
+impl Shell {
+    /// The bottom row: branch on the left; cursor, indentation, encoding, line breaks, language
+    /// and language server of the focused editor on the right.
+    pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme().clone();
+        let root = self.workspace.active_project().map(|p| p.root.clone());
+        let branch = root.as_deref().and_then(|r| self.cached_branch(r));
+        let editor = self.focused_editor();
+        let status = editor.as_ref().and_then(|e| e.read(cx).status());
+        let lsp = status
+            .as_ref()
+            .and_then(|s| self.lsp_status(root.as_deref()?, s.lang?));
+
+        let item = |id: &'static str, label: SharedString| {
+            div()
+                .id(id)
+                .h_full()
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .whitespace_nowrap()
+                .child(label)
+        };
+        let button = |id: &'static str, label: SharedString, tip: &'static str| {
+            item(id, label)
+                .cursor_pointer()
+                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                .tooltip(move |_, cx| Tooltip::view(tip, cx))
+        };
+
+        let left = branch.map(|branch| {
+            button("status-branch", branch.into(), "Source control changes").on_click(
+                cx.listener(|this, _, _, cx| this.toggle_drawer_tab(DrawerTab::Changes, cx)),
+            )
+        });
+        let right = status.zip(editor).map(|(status, editor)| {
+            let position = position_label(status.line, status.column, status.selected);
+            let indent = status.indent;
+            let lang = status.lang;
+            let lsp_dot = lsp.map(|lsp| {
+                let color = match lsp {
+                    LspStatus::Ready(_) => t.color.success,
+                    LspStatus::Starting(_) => t.color.warning,
+                    LspStatus::Failed(..) => t.color.danger,
+                };
+                let tip = lsp_tooltip(&lsp);
+                div()
+                    .id("status-lsp")
+                    .h_full()
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
+                    .child(div().size(px(6.)).rounded_full().bg(color))
+            });
+            div()
+                .flex()
+                .h_full()
+                .child(
+                    button("status-position", position.into(), "Go to Line  ⌃G").on_click({
+                        let editor = editor.clone();
+                        move |_, window, cx| {
+                            window.focus(&editor.focus_handle(cx));
+                            if let Ok(action) = cx.build_action("editor::GoToLine", None) {
+                                window.dispatch_action(action, cx);
+                            }
+                        }
+                    }),
+                )
+                .child(
+                    button(
+                        "status-indent",
+                        indent_label(indent).into(),
+                        "Select Indentation",
+                    )
+                    .on_click({
+                        let editor = editor.clone();
+                        cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            let items = indent_menu(&editor, indent);
+                            this.open_context_menu(event.position(), items, window, cx);
+                        })
+                    }),
+                )
+                .child(item("status-encoding", "UTF-8".into()))
+                .child(item("status-eol", eol_label(status.line_ending).into()))
+                .child(
+                    button(
+                        "status-lang",
+                        lang_name(lang).into(),
+                        "Select Language Mode",
+                    )
+                    .on_click(cx.listener(
+                        move |this, event: &ClickEvent, window, cx| {
+                            let items = language_menu(&editor, lang);
+                            this.open_context_menu(event.position(), items, window, cx);
+                        },
+                    )),
+                )
+                .children(lsp_dot)
+        });
+
+        div()
+            .id("status-bar")
+            .flex_none()
+            .h(px(HEIGHT))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(4.))
+            .bg(t.color.surface)
+            .border_t_1()
+            .border_color(t.color.border)
+            .text_size(t.typography.caption)
+            .text_color(t.color.content_muted)
+            .child(div().flex().h_full().children(left))
+            .child(div().flex().h_full().children(right))
+    }
+}
+
+/// VS Code's indentation picker, as a menu at the status item.
+fn indent_menu(editor: &Entity<EditorView>, current: Indent) -> Vec<MenuItem> {
+    let set = |label: String, indent: Indent| {
+        let editor = editor.downgrade();
+        MenuItem::new(label, move |_, cx| {
+            editor.update(cx, |e, cx| e.set_indent(indent, cx)).ok();
+        })
+        .disabled(indent == current)
+    };
+    let convert = |label: &'static str, indent: Indent| {
+        let editor = editor.downgrade();
+        MenuItem::new(label, move |_, cx| {
+            editor
+                .update(cx, |e, cx| e.convert_indentation(indent, cx))
+                .ok();
+        })
+    };
+    let spaces = match current {
+        Indent::Spaces(n) => n,
+        Indent::Tab => 4,
+    };
+    let mut items: Vec<MenuItem> = [2, 4, 8]
+        .into_iter()
+        .map(|n| set(format!("Indent Using Spaces: {n}"), Indent::Spaces(n)))
+        .collect();
+    items.push(set("Indent Using Tabs".into(), Indent::Tab));
+    items.push(MenuItem::separator());
+    items.push(convert(
+        "Convert Indentation to Spaces",
+        Indent::Spaces(spaces),
+    ));
+    items.push(convert("Convert Indentation to Tabs", Indent::Tab));
+    items
+}
+
+fn language_menu(editor: &Entity<EditorView>, current: Option<Lang>) -> Vec<MenuItem> {
+    let mut langs: Vec<Option<Lang>> = std::iter::once(None)
+        .chain(Lang::ALL.into_iter().map(Some))
+        .collect();
+    langs.sort_by_key(|l| lang_name(*l));
+    langs
+        .into_iter()
+        .map(|lang| {
+            let editor = editor.downgrade();
+            MenuItem::new(lang_name(lang), move |_, cx| {
+                editor.update(cx, |e, cx| e.set_language(lang, cx)).ok();
+            })
+            .disabled(lang == current)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn position_shows_the_selection_size_only_when_there_is_one() {
+        assert_eq!(position_label(12, 5, 0), "Ln 12, Col 5");
+        assert_eq!(position_label(1, 1, 42), "Ln 1, Col 1 (42 selected)");
+    }
+
+    #[test]
+    fn indentation_and_line_breaks_read_as_in_vs_code() {
+        assert_eq!(indent_label(Indent::Spaces(2)), "Spaces: 2");
+        assert_eq!(indent_label(Indent::Tab), "Tab Size: 4");
+        assert_eq!(eol_label(LineEnding::Lf), "LF");
+        assert_eq!(eol_label(LineEnding::CrLf), "CRLF");
+    }
+
+    #[test]
+    fn every_language_has_a_distinct_name() {
+        let mut names: Vec<&str> = Lang::ALL.into_iter().map(|l| lang_name(Some(l))).collect();
+        names.push(lang_name(None));
+        let count = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), count);
+    }
+
+    #[test]
+    fn language_server_tooltips_name_the_program() {
+        assert_eq!(
+            lsp_tooltip(&LspStatus::Failed("gopls", "not found".into())),
+            "gopls failed: not found"
+        );
+        assert_eq!(lsp_tooltip(&LspStatus::Ready("gopls")), "gopls is running");
+    }
+}

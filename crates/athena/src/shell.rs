@@ -16,6 +16,7 @@ mod panes;
 mod playwright_view;
 mod quit;
 mod search;
+mod status_bar;
 mod tree;
 mod usage_view;
 mod watch;
@@ -803,6 +804,7 @@ impl Render for Shell {
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)
+            .child(self.render_status_bar(cx))
             .children(self.render_usage_popover(cx))
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))

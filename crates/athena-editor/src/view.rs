@@ -1979,6 +1979,67 @@ impl EditorView {
     }
 }
 
+/// What the status bar shows about an editor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditorStatus {
+    /// 1-based cursor line.
+    pub line: usize,
+    /// 1-based cursor column with tabs expanded, as VS Code counts it.
+    pub column: usize,
+    /// Characters selected.
+    pub selected: usize,
+    pub lang: Option<crate::Lang>,
+    pub indent: crate::Indent,
+    pub line_ending: crate::LineEnding,
+}
+
+impl EditorView {
+    pub fn status(&self) -> Option<EditorStatus> {
+        let b = self.buf()?;
+        let head = self.cursor.head().min(b.len_chars());
+        let line = b.line_of(head);
+        let before = b.text(b.line_start(line)..head);
+        let column = before.chars().fold(0, |col, c| match c {
+            '\t' => col + crate::display::TAB_WIDTH - col % crate::display::TAB_WIDTH,
+            _ => col + 1,
+        });
+        Some(EditorStatus {
+            line: line + 1,
+            column: column + 1,
+            selected: self.cursor.selection.range().len(),
+            lang: b.lang(),
+            indent: b.indent,
+            line_ending: b.line_ending(),
+        })
+    }
+
+    /// Highlights this file as `lang` (plain text for `None`), in every tab showing it.
+    pub fn set_language(&mut self, lang: Option<crate::Lang>, cx: &mut Context<Self>) {
+        let Some(shared) = self.buffer.clone() else {
+            return;
+        };
+        shared.buffer.borrow_mut().set_lang(lang);
+        self.display.clear();
+        *self.fold_cache.borrow_mut() = Default::default();
+        shared.changed(cx);
+        self.changed(cx);
+    }
+
+    /// Indents with `indent` from now on, leaving existing lines as they are.
+    pub fn set_indent(&mut self, indent: crate::Indent, cx: &mut Context<Self>) {
+        if let Some(shared) = self.buffer.clone() {
+            shared.buffer.borrow_mut().indent = indent;
+            shared.changed(cx);
+            self.changed(cx);
+        }
+    }
+
+    /// Rewrites every line's indentation as `indent` and keeps using it; one undo step.
+    pub fn convert_indentation(&mut self, indent: crate::Indent, cx: &mut Context<Self>) {
+        self.with_buffer(cx, |b, c| b.convert_indentation(c, indent));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

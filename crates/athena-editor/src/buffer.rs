@@ -963,7 +963,6 @@ impl Buffer {
     pub fn set_lang(&mut self, lang: Option<Lang>) {
         if lang != self.lang() {
             self.syntax = lang.map(|lang| Syntax::new(lang, &self.rope));
-            self.version += 1;
         }
     }
 
