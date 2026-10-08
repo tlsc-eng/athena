@@ -76,7 +76,7 @@ pub fn set_aside(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ItemKind, PaneId, UiState, WindowMode, WindowState};
+    use crate::{ItemId, ItemKind, PaneId, UiState, ViewState, WindowMode, WindowState};
 
     #[test]
     fn round_trip() {
@@ -190,6 +190,42 @@ mod tests {
             w.projects[1].layout, None,
             "a layout with only an empty pane is dropped"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn editor_view_state_survives_a_round_trip_and_old_files_load_without_it() {
+        let dir = std::env::temp_dir().join(format!("athena-view-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        let old = r#"{"projects":[{"root":"/a","layout":{"tree":{"Leaf":{"id":1,
+            "items":[{"id":2,"kind":{"Editor":{"path":"/a/x.rs"}}}],"active":0}},
+            "focused":1,"next_id":3}}],"active":0,"window":null}"#;
+        fs::write(&path, old).unwrap();
+        let mut w = load(&path).unwrap();
+        let layout = w.projects[0].layout.as_mut().unwrap();
+        assert_eq!(layout.items().next().unwrap().view, None);
+
+        let state = ViewState {
+            cursor: (41, 7),
+            scroll_top: Some(30),
+            folds: vec![3, 12],
+        };
+        layout.item_mut(ItemId(2)).unwrap().view = Some(state.clone());
+        save(&path, &w).unwrap();
+        let again = load(&path).unwrap();
+        let item = again.projects[0]
+            .layout
+            .as_ref()
+            .unwrap()
+            .items()
+            .next()
+            .unwrap();
+        assert_eq!(item.view.as_ref(), Some(&state));
+
+        let partial: ViewState = serde_json::from_str(r#"{"cursor":[5,2]}"#).unwrap();
+        assert_eq!((partial.cursor, partial.scroll_top), ((5, 2), None));
+        assert!(partial.folds.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

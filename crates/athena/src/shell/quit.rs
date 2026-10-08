@@ -31,7 +31,7 @@ impl Shell {
         let dirty = self.dirty_editors(None, cx);
         self.settle_unsaved(dirty, "quitting", window, cx, |this, cx| {
             this.quit_settled = true;
-            this.save_now();
+            this.save_now(cx);
             cx.quit();
         });
     }

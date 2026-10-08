@@ -7,6 +7,7 @@ use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
 use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
+    ViewState,
 };
 use gpui::{
     Animation, AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
@@ -214,6 +215,9 @@ impl Shell {
                 view.update(cx, |v, cx| {
                     v.set_autosave(delay, cx);
                     v.set_format_on_save(format_on_save);
+                    if let Some(state) = &item.view {
+                        restore_view_state(v, state, cx);
+                    }
                 });
                 let tab = key.clone();
                 cx.subscribe(&view, move |this, view, event: &EditorEvent, cx| {
@@ -252,6 +256,7 @@ impl Shell {
                             this.lsp_references(&view, at, cx);
                         }
                         EditorEvent::CursorMoved { line } => {
+                            this.schedule_save(cx);
                             return this.git_cursor_moved(&view, *line, cx);
                         }
                         EditorEvent::Hover {
@@ -327,6 +332,28 @@ impl Shell {
         };
         self.items.insert(key, view.clone());
         Some(view)
+    }
+
+    /// Copies each open editor's place into its tab, so the next save carries it.
+    pub(super) fn capture_view_states(&mut self, cx: &gpui::App) {
+        for ((root, id), view) in &self.items {
+            let ItemView::Editor(editor) = view else {
+                continue;
+            };
+            let Some(state) = view_state(editor.read(cx)) else {
+                continue;
+            };
+            let item = self
+                .workspace
+                .projects
+                .iter_mut()
+                .find(|p| &p.root == root)
+                .and_then(|p| p.layout.as_mut())
+                .and_then(|l| l.item_mut(*id));
+            if let Some(item) = item {
+                item.view = Some(state);
+            }
+        }
     }
 
     /// Redraws for terminal label, bell and Claude-state changes at most once a frame.
@@ -2157,6 +2184,18 @@ fn file_kind(path: PathBuf) -> ItemKind {
     } else {
         ItemKind::Editor { path }
     }
+}
+
+/// Scroll and folds are not readable from outside the editor yet, so only the cursor is kept.
+fn view_state(editor: &EditorView) -> Option<ViewState> {
+    Some(ViewState {
+        cursor: editor.cursor_utf16()?,
+        ..ViewState::default()
+    })
+}
+
+fn restore_view_state(editor: &mut EditorView, state: &ViewState, cx: &mut Context<EditorView>) {
+    editor.go_to_position(state.cursor.0, state.cursor.1, cx);
 }
 
 #[cfg(test)]

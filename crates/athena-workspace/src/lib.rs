@@ -7,7 +7,7 @@ pub mod watch;
 
 pub use layout::{
     Axis, DiffBase, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath,
-    Pane, PaneId, Rect,
+    Pane, PaneId, Rect, ViewState,
 };
 pub use persist::{is_corrupt, load, save, set_aside};
 pub use project::{Project, git_branch};

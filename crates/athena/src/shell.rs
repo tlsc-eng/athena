@@ -169,7 +169,7 @@ impl Shell {
             }),
             cx.on_app_quit(|this, cx| {
                 this.flush_unsaved(cx);
-                this.save_now();
+                this.save_now(cx);
                 this.ide_quit();
                 async {}
             }),
@@ -295,13 +295,14 @@ impl Shell {
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DEBOUNCE).await;
-            this.update(cx, |this, _| this.save_now()).ok();
+            this.update(cx, |this, cx| this.save_now(cx)).ok();
         }));
     }
 
-    fn save_now(&mut self) {
+    fn save_now(&mut self, cx: &gpui::App) {
         self.save_task = None;
         self.sync_ide_folders();
+        self.capture_view_states(cx);
         if let Err(err) = athena_workspace::save(&self.path, &self.persisted_workspace()) {
             tracing::error!("could not save the workspace: {err:#}");
         }

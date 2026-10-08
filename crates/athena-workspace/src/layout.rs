@@ -85,6 +85,22 @@ impl ItemKind {
 pub struct Item {
     pub id: ItemId,
     pub kind: ItemKind,
+    /// Where an editor tab was left, restored when its view is next created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ViewState>,
+}
+
+/// An editor's cursor, scroll and folds, in zero-based lines and UTF-16 columns.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ViewState {
+    pub cursor: (u32, u32),
+    /// The first line shown, once the editor can report it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scroll_top: Option<u32>,
+    /// First lines of folded regions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub folds: Vec<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -146,6 +162,7 @@ impl Layout {
             items: vec![Item {
                 id: ItemId(2),
                 kind: first,
+                view: None,
             }],
             active: 0,
         };
@@ -245,7 +262,11 @@ impl Layout {
     pub fn add_item(&mut self, pane: PaneId, kind: ItemKind) -> Option<ItemId> {
         let id = ItemId(self.next());
         let pane = self.pane_mut(pane)?;
-        pane.items.push(Item { id, kind });
+        pane.items.push(Item {
+            id,
+            kind,
+            view: None,
+        });
         pane.active = pane.items.len() - 1;
         Some(id)
     }
@@ -256,6 +277,7 @@ impl Layout {
         let item = Item {
             id: ItemId(self.next()),
             kind,
+            view: None,
         };
         self.split_off(pane, axis, item, false)
     }
