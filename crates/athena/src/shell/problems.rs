@@ -81,6 +81,20 @@ fn step(
     found.cloned()
 }
 
+/// Where F8 steps on from in `path`: the problem it last opened while the cursor is still where
+/// that put it, as a problem past the end of its line puts the cursor short of it.
+fn step_origin(
+    opened: Option<&(PathBuf, Position)>,
+    path: &Path,
+    cursor: Position,
+    lands: impl Fn(Position) -> Position,
+) -> Position {
+    match opened {
+        Some((p, at)) if p == path && lands(*at) == cursor => *at,
+        _ => cursor,
+    }
+}
+
 fn severity_color(severity: Severity, t: &athena_ui::Theme) -> Hsla {
     match severity {
         Severity::Error => t.color.danger,
@@ -143,7 +157,13 @@ impl Shell {
         let current = self.focused_editor().and_then(|e| {
             let e = e.read(cx);
             let (line, character) = e.cursor_utf16()?;
-            Some((e.path().to_path_buf(), Position { line, character }))
+            let lands = |at: Position| match e.landing_utf16(at.line, at.character) {
+                Some((line, character)) => Position { line, character },
+                None => at,
+            };
+            let cursor = Position { line, character };
+            let at = step_origin(self.problems.opened.as_ref(), e.path(), cursor, lands);
+            Some((e.path().to_path_buf(), at))
         });
         let from = current.as_ref().map(|(p, at)| (p.as_path(), *at));
         let Some((path, at)) = step(&places, from, forward) else {
@@ -438,6 +458,26 @@ mod tests {
             step(&places, Some((&other, at(0, 0))), false),
             Some((b, at(1, 1)))
         );
+    }
+
+    #[test]
+    fn f8_moves_past_a_stale_problem_the_cursor_could_not_reach() {
+        let a = PathBuf::from("/p/a.go");
+        let places = vec![(a.clone(), at(2, 40)), (a.clone(), at(5, 0))];
+        let opened = (a.clone(), at(2, 40));
+        let lands = |p: Position| at(p.line, p.character.min(10));
+        let from = step_origin(Some(&opened), &a, at(2, 10), lands);
+        assert_eq!(
+            step(&places, Some((&a, from)), true),
+            Some((a.clone(), at(5, 0)))
+        );
+        assert_eq!(
+            step_origin(Some(&opened), &a, at(1, 0), lands),
+            at(1, 0),
+            "a cursor moved since steps from where it is"
+        );
+        let b = PathBuf::from("/p/b.go");
+        assert_eq!(step_origin(Some(&opened), &b, at(2, 10), lands), at(2, 10));
     }
 
     #[test]

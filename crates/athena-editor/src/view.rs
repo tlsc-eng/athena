@@ -550,6 +550,12 @@ impl EditorView {
         Some(b.utf16_position(self.cursor.head()))
     }
 
+    /// Where [`Self::go_to_position`] would put the cursor, a position past the text clamped.
+    pub fn landing_utf16(&self, line: u32, character: u32) -> Option<(u32, u32)> {
+        let b = self.buf()?;
+        Some(b.utf16_position(b.char_at_utf16(line, character)))
+    }
+
     /// Follows the file to `path` after it was renamed on disk, keeping any unsaved edits.
     /// The caller re-registers the file with its language server.
     pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
