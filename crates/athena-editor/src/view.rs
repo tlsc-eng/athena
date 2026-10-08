@@ -1640,6 +1640,14 @@ impl EditorView {
     }
 }
 
+/// The UTF-16 `range` of `text`, clamped and put in order since the input system may send either.
+fn utf16_slice(text: &str, range: Range<usize>) -> (Option<String>, Range<usize>) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let (a, b) = (range.start.min(units.len()), range.end.min(units.len()));
+    let r = a.min(b)..a.max(b);
+    (String::from_utf16(&units[r.clone()]).ok(), r)
+}
+
 impl EntityInputHandler for EditorView {
     fn text_for_range(
         &mut self,
@@ -1648,11 +1656,9 @@ impl EntityInputHandler for EditorView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let marked = self.marked.clone().unwrap_or_default();
-        let units: Vec<u16> = marked.encode_utf16().collect();
-        let r = range.start.min(units.len())..range.end.min(units.len());
-        *actual = Some(r.clone());
-        String::from_utf16(&units[r]).ok()
+        let (text, r) = utf16_slice(self.marked.as_deref().unwrap_or_default(), range);
+        *actual = Some(r);
+        text
     }
 
     fn selected_text_range(
@@ -1794,6 +1800,17 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marked_text_ranges_are_clamped_and_ordered() {
+        let reversed = |start, end| Range { start, end };
+        assert_eq!(
+            utf16_slice("かな", reversed(2, 0)),
+            (Some("かな".into()), 0..2)
+        );
+        assert_eq!(utf16_slice("ab", reversed(5, 1)), (Some("b".into()), 1..2));
+        assert_eq!(utf16_slice("", 3..7), (Some(String::new()), 0..0));
+    }
 
     #[test]
     fn replacing_text_is_one_undo_step_that_keeps_the_cursor() {
