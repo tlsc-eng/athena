@@ -2068,6 +2068,24 @@ impl EditorView {
     }
 }
 
+/// A 0-based line and UTF-16 column.
+type Utf16 = (u32, u32);
+
+impl EditorView {
+    /// The selection as 0-based (line, UTF-16 column) start and end, in document order, with
+    /// its text; start equals end for a bare cursor.
+    pub fn selection_utf16(&self) -> Option<(Utf16, Utf16, String)> {
+        let b = self.buf()?;
+        let range = self.cursor.selection.range();
+        let text = b.selected_text(&self.cursor);
+        Some((
+            b.utf16_position(range.start),
+            b.utf16_position(range.end),
+            text,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

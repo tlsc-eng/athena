@@ -25,7 +25,9 @@ actions!(
         PageUp,
         PageDown,
         Top,
-        Bottom
+        Bottom,
+        AcceptProposal,
+        RejectProposal
     ]
 );
 
@@ -40,6 +42,8 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("pagedown", PageDown, ctx),
         KeyBinding::new("cmd-up", Top, ctx),
         KeyBinding::new("cmd-down", Bottom, ctx),
+        KeyBinding::new("cmd-enter", AcceptProposal, ctx),
+        KeyBinding::new("cmd-backspace", RejectProposal, ctx),
     ]);
 }
 
@@ -69,6 +73,10 @@ pub enum DiffEvent {
         expected: String,
     },
     OpenFile,
+    /// The user accepted a proposed change.
+    Accept,
+    /// The user rejected a proposed change.
+    Reject,
 }
 
 /// Which hunk buttons a diff offers; it depends on what the two sides are.
@@ -204,6 +212,8 @@ pub struct DiffView {
     /// Why the old side is not what the tab names, shown under the toolbar.
     note: Option<SharedString>,
     actions: HunkActions,
+    /// The new side is a change someone is waiting for the user to accept or reject.
+    proposal: bool,
     inline: bool,
     loaded: Option<Rc<Loaded>>,
     error: Option<SharedString>,
@@ -243,6 +253,7 @@ impl DiffView {
             new_label: new_label.into(),
             note: None,
             actions,
+            proposal: false,
             inline: false,
             loaded: None,
             error: None,
@@ -258,6 +269,23 @@ impl DiffView {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Offers Accept and Reject for the whole change instead of hunk actions.
+    pub fn as_proposal(mut self) -> Self {
+        self.proposal = true;
+        self
+    }
+
+    fn decide(&mut self, accept: bool, cx: &mut Context<Self>) {
+        if !self.proposal {
+            return cx.propagate();
+        }
+        cx.emit(if accept {
+            DiffEvent::Accept
+        } else {
+            DiffEvent::Reject
+        });
     }
 
     pub fn label(&self) -> String {
@@ -833,6 +861,30 @@ impl DiffView {
                 tool("diff-open", "Open File", "Open the file in the editor")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::OpenFile))),
             )
+            .when(self.proposal, |el| {
+                el.child(
+                    tool("diff-reject", "Reject", "Reject the change (⌘⌫)")
+                        .on_click(cx.listener(|this, _, _, cx| this.decide(false, cx))),
+                )
+                .child(
+                    div()
+                        .id("diff-accept")
+                        .h(px(24.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .rounded(t.shape.radius_control)
+                        .cursor_pointer()
+                        .bg(t.color.accent)
+                        .text_color(t.color.content_on_accent)
+                        .font_weight(FontWeight::MEDIUM)
+                        .hover(|s| s.bg(t.color.accent_hover))
+                        .active(|s| s.bg(t.color.accent_pressed))
+                        .tooltip(|_, cx| Tooltip::view("Accept the change (⌘↵)", cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.decide(true, cx)))
+                        .child("Accept"),
+                )
+            })
     }
 
     fn toggle_inline(&mut self, cx: &mut Context<Self>) {
@@ -1001,6 +1053,8 @@ impl Render for DiffView {
             }))
             .on_action(cx.listener(|this, _: &Top, _, cx| this.scroll_rows(isize::MIN / 2, cx)))
             .on_action(cx.listener(|this, _: &Bottom, _, cx| this.scroll_rows(isize::MAX / 2, cx)))
+            .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.decide(true, cx)))
+            .on_action(cx.listener(|this, _: &RejectProposal, _, cx| this.decide(false, cx)))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, _| window.focus(&this.focus)),
