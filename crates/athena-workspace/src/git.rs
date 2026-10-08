@@ -1,7 +1,7 @@
 //! Git status, diff and blame through `/usr/bin/git`, with the parsers kept pure for tests.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 const GIT: &str = "/usr/bin/git";
+/// A git run still going after this is killed, so a hung git cannot stall the views waiting on it.
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What changed about a file, as the tree, tabs and Changes list colour it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -305,7 +307,23 @@ fn git(root: &Path) -> Command {
     cmd
 }
 
-fn run(mut cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
+fn run(cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
+    run_within(cmd, stdin, TIMEOUT)
+}
+
+/// Error from a run killed for taking longer than its time limit.
+#[derive(Debug)]
+pub struct TimedOut;
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "git did not finish within {} seconds", TIMEOUT.as_secs())
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
+fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<Vec<u8>> {
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     }
@@ -315,14 +333,39 @@ fn run(mut cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
         .spawn()
         .context("could not run git")?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        // A failed write shows up as git's own error below.
-        let _ = pipe.write_all(text.as_bytes());
+        let text = text.to_owned();
+        // A failed write shows up as git's own error below; a git that never reads hits the limit.
+        std::thread::spawn(move || pipe.write_all(text.as_bytes()));
     }
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut out);
+            }
+            out
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(TimedOut.into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    if !status.success() {
+        let stderr = stderr.join().unwrap_or_default();
+        bail!("{}", String::from_utf8_lossy(&stderr).trim());
     }
-    Ok(out.stdout)
+    Ok(stdout)
 }
 
 /// The project root's path inside its repository ("" at the top, "sub/dir/" below it).
@@ -629,6 +672,16 @@ mod tests {
             .status
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn a_hung_command_is_killed_at_the_time_limit() {
+        let started = Instant::now();
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("30");
+        let err = run_within(cmd, None, Duration::from_millis(200)).unwrap_err();
+        assert!(err.is::<TimedOut>());
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

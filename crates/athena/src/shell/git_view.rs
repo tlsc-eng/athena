@@ -229,6 +229,11 @@ impl Shell {
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok((prefix, snapshot)) => this.git_status_arrived(&root, prefix, snapshot, cx),
+                Err(err) if err.is::<git::TimedOut>() => {
+                    tracing::warn!(root = %root.display(), "git status: {err:#}");
+                    this.git_repo(&root).slow = true;
+                    this.git_finished(cx);
+                }
                 Err(err) => {
                     tracing::debug!(root = %root.display(), "git status: {err:#}");
                     let repo = this.git_repo(&root);
