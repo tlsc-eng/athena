@@ -116,6 +116,8 @@ pub struct Shell {
     /// Keys oneshot animations so reopening something replays them.
     generation: u64,
     save_task: Option<Task<()>>,
+    /// Unsaved files were settled by the Save question, so quitting must not keep copies of them.
+    quit_settled: bool,
     redraw_pending: Option<Task<()>>,
     rail_from: usize,
     switch_count: u64,
@@ -148,7 +150,8 @@ impl Shell {
                     }
                 }
             }),
-            cx.on_app_quit(|this, _| {
+            cx.on_app_quit(|this, cx| {
+                this.flush_unsaved(cx);
                 this.save_now();
                 async {}
             }),
@@ -242,6 +245,7 @@ impl Shell {
             ratio_anim: None,
             generation: 0,
             save_task: None,
+            quit_settled: false,
             redraw_pending: None,
             switch_count: 0,
             focus_pending: true,
@@ -253,6 +257,7 @@ impl Shell {
             this.update(cx, |this, cx| this.quit(window, cx)).is_err()
         });
         shell.start_notices(window, cx);
+        shell.announce_recovery(cx);
         shell.start_usage(window, cx);
         shell.start_git(window, cx);
         crate::system_notify::set_badge(shell.unread());

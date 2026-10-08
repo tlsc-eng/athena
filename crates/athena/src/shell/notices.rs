@@ -14,6 +14,8 @@ use super::item::ItemView;
 
 const KEEP: usize = 200;
 const TOAST_FOR: Duration = Duration::from_secs(5);
+/// Recovered files are announced at launch, when the user may not be looking yet.
+const RECOVERY_TOAST_FOR: Duration = Duration::from_secs(30);
 const MAX_TOASTS: usize = 3;
 const RECONNECT_AFTER: Duration = Duration::from_secs(2);
 
@@ -37,6 +39,8 @@ pub(super) struct Toast {
     id: u64,
     /// Title and body of a toast that is not kept in the Notifications list.
     transient: Option<(String, String)>,
+    /// Files a click opens, for a toast that is about files rather than a notification.
+    open: Vec<PathBuf>,
     closing: Option<Closing>,
     _dismiss: Task<()>,
 }
@@ -229,7 +233,7 @@ impl Shell {
                 view.update(cx, |v, cx| v.mark_attention(cx));
             }
             if window.is_window_active() {
-                self.show_toast(notification.id, None, cx);
+                self.show_toast(notification.id, None, TOAST_FOR, cx);
             } else {
                 let (title, body) = describe(
                     &notification.kind,
@@ -266,8 +270,36 @@ impl Shell {
         if self.notifications.len() > KEEP {
             self.notifications.remove(0);
         }
-        self.show_toast(id, None, cx);
+        self.show_toast(id, None, TOAST_FOR, cx);
         self.notices_changed(cx);
+    }
+
+    /// Offers the copies of unsaved files an earlier quit or crash kept.
+    pub(super) fn announce_recovery(&mut self, cx: &mut Context<Self>) {
+        let Ok(dir) = athena_proto::recovery_dir() else {
+            return;
+        };
+        let files = athena_editor::recovery::take_unannounced(&dir);
+        if files.is_empty() {
+            return;
+        }
+        tracing::info!(
+            "offering {} recovered files from {}",
+            files.len(),
+            dir.display()
+        );
+        let title = match files.len() {
+            1 => "Recovered unsaved changes in 1 file".to_string(),
+            n => format!("Recovered unsaved changes in {n} files"),
+        };
+        let body = format!("Click to open them. Copies stay in {}", dir.display());
+        self.next_notice += 1;
+        let id = self.next_notice;
+        self.show_toast(id, Some((title, body)), RECOVERY_TOAST_FOR, cx);
+        if let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id) {
+            toast.open = files;
+        }
+        cx.notify();
     }
 
     /// A toast for something only worth seeing now (a lookup that found nothing), not kept in the list.
@@ -279,7 +311,7 @@ impl Shell {
     ) {
         self.next_notice += 1;
         let id = self.next_notice;
-        self.show_toast(id, Some((title.into(), body.into())), cx);
+        self.show_toast(id, Some((title.into(), body.into())), TOAST_FOR, cx);
         cx.notify();
     }
 
@@ -293,9 +325,15 @@ impl Shell {
         cx.notify();
     }
 
-    fn show_toast(&mut self, id: u64, transient: Option<(String, String)>, cx: &mut Context<Self>) {
+    fn show_toast(
+        &mut self,
+        id: u64,
+        transient: Option<(String, String)>,
+        lasts: Duration,
+        cx: &mut Context<Self>,
+    ) {
         let dismiss = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_FOR).await;
+            cx.background_executor().timer(lasts).await;
             let Ok(delay) = this.update(cx, |this, cx| {
                 if let Some(toast) = this.toasts.iter_mut().find(|t| t.id == id) {
                     toast.closing = Some(Closing::new(id));
@@ -315,6 +353,7 @@ impl Shell {
         self.toasts.push(Toast {
             id,
             transient,
+            open: Vec::new(),
             closing: None,
             _dismiss: dismiss,
         });
@@ -330,7 +369,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let files = self
+            .toasts
+            .iter_mut()
+            .find(|t| t.id == id)
+            .map(|t| std::mem::take(&mut t.open))
+            .unwrap_or_default();
         self.toasts.retain(|t| t.id != id);
+        if !files.is_empty() {
+            return self.open_recovered(files, window, cx);
+        }
         let Some(n) = self.notifications.iter_mut().find(|n| n.id == id) else {
             cx.notify();
             return;
@@ -341,6 +389,20 @@ impl Shell {
             self.focus_item(&root, item, window, cx);
         }
         self.notices_changed(cx);
+    }
+
+    /// Opens recovered copies as tabs, or shows their folder when no project is open to hold them.
+    fn open_recovered(&mut self, files: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.active.is_none() {
+            if let Ok(dir) = athena_proto::recovery_dir() {
+                let _ = std::process::Command::new("open").arg(dir).spawn();
+            }
+            return cx.notify();
+        }
+        for file in files {
+            self.open_file(file, window, cx);
+        }
+        cx.notify();
     }
 
     fn focus_item(

@@ -37,3 +37,8 @@ pub fn app_log_path() -> Result<PathBuf> {
 pub fn app_socket_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("app.sock"))
 }
+
+/// Where copies of unsaved files go when Athena quits or crashes without saving them.
+pub fn recovery_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("recovery"))
+}

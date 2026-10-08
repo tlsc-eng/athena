@@ -7,12 +7,14 @@ use anyhow::Result;
 use gpui::{App, AppContext, Entity, Global};
 
 use crate::buffer::Buffer;
+use crate::recovery;
 
 /// One file's text, held by every editor tab showing that file.
 pub(crate) struct SharedBuffer {
     pub buffer: RefCell<Buffer>,
     /// Notified after each change, so the other views catch up and redraw.
     pub signal: Entity<Signal>,
+    recovery_id: u64,
 }
 
 pub(crate) struct Signal;
@@ -22,11 +24,25 @@ impl SharedBuffer {
         Rc::new(Self {
             buffer: RefCell::new(buffer),
             signal: cx.new(|_| Signal),
+            recovery_id: recovery::next_id(),
         })
     }
 
     pub fn changed(&self, cx: &mut App) {
         self.signal.update(cx, |_, cx| cx.notify());
+    }
+
+    /// Hands unsaved text to the recovery list, or takes it off once saved.
+    pub fn note_recovery(&self) {
+        let b = self.buffer.borrow();
+        let dirty = b.path.as_deref().filter(|_| b.is_dirty());
+        recovery::note(self.recovery_id, dirty.map(|path| (path, b.rope())));
+    }
+}
+
+impl Drop for SharedBuffer {
+    fn drop(&mut self) {
+        recovery::note(self.recovery_id, None);
     }
 }
 

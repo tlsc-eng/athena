@@ -30,9 +30,31 @@ impl Shell {
     pub(super) fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dirty = self.dirty_editors(None, cx);
         self.settle_unsaved(dirty, "quitting", window, cx, |this, cx| {
+            this.quit_settled = true;
             this.save_now();
             cx.quit();
         });
+    }
+
+    /// A quit that skipped the Save question (Dock, logout, `osascript`) saves what auto save would
+    /// and keeps recovery copies of the rest, so nothing unsaved is dropped.
+    pub(super) fn flush_unsaved(&mut self, cx: &mut Context<Self>) {
+        if self.quit_settled {
+            return;
+        }
+        if self.autosave_delay().is_some() {
+            for editor in self.dirty_editors(None, cx) {
+                editor.update(cx, |e, cx| e.save(cx));
+            }
+        }
+        let Ok(dir) = athena_proto::recovery_dir() else {
+            return;
+        };
+        match athena_editor::recovery::write_dirty(&dir) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("kept copies of {n} unsaved files in {}", dir.display()),
+            Err(err) => tracing::error!("could not keep copies of unsaved files: {err}"),
+        }
     }
 
     /// Closes the active project once its unsaved files are settled: auto save saves them quietly,

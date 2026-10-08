@@ -29,6 +29,7 @@ fn main() {
         Err(err) => eprintln!("athena: {err:#}"),
     }
     tracing::info!("athena {} starting", env!("CARGO_PKG_VERSION"));
+    install_panic_hook();
     Application::new()
         .with_assets(athena_ui::Assets)
         .run(|cx: &mut App| {
@@ -77,6 +78,20 @@ fn main() {
                 cx.activate(true);
             }
         });
+}
+
+/// Logs a panic to app.log and keeps copies of unsaved files before the default hook runs.
+fn install_panic_hook() {
+    let recovery = athena_proto::recovery_dir().ok();
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let kept = recovery
+            .as_deref()
+            .map(athena_editor::recovery::write_dirty);
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("{info}\nunsaved files kept: {kept:?}\n{backtrace}");
+        default(info);
+    }));
 }
 
 fn workspace_path() -> PathBuf {

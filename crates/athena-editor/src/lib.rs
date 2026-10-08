@@ -7,6 +7,7 @@ mod hover;
 mod image;
 mod line_jump;
 mod lines;
+pub mod recovery;
 mod shared;
 mod signature;
 mod syntax;

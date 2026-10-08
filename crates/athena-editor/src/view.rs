@@ -569,6 +569,9 @@ impl EditorView {
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(shared) = &self.buffer {
+            shared.note_recovery();
+        }
         let dirty = self.is_dirty();
         if dirty != self.was_dirty {
             self.was_dirty = dirty;
