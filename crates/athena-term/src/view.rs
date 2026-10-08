@@ -838,7 +838,7 @@ impl TerminalView {
         {
             if links::openable(&link.uri) {
                 cx.open_url(&link.uri);
-            } else if let Some(path) = links::file_uri_path(&link.uri) {
+            } else if let Some(path) = file_link_target(&link.uri) {
                 cx.emit(TerminalEvent::OpenFile {
                     path,
                     line: None,
@@ -1595,6 +1595,12 @@ impl Render for TerminalView {
     }
 }
 
+/// The file a `file://` hyperlink names, if it is a regular file the editor can open; a
+/// device or FIFO would block the UI thread reading it.
+fn file_link_target(uri: &str) -> Option<PathBuf> {
+    links::file_uri_path(uri).filter(|path| path.is_file())
+}
+
 fn report_button(button: MouseButton) -> Option<mouse::Button> {
     match button {
         MouseButton::Left => Some(mouse::Button::Left),
@@ -1837,6 +1843,17 @@ mod tests {
         assert!(!is_stale_daemon(&mismatch(0)), "an idle one is replaced");
         assert!(!is_stale_daemon(&anyhow!(ConnectError::NotRunning)));
         assert!(!is_stale_daemon(&anyhow!(ConnectError::DaemonExited)));
+    }
+
+    #[test]
+    fn file_hyperlinks_open_only_regular_files() {
+        let file = std::env::temp_dir().join(format!("athena-link-{}.txt", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        let uri = format!("file://{}", file.display());
+        assert_eq!(file_link_target(&uri), Some(file.clone()));
+        assert_eq!(file_link_target("file:///dev/zero"), None);
+        assert_eq!(file_link_target("file:///tmp"), None);
+        std::fs::remove_file(&file).unwrap();
     }
 
     #[test]
