@@ -120,26 +120,10 @@ fn server_edit_ranges(b: &Buffer, edits: &[ServerEdit]) -> Vec<(Range<usize>, St
 
 /// The buffer's text with the server's edits applied; same-place inserts keep their order.
 pub(crate) fn apply_server_edits(b: &Buffer, edits: &[ServerEdit]) -> String {
-    // An end past the last line means the end of the text.
-    let at = |(line, col): (u32, u32)| {
-        if line as usize >= b.len_lines() {
-            b.len_chars()
-        } else {
-            b.char_at_utf16(line, col)
-        }
-    };
-    let mut ranges: Vec<(usize, Range<usize>, &str)> = edits
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let start = at(e.start);
-            (i, start..at(e.end).max(start), e.text.as_str())
-        })
-        .collect();
-    ranges.sort_by_key(|(i, r, _)| (Reverse(r.start), Reverse(*i)));
+    let mut ranges = server_edit_ranges(b, edits);
     // Overlapping edits break the protocol; one reaching into an applied edit is dropped.
     let mut floor = usize::MAX;
-    ranges.retain(|(_, r, _)| {
+    ranges.retain(|(r, _)| {
         let fits = r.end <= floor;
         if fits {
             floor = r.start;
@@ -147,9 +131,9 @@ pub(crate) fn apply_server_edits(b: &Buffer, edits: &[ServerEdit]) -> String {
         fits
     });
     let mut rope = b.rope().clone();
-    for (_, range, text) in ranges {
+    for (range, text) in ranges {
         rope.remove(range.clone());
-        rope.insert(range.start, text);
+        rope.insert(range.start, &text);
     }
     rope.to_string()
 }
@@ -182,6 +166,16 @@ mod tests {
         let b = Buffer::new("xy", None);
         let same_place = [edit((0, 1), (0, 1), "A"), edit((0, 1), (0, 1), "B")];
         assert_eq!(apply_server_edits(&b, &same_place), "xABy");
+        let b = Buffer::new("abcdefgh", None);
+        let insert = edit((0, 5), (0, 5), "<");
+        let replace = edit((0, 5), (0, 8), "XYZ");
+        for list in [[insert.clone(), replace.clone()], [replace, insert]] {
+            assert_eq!(
+                apply_server_edits(&b, &list),
+                "abcde<XYZ",
+                "a replace sharing its start with an insert is kept"
+            );
+        }
     }
 
     #[test]
