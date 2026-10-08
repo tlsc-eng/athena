@@ -439,10 +439,10 @@ pub struct EditorView {
 pub struct ViewState {
     /// The cursor's line and UTF-16 column, as language servers count them.
     pub cursor: (u32, u32),
-    /// The buffer line at the top of the viewport.
-    pub top_line: usize,
-    /// Folded regions as their first and last hidden line; the header is the line above.
-    pub folds: Vec<(usize, usize)>,
+    /// The buffer line at the top of the viewport; `None` scrolls the cursor into view.
+    pub top_line: Option<usize>,
+    /// The header lines of folded regions, which fold whatever region they head when restored.
+    pub folds: Vec<usize>,
     /// This tab's word wrap choice; `None` follows the workspace default.
     pub wrap: Option<bool>,
 }
@@ -531,14 +531,14 @@ impl EditorView {
         };
         Some(ViewState {
             cursor: b.utf16_position(self.cursor.head()),
-            top_line,
-            folds: self.display.folds().map(|f| (f.start, f.end)).collect(),
+            top_line: Some(top_line),
+            folds: self.display.folds().map(|f| f.header()).collect(),
             wrap: self.wrap,
         })
     }
 
-    /// Puts the cursor, folds and scroll back where [`Self::view_state`] found them; folds that no
-    /// longer match the text are skipped and positions past the end are clamped.
+    /// Puts the cursor, folds and scroll back where [`Self::view_state`] found them; a header that
+    /// no longer heads a region is skipped and positions past the end are clamped.
     pub fn restore_view_state(&mut self, state: &ViewState, cx: &mut Context<Self>) {
         let Some(lines) = self.buf().map(|b| b.len_lines()) else {
             return;
@@ -546,9 +546,8 @@ impl EditorView {
         self.follow_edits();
         self.set_word_wrap(state.wrap, cx);
         self.display.clear();
-        for &(start, end) in &state.folds {
-            let fold = Fold { start, end };
-            if start > 0 && end < lines && self.fold_at(start - 1) == Some(fold) {
+        for &header in &state.folds {
+            if let Some(fold) = self.fold_at(header) {
                 self.display.fold(fold);
             }
         }
@@ -559,8 +558,9 @@ impl EditorView {
             b.move_to(self.cursor.primary_mut(), at, false);
         }
         self.cursor_out_of_folds();
-        self.pending_top = Some(state.top_line.min(lines.saturating_sub(1)));
-        self.autoscroll = false;
+        self.pending_top = state.top_line.map(|top| top.min(lines.saturating_sub(1)));
+        self.autoscroll = self.pending_top.is_none();
+        self.center_cursor = self.autoscroll;
         self.note_cursor_line(false, cx);
         cx.notify();
     }
