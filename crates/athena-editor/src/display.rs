@@ -37,9 +37,231 @@ impl DisplayLine {
     }
 }
 
+/// Lines hidden under a folded header; the header is the line before `start`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fold {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Fold {
+    pub fn header(&self) -> usize {
+        self.start - 1
+    }
+
+    fn len(&self) -> usize {
+        self.end + 1 - self.start
+    }
+
+    fn contains(&self, line: usize) -> bool {
+        self.start <= line && line <= self.end
+    }
+}
+
+/// Maps buffer lines to the visual rows left after folding.
+#[derive(Default)]
+pub struct DisplayMap {
+    /// Sorted by `start` and never overlapping.
+    folds: Vec<Fold>,
+}
+
+impl DisplayMap {
+    pub fn is_empty(&self) -> bool {
+        self.folds.is_empty()
+    }
+
+    /// The row a line is drawn on; a hidden line maps to its fold's header row.
+    pub fn row_of(&self, line: usize) -> usize {
+        let mut hidden = 0;
+        for f in &self.folds {
+            if f.start > line {
+                break;
+            }
+            if f.contains(line) {
+                return f.header() - hidden;
+            }
+            hidden += f.len();
+        }
+        line - hidden
+    }
+
+    pub fn line_of(&self, row: usize) -> usize {
+        let mut line = row;
+        for f in &self.folds {
+            if f.start > line {
+                break;
+            }
+            line += f.len();
+        }
+        line
+    }
+
+    pub fn row_count(&self, lines: usize) -> usize {
+        lines - self.folds.iter().map(Fold::len).sum::<usize>()
+    }
+
+    pub fn fold_containing(&self, line: usize) -> Option<Fold> {
+        self.folds.iter().copied().find(|f| f.contains(line))
+    }
+
+    /// The fold whose header is `line`, if it is folded.
+    pub fn folded_at(&self, line: usize) -> Option<Fold> {
+        self.folds.iter().copied().find(|f| f.header() == line)
+    }
+
+    /// Folds `fold`, absorbing any folds inside or overlapping it.
+    pub fn fold(&mut self, fold: Fold) {
+        if fold.start == 0 || fold.end < fold.start {
+            return;
+        }
+        self.folds
+            .retain(|f| f.end < fold.start || f.start > fold.end);
+        let at = self.folds.partition_point(|f| f.start < fold.start);
+        self.folds.insert(at, fold);
+    }
+
+    /// Unfolds the fold headed by `line`; returns whether there was one.
+    pub fn unfold_at(&mut self, line: usize) -> bool {
+        let before = self.folds.len();
+        self.folds.retain(|f| f.header() != line);
+        self.folds.len() != before
+    }
+
+    pub fn clear(&mut self) {
+        self.folds.clear();
+    }
+
+    /// Unfolds whatever hides `line`; returns whether anything changed.
+    pub fn reveal(&mut self, line: usize) -> bool {
+        let before = self.folds.len();
+        self.folds.retain(|f| !f.contains(line));
+        self.folds.len() != before
+    }
+
+    /// Follows an edit that replaced `old_lines` line breaks from `first` with `new_lines`.
+    /// Folds the edit reaches into are dropped, as is one whose header gained or lost lines.
+    pub fn apply_edit(&mut self, first: usize, old_lines: usize, new_lines: usize) {
+        let last = first + old_lines;
+        let delta = new_lines as isize - old_lines as isize;
+        self.folds.retain_mut(|f| {
+            if f.end < first {
+                return true;
+            }
+            if f.start <= last || (delta != 0 && f.header() == first) {
+                return false;
+            }
+            f.start = (f.start as isize + delta) as usize;
+            f.end = (f.end as isize + delta) as usize;
+            true
+        });
+    }
+}
+
+/// The block indented under `line`: following lines indented deeper, ignoring blank ones.
+pub fn indent_fold_at(line: usize, lines: usize, text: impl Fn(usize) -> String) -> Option<Fold> {
+    let indent = |s: &str| -> Option<usize> {
+        if s.trim().is_empty() {
+            return None;
+        }
+        let mut col = 0;
+        for c in s.chars() {
+            match c {
+                ' ' => col += 1,
+                '\t' => col += TAB_WIDTH - col % TAB_WIDTH,
+                _ => break,
+            }
+        }
+        Some(col)
+    };
+    let header = indent(&text(line))?;
+    let mut end = line;
+    for l in line + 1..lines {
+        match indent(&text(l)) {
+            None => continue,
+            Some(i) if i > header => end = l,
+            Some(_) => break,
+        }
+    }
+    (end > line).then_some(Fold {
+        start: line + 1,
+        end,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fold(start: usize, end: usize) -> Fold {
+        Fold { start, end }
+    }
+
+    #[test]
+    fn rows_round_trip_with_two_folds() {
+        let mut map = DisplayMap::default();
+        map.fold(fold(3, 5));
+        map.fold(fold(8, 9));
+        let visible = [0, 1, 2, 6, 7, 10, 11];
+        assert_eq!(map.row_count(12), visible.len());
+        for (row, line) in visible.iter().enumerate() {
+            assert_eq!(map.line_of(row), *line);
+            assert_eq!(map.row_of(*line), row);
+        }
+        assert_eq!(map.row_of(4), 2, "hidden lines sit on their header's row");
+        assert!(map.fold_containing(9).is_some() && map.fold_containing(7).is_none());
+        assert_eq!(map.folded_at(7), Some(fold(8, 9)));
+    }
+
+    #[test]
+    fn folding_an_outer_block_absorbs_inner_folds() {
+        let mut map = DisplayMap::default();
+        map.fold(fold(4, 5));
+        map.fold(fold(2, 8));
+        assert_eq!(map.folds, vec![fold(2, 8)]);
+        assert!(map.unfold_at(1));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn edits_shift_folds_below_and_drop_touched_ones() {
+        let mut map = DisplayMap::default();
+        map.fold(fold(3, 5));
+        map.fold(fold(10, 12));
+        map.apply_edit(0, 0, 2);
+        assert_eq!(map.folds, vec![fold(5, 7), fold(12, 14)]);
+        map.apply_edit(6, 1, 0);
+        assert_eq!(map.folds, vec![fold(11, 13)]);
+        map.apply_edit(10, 0, 0);
+        assert_eq!(
+            map.folds,
+            vec![fold(11, 13)],
+            "typing on the header keeps the fold"
+        );
+        map.apply_edit(10, 0, 1);
+        assert!(map.is_empty(), "a new line under the header unfolds");
+    }
+
+    #[test]
+    fn reveal_unfolds_only_what_hides_the_line() {
+        let mut map = DisplayMap::default();
+        map.fold(fold(3, 5));
+        map.fold(fold(8, 9));
+        assert!(!map.reveal(7));
+        assert!(map.reveal(9));
+        assert_eq!(map.folds, vec![fold(3, 5)]);
+    }
+
+    #[test]
+    fn indent_folds_python_blocks() {
+        let src =
+            "class A:\n    def f(self):\n        x = 1\n\n        return x\n\n    y = 2\nz = 3\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let text = |l: usize| lines[l].to_string();
+        assert_eq!(indent_fold_at(0, lines.len(), text), Some(fold(1, 6)));
+        assert_eq!(indent_fold_at(1, lines.len(), text), Some(fold(2, 4)));
+        assert_eq!(indent_fold_at(2, lines.len(), text), None);
+        assert_eq!(indent_fold_at(3, lines.len(), text), None);
+    }
 
     #[test]
     fn expands_tabs_to_stops() {

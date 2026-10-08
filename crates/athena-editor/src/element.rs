@@ -60,6 +60,8 @@ fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
 
 const LINE_HEIGHT_RATIO: f32 = 1.5;
 const GUTTER_PAD: f32 = 16.;
+/// Width of the gutter column right of the line numbers that holds fold chevrons.
+const FOLD_COLUMN: f32 = 20.;
 const TEXT_PAD: f32 = 8.;
 
 pub struct EditorElement {
@@ -183,7 +185,8 @@ impl Element for EditorElement {
                 return;
             };
             if view.autoscroll {
-                let line = buffer.line_of(buffer.selection.head) as f32 * f32::from(lh);
+                let row = view.display.row_of(buffer.line_of(buffer.selection.head));
+                let line = row as f32 * f32::from(lh);
                 let height = f32::from(bounds.size.height);
                 if line < view.scroll.y {
                     view.scroll.y = line;
@@ -199,7 +202,9 @@ impl Element for EditorElement {
         };
         let total = buffer.len_lines();
         let digits = total.to_string().len().max(3);
-        let gutter_w = cell * digits as f32 + px(GUTTER_PAD * 2.);
+        let numbers_right = bounds.left() + px(GUTTER_PAD) + cell * digits as f32;
+        let fold_column = (numbers_right, numbers_right + px(FOLD_COLUMN));
+        let gutter_w = fold_column.1 - bounds.left();
         let text_left = bounds.left() + gutter_w + px(TEXT_PAD);
         frame.gutter_bounds = Bounds::new(bounds.origin, size(gutter_w, bounds.size.height));
         frame.text_bounds = Bounds::from_corners(
@@ -209,8 +214,13 @@ impl Element for EditorElement {
 
         let first = (view.scroll.y / f32::from(lh)).floor().max(0.) as usize;
         let visible = (f32::from(bounds.size.height) / f32::from(lh)).ceil() as usize + 1;
-        let last = (first + visible).min(total);
-        let tokens = buffer.highlights(first..last);
+        let last = (first + visible).min(view.display.row_count(total));
+        let shown: Vec<usize> = (first..last).map(|r| view.display.line_of(r)).collect();
+        // One highlight query per unbroken run of lines, so folded text is never queried.
+        let mut tokens = Vec::new();
+        for run in shown.chunk_by(|a, b| a + 1 == *b) {
+            tokens.extend(buffer.highlights(run[0]..run[run.len() - 1] + 1));
+        }
         let rope = buffer.rope();
         let selection = buffer.selection.range();
         let head = buffer.selection.head;
@@ -219,7 +229,7 @@ impl Element for EditorElement {
         // Horizontal autoscroll needs the cursor line shaped, so it is settled before painting.
         let mut scroll_x = view.scroll.x;
         let mut lines = Vec::new();
-        for line in first..last {
+        for &line in &shown {
             let raw = buffer.line(line);
             let display = DisplayLine::new(&raw);
             let start_char = buffer.line_start(line);
@@ -286,11 +296,11 @@ impl Element for EditorElement {
                 (a..b.max(a), m.severity)
             })
             .collect();
-        let y_of = |line: usize| bounds.top() + lh * line as f32 - px(view.scroll.y);
         let x0 = text_left - px(scroll_x);
-        for (line, start, n, display, shaped) in &lines {
-            let y = y_of(*line);
+        for (row, (line, start, n, display, shaped)) in lines.iter().enumerate() {
+            let y = bounds.top() + lh * (first + row) as f32 - px(view.scroll.y);
             let end = start + n;
+            let folded = view.display.folded_at(*line);
             if *line == head_line && selection.is_empty() && self.focused {
                 frame.backgrounds.push(fill(
                     Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh)),
@@ -325,13 +335,36 @@ impl Element for EditorElement {
                 frame.backgrounds.push(fill(b, theme.color.surface_accent));
             }
             frame.text.push((point(x0, y), shaped.clone()));
+            if folded.is_some() {
+                let dots =
+                    text_system.shape_line("⋯".into(), font_size, &[run(3, syntax.comment)], None);
+                let x = x0 + shaped.width + cell;
+                let pad = cell / 2.;
+                frame.backgrounds.push(
+                    fill(
+                        Bounds::new(
+                            point(x - pad, y + px(3.)),
+                            size(dots.width + pad * 2., lh - px(6.)),
+                        ),
+                        theme.color.surface_active,
+                    )
+                    .corner_radii(theme.shape.radius_control),
+                );
+                frame.text.push((point(x, y), dots));
+            }
 
+            // A folded header's number also reports diagnostics hidden under it.
+            let marks_end =
+                folded.map_or(end, |f| buffer.line_start(f.end) + buffer.line_len(f.end));
             let mut worst = None;
             for (range, severity) in &marks {
-                if range.start > end || range.end < *start {
+                if range.start > marks_end || range.end < *start {
                     continue;
                 }
                 worst = worst.min(Some(*severity)).or(Some(*severity));
+                if range.start > end {
+                    continue;
+                }
                 let a = range.start.clamp(*start, end);
                 let b = range.end.clamp(*start, end);
                 let xa = shaped.x_for_index(display.char_to_byte[a - start]);
@@ -357,8 +390,25 @@ impl Element for EditorElement {
                 &[run(number.len(), color)],
                 None,
             );
-            let x = bounds.left() + gutter_w - px(GUTTER_PAD) - label.width;
+            let x = numbers_right - label.width;
             frame.gutter.push((point(x, y), label));
+            let chevron = match folded {
+                Some(_) => Some(("▸", syntax.line_number_active)),
+                None if view.gutter_hover && view.fold_at(*line).is_some() => {
+                    Some(("▾", syntax.line_number))
+                }
+                None => None,
+            };
+            if let Some((glyph, color)) = chevron {
+                let shaped = text_system.shape_line(
+                    glyph.into(),
+                    font_size,
+                    &[run(glyph.len(), color)],
+                    None,
+                );
+                let x = fold_column.0 + (px(FOLD_COLUMN) - shaped.width) / 2.;
+                frame.gutter.push((point(x, y), shaped));
+            }
 
             if *line == head_line {
                 let x = x0 + shaped.x_for_index(display.char_to_byte[head - start]);
@@ -400,6 +450,7 @@ impl Element for EditorElement {
                 text_left,
                 line_height: lh,
                 lines: stored,
+                fold_column,
             });
         });
         frame

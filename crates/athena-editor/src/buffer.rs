@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use ropey::Rope;
 use tree_sitter::{InputEdit, Point};
 
+use crate::display::{Fold, indent_fold_at};
 use crate::syntax::{Lang, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
@@ -88,6 +89,8 @@ pub struct Buffer {
     last_edit: Option<(EditKind, Instant)>,
     /// Column the cursor tries to return to on vertical moves across shorter lines.
     goal_column: Option<usize>,
+    /// (first line, line breaks removed, line breaks inserted) per change, for folds to follow.
+    line_edits: Vec<(usize, usize, usize)>,
 }
 
 impl Buffer {
@@ -111,6 +114,7 @@ impl Buffer {
             redo: Vec::new(),
             last_edit: None,
             goal_column: None,
+            line_edits: Vec::new(),
         }
     }
 
@@ -273,6 +277,11 @@ impl Buffer {
         let old_end_char = change.start + change.deleted.chars().count();
         let old_end_byte = self.rope.char_to_byte(old_end_char);
         let old_end_position = self.point(old_end_char);
+        self.line_edits.push((
+            start_position.row,
+            change.deleted.matches('\n').count(),
+            change.inserted.matches('\n').count(),
+        ));
         self.rope.remove(change.start..old_end_char);
         self.rope.insert(change.start, &change.inserted);
         let new_end_char = change.start + change.inserted.chars().count();
@@ -545,6 +554,16 @@ impl Buffer {
         self.goal_column = Some(goal);
     }
 
+    /// Moves to `line`, keeping the column vertical moves aim for.
+    pub fn move_to_line(&mut self, line: usize, extend: bool) {
+        let goal = *self
+            .goal_column
+            .get_or_insert(self.column_of(self.selection.head));
+        let head = self.char_at(line.min(self.len_lines() - 1), goal);
+        self.set_head(head, extend);
+        self.goal_column = Some(goal);
+    }
+
     pub fn move_line_start(&mut self, extend: bool) {
         self.goal_column = None;
         let line = self.line_of(self.selection.head);
@@ -652,6 +671,43 @@ impl Buffer {
             i += 1;
         }
         i
+    }
+
+    /// Line edits since the last call, oldest first.
+    pub fn take_line_edits(&mut self) -> Vec<(usize, usize, usize)> {
+        std::mem::take(&mut self.line_edits)
+    }
+
+    /// The region `line` can fold: up to the line before the furthest closing bracket of a bracket
+    /// opened on it, else the block indented under it.
+    pub fn fold_at(&self, line: usize) -> Option<Fold> {
+        if line + 1 >= self.len_lines() {
+            return None;
+        }
+        let close = self.syntax.as_ref().and_then(|syntax| {
+            let start = self.rope.line_to_byte(line);
+            let end = self.rope.line_to_byte(line + 1);
+            let mut best = None;
+            for (i, b) in self.rope.byte_slice(start..end).bytes().enumerate() {
+                if matches!(b, b'{' | b'[' | b'(')
+                    && let Some(partner) = syntax.bracket_partner(start + i)
+                {
+                    let partner_line = self.rope.byte_to_line(partner);
+                    if partner_line > line && best.is_none_or(|b| partner_line > b) {
+                        best = Some(partner_line);
+                    }
+                }
+            }
+            best
+        });
+        match close {
+            Some(close) if close >= line + 2 => Some(Fold {
+                start: line + 1,
+                end: close - 1,
+            }),
+            Some(_) => None,
+            None => indent_fold_at(line, self.len_lines(), |l| self.line(l)),
+        }
     }
 
     /// The bracket at or just before the cursor and its partner, as char offsets.
@@ -912,6 +968,34 @@ mod tests {
         assert_eq!(plain.matching_bracket(), Some((2, 10)));
         plain.move_to(8, false);
         assert_eq!(plain.matching_bracket(), Some((7, 5)));
+    }
+
+    #[test]
+    fn folds_start_at_brackets_and_fall_back_to_indent() {
+        let go = "func f() {\n\tx := []int{\n\t\t1,\n\t}\n\treturn\n}\n";
+        let b = buf(go, "/x/a.go");
+        assert_eq!(b.fold_at(0), Some(Fold { start: 1, end: 4 }));
+        assert_eq!(b.fold_at(1), Some(Fold { start: 2, end: 2 }));
+        assert_eq!(b.fold_at(2), None);
+        let py = "def f():\n    if x:\n        pass\n    return 1\n";
+        let b = buf(py, "/x/a.py");
+        assert_eq!(b.fold_at(0), Some(Fold { start: 1, end: 3 }));
+        assert_eq!(b.fold_at(1), Some(Fold { start: 2, end: 2 }));
+        let one_line = buf("f(a, {\n})\n", "/x/a.ts");
+        assert_eq!(one_line.fold_at(0), None);
+    }
+
+    #[test]
+    fn edits_report_line_deltas() {
+        let mut b = buf("a\nb\nc", "/x/a.ts");
+        b.take_line_edits();
+        b.move_to(2, false);
+        b.insert("x\ny\n");
+        b.select_all();
+        b.backspace();
+        assert_eq!(b.take_line_edits(), vec![(1, 0, 2), (0, 4, 0)]);
+        b.undo();
+        assert_eq!(b.take_line_edits(), vec![(0, 0, 4)]);
     }
 
     #[test]
