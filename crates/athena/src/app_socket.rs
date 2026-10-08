@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -60,7 +61,7 @@ fn serve(mut stream: UnixStream, tx: async_channel::Sender<Request>) {
     while let Ok(Some(msg)) = athena_proto::read_frame::<_, AppMsg>(&mut stream) {
         if let AppMsg::Identify { session } = msg {
             claimed = Some(session);
-            if athena_proto::write_frame(&mut stream, &AppReply::Ok).is_err() {
+            if send_reply(&mut stream, AppReply::Ok).is_err() {
                 return;
             }
             continue;
@@ -78,9 +79,33 @@ fn serve(mut stream: UnixStream, tx: async_channel::Sender<Request>) {
         let reply = reply_rx
             .recv_timeout(REPLY_TIMEOUT)
             .unwrap_or_else(|_| AppReply::Error("Athena did not answer in time".into()));
-        if athena_proto::write_frame(&mut stream, &reply).is_err() {
+        if send_reply(&mut stream, reply).is_err() {
             return;
         }
+    }
+}
+
+/// Sends `reply`, trimming a list too long for one frame; terminal lines keep the newest.
+fn send_reply(out: &mut impl Write, mut reply: AppReply) -> io::Result<()> {
+    loop {
+        match athena_proto::write_frame(out, &reply) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => reply = shrink(reply),
+            done => return done,
+        }
+    }
+}
+
+fn shrink(reply: AppReply) -> AppReply {
+    match reply {
+        AppReply::Lines(mut lines) if lines.len() > 1 => {
+            lines.drain(..lines.len().div_ceil(4));
+            AppReply::Lines(lines)
+        }
+        AppReply::Diagnostics(mut list) if list.len() > 1 => {
+            list.truncate(list.len() * 3 / 4);
+            AppReply::Diagnostics(list)
+        }
+        _ => AppReply::Error("the answer is too large to send".into()),
     }
 }
 
@@ -90,4 +115,24 @@ fn same_user(stream: &UnixStream) -> bool {
     let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
     // SAFETY: geteuid has no preconditions.
     ok && uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_over_the_frame_limit_is_trimmed_to_its_newest_lines() {
+        let lines: Vec<String> = (0..2000)
+            .map(|i| format!("{i:04}{}", "x".repeat(996)))
+            .collect();
+        let mut out = Vec::new();
+        send_reply(&mut out, AppReply::Lines(lines)).unwrap();
+        let Some(AppReply::Lines(sent)) = athena_proto::read_frame(&mut out.as_slice()).unwrap()
+        else {
+            panic!("expected lines")
+        };
+        assert!((800..2000).contains(&sent.len()), "{} lines", sent.len());
+        assert!(sent.last().unwrap().starts_with("1999"));
+    }
 }
