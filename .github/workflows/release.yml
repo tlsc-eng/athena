@@ -21,6 +21,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4dfd137a5aecc12897f37a01818006f58cf58347 # 1.98.0
 
+      # Tag runs can restore main's cache, which also holds cargo-deny and cargo-audit in ~/.cargo/bin.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: athena-macos
+          save-if: false
+
       - name: Tag matches the crate version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
