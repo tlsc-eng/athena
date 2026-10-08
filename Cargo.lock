@@ -455,6 +455,7 @@ dependencies = [
  "athena-ui",
  "athena-workspace",
  "block2",
+ "futures",
  "gpui",
  "ignore",
  "libc",

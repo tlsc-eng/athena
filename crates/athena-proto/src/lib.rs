@@ -40,6 +40,12 @@ pub enum AppMsg {
     },
     /// Which pane and project the connecting process runs in, as the window determined it.
     WhoAmI,
+    /// Types `text` into a terminal, only after the user approves it in the window.
+    RunInTerminal {
+        session: PaneId,
+        text: String,
+        newline: bool,
+    },
     /// Sent first by clients running in an Athena terminal (`ATHENA_PANE_ID`). The window only
     /// believes it if that pane's foreground program is an ancestor of the client.
     Identify {

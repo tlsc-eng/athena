@@ -3,13 +3,15 @@ use std::path::PathBuf;
 use athena_proto::{ActiveFile, AppMsg, AppReply, PaneId, ProjectInfo, TerminalInfo};
 use athena_term::ClaudeState;
 use athena_workspace::{ItemKind, resolve_in_roots};
-use gpui::{Context, Window};
+use gpui::{Context, PromptLevel, Window};
 
 use super::Shell;
 use super::item::ItemView;
 
 const MAX_LINES: u32 = 2000;
 const MAX_SELECTION: usize = 64 * 1024;
+const MAX_RUN: usize = 4096;
+const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Shell {
     /// Answers a request from `athena` or the MCP bridge.
@@ -49,6 +51,7 @@ impl Shell {
                 self.read_terminal(session, lines.min(MAX_LINES), cx)
             }
             AppMsg::Identify { .. } => AppReply::Ok,
+            AppMsg::RunInTerminal { .. } => AppReply::Error("needs confirmation".into()),
             AppMsg::WhoAmI => AppReply::Caller {
                 session: caller,
                 project: caller.and_then(|s| self.session_root(s)),
@@ -72,6 +75,76 @@ impl Shell {
             _ => None,
         })?;
         lineage.contains(&foreground).then_some(session)
+    }
+
+    /// Asks the user before typing anything Claude sends into a terminal; no answer means no.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn confirm_run(
+        &mut self,
+        session: PaneId,
+        text: String,
+        newline: bool,
+        caller: Option<PaneId>,
+        reply: std::sync::mpsc::SyncSender<AppReply>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.items.values().find_map(|v| match v {
+            ItemView::Terminal(t) if t.read(cx).session() == Some(session) => Some(t.clone()),
+            _ => None,
+        });
+        let Some(target) = target else {
+            let _ = reply.send(AppReply::Error(format!(
+                "terminal {session} is not open in Athena"
+            )));
+            return;
+        };
+        if text.len() > MAX_RUN {
+            let _ = reply.send(AppReply::Error(format!(
+                "command is longer than {MAX_RUN} bytes"
+            )));
+            return;
+        }
+        let who = match caller.and_then(|s| self.session_root(s)) {
+            Some(root) => format!(
+                "Claude in {}",
+                root.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+            None => "A program outside Athena".to_string(),
+        };
+        let place = target.read(cx).label();
+        let detail = format!(
+            "{who} wants to type this into \"{place}\"{}:\n\n{text}",
+            if newline { " and press Return" } else { "" }
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Run in terminal?",
+            Some(&detail),
+            &["Run", "Don't Run"],
+            cx,
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            let timeout = cx.background_executor().timer(CONFIRM_FOR);
+            let choice = futures::future::select(answer, timeout).await;
+            let approved = matches!(choice, futures::future::Either::Left((Ok(0), _)));
+            let result = if approved {
+                let mut bytes = text.into_bytes();
+                if newline {
+                    bytes.push(b'\r');
+                }
+                let _ = cx.update(|_, cx| target.update(cx, |t, cx| t.type_text(bytes, cx)));
+                AppReply::Ok
+            } else if matches!(choice, futures::future::Either::Right(_)) {
+                AppReply::Error("no answer within 60 seconds; nothing was typed".into())
+            } else {
+                AppReply::Error("the user declined; nothing was typed".into())
+            };
+            let _ = reply.send(result);
+        })
+        .detach();
     }
 
     fn session_root(&self, session: PaneId) -> Option<PathBuf> {

@@ -36,6 +36,7 @@ rmcp = { version = "=3.5.1", default-features = false, features = ["server", "ma
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "time"] }
 schemars = "1"
 sha2 = "0.11"
+futures = "0.3"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

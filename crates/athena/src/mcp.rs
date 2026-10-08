@@ -31,6 +31,16 @@ struct ReadTerminalArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RunArgs {
+    /// The `session` of a terminal from list_terminals.
+    session: u64,
+    /// What to type. The user sees it in full and must approve it.
+    text: String,
+    /// Press Return after typing (default true).
+    newline: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ProjectFilesArgs {
     /// Project root from list_projects; defaults to the project this session runs in.
     project: Option<String>,
@@ -161,6 +171,22 @@ impl Bridge {
             return Err(unexpected());
         };
         text(lines.join("\n"))
+    }
+
+    #[tool(
+        description = "Type a command into one of the user's terminals. Athena shows the user the exact text and runs it only if they approve within 60 seconds."
+    )]
+    async fn run_in_terminal(
+        &self,
+        Parameters(args): Parameters<RunArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let msg = AppMsg::RunInTerminal {
+            session: args.session,
+            text: args.text,
+            newline: args.newline.unwrap_or(true),
+        };
+        ask(msg).await?;
+        text("The user approved it; it was typed into the terminal.")
     }
 
     #[tool(

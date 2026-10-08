@@ -10,8 +10,8 @@ use athena_proto::{AppMsg, AppReply, PaneId};
 
 use crate::procinfo;
 
-/// How long a client waits for the window before giving up on a request.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a client waits for the window; long enough for a person to answer a confirm.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// One request from `athena` or the MCP bridge, answered on the window's thread.
 pub struct Request {

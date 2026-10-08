@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use athena_proto::AppMsg;
 use athena_term::ClaudeState;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
@@ -117,6 +118,15 @@ impl Shell {
             while let Ok(request) = requests.recv().await {
                 let answered = this.update_in(cx, |this, window, cx| {
                     let caller = this.verify_caller(request.claimed, &request.lineage, cx);
+                    if let AppMsg::RunInTerminal {
+                        session,
+                        text,
+                        newline,
+                    } = request.msg
+                    {
+                        this.confirm_run(session, text, newline, caller, request.reply, window, cx);
+                        return;
+                    }
                     let reply = this.handle_app(request.msg, caller, window, cx);
                     let _ = request.reply.send(reply);
                 });

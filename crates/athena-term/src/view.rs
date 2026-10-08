@@ -208,6 +208,14 @@ impl TerminalView {
         self.pane
     }
 
+    /// Sends bytes to the shell now, as if typed.
+    pub fn type_text(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.input(bytes);
+            cx.notify();
+        }
+    }
+
     /// Types `text` into the shell as soon as it is attached.
     pub fn run_on_start(&mut self, text: impl Into<String>) {
         self.pending_input = Some(text.into().into_bytes());
