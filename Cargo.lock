@@ -452,6 +452,8 @@ name = "athena-editor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "athena-ui",
+ "gpui",
  "ropey",
  "streaming-iterator",
  "tree-sitter",

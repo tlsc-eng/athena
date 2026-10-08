@@ -1,5 +1,9 @@
 mod buffer;
+mod display;
+mod element;
 mod syntax;
+mod view;
 
 pub use buffer::{Buffer, Indent, Selection};
 pub use syntax::{Lang, Token};
+pub use view::{EditorEvent, EditorView, init};

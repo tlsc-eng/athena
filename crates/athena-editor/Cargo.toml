@@ -14,3 +14,5 @@ tree-sitter-typescript.workspace = true
 tree-sitter-javascript.workspace = true
 streaming-iterator.workspace = true
 anyhow.workspace = true
+gpui.workspace = true
+athena-ui.workspace = true
