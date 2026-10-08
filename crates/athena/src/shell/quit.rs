@@ -131,6 +131,7 @@ impl Shell {
         self.drop_project_items(root, cx);
         self.history.forget_root(root);
         self.lsp_project_closed(root);
+        self.git_project_closed(root);
         self.workspace.close_project(index);
         self.rail_from = self.workspace.active.unwrap_or(0);
         if was_active {

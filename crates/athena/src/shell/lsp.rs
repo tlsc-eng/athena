@@ -870,6 +870,9 @@ impl Shell {
         self.lsp.documents.retain(|_, (r, _)| r != root);
         self.lsp.crashes.retain(|(r, _), _| r != root);
         self.lsp.restarts.retain(|(r, _), _| r != root);
+        self.lsp.diagnostics.retain(|_, ((r, _), _)| r != root);
+        let under = document_key(root);
+        self.lsp.changes.retain(|doc, _| !doc.starts_with(&under));
     }
 
     /// Diagnostics for `path`, or for every file under `roots`, 1-based for people and Claude.

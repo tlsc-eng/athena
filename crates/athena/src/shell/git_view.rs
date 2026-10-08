@@ -175,6 +175,12 @@ impl Shell {
         }));
     }
 
+    /// Forgets a closed project's git state and gutter marks.
+    pub(super) fn git_project_closed(&mut self, root: &Path) {
+        self.git.repos.remove(root);
+        self.git.marks.retain(|path, _| !path.starts_with(root));
+    }
+
     /// The branch for the title bar, from the last status run.
     pub(super) fn cached_branch(&self, root: &Path) -> Option<String> {
         self.git.repos.get(root)?.branch.clone()
@@ -235,6 +241,10 @@ impl Shell {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
+                // The project closed while git ran; recording it would bring its state back.
+                _ if !this.workspace.projects.iter().any(|p| p.root == root) => {
+                    this.git_finished(cx)
+                }
                 Ok((prefix, snapshot)) => this.git_status_arrived(&root, prefix, snapshot, cx),
                 Err(err) if err.is::<git::TimedOut>() => {
                     tracing::warn!(root = %root.display(), "git status: {err:#}");
