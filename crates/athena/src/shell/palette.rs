@@ -76,6 +76,15 @@ fn placeholder_hint(mode: Mode) -> &'static str {
     }
 }
 
+/// Editor actions the palette offers while an editor is focused; Insert line above has no key.
+const EDITOR_COMMANDS: &[(&str, &str)] = &[
+    ("Indent lines", "editor::IndentLines"),
+    ("Outdent lines", "editor::OutdentLines"),
+    ("Toggle replace", "editor::FindReplace"),
+    ("Insert line above", "editor::InsertLineAbove"),
+    ("Insert line below", "editor::InsertLineBelow"),
+];
+
 /// Commands offered for starting Claude; typing anything else offers that too.
 const CLAUDE_COMMANDS: &[&str] = &["claude", "claude-tlsc", "claude-ai"];
 
@@ -177,6 +186,9 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Next project", Box::new(actions::NextProject)),
         ("Previous project", Box::new(actions::PrevProject)),
         ("Toggle full screen", Box::new(actions::ToggleFullScreen)),
+        ("Zoom in", Box::new(actions::FontZoomIn)),
+        ("Zoom out", Box::new(actions::FontZoomOut)),
+        ("Reset zoom", Box::new(actions::FontZoomReset)),
     ]
 }
 
@@ -269,12 +281,17 @@ impl Shell {
         let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
         let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
         let mut commands = commands();
-        // The editor's own action, so it only means something with an editor focused.
-        if self.focused_editor().is_some()
-            && let Ok(action) = cx.build_action("editor::GoToLine", None)
-        {
-            let at = commands.iter().position(|(l, _)| *l == "Go to file");
-            commands.insert(at.map_or(0, |i| i + 1), ("Go to line", action));
+        // The editor's own actions, so they only mean something with an editor focused.
+        if self.focused_editor().is_some() {
+            if let Ok(action) = cx.build_action("editor::GoToLine", None) {
+                let at = commands.iter().position(|(l, _)| *l == "Go to file");
+                commands.insert(at.map_or(0, |i| i + 1), ("Go to line", action));
+            }
+            for (label, name) in EDITOR_COMMANDS {
+                if let Ok(action) = cx.build_action(name, None) {
+                    commands.push((label, action));
+                }
+            }
         }
         commands
             .into_iter()
