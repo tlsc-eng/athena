@@ -4,6 +4,7 @@ mod claude;
 mod containers_view;
 mod dnd;
 mod drawer;
+mod edits;
 mod fileops;
 mod fuzzy;
 mod git_view;

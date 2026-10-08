@@ -230,6 +230,32 @@ impl Shell {
         Some(self.lsp.servers.get(key)?.client.clone())
     }
 
+    /// Every running server.
+    pub(super) fn all_clients(&self) -> Vec<Rc<Client>> {
+        self.lsp
+            .servers
+            .values()
+            .filter(|s| s.ready)
+            .map(|s| s.client.clone())
+            .collect()
+    }
+
+    /// Whether a language server has `doc` open, so knows its version.
+    pub(super) fn lsp_knows(&self, doc: &Path) -> bool {
+        self.lsp.documents.contains_key(doc)
+    }
+
+    /// `path` as the project that holds it spells it; servers report real paths, and a project
+    /// opened through a symlink (/tmp) names its tabs through the link.
+    pub(super) fn project_spelling(&self, path: &Path) -> PathBuf {
+        for project in &self.workspace.projects {
+            if let Ok(rest) = path.strip_prefix(document_key(&project.root)) {
+                return project.root.join(rest);
+            }
+        }
+        path.to_path_buf()
+    }
+
     /// The running servers of the project at `root`.
     pub(super) fn project_clients(&self, root: &Path) -> Vec<Rc<Client>> {
         self.lsp
@@ -340,8 +366,18 @@ impl Shell {
                 };
                 self.local_notice(NoticeKind::Message { title, body: why }, cx);
             }
-            Event::ApplyEdit { reply, .. } => {
-                reply.send(Err("Athena does not apply server edits yet".into()))
+            Event::ApplyEdit { label, edit, reply } => {
+                tracing::debug!(
+                    ?label,
+                    changes = edit.changes.len(),
+                    "server applies an edit"
+                );
+                let result = self.apply_workspace_edit(&edit, cx);
+                if let Err(why) = &result {
+                    let title = label.unwrap_or_else(|| "Edit not applied".into());
+                    self.lsp_failed(&title, why.clone(), cx);
+                }
+                reply.send(result.map(drop));
             }
         }
     }
@@ -396,7 +432,11 @@ impl Shell {
         }
     }
 
-    fn editors_showing(&self, doc: &Path, cx: &Context<Self>) -> Vec<Entity<EditorView>> {
+    pub(super) fn editors_showing(
+        &self,
+        doc: &Path,
+        cx: &Context<Self>,
+    ) -> Vec<Entity<EditorView>> {
         self.items
             .values()
             .filter_map(|view| match view {

@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use gpui::Context;
 
-use crate::buffer::{Buffer, Indent};
+use crate::buffer::{Buffer, Edit, Indent};
 use crate::completion::ServerEdit;
 use crate::display::TAB_WIDTH;
 use crate::syntax::Lang;
@@ -71,6 +71,53 @@ impl EditorView {
     }
 }
 
+impl EditorView {
+    /// Applies a language server's edits, such as a rename's, as one undo step; the cursor stays
+    /// on the text it was on. The caller has checked they do not overlap.
+    pub fn apply_server_edits(&mut self, edits: &[ServerEdit], cx: &mut Context<Self>) {
+        if edits.is_empty() {
+            return;
+        }
+        self.with_buffer(cx, |b, c| {
+            let before = *c;
+            let version = b.version();
+            let list = server_edit_ranges(b, edits);
+            b.apply_edits(c, &list, None);
+            let mut kept = before;
+            if let Some(applied) = b.edits_since(version) {
+                let applied: Vec<Edit> = applied.copied().collect();
+                kept.follow(&applied, b.len_chars());
+            }
+            *c = kept;
+        });
+    }
+}
+
+/// Char ranges for `edits`, last first, so each still holds when applied; at one place a
+/// replacement goes before the inserts there, which then land in their given order.
+fn server_edit_ranges(b: &Buffer, edits: &[ServerEdit]) -> Vec<(Range<usize>, String)> {
+    let at = |(line, col): (u32, u32)| {
+        if line as usize >= b.len_lines() {
+            b.len_chars()
+        } else {
+            b.char_at_utf16(line, col)
+        }
+    };
+    let mut ranges: Vec<(usize, Range<usize>, &str)> = edits
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let start = at(e.start);
+            (i, start..at(e.end).max(start), e.text.as_str())
+        })
+        .collect();
+    ranges.sort_by_key(|(i, r, _)| Reverse((r.start, r.end, *i)));
+    ranges
+        .into_iter()
+        .map(|(_, r, text)| (r, text.to_string()))
+        .collect()
+}
+
 /// The buffer's text with the server's edits applied; same-place inserts keep their order.
 pub(crate) fn apply_server_edits(b: &Buffer, edits: &[ServerEdit]) -> String {
     // An end past the last line means the end of the text.
@@ -135,6 +182,35 @@ mod tests {
         let b = Buffer::new("xy", None);
         let same_place = [edit((0, 1), (0, 1), "A"), edit((0, 1), (0, 1), "B")];
         assert_eq!(apply_server_edits(&b, &same_place), "xABy");
+    }
+
+    #[test]
+    fn server_edits_are_one_undo_step_and_keep_the_cursor_on_its_text() {
+        let mut b = Buffer::new("let a = 1;\nuse(a, a);\n", None);
+        let mut c = crate::Cursor::at(b.line_start(1) + 4);
+        let before = c;
+        let edits = [
+            edit((0, 4), (0, 5), "count"),
+            edit((1, 4), (1, 5), "count"),
+            edit((1, 7), (1, 8), "count"),
+            edit((1, 0), (1, 0), "// "),
+            edit((1, 0), (1, 3), "run"),
+        ];
+        let version = b.version();
+        let list = server_edit_ranges(&b, &edits);
+        b.apply_edits(&mut c, &list, None);
+        let applied: Vec<Edit> = b.edits_since(version).unwrap().copied().collect();
+        let mut kept = before;
+        kept.follow(&applied, b.len_chars());
+        assert_eq!(b.full_text(), "let count = 1;\n// run(count, count);\n");
+        assert_eq!(
+            kept.head(),
+            b.line_start(1) + "// run(".chars().count(),
+            "the cursor stays at the start of the renamed word"
+        );
+        assert!(b.undo(&mut c));
+        assert_eq!(b.full_text(), "let a = 1;\nuse(a, a);\n");
+        assert!(!b.undo(&mut c), "all of it was one step");
     }
 
     #[test]

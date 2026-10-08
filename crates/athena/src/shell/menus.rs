@@ -281,7 +281,7 @@ impl Shell {
     }
 
     /// Points tabs at a renamed file, or at files inside a renamed folder.
-    fn retarget_items(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
+    pub(super) fn retarget_items(&mut self, from: &Path, to: &Path, cx: &mut Context<Self>) {
         let mut moved = Vec::new();
         for project in &mut self.workspace.projects {
             let Some(layout) = project.layout.as_mut() else {
