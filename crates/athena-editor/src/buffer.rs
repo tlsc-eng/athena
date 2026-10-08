@@ -191,22 +191,25 @@ impl Buffer {
         Ok(buffer)
     }
 
-    /// Writes through a temp file and rename, keeping the file's permissions.
+    /// Writes through a temp file and rename, keeping the file's permissions; a symlink stays a
+    /// link and its target gets the text.
     pub fn save(&mut self) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
-        let tmp = path.with_file_name(format!(
+        let target = link_target(&path);
+        let tmp = target.with_file_name(format!(
             ".{}.athena-tmp",
-            path.file_name()
+            target
+                .file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default()
         ));
         let mut out = fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
         self.rope.write_to(&mut out)?;
         out.sync_all()?;
-        if let Ok(meta) = fs::metadata(&path) {
+        if let Ok(meta) = fs::metadata(&target) {
             fs::set_permissions(&tmp, meta.permissions())?;
         }
-        fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
+        fs::rename(&tmp, &target).with_context(|| format!("replace {}", target.display()))?;
         self.disk_mtime = modified(&path);
         self.saved_at = Some(self.undo.len());
         // The next keystroke must start a new undo step, or it would fold into the saved one.
@@ -1032,6 +1035,26 @@ impl Buffer {
     }
 }
 
+/// The file a save to `path` must replace: symlinks are followed, so the link itself survives.
+fn link_target(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    // A dangling link is followed by hand, so saving creates the file it points at.
+    let mut at = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::read_link(&at) {
+            Ok(next) => {
+                at = at
+                    .parent()
+                    .map_or_else(|| next.clone(), |dir| dir.join(&next))
+            }
+            Err(_) => break,
+        }
+    }
+    at
+}
+
 fn modified(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -1295,6 +1318,44 @@ mod tests {
         let path = dir.join("main.go");
         fs::write(&path, text).unwrap();
         path
+    }
+
+    #[test]
+    fn saving_through_a_symlink_updates_the_target_and_keeps_the_link() {
+        let target = temp_file("symlink", "old\n");
+        let dir = target.parent().unwrap().to_path_buf();
+        let link = dir.join("CLAUDE.md");
+        std::os::unix::fs::symlink("main.go", &link).unwrap();
+        let mut b = Buffer::open(&link).unwrap();
+        b.insert(&mut Cursor::default(), "new ");
+        b.save_checked().unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new old\n");
+        assert_eq!(b.path.as_deref(), Some(link.as_path()));
+        assert!(!b.changed_on_disk());
+
+        fs::remove_file(&target).unwrap();
+        b.insert(&mut Cursor::default(), "again ");
+        b.save().unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "again new old\n");
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "no temp file left: {names:?}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Writes as another program would, with a modification time that differs from ours.

@@ -99,7 +99,9 @@ impl Shell {
         }
         let changed: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
         for view in self.items.values() {
-            let touched = |file: &Path| everything || changed.contains(file);
+            let touched = |file: &Path| {
+                everything || changed.contains(file) || changed.contains(real_path(file).as_path())
+            };
             match view {
                 ItemView::Editor(editor) if touched(editor.read(cx).path()) => {
                     editor.update(cx, |v, cx| v.check_disk(cx))
@@ -117,6 +119,18 @@ impl Shell {
     }
 }
 
+/// The path FSEvents reports for `file`: links and `/tmp`-style folders resolved, and for a
+/// deleted file its folder resolved instead.
+fn real_path(file: &Path) -> PathBuf {
+    file.canonicalize()
+        .ok()
+        .or_else(|| {
+            let real_dir = file.parent()?.canonicalize().ok()?;
+            Some(real_dir.join(file.file_name()?))
+        })
+        .unwrap_or_else(|| file.to_path_buf())
+}
+
 /// Whether a change can alter `git status`: anything in the work tree that is not already known to
 /// be ignored, but inside `.git` only the branch and refs, since `git status` itself rewrites the
 /// index and would kick itself forever.
@@ -130,6 +144,24 @@ fn affects_git(root: &Path, path: &Path, decorations: Option<&Decorations>) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_symlinked_file_is_matched_by_the_path_its_target_changes_under() {
+        let dir = std::env::temp_dir().join(format!("athena-watch-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("AGENTS.md");
+        std::fs::write(&target, "x").unwrap();
+        let link = dir.join("CLAUDE.md");
+        std::os::unix::fs::symlink("AGENTS.md", &link).unwrap();
+        assert_eq!(real_path(&link), target.canonicalize().unwrap());
+        std::fs::remove_file(&target).unwrap();
+        let gone = dir.join("gone.rs");
+        assert_eq!(
+            real_path(&gone),
+            dir.canonicalize().unwrap().join("gone.rs")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn git_internals_other_than_head_and_refs_do_not_refresh_git() {
