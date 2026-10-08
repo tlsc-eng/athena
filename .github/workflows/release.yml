@@ -1,0 +1,44 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode and Metal toolchain
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          xcodebuild -downloadComponent MetalToolchain
+          xcrun --find metal
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+
+      - name: Tag matches the crate version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -I -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="athena"))')
+          test "v$version" = "$GITHUB_REF_NAME"
+
+      - name: Supply chain
+        run: |
+          cargo install --locked cargo-deny cargo-audit
+          cargo deny check
+          cargo audit
+
+      - run: cargo test --workspace --locked
+      - run: ./scripts/bundle.sh
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/Athena-*-arm64.zip dist/Athena-*-arm64.zip.sha256 \
+            --title "Athena ${GITHUB_REF_NAME#v}" --notes "Install: brew install --cask bjsonn/athena/athena"

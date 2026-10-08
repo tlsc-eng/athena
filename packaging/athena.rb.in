@@ -1,0 +1,24 @@
+cask "athena" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/bjsonn/athena/releases/download/v#{version}/Athena-#{version}-arm64.zip"
+  name "Athena"
+  desc "Personal IDE with persistent terminals and Claude Code integration"
+  homepage "https://github.com/bjsonn/athena"
+
+  depends_on arch: :arm64
+  depends_on macos: ">= :tahoe"
+
+  app "Athena.app"
+  binary "#{appdir}/Athena.app/Contents/MacOS/athena"
+
+  # Ad-hoc signed, with no Developer ID: Gatekeeper refuses a quarantined copy outright.
+  postflight do
+    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/Athena.app"]
+  end
+
+  uninstall quit: "io.tlsc.athena"
+
+  zap trash: "~/Library/Application Support/athena"
+end
