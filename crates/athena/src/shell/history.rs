@@ -36,6 +36,12 @@ impl History {
         self.forward.clear();
     }
 
+    /// Drops places in a project whose tab ids are about to be reused.
+    pub fn forget_root(&mut self, root: &std::path::Path) {
+        self.back.retain(|l| l.root != root);
+        self.forward.retain(|l| l.root != root);
+    }
+
     /// Steps from `current`, skipping places that are gone or that are where the user already is.
     pub fn step(
         &mut self,
@@ -205,6 +211,19 @@ mod tests {
         }
         assert_eq!(h.back.len(), CAP);
         assert_eq!(h.back[0], at(150));
+    }
+
+    #[test]
+    fn forgetting_a_project_drops_only_its_places() {
+        let mut h = History::default();
+        h.record(at(1));
+        h.record(Loc {
+            root: "/q".into(),
+            ..at(1)
+        });
+        h.forget_root(std::path::Path::new("/p"));
+        assert_eq!(h.back.len(), 1);
+        assert_eq!(h.back[0].root, PathBuf::from("/q"));
     }
 
     #[test]

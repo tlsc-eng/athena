@@ -445,10 +445,16 @@ impl Shell {
             .active_root()
             .and_then(|root| self.items.get(&(root, item)).cloned())
             .filter(|view| view.is_dirty(cx));
-        if let Some(ItemView::Editor(editor)) = dirty {
+        if let (Some(ItemView::Editor(editor)), Some(root)) = (dirty, self.active_root()) {
             return self.settle_dirty(editor, window, cx, move |this, close, window, cx| {
-                if close {
+                if !close {
+                    return;
+                }
+                // The project may have changed while the prompt was up; ids repeat across projects.
+                if this.active_root().as_deref() == Some(root.as_path()) {
                     this.close_pane_item(pane, item, window, cx);
+                } else {
+                    this.remove_item_from(&root, item, window, cx);
                 }
             });
         }
@@ -497,13 +503,23 @@ impl Shell {
     /// Closes several tabs of the active project in order, stopping if the user cancels a save prompt.
     pub(super) fn close_items(
         &mut self,
+        items: Vec<ItemId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(root) = self.active_root() {
+            self.close_items_in(root, items, window, cx);
+        }
+    }
+
+    /// Item ids are only unique within a project, so a run interrupted by a prompt keeps its root.
+    fn close_items_in(
+        &mut self,
+        root: PathBuf,
         mut items: Vec<ItemId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(root) = self.active_root() else {
-            return;
-        };
         while !items.is_empty() {
             let item = items.remove(0);
             let dirty = self
@@ -516,7 +532,7 @@ impl Shell {
                 return self.settle_dirty(editor, window, cx, move |this, close, window, cx| {
                     if close {
                         this.remove_item_from(&root, item, window, cx);
-                        this.close_items(items, window, cx);
+                        this.close_items_in(root, items, window, cx);
                     }
                 });
             }
@@ -664,6 +680,8 @@ impl Shell {
             && !layout.close_item(item)
         {
             project.layout = None;
+            // A fresh layout numbers its tabs from the start again.
+            self.history.forget_root(root);
         }
         // A fade that ends after a project switch must not touch the now-active project's zoom or focus.
         if self.active_root().as_deref() == Some(root) {
@@ -1473,7 +1491,7 @@ impl Shell {
         let item = drag.item;
         let here = layout
             .find_item(item)
-            .filter(|_| drag.pane == to)
+            .filter(|(p, _)| *p == to)
             .map(|(_, at)| at);
         if layout.move_item(item, to, strip_drop_index(here, before, len)) {
             self.zoomed = None;

@@ -337,6 +337,7 @@ impl Shell {
         if let Some(index) = self.workspace.active {
             let root = self.workspace.projects[index].root.clone();
             self.drop_project_items(&root, cx);
+            self.history.forget_root(&root);
             self.lsp_project_closed(&root);
             self.zoomed = None;
             self.focus_pending = true;

@@ -296,6 +296,18 @@ impl Shell {
                 Some(ItemView::Editor(editor)) if editor.read(cx).is_dirty() => {
                     if let Err(err) = editor.update(cx, |e, cx| e.save_as(new, cx)) {
                         self.transient_notice("Could not save the file", format!("{err:#}"), cx);
+                        // The editor still writes to the old path, so the tab must say so too.
+                        let item = self
+                            .workspace
+                            .projects
+                            .iter_mut()
+                            .find(|p| p.root == root)
+                            .and_then(|p| p.layout.as_mut())
+                            .and_then(|l| l.item_mut(id));
+                        if let Some(item) = item {
+                            item.kind = super::panes::file_kind_like(&item.kind, old);
+                        }
+                        continue;
                     }
                     self.lsp_closed(&old, cx);
                     self.lsp_opened(&root, &editor, cx);
@@ -355,6 +367,14 @@ impl Shell {
             })
             .collect();
         for (root, item) in showing {
+            // As in VS Code, unsaved edits stay open; saving them writes the file back.
+            let dirty = self
+                .items
+                .get(&(root.clone(), item))
+                .is_some_and(|v| v.is_dirty(cx));
+            if dirty {
+                continue;
+            }
             self.remove_item_from(&root, item, window, cx);
         }
         self.tree.invalidate();

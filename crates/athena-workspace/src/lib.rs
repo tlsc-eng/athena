@@ -13,7 +13,6 @@ pub use persist::{load, save};
 pub use project::{Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -170,20 +169,59 @@ impl Workspace {
     /// Drops projects whose folder no longer exists and spells roots canonically, merging projects
     /// that turn out to be the same folder; keeps the active one if it survives.
     pub fn prune_missing(&mut self) {
-        let active_root = self.active_project().map(|p| canonical(&p.root));
-        self.projects.retain(|p| Path::new(&p.root).is_dir());
-        let mut seen = HashSet::new();
-        self.projects.retain_mut(|p| {
-            p.root = canonical(&p.root);
-            seen.insert(p.root.clone())
+        let active = self.active;
+        let mut kept: Vec<Project> = Vec::new();
+        let mut kept_active = None;
+        for (i, mut project) in std::mem::take(&mut self.projects).into_iter().enumerate() {
+            if !project.root.is_dir() {
+                continue;
+            }
+            let root = canonical(&project.root);
+            if root != project.root {
+                if let Some(layout) = project.layout.as_mut() {
+                    rebase_files(layout, &project.root, &root);
+                }
+                project.root = root;
+            }
+            match kept.iter().position(|k| k.root == project.root) {
+                // The active copy's tabs are the ones the user was looking at.
+                Some(j) if active == Some(i) => {
+                    if project.layout.is_some() {
+                        kept[j].layout = project.layout;
+                    }
+                    kept_active = Some(j);
+                }
+                Some(_) => {}
+                None => {
+                    if active == Some(i) {
+                        kept_active = Some(kept.len());
+                    }
+                    kept.push(project);
+                }
+            }
+        }
+        self.projects = kept;
+        self.active = kept_active.or(if self.projects.is_empty() {
+            None
+        } else {
+            Some(0)
         });
-        self.active = active_root
-            .and_then(|r| self.projects.iter().position(|p| p.root == r))
-            .or(if self.projects.is_empty() {
-                None
-            } else {
-                Some(0)
-            });
+    }
+}
+
+/// Re-spells tab paths under `from` as paths under `to`.
+fn rebase_files(layout: &mut Layout, from: &Path, to: &Path) {
+    let ids: Vec<ItemId> = layout.items().map(|i| i.id).collect();
+    for id in ids {
+        let Some(item) = layout.item_mut(id) else {
+            continue;
+        };
+        if let ItemKind::Editor { path } | ItemKind::Image { path } | ItemKind::Rendered { path } =
+            &mut item.kind
+            && let Ok(rest) = path.strip_prefix(from)
+        {
+            *path = to.join(rest);
+        }
     }
 }
 
@@ -220,14 +258,46 @@ mod tests {
     #[test]
     fn loading_merges_roots_that_name_the_same_folder() {
         let (real, link) = linked_dirs("prune");
+        let link_file = link.join("lib.rs");
         let mut w = Workspace::default();
         w.projects.push(Project::new(link));
         w.projects.push(Project::new(real.clone()));
         w.active = Some(1);
+        w.projects[1].layout = Some(Layout::new(ItemKind::Editor {
+            path: real.join("main.rs"),
+        }));
+        w.projects[0].layout = Some(Layout::new(ItemKind::Editor {
+            path: link_file.clone(),
+        }));
         w.prune_missing();
         assert_eq!(w.projects.len(), 1);
         assert_eq!(w.projects[0].root, real);
         assert_eq!(w.active, Some(0));
+        let kept = w.projects[0].layout.as_ref().unwrap();
+        assert_eq!(
+            kept.items().next().unwrap().kind.file(),
+            Some(&real.join("main.rs")),
+            "the active copy's tabs win"
+        );
+        std::fs::remove_dir_all(real.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn loading_respells_tab_paths_under_a_symlinked_root() {
+        let (real, link) = linked_dirs("respell");
+        let mut w = Workspace::default();
+        let mut project = Project::new(link.clone());
+        project.layout = Some(Layout::new(ItemKind::Editor {
+            path: link.join("src/lib.rs"),
+        }));
+        w.projects.push(project);
+        w.active = Some(0);
+        w.prune_missing();
+        let layout = w.projects[0].layout.as_ref().unwrap();
+        assert_eq!(
+            layout.items().next().unwrap().kind.file(),
+            Some(&real.join("src/lib.rs"))
+        );
         std::fs::remove_dir_all(real.parent().unwrap()).unwrap();
     }
 
