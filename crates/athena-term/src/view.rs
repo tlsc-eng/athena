@@ -98,6 +98,8 @@ pub struct TerminalView {
     foreground: Option<Process>,
     selecting: bool,
     claude_state: Option<ClaudeState>,
+    /// What Claude Code's own hooks last reported; trusted over the output-silence guess.
+    claude_hook: Option<ClaudeState>,
     grid: GridSize,
     scroll_remainder: f32,
     _claude_timer: Option<Task<()>>,
@@ -131,6 +133,7 @@ impl TerminalView {
             foreground: None,
             selecting: false,
             claude_state: None,
+            claude_hook: None,
             scroll_remainder: 0.,
             _claude_timer: None,
             _io: None,
@@ -179,6 +182,27 @@ impl TerminalView {
         self.terminal.as_ref().is_some_and(|t| t.bell)
     }
 
+    /// The daemon pane this view shows, once attached.
+    pub fn session(&self) -> Option<PaneId> {
+        self.pane
+    }
+
+    /// Records Claude Code's state as reported by its hooks.
+    pub fn set_claude_hook(&mut self, state: ClaudeState, cx: &mut Context<Self>) {
+        self.claude_hook = Some(state);
+        self.refresh_claude(cx);
+        cx.notify();
+    }
+
+    /// Marks the tab until the user looks at it, as a bell does.
+    pub fn mark_attention(&mut self, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.bell = true;
+            cx.emit(TerminalEvent::Changed);
+            cx.notify();
+        }
+    }
+
     fn is_claude(&self) -> bool {
         self.foreground.as_ref().is_some_and(|p| {
             p.name == "claude"
@@ -190,6 +214,9 @@ impl TerminalView {
     fn current_claude_state(&self) -> Option<ClaudeState> {
         if !self.is_claude() {
             return None;
+        }
+        if let Some(state) = self.claude_hook {
+            return Some(state);
         }
         let terminal = self.terminal.as_ref()?;
         if terminal.bell || terminal.last_output.elapsed() >= CLAUDE_IDLE {
@@ -359,6 +386,9 @@ impl TerminalView {
             }
             ServerMsg::Foreground { process, .. } => {
                 self.foreground = process;
+                if !self.is_claude() {
+                    self.claude_hook = None;
+                }
                 self.refresh_claude(cx);
                 cx.emit(TerminalEvent::Changed);
             }
@@ -781,14 +811,15 @@ impl gpui::EntityInputHandler for TerminalView {
 }
 
 /// Connects to the session daemon, starting the one installed next to this executable if needed.
-fn open_connection() -> anyhow::Result<(Connection, UnixStream)> {
+pub fn open_connection() -> anyhow::Result<(Connection, UnixStream)> {
     let daemon = std::env::current_exe()?.with_file_name("athena-mux");
     let socket = athena_proto::socket_path()?;
     let log = athena_proto::log_path()?;
     athena_proto::connect_or_spawn(&socket, &daemon, &log).map_err(|e| anyhow!(e))
 }
 
-fn read_messages(mut reader: UnixStream) -> async_channel::Receiver<ServerMsg> {
+/// Frames from the daemon on a channel, read on a dedicated thread.
+pub fn read_messages(mut reader: UnixStream) -> async_channel::Receiver<ServerMsg> {
     let (tx, rx) = async_channel::bounded(64);
     let spawned = thread::Builder::new()
         .name("mux-read".into())
