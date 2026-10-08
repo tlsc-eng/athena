@@ -1,15 +1,21 @@
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use athena_proto::{MAX_OUTPUT_CHUNK, PaneId, Process};
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::process;
 use crate::ring::Ring;
 
 pub const SCROLLBACK_BYTES: usize = 8 * 1024 * 1024;
+/// How long programs get to exit after a hangup before they are killed.
+pub const KILL_GRACE: Duration = Duration::from_secs(2);
+const REAP_POLL: Duration = Duration::from_millis(50);
 
 pub struct Pane {
     pub cwd: PathBuf,
@@ -19,9 +25,10 @@ pub struct Pane {
     pub attached: Vec<u64>,
     pub exit: Option<Option<i32>>,
     pub foreground: Option<Process>,
+    /// Device number of the pane's terminal; `None` once it has been hung up.
+    tty: Option<u32>,
     master: Box<dyn MasterPty + Send>,
     input: mpsc::Sender<Vec<u8>>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 /// Output side of a freshly spawned shell, consumed by the pane's reader thread.
@@ -84,9 +91,14 @@ impl Pane {
             cmd.env("LANG", "en_US.UTF-8");
         }
 
+        let tty = pair
+            .master
+            .tty_name()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .context("pty device")?
+            .rdev() as u32;
         let child = pair.slave.spawn_command(cmd).context("spawn shell")?;
         drop(pair.slave);
-        let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader()?;
         let mut writer = pair.master.take_writer()?;
 
@@ -114,9 +126,9 @@ impl Pane {
             attached: Vec::new(),
             exit: None,
             foreground: None,
+            tty: Some(tty),
             master: pair.master,
             input,
-            killer,
         };
         Ok((pane, PaneOutput { reader, child }))
     }
@@ -140,11 +152,51 @@ impl Pane {
             pixel_height: 0,
         });
     }
+
+    /// Hangs up everything running on the pane's terminal, as closing a terminal window does.
+    /// The returned handle kills what ignores the hangup.
+    pub fn hang_up(&mut self) -> Option<Hangup> {
+        let tty = self.tty.take()?;
+        // An exited pane's terminal had no process left on it, so there is nothing to signal.
+        if self.exit.is_some() {
+            return None;
+        }
+        let hold = self.master.try_clone_reader().ok();
+        process::signal_tty(tty, libc::SIGHUP);
+        // Stopped jobs only act on the hangup once continued, as the kernel's own hangup does.
+        process::signal_tty(tty, libc::SIGCONT);
+        hold.map(|hold| Hangup { tty, _hold: hold })
+    }
 }
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        let _ = self.killer.kill();
+        if let Some(hangup) = self.hang_up() {
+            let deadline = Instant::now() + KILL_GRACE;
+            let _ = thread::Builder::new()
+                .name("pane-reap".into())
+                .spawn(move || hangup.reap(deadline));
+        }
+    }
+}
+
+/// A hung-up terminal, held open so its device cannot pass to a new pane before the kill.
+pub struct Hangup {
+    tty: u32,
+    _hold: Box<dyn Read + Send>,
+}
+
+impl Hangup {
+    /// Waits until `deadline` for everything on the terminal to exit, then kills what is left.
+    pub fn reap(self, deadline: Instant) {
+        while !process::on_tty(self.tty).is_empty() {
+            if Instant::now() >= deadline {
+                let killed = process::signal_tty(self.tty, libc::SIGKILL);
+                tracing::info!("killed {killed} processes that ignored the hangup");
+                return;
+            }
+            thread::sleep(REAP_POLL);
+        }
     }
 }
 

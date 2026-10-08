@@ -22,6 +22,8 @@ const CLIENT_QUEUE: usize = 256;
 const LAG_GRACE: Duration = Duration::from_secs(2);
 const LAG_POLL: Duration = Duration::from_millis(5);
 const IDLE_EXIT: Duration = Duration::from_secs(60);
+/// How long programs get to exit after a hangup when the whole daemon stops.
+const EXIT_GRACE: Duration = Duration::from_millis(500);
 const REAPER_TICK: Duration = Duration::from_secs(5);
 const FOREGROUND_TICK: Duration = Duration::from_millis(500);
 const MAX_DIM: u16 = 1000;
@@ -156,8 +158,17 @@ impl Server {
     }
 
     fn exit(&self, mut st: MutexGuard<'_, State>) -> ! {
-        st.panes.clear();
         let _ = std::fs::remove_file(&self.socket);
+        let hangups: Vec<_> = st
+            .panes
+            .drain()
+            .filter_map(|(_, mut pane)| pane.hang_up())
+            .collect();
+        // Short, so a replacement daemon is not kept waiting long for the lock.
+        let deadline = Instant::now() + EXIT_GRACE;
+        for hangup in hangups {
+            hangup.reap(deadline);
+        }
         std::process::exit(0);
     }
 

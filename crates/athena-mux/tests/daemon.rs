@@ -436,3 +436,103 @@ fn a_client_that_stops_reading_does_not_stall_other_clients() {
         "the stalled client is still connected"
     );
 }
+
+/// Pids of processes whose command line contains `needle`, with their parents.
+fn processes_matching(needle: &str) -> Vec<(i32, i32)> {
+    let out = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains(needle))
+        .filter_map(|l| {
+            let mut fields = l.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+fn children_of(parent: i32) -> Vec<i32> {
+    let out = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let mut fields = l.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let ppid: i32 = fields.next()?.parse().ok()?;
+            (ppid == parent).then_some(pid)
+        })
+        .collect()
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the pid exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Pty masters the daemon holds open, as lsof sees them.
+fn open_ptys(daemon: u32) -> usize {
+    let out = Command::new("lsof")
+        .args(["-p", &daemon.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("ptmx"))
+        .count()
+}
+
+#[test]
+fn killing_a_pane_also_ends_programs_that_ignore_the_hangup() {
+    let daemon = Daemon::start("hup");
+    let script = daemon.home.join("stubborn.sh");
+    std::fs::write(&script, "trap '' HUP\necho stubborn-ready\nsleep 1000\n").unwrap();
+    let (conn, mut reader) = daemon.connect();
+    let pane = spawn_pane(&conn, &mut reader);
+    conn.send(&ClientMsg::Attach { pane }).unwrap();
+    conn.send(&ClientMsg::Input {
+        pane,
+        data: format!("trap '' HUP; sh {}\r", script.display()).into_bytes(),
+    })
+    .unwrap();
+    read_until(&mut reader, "stubborn-ready\r\n");
+    let script = script.display().to_string();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (sh, sleep) = loop {
+        let sh = processes_matching(&script).first().map(|(pid, _)| *pid);
+        if let Some(sh) = sh
+            && let Some(sleep) = children_of(sh).first()
+        {
+            break (sh, *sleep);
+        }
+        assert!(Instant::now() < deadline, "the script did not start");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let shell = processes_matching(&script)[0].1;
+    assert!(open_ptys(daemon.child.id()) > 0);
+
+    conn.send(&ClientMsg::Kill { pane }).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while [shell, sh, sleep].into_iter().any(alive) || open_ptys(daemon.child.id()) > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "still running after the kill: shell {} sh {} sleep {}, {} ptys open",
+            alive(shell),
+            alive(sh),
+            alive(sleep),
+            open_ptys(daemon.child.id())
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    conn.send(&ClientMsg::ListPanes).unwrap();
+    let panes = loop {
+        if let ServerMsg::Panes { panes } = next(&mut reader) {
+            break panes;
+        }
+    };
+    assert!(panes.is_empty());
+}
