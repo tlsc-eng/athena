@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use ropey::Rope;
 use tree_sitter::{InputEdit, Point};
 
-use crate::syntax::{Lang, Syntax, Token};
+use crate::syntax::{Lang, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
 const UNDO_GROUP: Duration = Duration::from_millis(500);
@@ -654,6 +654,57 @@ impl Buffer {
         i
     }
 
+    /// The bracket at or just before the cursor and its partner, as char offsets.
+    pub fn matching_bracket(&self) -> Option<(usize, usize)> {
+        let head = self.selection.head;
+        let at = [head, head.wrapping_sub(1)].into_iter().find(|&i| {
+            i < self.len_chars() && bracket_pair(&self.rope.char(i).to_string()).is_some()
+        })?;
+        let byte = self.rope.char_to_byte(at);
+        if let Some(syntax) = &self.syntax
+            && let Some(partner) = syntax.bracket_partner(byte)
+        {
+            return Some((at, self.rope.byte_to_char(partner)));
+        }
+        self.scan_bracket(at).map(|partner| (at, partner))
+    }
+
+    /// Plain nesting count, for text without a parse tree or brackets the tree leaves unpaired.
+    fn scan_bracket(&self, at: usize) -> Option<usize> {
+        const LIMIT: usize = 100_000;
+        let c = self.rope.char(at).to_string();
+        let (open, close) = bracket_pair(&c)?;
+        let (open, close) = (open.chars().next()?, close.chars().next()?);
+        let forward = c.starts_with(open);
+        let mut depth = 0usize;
+        if forward {
+            for (i, ch) in self.rope.chars_at(at).enumerate().take(LIMIT) {
+                depth = match ch {
+                    _ if ch == open => depth + 1,
+                    _ if ch == close => depth - 1,
+                    _ => depth,
+                };
+                if depth == 0 {
+                    return Some(at + i);
+                }
+            }
+        } else {
+            let mut chars = self.rope.chars_at(at + 1);
+            for i in 0..LIMIT.min(at + 1) {
+                let ch = chars.prev()?;
+                depth = match ch {
+                    _ if ch == close => depth + 1,
+                    _ if ch == open => depth - 1,
+                    _ => depth,
+                };
+                if depth == 0 {
+                    return Some(at - i);
+                }
+            }
+        }
+        None
+    }
+
     /// Case-insensitive occurrences of `query`, as char ranges.
     pub fn find_all(&self, query: &str) -> Vec<Range<usize>> {
         if query.is_empty() {
@@ -840,6 +891,27 @@ mod tests {
         fs::write(dir.join("bin"), [0u8, 1, 2]).unwrap();
         assert!(Buffer::open(&dir.join("bin")).is_err());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn matching_bracket_pairs_nested() {
+        let mut b = buf("func f() {\n\tif x { g(\"}\") }\n}\n", "/x/a.go");
+        b.move_to(9, false);
+        assert_eq!(b.matching_bracket(), Some((9, b.len_chars() - 2)));
+        b.move_to(b.len_chars() - 1, false);
+        assert_eq!(b.matching_bracket(), Some((b.len_chars() - 2, 9)));
+        let inner = b.full_text().find("{ g").unwrap();
+        b.move_to(inner + 1, false);
+        let close = b.full_text().rfind(") }").unwrap() + 2;
+        assert_eq!(b.matching_bracket(), Some((inner, close)));
+        b.move_to(3, false);
+        assert_eq!(b.matching_bracket(), None);
+
+        let mut plain = buf("a (b [c] d) e", "/x/notes.txt");
+        plain.move_to(2, false);
+        assert_eq!(plain.matching_bracket(), Some((2, 10)));
+        plain.move_to(8, false);
+        assert_eq!(plain.matching_bracket(), Some((7, 5)));
     }
 
     #[test]

@@ -509,6 +509,46 @@ impl Syntax {
     }
 }
 
+impl Syntax {
+    /// Byte of the bracket paired with the one at `byte`, when the parse tree pairs them.
+    pub fn bracket_partner(&self, byte: usize) -> Option<usize> {
+        let Backend::Tree {
+            tree: Some(tree), ..
+        } = &self.backend
+        else {
+            return None;
+        };
+        let node = tree.root_node().descendant_for_byte_range(byte, byte + 1)?;
+        let (open, close) = bracket_pair(node.kind())?;
+        if node.is_named() || node.start_byte() != byte {
+            return None;
+        }
+        let forward = node.kind() == open;
+        let want = if forward { close } else { open };
+        let mut sibling = node;
+        loop {
+            sibling = if forward {
+                sibling.next_sibling()?
+            } else {
+                sibling.prev_sibling()?
+            };
+            if !sibling.is_named() && sibling.kind() == want {
+                return Some(sibling.start_byte());
+            }
+        }
+    }
+}
+
+/// The open and close strings of the bracket pair `kind` belongs to.
+pub fn bracket_pair(kind: &str) -> Option<(&'static str, &'static str)> {
+    match kind {
+        "(" | ")" => Some(("(", ")")),
+        "[" | "]" => Some(("[", "]")),
+        "{" | "}" => Some(("{", "}")),
+        _ => None,
+    }
+}
+
 fn scan_lines(scan: LineScanner, rope: &Rope, bytes: Range<usize>) -> Vec<(Range<usize>, Token)> {
     let first = rope.byte_to_line(bytes.start.min(rope.len_bytes()));
     let last = rope.byte_to_line(bytes.end.min(rope.len_bytes()));

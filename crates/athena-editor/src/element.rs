@@ -272,6 +272,11 @@ impl Element for EditorElement {
         }
 
         let finds = view.find_matches().to_vec();
+        let brackets = selection
+            .is_empty()
+            .then(|| buffer.matching_bracket())
+            .flatten()
+            .map_or(Vec::new(), |(a, b)| vec![a..a + 1, b..b + 1]);
         let marks: Vec<(std::ops::Range<usize>, crate::MarkerSeverity)> = view
             .markers
             .iter()
@@ -307,6 +312,11 @@ impl Element for EditorElement {
             for m in &finds {
                 if let Some(b) = span(m) {
                     frame.backgrounds.push(fill(b, theme.color.surface_active));
+                }
+            }
+            for r in &brackets {
+                if let Some(b) = span(r) {
+                    frame.backgrounds.push(fill(b, syntax.bracket_match));
                 }
             }
             if !selection.is_empty()
