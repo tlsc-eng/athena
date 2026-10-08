@@ -144,7 +144,7 @@ pub enum EditorEvent {
         line: u32,
         character: u32,
     },
-    /// The cursor moved to another zero-based line.
+    /// The cursor moved to another zero-based line, or the text of its line changed.
     CursorMoved {
         line: u32,
     },
@@ -313,11 +313,11 @@ impl EditorView {
         self.cursor_line
     }
 
-    fn note_cursor_line(&mut self, cx: &mut Context<Self>) {
+    fn note_cursor_line(&mut self, edited: bool, cx: &mut Context<Self>) {
         let Some(line) = self.buffer.as_ref().map(|b| b.line_of(b.selection.head)) else {
             return;
         };
-        if line != self.cursor_line {
+        if line != self.cursor_line || edited {
             self.cursor_line = line;
             cx.emit(EditorEvent::CursorMoved { line: line as u32 });
         }
@@ -425,7 +425,7 @@ impl EditorView {
         }
         self.reveal_selection();
         self.autoscroll = true;
-        self.note_cursor_line(cx);
+        self.note_cursor_line(edited, cx);
         if edited {
             self.refresh_find(false, cx);
             let version = self.buffer.as_ref().map_or(0, Buffer::version);
@@ -473,7 +473,7 @@ impl EditorView {
             n if n >= 3 => buffer.select_line_at(at),
             _ => buffer.move_to(at, event.modifiers.shift),
         }
-        self.note_cursor_line(cx);
+        self.note_cursor_line(false, cx);
         if event.modifiers.platform && event.click_count == 1 {
             self.definition_at(at, cx);
             cx.notify();
@@ -501,7 +501,7 @@ impl EditorView {
         {
             buffer.move_to(at, true);
             self.autoscroll = true;
-            self.note_cursor_line(cx);
+            self.note_cursor_line(false, cx);
             cx.notify();
         }
     }

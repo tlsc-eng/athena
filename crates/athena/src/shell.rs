@@ -382,7 +382,7 @@ impl Shell {
                             .text_color(t.color.content)
                             .child(p.name()),
                     )
-                    .children(self.git_branch_label(&p.root).map(|branch| {
+                    .children(self.cached_branch(&p.root).map(|branch| {
                         div()
                             .text_color(t.color.content_muted)
                             .child(format!("· {branch}"))

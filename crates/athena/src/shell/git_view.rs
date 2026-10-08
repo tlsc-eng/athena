@@ -174,7 +174,7 @@ impl Shell {
     }
 
     /// The branch for the title bar, from the last status run.
-    pub(super) fn git_branch_label(&self, root: &Path) -> Option<String> {
+    pub(super) fn cached_branch(&self, root: &Path) -> Option<String> {
         self.git.repos.get(root)?.branch.clone()
     }
 
@@ -425,13 +425,17 @@ impl Shell {
         else {
             return;
         };
-        let e = editor.read(cx);
-        let path = under_root(&root, e.path());
-        let contents = if e.is_dirty() { e.text() } else { None };
         let weak = editor.downgrade();
         let line = line as usize;
         self.git.blame = Some(cx.spawn(async move |_, cx| {
             cx.background_executor().timer(BLAME_DELAY).await;
+            // Read after the pause, so typing does not copy the whole buffer per keystroke.
+            let Ok((path, contents)) = weak.read_with(cx, |e, _| {
+                let contents = if e.is_dirty() { e.text() } else { None };
+                (under_root(&root, e.path()), contents)
+            }) else {
+                return;
+            };
             let found = cx
                 .background_executor()
                 .spawn(async move { git::blame_line(&root, &path, line, contents.as_deref()) })
