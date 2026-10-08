@@ -6,7 +6,9 @@ use gpui::{
     fill, point, px, relative, size,
 };
 
-use crate::display::DisplayLine;
+use crate::Lang;
+use crate::buffer::Buffer;
+use crate::display::{DisplayLine, Guides};
 use crate::syntax::Token;
 use crate::view::{EditorLayout, EditorView};
 
@@ -94,6 +96,29 @@ impl IntoElement for EditorElement {
     fn into_element(self) -> Self::Element {
         self
     }
+}
+
+/// Guides for the shown lines, reaching to the cursor's line when it is near enough to matter.
+fn guides_for(buffer: &Buffer, shown: &[usize], cursor_line: usize) -> Guides {
+    const NEAR: usize = 1000;
+    let (Some(&top), Some(&bottom)) = (shown.first(), shown.last()) else {
+        return Guides::new(0..0, 0, 1, false, 0, |_| String::new());
+    };
+    let near = cursor_line + NEAR >= top && cursor_line <= bottom + NEAR;
+    let lines = if near {
+        top.min(cursor_line)..bottom.max(cursor_line) + 1
+    } else {
+        top..bottom + 1
+    };
+    let offside = matches!(buffer.lang(), Some(Lang::Python | Lang::Yaml));
+    Guides::new(
+        lines,
+        buffer.len_lines(),
+        buffer.indent.size(),
+        offside,
+        cursor_line,
+        |l| buffer.line(l),
+    )
 }
 
 impl Element for EditorElement {
@@ -303,6 +328,9 @@ impl Element for EditorElement {
             })
             .collect();
         let x0 = text_left - px(scroll_x);
+        let guides = guides_for(&buffer, &shown, head_line);
+        let guide_step = cell * buffer.indent.size() as f32;
+        let mut tab_mark = None;
         for (row, (line, start, n, display, shaped)) in lines.iter().enumerate() {
             let y = bounds.top() + lh * (first + row) as f32 - px(view.scroll.y);
             let end = start + n;
@@ -312,6 +340,17 @@ impl Element for EditorElement {
                     Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh)),
                     syntax.current_line,
                 ));
+            }
+            for guide in 0..guides.level(*line) {
+                let color = if guides.is_active(guide, *line) {
+                    syntax.indent_guide_active
+                } else {
+                    syntax.indent_guide
+                };
+                let x = x0 + guide_step * guide as f32;
+                frame
+                    .backgrounds
+                    .push(fill(Bounds::new(point(x, y), size(px(1.), lh)), color));
             }
             let span = |r: &std::ops::Range<usize>| -> Option<Bounds<Pixels>> {
                 let a = r.start.max(*start);
@@ -341,6 +380,35 @@ impl Element for EditorElement {
                 frame.backgrounds.push(fill(b, theme.color.surface_accent));
             }
             frame.text.push((point(x0, y), shaped.clone()));
+            // As VS Code's default `renderWhitespace: selection`: blanks show only where selected.
+            let (a, b) = (selection.start.max(*start), selection.end.min(end));
+            for (i, ch) in rope.slice(a.min(b)..b).chars().enumerate() {
+                let x = x0 + shaped.x_for_index(display.char_to_byte[a + i - start]);
+                match ch {
+                    ' ' => frame.overlay.push(
+                        fill(
+                            Bounds::new(
+                                point(x + cell / 2. - px(1.), y + lh / 2. - px(1.)),
+                                size(px(2.), px(2.)),
+                            ),
+                            syntax.whitespace,
+                        )
+                        .corner_radii(px(1.)),
+                    ),
+                    '\t' => {
+                        let mark = tab_mark.get_or_insert_with(|| {
+                            text_system.shape_line(
+                                "→".into(),
+                                font_size,
+                                &[run("→".len(), syntax.whitespace)],
+                                None,
+                            )
+                        });
+                        frame.text.push((point(x, y), mark.clone()));
+                    }
+                    _ => {}
+                }
+            }
             if folded.is_some() {
                 let dots =
                     text_system.shape_line("⋯".into(), font_size, &[run(3, syntax.comment)], None);

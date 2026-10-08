@@ -96,6 +96,11 @@ pub struct SyntaxColors {
     pub line_number: Hsla,
     pub line_number_active: Hsla,
     pub current_line: Hsla,
+    pub indent_guide: Hsla,
+    /// The guide of the block the cursor is in.
+    pub indent_guide_active: Hsla,
+    /// Dots and arrows marking spaces and tabs inside a selection.
+    pub whitespace: Hsla,
 }
 
 #[derive(Clone)]
@@ -190,6 +195,9 @@ impl Theme {
                 line_number: c(0x5f5a55),
                 line_number_active: c(0xa8a49e),
                 current_line: c(0x1a1614),
+                indent_guide: c(0x312d2a),
+                indent_guide_active: c(0x5f5a55),
+                whitespace: c(0x5f5a55),
             },
             typography: Typography {
                 ui: "Geist".into(),

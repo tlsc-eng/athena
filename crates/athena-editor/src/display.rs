@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 /// Columns a tab advances to the next multiple of.
 pub const TAB_WIDTH: usize = 4;
 
@@ -157,26 +159,28 @@ impl DisplayMap {
     }
 }
 
+/// The visual column a line's code starts at; `None` for a blank line.
+fn indent_column(s: &str) -> Option<usize> {
+    if s.trim().is_empty() {
+        return None;
+    }
+    let mut col = 0;
+    for c in s.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += TAB_WIDTH - col % TAB_WIDTH,
+            _ => break,
+        }
+    }
+    Some(col)
+}
+
 /// The block indented under `line`: following lines indented deeper, ignoring blank ones.
 pub fn indent_fold_at(line: usize, lines: usize, text: impl Fn(usize) -> String) -> Option<Fold> {
-    let indent = |s: &str| -> Option<usize> {
-        if s.trim().is_empty() {
-            return None;
-        }
-        let mut col = 0;
-        for c in s.chars() {
-            match c {
-                ' ' => col += 1,
-                '\t' => col += TAB_WIDTH - col % TAB_WIDTH,
-                _ => break,
-            }
-        }
-        Some(col)
-    };
-    let header = indent(&text(line))?;
+    let header = indent_column(&text(line))?;
     let mut end = line;
     for l in line + 1..lines {
-        match indent(&text(l)) {
+        match indent_column(&text(l)) {
             None => continue,
             Some(i) if i > header => end = l,
             Some(_) => break,
@@ -186,6 +190,106 @@ pub fn indent_fold_at(line: usize, lines: usize, text: impl Fn(usize) -> String)
         start: line + 1,
         end,
     })
+}
+
+/// Indentation guides for a run of lines: how many each line shows, and the guide of the block
+/// the cursor is in, drawn brighter as VS Code does.
+pub struct Guides {
+    from: usize,
+    levels: Vec<usize>,
+    /// Guide index and the first and last line it is highlighted on.
+    active: Option<(usize, usize, usize)>,
+}
+
+impl Guides {
+    /// Guides for `lines` (which should include `cursor` for it to be highlighted), with
+    /// `size`-column indent steps; `offside` languages end a block at its last indented line.
+    pub fn new(
+        lines: Range<usize>,
+        total: usize,
+        size: usize,
+        offside: bool,
+        cursor: usize,
+        text: impl Fn(usize) -> String,
+    ) -> Self {
+        // Blank lines at the edges look this far out for the code around them.
+        const REACH: usize = 100;
+        let size = size.max(1);
+        let level = |col: usize| col.div_ceil(size);
+        let cols: Vec<Option<usize>> = lines.clone().map(|l| indent_column(&text(l))).collect();
+        let outside = |range: Range<usize>, rev: bool| {
+            let mut it: Box<dyn Iterator<Item = usize>> = if rev {
+                Box::new(range.rev())
+            } else {
+                Box::new(range)
+            };
+            it.find_map(|l| indent_column(&text(l)))
+        };
+        let mut below = vec![None; cols.len()];
+        let mut next = outside(lines.end..(lines.end + REACH).min(total), false);
+        for (i, col) in cols.iter().enumerate().rev() {
+            below[i] = next;
+            if col.is_some() {
+                next = *col;
+            }
+        }
+        let mut above = outside(lines.start.saturating_sub(REACH)..lines.start, true);
+        let mut levels = Vec::with_capacity(cols.len());
+        for (i, col) in cols.iter().enumerate() {
+            levels.push(match (col, above.map(level), below[i].map(level)) {
+                (Some(col), ..) => level(*col),
+                (None, Some(a), Some(b)) if a == b => a,
+                (None, Some(a), Some(b)) if a < b => a + 1,
+                (None, Some(_), Some(b)) if offside => b,
+                (None, Some(_), Some(b)) => b + 1,
+                _ => 0,
+            });
+            if col.is_some() {
+                above = *col;
+            }
+        }
+        let active = active_guide(&levels, cursor.wrapping_sub(lines.start))
+            .map(|(guide, a, b)| (guide, lines.start + a, lines.start + b));
+        Self {
+            from: lines.start,
+            levels,
+            active,
+        }
+    }
+
+    /// How many guides `line` shows; guide `k` sits at column `k * size`.
+    pub fn level(&self, line: usize) -> usize {
+        line.checked_sub(self.from)
+            .and_then(|i| self.levels.get(i))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn is_active(&self, guide: usize, line: usize) -> bool {
+        self.active
+            .is_some_and(|(g, a, b)| g == guide && (a..=b).contains(&line))
+    }
+}
+
+/// The guide around the line at `at`: the one under a block header, else the innermost one the
+/// line sits in; with the lines it runs over, as indexes into `levels`.
+fn active_guide(levels: &[usize], at: usize) -> Option<(usize, usize, usize)> {
+    let here = *levels.get(at)?;
+    let next = levels.get(at + 1).copied().unwrap_or(0);
+    let (guide, seed) = if next > here {
+        (here, at + 1)
+    } else {
+        (here.checked_sub(1)?, at)
+    };
+    let mut start = seed;
+    while start > 0 && levels[start - 1] > guide {
+        start -= 1;
+    }
+    let mut end = seed;
+    while end + 1 < levels.len() && levels[end + 1] > guide {
+        end += 1;
+    }
+    Some((guide, start, end))
 }
 
 #[cfg(test)]
@@ -261,6 +365,39 @@ mod tests {
         assert_eq!(indent_fold_at(1, lines.len(), text), Some(fold(2, 4)));
         assert_eq!(indent_fold_at(2, lines.len(), text), None);
         assert_eq!(indent_fold_at(3, lines.len(), text), None);
+    }
+
+    fn guides(src: &str, size: usize, offside: bool, cursor: usize) -> Guides {
+        let lines: Vec<&str> = src.split('\n').collect();
+        Guides::new(0..lines.len(), lines.len(), size, offside, cursor, |l| {
+            lines[l].to_string()
+        })
+    }
+
+    #[test]
+    fn guides_follow_indentation_through_blank_lines() {
+        let src = "func f() {\n\tif x {\n\n\t\ty()\n\t}\n\n}";
+        let g = guides(src, 4, false, 3);
+        let levels: Vec<usize> = (0..7).map(|l| g.level(l)).collect();
+        assert_eq!(levels, [0, 1, 2, 2, 1, 1, 0]);
+        assert!(g.is_active(1, 2) && g.is_active(1, 3), "the cursor's block");
+        assert!(!g.is_active(0, 3) && !g.is_active(1, 4));
+
+        let header = guides(src, 4, false, 1);
+        assert!(
+            header.is_active(1, 3),
+            "a header highlights the block under it"
+        );
+        assert!(!header.is_active(0, 1));
+    }
+
+    #[test]
+    fn guides_round_partial_indents_up_and_offside_blocks_end_early() {
+        let g = guides("a\n  b\n\nc", 4, true, 0);
+        assert_eq!((g.level(1), g.level(2)), (1, 0));
+        let g = guides("a\n  b\n\nc", 4, false, 0);
+        assert_eq!(g.level(2), 1);
+        assert_eq!(guides("", 4, false, 0).level(0), 0);
     }
 
     #[test]
