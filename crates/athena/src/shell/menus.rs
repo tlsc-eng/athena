@@ -48,13 +48,19 @@ fn reveal_in_finder(path: PathBuf, cx: &mut App) {
 fn path_items(root: &Path, path: &Path) -> Vec<MenuItem> {
     let relative = path.strip_prefix(root).unwrap_or(path);
     let shown = path.to_path_buf();
-    vec![
+    let mut items = vec![
         MenuItem::new("Reveal in Finder", move |_, cx| {
             reveal_in_finder(shown.clone(), cx)
         }),
         copy_item("Copy Path", path.display().to_string()),
-        copy_item("Copy Relative Path", relative.display().to_string()),
-    ]
+    ];
+    if path != root {
+        items.push(copy_item(
+            "Copy Relative Path",
+            relative.display().to_string(),
+        ));
+    }
+    items
 }
 
 impl Shell {

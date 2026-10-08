@@ -948,7 +948,9 @@ impl Shell {
                 .into_any_element();
         };
 
-        let tree = match self.zoomed.and_then(|z| layout.pane(z).cloned()) {
+        let zoomed = self.zoomed.and_then(|z| layout.pane(z).cloned());
+        let zoomed_shown = zoomed.is_some();
+        let tree = match zoomed {
             Some(pane) => self.render_pane(&root, &pane, true, cx),
             None => self.render_node(&root, &layout.tree, &mut Vec::new(), layout.focused, cx),
         };
@@ -989,7 +991,7 @@ impl Shell {
             .collect();
 
         // A frame on top, not a border, so zooming does not resize the pane a second time.
-        let zoom_frame = self.zoomed.is_some().then(|| {
+        let zoom_frame = zoomed_shown.then(|| {
             div()
                 .absolute()
                 .inset_0()
@@ -1316,7 +1318,6 @@ impl Shell {
                         div()
                             .id(("tab-strip-end", pane_id.0))
                             .flex_1()
-                            .min_w(px(32.))
                             .h_full()
                             .drag_over::<TabDrag>(|s, _, _, cx| {
                                 s.bg(cx.theme().color.surface_accent)
