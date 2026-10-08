@@ -205,10 +205,10 @@ impl Shell {
     fn save_now(&mut self) {
         self.save_task = None;
         if let Err(err) = athena_workspace::save(&self.path, &self.workspace) {
-            eprintln!("athena: {err:#}");
+            tracing::error!("could not save the workspace: {err:#}");
         }
         if let Err(err) = notices::save(&self.notices_path, &self.notifications) {
-            eprintln!("athena: {err:#}");
+            tracing::error!("could not save notifications: {err:#}");
         }
     }
 

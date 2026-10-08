@@ -86,6 +86,7 @@ impl Client {
 
     fn request(&self, method: &'static str, params: Value) -> async_channel::Receiver<Reply> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(id, method, "lsp request");
         let (tx, rx) = async_channel::bounded(1);
         self.pending.lock().expect("pending lock").insert(id, tx);
         let _ = self
@@ -287,6 +288,7 @@ impl Reader {
                     .as_i64()
                     .and_then(|id| self.pending.lock().expect("pending lock").remove(&id));
                 if let Some(waiter) = waiter {
+                    tracing::debug!(%id, failed = message.get("error").is_some(), "lsp reply");
                     let reply = match message.get("error") {
                         Some(error) => Err(error
                             .get("message")

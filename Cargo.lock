@@ -509,6 +509,7 @@ dependencies = [
  "async-channel 2.5.0",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

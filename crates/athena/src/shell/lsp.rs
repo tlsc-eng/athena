@@ -155,6 +155,7 @@ impl Shell {
         if let Some(server) = self.lsp.servers.get(key) {
             return Some(server.client.clone());
         }
+        tracing::info!(root = %key.0.display(), "starting {}", key.1.program());
         let (client, events) = Client::start(key.1, document_key(&key.0));
         let client = Rc::new(client);
         let event_key = key.clone();
@@ -200,6 +201,7 @@ impl Shell {
                 };
                 self.lsp.documents.retain(|_, k| *k != key);
                 let program = key.1.program();
+                tracing::warn!("{program} stopped: {why}");
                 let title = if server.ready {
                     format!("{program} stopped; it restarts when you open a file")
                 } else {
@@ -299,8 +301,13 @@ impl Shell {
         else {
             return self.lsp_failed("No definition found", NO_SERVER.into(), cx);
         };
+        tracing::debug!(path = %doc.display(), line = at.line, character = at.character, "definition");
         cx.spawn(async move |this, cx| {
             let found = client.definition(&doc, at).await;
+            match &found {
+                Ok(list) => tracing::debug!("definition → {} locations", list.len()),
+                Err(why) => tracing::warn!("definition failed: {why}"),
+            }
             let _ = this.update(cx, |this, cx| {
                 match found.map(|list| list.into_iter().next()) {
                     Ok(Some(target)) => {
@@ -342,8 +349,13 @@ impl Shell {
         };
         self.lsp.references = References::Loading;
         let asked = self.lsp.references_asked;
+        tracing::debug!(path = %doc.display(), line = at.line, character = at.character, "references");
         cx.spawn(async move |this, cx| {
             let found = client.references(&doc, at).await;
+            match &found {
+                Ok(list) => tracing::debug!("references → {} locations", list.len()),
+                Err(why) => tracing::warn!("references failed: {why}"),
+            }
             let found = match found {
                 Ok(list) => Ok(cx
                     .background_executor()
