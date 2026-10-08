@@ -81,7 +81,8 @@ pub struct Buffer {
     pub indent: Indent,
     syntax: Option<Syntax>,
     version: u64,
-    saved_version: u64,
+    /// Undo depth matching the file on disk; `None` once that state can no longer be reached.
+    saved_at: Option<usize>,
     undo: Vec<Transaction>,
     redo: Vec<Transaction>,
     last_edit: Option<(EditKind, Instant)>,
@@ -104,7 +105,7 @@ impl Buffer {
             indent,
             syntax,
             version: 0,
-            saved_version: 0,
+            saved_at: Some(0),
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
@@ -144,12 +145,14 @@ impl Buffer {
             fs::set_permissions(&tmp, meta.permissions())?;
         }
         fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
-        self.saved_version = self.version;
+        self.saved_at = Some(self.undo.len());
+        // The next keystroke must start a new undo step, or it would fold into the saved one.
+        self.last_edit = None;
         Ok(())
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.version != self.saved_version
+        self.saved_at != Some(self.undo.len())
     }
 
     pub fn version(&self) -> u64 {
@@ -281,6 +284,9 @@ impl Buffer {
             last.changes.push(change);
             last.after = self.selection;
             return;
+        }
+        if self.saved_at.is_some_and(|at| at > self.undo.len()) {
+            self.saved_at = None;
         }
         self.undo.push(Transaction {
             changes: vec![change],
@@ -683,6 +689,26 @@ mod tests {
         assert!(b.redo());
         assert_eq!(b.rope().to_string(), "hello");
         assert_eq!(b.selection, Selection::cursor(5));
+    }
+
+    #[test]
+    fn undoing_to_the_saved_state_is_clean() {
+        let mut b = buf("x", "/x/a.ts");
+        b.move_to(1, false);
+        b.insert("y");
+        assert!(b.is_dirty());
+        b.undo();
+        assert!(!b.is_dirty());
+        b.redo();
+        assert!(b.is_dirty());
+        b.undo();
+        b.insert("z");
+        b.undo();
+        assert!(!b.is_dirty(), "back at the original text");
+        b.redo();
+        b.undo();
+        b.undo();
+        assert!(!b.is_dirty());
     }
 
     #[test]
