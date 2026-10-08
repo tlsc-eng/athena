@@ -4,12 +4,13 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use athena_ui::motion::{self, Closing, Opening};
 use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput, empty_state};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
-    Render, ScrollWheelEvent, ShapedLine, Size, Subscription, Task, UTF16Selection, Window,
-    actions, div, prelude::*, px,
+    Animation, App, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Pixels, Point, Render, ScrollWheelEvent, ShapedLine, Size, Subscription, Task, UTF16Selection,
+    Window, actions, div, prelude::*, px,
 };
 
 use crate::buffer::{Buffer, SaveError, UNDO_GROUP};
@@ -189,6 +190,10 @@ pub struct EditorView {
     pub(crate) autoscroll: bool,
     pub(crate) marked: Option<String>,
     find: Option<FindBar>,
+    find_opening: Option<Opening>,
+    /// A dismissed find bar, still drawn while it fades out.
+    find_closing: Option<(FindBar, Closing)>,
+    find_generation: u64,
     save_error: Option<String>,
     selecting: bool,
     was_dirty: bool,
@@ -228,6 +233,9 @@ impl EditorView {
             autoscroll: true,
             marked: None,
             find: None,
+            find_opening: None,
+            find_closing: None,
+            find_generation: 0,
             save_error: None,
             selecting: false,
             was_dirty: false,
@@ -478,7 +486,7 @@ impl EditorView {
                             }
                             InputEvent::Up => this.step_find(-1),
                             InputEvent::Cancel => {
-                                this.find = None;
+                                this.close_find(cx);
                                 window.focus(&this.focus);
                             }
                         }
@@ -490,6 +498,8 @@ impl EditorView {
                     current: 0,
                     _subscription: subscription,
                 });
+                self.find_closing = None;
+                self.find_opening = Some(Opening::now());
                 input
             }
         };
@@ -498,6 +508,34 @@ impl EditorView {
         }
         window.focus(&input.focus_handle(cx));
         cx.notify();
+    }
+
+    /// Starts the find bar's fade-out (its matches stop highlighting at once); false if it was closed.
+    fn close_find(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(find) = self.find.take() else {
+            return false;
+        };
+        self.find_generation += 1;
+        let generation = self.find_generation;
+        self.find_closing = Some((find, Closing::new(generation)));
+        let t = cx.theme();
+        let delay = motion::exit_delay(t.motion.reduced, t.motion.fast);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .find_closing
+                    .as_ref()
+                    .is_some_and(|(_, c)| c.generation == generation)
+                {
+                    this.find_closing = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+        true
     }
 
     /// Re-runs the search; `jump` moves the selection to the first match at or after the cursor.
@@ -552,38 +590,64 @@ impl EditorView {
     }
 
     fn render_find(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let find = self.find.as_ref()?;
+        let (find, closing) = match (&self.find, &self.find_closing) {
+            (Some(find), _) => (find, None),
+            (None, Some((find, closing))) => (find, Some(*closing)),
+            (None, None) => return None,
+        };
         let t = cx.theme();
         let count = match find.matches.len() {
             0 => "No results".to_string(),
             n => format!("{} of {n}", find.current + 1),
+        };
+        let row = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .w(px(280.))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .bg(t.color.surface_sunken)
+                    .border_1()
+                    .border_color(t.color.accent)
+                    .rounded(t.shape.radius_control)
+                    .child(find.input.clone()),
+            )
+            .child(div().text_color(t.color.content_muted).child(count));
+        // The bar's height snaps so the text below re-lays out once; only the row inside moves.
+        let row = match closing {
+            Some(closing) => motion::animate_exit(
+                t.motion.reduced,
+                row,
+                ("find-close", closing.generation),
+                t.motion.fast,
+                |el, d| el.opacity(1. - d).top(px(-8. * d)),
+            ),
+            None => motion::animate_enter(
+                t.motion.reduced,
+                self.find_opening.is_some_and(|o| o.running(t.motion.fast)),
+                row,
+                "find-open",
+                Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+                |el, d| el.opacity(d).top(px(-8. * (1. - d))),
+            ),
         };
         Some(
             div()
                 .flex_none()
                 .h(px(36.))
                 .px(px(12.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
+                .overflow_hidden()
                 .bg(t.color.surface)
                 .border_b_1()
                 .border_color(t.color.border)
                 .text_size(t.typography.caption)
-                .child(
-                    div()
-                        .w(px(280.))
-                        .h(px(24.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .bg(t.color.surface_sunken)
-                        .border_1()
-                        .border_color(t.color.accent)
-                        .rounded(t.shape.radius_control)
-                        .child(find.input.clone()),
-                )
-                .child(div().text_color(t.color.content_muted).child(count)),
+                .child(row),
         )
     }
 }
@@ -809,9 +873,7 @@ impl Render for EditorView {
                         this.with_buffer(cx, Buffer::toggle_comment)
                     }))
                     .on_action(cx.listener(|this, _: &Escape, _, cx| {
-                        if this.find.take().is_some() {
-                            cx.notify();
-                        } else {
+                        if !this.close_find(cx) {
                             let head = this.buffer.as_ref().map(|b| b.selection.head);
                             if let Some(head) = head {
                                 this.with_buffer(cx, |b| b.move_to(head, false));
