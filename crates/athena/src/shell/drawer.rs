@@ -177,7 +177,14 @@ impl Shell {
             DrawerTab::Changes => self.render_changes(cx),
             DrawerTab::Search => self.render_search(cx),
         };
+        // The search field is the drawer's only input; once it is hidden its focus has nowhere to go.
+        if self.drawer_focus.contains_focused(window, cx)
+            && (closing.is_some() || tab != DrawerTab::Search)
+        {
+            self.focus_active_item(window, cx);
+        }
         let drawer = div()
+            .track_focus(&self.drawer_focus)
             .size_full()
             .flex()
             .flex_col()
@@ -185,6 +192,9 @@ impl Shell {
             .border_color(t.color.border)
             .bg(t.color.surface_sunken)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(closing.is_some(), |el| {
+                el.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            })
             .child(
                 div()
                     .h(px(32.))
