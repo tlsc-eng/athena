@@ -19,6 +19,7 @@ mod search;
 mod tree;
 mod usage_view;
 mod watch;
+mod zoom;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -46,7 +47,8 @@ use crate::actions::{
     TogglePaneZoom, TogglePreview, Zoom,
 };
 use crate::actions::{
-    FindInProject, NavigateBack, NavigateForward, RevealInTree, ShowChanges, ToggleBlame,
+    FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, NavigateBack, NavigateForward,
+    RevealInTree, ShowChanges, ToggleBlame,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -134,6 +136,8 @@ impl Shell {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
+        cx.global_mut::<athena_ui::Theme>()
+            .set_code_zoom(workspace.ui.font_zoom);
         let subscriptions = vec![
             cx.observe_window_bounds(window, |this, window, cx| {
                 this.workspace.window = Some(window_state(window.window_bounds()));
@@ -793,6 +797,9 @@ impl Render for Shell {
                 this.toggle_drawer_tab(drawer::DrawerTab::Changes, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleBlame, _, cx| this.toggle_blame(cx)))
+            .on_action(cx.listener(|this, _: &FontZoomIn, _, cx| this.zoom_font(Some(1), cx)))
+            .on_action(cx.listener(|this, _: &FontZoomOut, _, cx| this.zoom_font(Some(-1), cx)))
+            .on_action(cx.listener(|this, _: &FontZoomReset, _, cx| this.zoom_font(None, cx)))
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)

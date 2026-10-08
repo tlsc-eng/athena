@@ -1,3 +1,4 @@
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use gpui::{BoxShadow, Global, Hsla, Pixels, SharedString, point, px, rgb, rgba};
@@ -30,6 +31,12 @@ pub struct Colors {
     pub tooltip_fg: Hsla,
     pub focus_ring: Hsla,
 }
+
+/// Editor and terminal font size before any zoom.
+const CODE_SIZE: f32 = 13.;
+
+/// Zoom steps, 1px each, keeping code between 6px and 40px.
+pub const CODE_ZOOM: RangeInclusive<i32> = -7..=27;
 
 #[derive(Clone)]
 pub struct Typography {
@@ -206,7 +213,7 @@ impl Theme {
                 body: px(14.),
                 heading: px(18.),
                 display: px(24.),
-                code: px(13.),
+                code: px(CODE_SIZE),
             },
             shape: Shape {
                 radius_control: px(2.),
@@ -222,6 +229,12 @@ impl Theme {
         }
     }
 
+    /// Sizes editor and terminal text `zoom` steps from the default, clamped to [`CODE_ZOOM`].
+    pub fn set_code_zoom(&mut self, zoom: i32) {
+        let zoom = zoom.clamp(*CODE_ZOOM.start(), *CODE_ZOOM.end());
+        self.typography.code = px(CODE_SIZE + zoom as f32);
+    }
+
     pub fn popover_shadow(&self) -> BoxShadow {
         BoxShadow {
             color: rgba(0x00000099).into(),
@@ -229,5 +242,23 @@ impl Theme {
             blur_radius: px(24.),
             spread_radius: px(-8.),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_zoom_steps_a_pixel_and_stays_in_range() {
+        let mut theme = Theme::dark(false);
+        theme.set_code_zoom(2);
+        assert_eq!(theme.typography.code, px(15.));
+        theme.set_code_zoom(-100);
+        assert_eq!(theme.typography.code, px(6.));
+        theme.set_code_zoom(100);
+        assert_eq!(theme.typography.code, px(40.));
+        theme.set_code_zoom(0);
+        assert_eq!(theme.typography.code, px(13.));
     }
 }

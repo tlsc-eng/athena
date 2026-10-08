@@ -98,6 +98,7 @@ mod tests {
             tree_width: 300.,
             drawer_height: 180.,
             tree_visible: false,
+            font_zoom: -2,
         };
         save(&path, &w).unwrap();
         assert_eq!(load(&path).unwrap(), w);
@@ -201,5 +202,6 @@ mod tests {
         assert_eq!(ui.tree_width, 320.);
         assert_eq!(ui.drawer_height, 240.);
         assert!(ui.tree_visible);
+        assert_eq!(ui.font_zoom, 0);
     }
 }

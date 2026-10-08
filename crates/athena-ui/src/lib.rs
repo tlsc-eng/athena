@@ -14,7 +14,9 @@ pub use icons::{FileIcon, ICON_SIZE, file_icon, icon_for};
 pub use input::{InputEvent, TextInput};
 pub use logo::{Glyph, Lockup};
 pub use menu::{ContextMenu, MenuItem};
-pub use theme::{Colors, Motion, Shape, SyntaxColors, TerminalColors, Theme, Typography};
+pub use theme::{
+    CODE_ZOOM, Colors, Motion, Shape, SyntaxColors, TerminalColors, Theme, Typography,
+};
 
 use gpui::App;
 

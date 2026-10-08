@@ -50,6 +50,9 @@ actions!(
         NavigateBack,
         NavigateForward,
         RevealInTree,
+        FontZoomIn,
+        FontZoomOut,
+        FontZoomReset,
     ]
 );
 
@@ -101,6 +104,11 @@ pub fn init(cx: &mut App) {
         // macOS reports ⌃⇧- as ⌃_, so that is the binding that matches; the other is for the menu.
         KeyBinding::new("ctrl-_", NavigateForward, None),
         KeyBinding::new("ctrl-shift--", NavigateForward, None),
+        // The image viewer's own zoom keys win while it has focus, being bound deeper.
+        KeyBinding::new("cmd-=", FontZoomIn, None),
+        KeyBinding::new("cmd-+", FontZoomIn, None),
+        KeyBinding::new("cmd--", FontZoomOut, None),
+        KeyBinding::new("cmd-0", FontZoomReset, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -162,6 +170,10 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Split Down", SplitDown),
                 MenuItem::action("Zoom Pane", TogglePaneZoom),
                 MenuItem::separator(),
+                MenuItem::action("Zoom In", FontZoomIn),
+                MenuItem::action("Zoom Out", FontZoomOut),
+                MenuItem::action("Reset Zoom", FontZoomReset),
+                MenuItem::separator(),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PrevTab),
             ],
@@ -192,5 +204,19 @@ mod tests {
         }
         assert_eq!(Keystroke::parse("ctrl--").unwrap().key, "-");
         assert_eq!(Keystroke::parse("ctrl-_").unwrap().key, "_");
+    }
+
+    #[test]
+    fn font_zoom_keystrokes_parse() {
+        for (source, key) in [
+            ("cmd-=", "="),
+            ("cmd-+", "+"),
+            ("cmd--", "-"),
+            ("cmd-0", "0"),
+        ] {
+            let k = Keystroke::parse(source).unwrap();
+            assert!(k.modifiers.platform, "{source}");
+            assert_eq!(k.key, key, "{source}");
+        }
     }
 }
