@@ -11,14 +11,15 @@ use athena_proto::{ClientMsg, ConnectError, Connection, ErrorKind, PaneId, Proce
 use athena_ui::{ActiveTheme, ButtonKind, empty_state};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle, Focusable,
-    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, ScrollWheelEvent, Task, UTF16Selection, Window, actions, div,
-    prelude::*, px,
+    IntoElement, KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, Task,
+    UTF16Selection, Window, actions, div, prelude::*, px,
 };
 
 use crate::element::{RowCache, TerminalElement};
 use crate::keys;
 use crate::links;
+use crate::mouse::{self, MouseEvent};
 use crate::terminal::{GridSize, Link, PaneEvent, Terminal, Transport};
 
 actions!(terminal, [Copy, Paste, ClearScrollback, SelectAll]);
@@ -124,6 +125,10 @@ pub struct TerminalView {
     pending_input: Option<Vec<u8>>,
     grid: GridSize,
     scroll_remainder: f32,
+    /// The button whose press went to the program, so its release does too.
+    mouse_press: Option<mouse::Button>,
+    /// The cell of the last report, so motion is sent once per cell.
+    mouse_cell: Option<(usize, usize)>,
     _claude_timer: Option<Task<()>>,
     _io: Option<Task<()>>,
 }
@@ -160,6 +165,8 @@ impl TerminalView {
             claude_hook: None,
             pending_input: None,
             scroll_remainder: 0.,
+            mouse_press: None,
+            mouse_cell: None,
             _claude_timer: None,
             _io: None,
         };
@@ -685,8 +692,60 @@ impl TerminalView {
         )
     }
 
+    /// Whether mouse events go to the program rather than select; Shift keeps selection, as in
+    /// iTerm and VS Code.
+    pub(crate) fn reports_mouse(&self, modifiers: &Modifiers) -> bool {
+        !modifiers.shift
+            && !modifiers.platform
+            && self
+                .terminal
+                .as_ref()
+                .is_some_and(|t| t.exit.is_none() && t.mode().intersects(TermMode::MOUSE_MODE))
+    }
+
+    /// The viewport cell under a window position, clamped to the grid.
+    fn mouse_cell_at(&self, position: gpui::Point<Pixels>) -> (usize, usize) {
+        let (col, row) = self.cell_position(position);
+        let size = self.terminal.as_ref().map_or(self.grid, Terminal::size);
+        (
+            (col.max(0.) as usize).min(size.cols.saturating_sub(1) as usize),
+            (row.max(0.) as usize).min(size.rows.saturating_sub(1) as usize),
+        )
+    }
+
+    fn report_mouse(
+        &mut self,
+        event: MouseEvent,
+        position: gpui::Point<Pixels>,
+        modifiers: &Modifiers,
+    ) {
+        let (col, row) = self.mouse_cell_at(position);
+        self.mouse_cell = Some((col, row));
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+        let mods = mouse::Mods {
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            control: modifiers.control,
+        };
+        if let Some(bytes) = mouse::encode(event, col, row, mods, terminal.mode()) {
+            terminal.input(bytes);
+        }
+    }
+
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
+        if self.reports_mouse(&event.modifiers) {
+            self.mouse_press = Some(mouse::Button::Left);
+            self.report_mouse(
+                MouseEvent::Press(mouse::Button::Left),
+                event.position,
+                &event.modifiers,
+            );
+            cx.notify();
+            return;
+        }
         let (col, row) = self.cell_position(event.position);
         let Some(terminal) = self.terminal.as_mut() else {
             return;
@@ -705,18 +764,74 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let (col, row) = self.cell_position(event.position);
-        let Some(terminal) = self.terminal.as_mut() else {
+    /// Presses of the middle and right buttons, which only a program asking for the mouse sees.
+    fn mouse_down_other(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(button) = report_button(event.button) else {
             return;
         };
-        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
-            let (point, side) = terminal.point_at(col, row);
-            terminal.update_selection(point, side);
+        if self.reports_mouse(&event.modifiers) {
+            window.focus(&self.focus);
+            self.mouse_press = Some(button);
+            self.report_mouse(MouseEvent::Press(button), event.position, &event.modifiers);
+            cx.stop_propagation();
             cx.notify();
+        }
+    }
+
+    /// Reports the release of a button whose press was reported; true if it was.
+    fn release_mouse(&mut self, event: &MouseUpEvent) -> bool {
+        let Some(button) = report_button(event.button) else {
+            return false;
+        };
+        if self.mouse_press != Some(button) {
+            return false;
+        }
+        self.mouse_press = None;
+        self.report_mouse(
+            MouseEvent::Release(button),
+            event.position,
+            &event.modifiers,
+        );
+        true
+    }
+
+    fn mouse_up_other(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.release_mouse(event) {
+            cx.notify();
+        }
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (col, row) = self.cell_position(event.position);
+        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
+            if let Some(terminal) = self.terminal.as_mut() {
+                let (point, side) = terminal.point_at(col, row);
+                terminal.update_selection(point, side);
+                cx.notify();
+            }
             return;
         }
-        let link = (event.modifiers.platform && col >= 0. && row >= 0.)
+        if (self.mouse_press.is_some() || self.reports_mouse(&event.modifiers))
+            && self.mouse_cell != Some(self.mouse_cell_at(event.position))
+        {
+            let held = self.mouse_press;
+            self.report_mouse(MouseEvent::Move(held), event.position, &event.modifiers);
+        }
+        self.hover_link(event.position, event.modifiers.platform, cx);
+    }
+
+    /// Underlines the link under the pointer while Cmd is held.
+    fn hover_link(&mut self, position: gpui::Point<Pixels>, cmd: bool, cx: &mut Context<Self>) {
+        let (col, row) = self.cell_position(position);
+        let Some(terminal) = self.terminal.as_ref() else {
+            return;
+        };
+        let link = (cmd && col >= 0. && row >= 0.)
             .then(|| terminal.link_at(row as usize, col as usize))
             .flatten();
         if link != self.hovered_link {
@@ -725,7 +840,20 @@ impl TerminalView {
         }
     }
 
-    fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hover_link(window.mouse_position(), event.modifiers.platform, cx);
+    }
+
+    fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.release_mouse(event) {
+            cx.notify();
+            return;
+        }
         if !std::mem::take(&mut self.selecting) {
             return;
         }
@@ -801,9 +929,9 @@ impl TerminalView {
     }
 
     fn scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(terminal) = self.terminal.as_mut() else {
+        if self.terminal.is_none() {
             return;
-        };
+        }
         let line_height = self.grid.cell_height;
         let dy: f32 = event.delta.pixel_delta(px(line_height)).y.into();
         self.scroll_remainder += dy / line_height;
@@ -812,6 +940,21 @@ impl TerminalView {
         if lines == 0 {
             return;
         }
+        if self.reports_mouse(&event.modifiers) {
+            let button = if lines > 0 {
+                mouse::Button::WheelUp
+            } else {
+                mouse::Button::WheelDown
+            };
+            for _ in 0..lines.unsigned_abs() {
+                self.report_mouse(MouseEvent::Press(button), event.position, &event.modifiers);
+            }
+            cx.notify();
+            return;
+        }
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
         let mode = terminal.mode();
         if mode.contains(TermMode::ALT_SCREEN) {
             // Full-screen apps without mouse reporting get arrow keys, as in Terminal.app.
@@ -911,11 +1054,18 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear_scrollback))
             .on_action(cx.listener(Self::select_all))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down_other))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down_other))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up_other))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up_other))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up_other))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up_other))
             .cursor(if self.hovered_link.is_some() {
                 CursorStyle::PointingHand
             } else {
@@ -956,6 +1106,15 @@ impl Render for TerminalView {
         )
         .children(self.render_clipboard_notice(cx))
         .children(self.render_status(cx))
+    }
+}
+
+fn report_button(button: MouseButton) -> Option<mouse::Button> {
+    match button {
+        MouseButton::Left => Some(mouse::Button::Left),
+        MouseButton::Middle => Some(mouse::Button::Middle),
+        MouseButton::Right => Some(mouse::Button::Right),
+        _ => None,
     }
 }
 

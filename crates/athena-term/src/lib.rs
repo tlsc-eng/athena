@@ -3,6 +3,7 @@ mod element;
 mod glyphs;
 mod keys;
 mod links;
+mod mouse;
 mod terminal;
 mod view;
 
