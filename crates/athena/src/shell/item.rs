@@ -55,6 +55,10 @@ impl ItemView {
         }
     }
 
+    pub fn is_stale(&self, cx: &App) -> bool {
+        matches!(self, Self::Terminal(v) if v.read(cx).is_stale())
+    }
+
     pub fn has_bell(&self, cx: &App) -> bool {
         matches!(self, Self::Terminal(v) if v.read(cx).has_bell())
     }

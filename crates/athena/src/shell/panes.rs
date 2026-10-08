@@ -161,6 +161,7 @@ impl Shell {
     ) -> Option<AnyElement> {
         let view = self.items.get(&(root.to_path_buf(), item.id))?;
         let (color, word) = match view.claude_state(cx) {
+            _ if view.is_stale(cx) => (t.color.content_muted, Some("stale")),
             Some(ClaudeState::Waiting) => (t.color.warning, Some("needs input")),
             Some(ClaudeState::Running) => (t.color.success, Some("running")),
             None if view.has_bell(cx) => (t.color.warning, None),
