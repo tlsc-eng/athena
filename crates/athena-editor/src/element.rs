@@ -467,14 +467,12 @@ impl Element for EditorElement {
             let x = numbers_right - label.width;
             frame.gutter.push((point(x, y), label));
             if view.lightbulb == Some(*line) {
-                let bulb = text_system.shape_line(
-                    "💡".into(),
-                    font_size * 0.75,
-                    &[run("💡".len(), theme.color.warning)],
-                    None,
+                // A painted dot, because the editor font has no emoji fallback for 💡.
+                let d = px(6.);
+                let origin = point(bounds.left() + (px(GUTTER_PAD) - d) / 2., y + (lh - d) / 2.);
+                frame.gutter_marks.push(
+                    fill(Bounds::new(origin, size(d, d)), theme.color.warning).corner_radii(d / 2.),
                 );
-                let x = bounds.left() + (px(GUTTER_PAD) - bulb.width) / 2.;
-                frame.gutter.push((point(x, y), bulb));
             }
             // Marks come from the saved file, so unsaved line inserts shift them until the next save.
             for mark in &view.gutter_marks {
