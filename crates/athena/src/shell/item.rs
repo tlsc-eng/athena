@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use athena_editor::{EditorView, ImageView};
+use athena_editor::{DiffView, EditorView, ImageView};
 use athena_preview::{DocView, PreviewView};
 use athena_term::{ClaudeState, TerminalView};
 use gpui::{AnyElement, App, Entity, FocusHandle, Focusable, IntoElement};
@@ -13,6 +13,7 @@ pub(super) enum ItemView {
     Image(Entity<ImageView>),
     Preview(Entity<PreviewView>),
     Doc(Entity<DocView>),
+    Diff(Entity<DiffView>),
 }
 
 impl ItemView {
@@ -23,6 +24,7 @@ impl ItemView {
             Self::Image(v) => v.focus_handle(cx),
             Self::Preview(v) => v.focus_handle(cx),
             Self::Doc(v) => v.focus_handle(cx),
+            Self::Diff(v) => v.focus_handle(cx),
         }
     }
 
@@ -33,6 +35,7 @@ impl ItemView {
             Self::Image(v) => v.clone().into_any_element(),
             Self::Preview(v) => v.clone().into_any_element(),
             Self::Doc(v) => v.clone().into_any_element(),
+            Self::Diff(v) => v.clone().into_any_element(),
         }
     }
 
@@ -50,13 +53,16 @@ impl ItemView {
             Self::Image(v) => file_label(v.read(cx).path()),
             Self::Preview(v) => v.read(cx).label(),
             Self::Doc(v) => v.read(cx).label(),
+            Self::Diff(v) => v.read(cx).label(),
         }
     }
 
     pub fn claude_state(&self, cx: &App) -> Option<ClaudeState> {
         match self {
             Self::Terminal(v) => v.read(cx).claude_state(),
-            Self::Editor(_) | Self::Image(_) | Self::Preview(_) | Self::Doc(_) => None,
+            Self::Editor(_) | Self::Image(_) | Self::Preview(_) | Self::Doc(_) | Self::Diff(_) => {
+                None
+            }
         }
     }
 

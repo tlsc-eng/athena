@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use athena_proto::{ActiveFile, AppMsg, AppReply, PaneId, ProjectInfo, TerminalInfo};
 use athena_term::ClaudeState;
-use athena_workspace::{ItemKind, resolve_in_roots};
+use athena_workspace::{DiffBase, ItemKind, resolve_in_roots};
 use gpui::{Context, PromptLevel, Window};
 
 use super::Shell;
@@ -62,6 +62,34 @@ impl Shell {
                 match path.map(|p| resolve_in_roots(&p, &roots)).transpose() {
                     Ok(path) => {
                         AppReply::Diagnostics(self.diagnostics_under(path.as_deref(), &roots))
+                    }
+                    Err(e) => AppReply::Error(e),
+                }
+            }
+            AppMsg::OpenDiff { path, staged } => {
+                let roots: Vec<PathBuf> = self
+                    .workspace
+                    .projects
+                    .iter()
+                    .map(|p| p.root.clone())
+                    .collect();
+                match resolve_in_roots(&path, &roots) {
+                    Ok(path) => {
+                        if let Some(i) = self
+                            .workspace
+                            .projects
+                            .iter()
+                            .position(|p| path.starts_with(&p.root))
+                        {
+                            self.switch_to(i, cx);
+                        }
+                        let base = if staged {
+                            DiffBase::Head
+                        } else {
+                            DiffBase::Index
+                        };
+                        self.open_diff(path, base, window, cx);
+                        AppReply::Ok
                     }
                     Err(e) => AppReply::Error(e),
                 }

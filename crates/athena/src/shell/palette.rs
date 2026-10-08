@@ -20,6 +20,7 @@ pub(super) enum Target {
     Command(Box<dyn Action>),
     /// A command that starts Claude Code in this project.
     Claude(String),
+    Branch(super::branches::BranchPick),
 }
 
 impl Clone for Target {
@@ -28,6 +29,7 @@ impl Clone for Target {
             Self::File(path) => Self::File(path.clone()),
             Self::Command(action) => Self::Command(action.boxed_clone()),
             Self::Claude(command) => Self::Claude(command.clone()),
+            Self::Branch(pick) => Self::Branch(pick.clone()),
         }
     }
 }
@@ -39,6 +41,7 @@ pub(super) enum Mode {
     FilesBeside,
     Commands,
     Claude,
+    Branches,
 }
 
 /// Commands offered for starting Claude; typing anything else offers that too.
@@ -88,6 +91,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Find in project", Box::new(actions::FindInProject)),
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),
+        ("Switch branch…", Box::new(actions::SwitchBranch)),
         ("Open file to the side", Box::new(actions::QuickOpenBeside)),
         ("New Claude session", Box::new(actions::NewClaudeSession)),
         (
@@ -153,6 +157,7 @@ impl Shell {
             Mode::FilesBeside => "Open to the side…",
             Mode::Commands => "Run a command…",
             Mode::Claude => "Command that starts Claude Code here…",
+            Mode::Branches => "Switch to a branch, or type a name to create one…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -168,7 +173,7 @@ impl Shell {
             },
         );
         let entries = match mode {
-            Mode::Files | Mode::FilesBeside => Vec::new(),
+            Mode::Files | Mode::FilesBeside | Mode::Branches => Vec::new(),
             Mode::Claude => claude_entries(""),
             Mode::Commands => {
                 let root = self.workspace.active_project().map(|p| p.root.as_path());
@@ -263,6 +268,17 @@ impl Shell {
         if palette.mode == Mode::Claude {
             palette.entries = claude_entries(&query);
         }
+        if palette.mode == Mode::Branches {
+            palette.entries = super::branches::entries(&self.git.branches, &query)
+                .into_iter()
+                .map(|b| Entry {
+                    label: b.label,
+                    detail: b.detail,
+                    key: b.key,
+                    target: Target::Branch(b.pick),
+                })
+                .collect();
+        }
         let mut hits: Vec<(i32, usize, Vec<usize>)> = palette
             .entries
             .iter()
@@ -344,6 +360,7 @@ impl Shell {
             Some(Target::File(path)) => self.open_file(path, window, cx),
             Some(Target::Command(action)) => window.dispatch_action(action, cx),
             Some(Target::Claude(command)) => self.start_claude_with(command, window, cx),
+            Some(Target::Branch(pick)) => self.run_branch(pick, cx),
             None => {}
         }
         cx.notify();
@@ -411,7 +428,7 @@ impl Shell {
                                     .with_highlights(bold),
                             )
                             .children(
-                                matches!(entry.target, Target::File(_))
+                                matches!(entry.target, Target::File(_) | Target::Branch(_))
                                     .then(|| entry.detail.clone())
                                     .flatten()
                                     .map(|d| {

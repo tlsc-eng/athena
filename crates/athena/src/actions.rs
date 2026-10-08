@@ -47,6 +47,7 @@ actions!(
         FindInProject,
         ShowChanges,
         ToggleBlame,
+        SwitchBranch,
         NavigateBack,
         NavigateForward,
         RevealInTree,

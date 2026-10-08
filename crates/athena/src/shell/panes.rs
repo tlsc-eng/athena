@@ -299,6 +299,7 @@ impl Shell {
                 .detach();
                 ItemView::Doc(view)
             }
+            ItemKind::Diff { path, base } => self.new_diff_view(root, path, base, cx),
             ItemKind::Preview { url } => {
                 let view = cx.new(|cx| PreviewView::new(root.to_path_buf(), url.clone(), cx));
                 let (project_root, item_id) = key.clone();
@@ -346,6 +347,7 @@ impl Shell {
             (None, ItemKind::Editor { path } | ItemKind::Image { path }) => file_label(path),
             (None, ItemKind::Preview { url }) => athena_preview::label_for(url),
             (None, ItemKind::Rendered { path }) => athena_preview::doc_label_for(path),
+            (None, ItemKind::Diff { path, base }) => super::review::diff_title(path, base),
         }
     }
 
@@ -878,6 +880,16 @@ impl Shell {
     /// holds editors, else the editor pane used last, else any editor pane, else splits the focused
     /// pane so terminals stay visible.
     pub(super) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_kind(file_kind(path), window, cx);
+    }
+
+    /// Opens a file-backed tab (an editor, viewer or diff) where `open_file` would put an editor.
+    pub(super) fn open_kind(
+        &mut self,
+        kind: ItemKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(i) = self.workspace.active else {
             return;
         };
@@ -886,7 +898,6 @@ impl Shell {
             .last_editor_pane
             .get(&self.workspace.projects[i].root)
             .copied();
-        let kind = file_kind(path);
         let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
             return self.start_layout(i, kind, window, cx);
         };
@@ -2128,6 +2139,10 @@ pub(super) fn file_kind_like(kind: &ItemKind, path: PathBuf) -> ItemKind {
     match kind {
         ItemKind::Image { .. } => ItemKind::Image { path },
         ItemKind::Rendered { .. } => ItemKind::Rendered { path },
+        ItemKind::Diff { base, .. } => ItemKind::Diff {
+            path,
+            base: base.clone(),
+        },
         _ => ItemKind::Editor { path },
     }
 }

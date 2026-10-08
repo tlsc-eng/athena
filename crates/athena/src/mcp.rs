@@ -23,6 +23,14 @@ struct OpenFileArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct OpenDiffArgs {
+    /// Absolute path of a file inside one of the open projects.
+    path: String,
+    /// Show the staged changes (HEAD against the index) instead of the unstaged ones.
+    staged: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ReadTerminalArgs {
     /// The `session` of a terminal from list_terminals.
     session: u64,
@@ -148,6 +156,21 @@ impl Bridge {
         })
         .await?;
         text(format!("Opened {}", args.path))
+    }
+
+    #[tool(
+        description = "Show the user a file's uncommitted changes in Athena's diff viewer (unstaged by default), where they can stage or revert each change."
+    )]
+    async fn open_diff(
+        &self,
+        Parameters(args): Parameters<OpenDiffArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        ask(AppMsg::OpenDiff {
+            path: PathBuf::from(&args.path),
+            staged: args.staged.unwrap_or(false),
+        })
+        .await?;
+        text(format!("Showing the changes to {}", args.path))
     }
 
     #[tool(

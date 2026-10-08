@@ -1,3 +1,4 @@
+mod branches;
 mod bridge;
 mod claude;
 mod containers_view;
@@ -15,6 +16,7 @@ mod palette;
 mod panes;
 mod playwright_view;
 mod quit;
+mod review;
 mod search;
 mod status_bar;
 mod tree;
@@ -49,7 +51,7 @@ use crate::actions::{
 };
 use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, NavigateBack, NavigateForward,
-    RevealInTree, ShowChanges, ToggleBlame,
+    RevealInTree, ShowChanges, SwitchBranch, ToggleBlame,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -801,6 +803,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &FontZoomIn, _, cx| this.zoom_font(Some(1), cx)))
             .on_action(cx.listener(|this, _: &FontZoomOut, _, cx| this.zoom_font(Some(-1), cx)))
             .on_action(cx.listener(|this, _: &FontZoomReset, _, cx| this.zoom_font(None, cx)))
+            .on_action(
+                cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
+            )
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)

@@ -58,6 +58,11 @@ pub enum AppMsg {
     Diagnostics {
         path: Option<PathBuf>,
     },
+    /// Shows a file's uncommitted changes in a diff tab, the staged ones when `staged`.
+    OpenDiff {
+        path: PathBuf,
+        staged: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

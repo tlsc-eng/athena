@@ -5,10 +5,12 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use athena_editor::{EditorView, GutterMark};
-use athena_ui::{ActiveTheme, Theme};
+use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput, Theme, Tooltip};
+use athena_workspace::DiffBase;
 use athena_workspace::git::{self, Decorations, Entry, FileStatus, Hunk};
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Hsla, Task, Window, div, prelude::*, px, uniform_list,
+    AnyElement, Context, Entity, Focusable, FontWeight, Hsla, PromptLevel, Subscription, Task,
+    Window, div, prelude::*, px, uniform_list,
 };
 
 use super::Shell;
@@ -49,6 +51,14 @@ pub(super) struct GitState {
     poll: Option<Task<()>>,
     blame_on: bool,
     blame: Option<Task<()>>,
+    commit_input: Option<Entity<TextInput>>,
+    _commit_events: Option<Subscription>,
+    amend: bool,
+    /// The message typed before Amend filled in the last commit's, put back when it is turned off.
+    before_amend: Option<String>,
+    committing: bool,
+    /// Branches for the branch picker, newest first.
+    pub(super) branches: Vec<git::Branch>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,6 +157,17 @@ fn rel_to(root: &Path, path: &Path) -> PathBuf {
 impl Shell {
     /// Polls the active project's status every few seconds while the window is in front.
     pub(super) fn start_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| TextInput::new("Message (⌘↩ to commit)", cx));
+        self.git._commit_events = Some(cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::SubmitBeside => this.commit(window, cx),
+                InputEvent::Cancel => this.focus_active_item(window, cx),
+                _ => {}
+            },
+        ));
+        self.git.commit_input = Some(input);
         // The window is not active yet while it is being built, so the first run is kicked.
         self.git_kick(cx);
         self.git.poll = Some(cx.spawn_in(window, async move |this, cx| {
@@ -211,7 +232,15 @@ impl Shell {
             .get(&under_root(root, path))
     }
 
-    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+    /// A renamed file's old path, relative to the project, for diffing it against HEAD.
+    pub(super) fn git_orig_path(&self, root: &Path, path: &Path) -> Option<PathBuf> {
+        let repo = self.git.repos.get(root)?;
+        let prefix = repo.prefix.as_deref()?;
+        let (_, entry) = repo.entries.iter().find(|(p, _)| p == path)?;
+        Some(PathBuf::from(entry.orig.as_ref()?.strip_prefix(prefix)?))
+    }
+
+    pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else {
             return;
         };
@@ -294,6 +323,7 @@ impl Shell {
             repo.entries = Rc::new(snapshot.entries);
             cx.notify();
         }
+        self.reload_diffs(root, None, cx);
         self.sync_gutters(root, cx);
     }
 
@@ -547,11 +577,335 @@ impl Shell {
         )
     }
 
-    /// The Changes tab: staged, unstaged and untracked files with stage and unstage buttons.
+    /// Cmd+Enter in the message box or the Commit button: commits what is staged, offering to
+    /// stage everything first when nothing is, as VS Code does.
+    pub(super) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git.committing {
+            return;
+        }
+        let Some(input) = self.git.commit_input.clone() else {
+            return;
+        };
+        let Some(rows) = self.change_rows() else {
+            return;
+        };
+        let message = input.read(cx).text().trim().to_string();
+        let amend = self.git.amend;
+        if message.is_empty() {
+            window.focus(&input.focus_handle(cx));
+            return self.transient_notice("Type a commit message", "Then press ⌘↩ or Commit.", cx);
+        }
+        let staged = rows.iter().any(|r| {
+            matches!(
+                r,
+                Row::File {
+                    group: Group::Staged,
+                    ..
+                }
+            )
+        });
+        let unstaged: Vec<PathBuf> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::File {
+                    group: Group::Changes | Group::Untracked,
+                    status,
+                    targets,
+                    ..
+                } if *status != FileStatus::Conflict => Some(targets.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if staged || amend {
+            return self.run_commit(message, amend, Vec::new(), cx);
+        }
+        if unstaged.is_empty() {
+            return self.transient_notice("Nothing to commit", "There are no changes.", cx);
+        }
+        let detail = format!(
+            "Stage all {} changed files and commit them directly?",
+            unstaged.len()
+        );
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "There are no staged changes to commit.",
+            Some(&detail),
+            &["Stage All and Commit", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |this, cx| this.run_commit(message, false, unstaged, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn run_commit(
+        &mut self,
+        message: String,
+        amend: bool,
+        stage_first: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        self.git.committing = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let task_message = message.clone();
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    if !stage_first.is_empty() {
+                        git::stage(&root, &stage_first)?;
+                    }
+                    git::commit(&root, &task_message, amend)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.git.committing = false;
+                match done {
+                    Ok(()) => {
+                        this.git.amend = false;
+                        this.git.before_amend = None;
+                        if let Some(input) = this.git.commit_input.clone() {
+                            input.update(cx, |i, cx| i.set_text("", cx));
+                        }
+                        let title = if amend {
+                            "Amended the last commit"
+                        } else {
+                            "Committed"
+                        };
+                        let subject = message.lines().next().unwrap_or_default().to_string();
+                        this.transient_notice(title, subject, cx);
+                    }
+                    Err(err) => this.transient_notice("Commit failed", format!("{err:#}"), cx),
+                }
+                this.refresh_git(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Amend fills in the last commit's message, as VS Code's "Commit (Amend)" edits it.
+    fn toggle_amend(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.git.commit_input.clone() else {
+            return;
+        };
+        self.git.amend = !self.git.amend;
+        cx.notify();
+        if !self.git.amend {
+            if let Some(before) = self.git.before_amend.take() {
+                input.update(cx, |i, cx| i.set_text(before, cx));
+            }
+            return;
+        }
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let last = cx
+                .background_executor()
+                .spawn(async move { git::last_message(&root) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.git.amend {
+                    return;
+                }
+                let Ok(last) = last else {
+                    return;
+                };
+                let typed = input.read(cx).text().to_string();
+                this.git.before_amend = Some(typed);
+                // The box holds one line; the body of the last commit is kept as git has it.
+                input.update(cx, |i, cx| {
+                    i.set_text(last.replace('\n', " ").trim().to_string(), cx)
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Discards unstaged changes (a copy is kept) or moves untracked files to the Trash, after
+    /// asking.
+    fn discard(
+        &mut self,
+        targets: Vec<PathBuf>,
+        untracked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let what = match targets.as_slice() {
+            [one] => one.display().to_string(),
+            many => format!("{} files", many.len()),
+        };
+        let (message, detail, button) = if untracked {
+            (
+                format!("Move {what} to the Trash?"),
+                "You can put it back from the Trash in Finder.".to_string(),
+                "Move to Trash",
+            )
+        } else {
+            (
+                format!("Discard changes in {what}?"),
+                "The file goes back to its staged or committed version. Git cannot undo this; \
+                 Athena keeps a copy of your version in Application Support/athena/discarded \
+                 for 30 days."
+                    .to_string(),
+                "Discard Changes",
+            )
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &[button, "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let task_root = root.clone();
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    let backup = super::review::backup_dir()?;
+                    for rel in &targets {
+                        if untracked {
+                            super::fileops::trash(&task_root.join(rel))?;
+                        } else {
+                            git::discard(&task_root, rel, &backup)?;
+                        }
+                    }
+                    anyhow::Ok(())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = done {
+                    this.transient_notice("Could not discard", format!("{err:#}"), cx);
+                }
+                this.tree.invalidate();
+                this.git_kick(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn render_commit_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let input = self.git.commit_input.clone()?;
+        let root = &self.workspace.active_project()?.root;
+        let branch = self.git.repos.get(root)?.branch.clone();
+        let t = cx.theme().clone();
+        let amend = self.git.amend;
+        let label = match (self.git.committing, amend) {
+            (true, _) => "Committing…",
+            (false, true) => "Amend",
+            (false, false) => "Commit",
+        };
+        Some(
+            div()
+                .flex_none()
+                .h(px(40.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .border_b_1()
+                .border_color(t.color.border)
+                .text_size(t.typography.caption)
+                .child(
+                    div()
+                        .id("git-branch")
+                        .h(px(26.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .flex_none()
+                        .rounded(t.shape.radius_control)
+                        .border_1()
+                        .border_color(t.color.border)
+                        .cursor_pointer()
+                        .text_color(t.color.content_secondary)
+                        .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                        .tooltip(|_, cx| Tooltip::view("Switch branch", cx))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_branches(window, cx)))
+                        .child(format!(
+                            "⎇ {}",
+                            branch.unwrap_or_else(|| "no branch".into())
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(26.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .rounded(t.shape.radius_control)
+                        .border_1()
+                        .border_color(t.color.border)
+                        .bg(t.color.surface)
+                        .text_size(t.typography.body)
+                        .child(input),
+                )
+                .child(
+                    div()
+                        .id("git-amend")
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(6.))
+                        .cursor_pointer()
+                        .text_color(if amend {
+                            t.color.content
+                        } else {
+                            t.color.content_muted
+                        })
+                        .tooltip(|_, cx| Tooltip::view("Rewrite the last commit", cx))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_amend(cx)))
+                        .child(
+                            div()
+                                .size(px(12.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(2.))
+                                .border_1()
+                                .border_color(if amend {
+                                    t.color.accent
+                                } else {
+                                    t.color.border_strong
+                                })
+                                .when(amend, |el| el.bg(t.color.accent))
+                                .text_color(t.color.content_on_accent)
+                                .text_size(px(9.))
+                                .when(amend, |el| el.child("✓")),
+                        )
+                        .child("Amend"),
+                )
+                .child(
+                    Button::new("git-commit", label, ButtonKind::Primary)
+                        .on_click(cx.listener(|this, _, window, cx| this.commit(window, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The Changes tab: a commit box above the staged, unstaged and untracked files.
     pub(super) fn render_changes(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let message = |text: &str| {
             div()
+                .flex_1()
                 .size_full()
                 .flex()
                 .items_center()
@@ -572,9 +926,27 @@ impl Shell {
                 _ => message("Reading git status…"),
             };
         };
-        if rows.is_empty() {
-            return message("No changes since the last commit.");
-        }
+        let body = if rows.is_empty() {
+            message("No changes since the last commit.")
+        } else {
+            self.render_change_list(rows, root, cx)
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(self.render_commit_bar(cx))
+            .child(div().flex_1().min_h_0().flex().child(body))
+            .into_any_element()
+    }
+
+    fn render_change_list(
+        &self,
+        rows: Vec<Row>,
+        root: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = cx.theme().clone();
         let rows = Rc::new(rows);
         uniform_list(
             "git-changes",
@@ -596,6 +968,7 @@ impl Shell {
                                 .collect();
                             let stage = group != Group::Staged;
                             let name = format!("changes-header-{i}");
+                            let discard = targets.clone();
                             div()
                                 .id(("git-header", i))
                                 .group(name.clone())
@@ -618,6 +991,18 @@ impl Shell {
                                         .child(count.to_string()),
                                 )
                                 .child(div().flex_1())
+                                .when(group != Group::Staged, |el| {
+                                    el.child(row_button(
+                                        ("git-header-discard", i),
+                                        "Discard All",
+                                        name.clone(),
+                                        &t,
+                                        cx.listener(move |this, _, window, cx| {
+                                            let untracked = group == Group::Untracked;
+                                            this.discard(discard.clone(), untracked, window, cx)
+                                        }),
+                                    ))
+                                })
                                 .child(row_button(
                                     ("git-header-action", i),
                                     if stage { "Stage All" } else { "Unstage All" },
@@ -649,11 +1034,20 @@ impl Shell {
                                 .unwrap_or_default();
                             let color = status_color(*status, &t);
                             let deleted = *status == FileStatus::Deleted;
-                            let stage = *group != Group::Staged;
+                            let conflict = *status == FileStatus::Conflict;
+                            let group = *group;
+                            let stage = group != Group::Staged;
                             let open = path.clone();
+                            let file = path.clone();
                             let is_dir = *is_dir;
                             let targets = targets.clone();
+                            let discard = targets.clone();
                             let hover = format!("changes-row-{i}");
+                            let base = if group == Group::Staged {
+                                DiffBase::Head
+                            } else {
+                                DiffBase::Index
+                            };
                             div()
                                 .id(("git-file", i))
                                 .group(hover.clone())
@@ -665,14 +1059,15 @@ impl Shell {
                                 .items_center()
                                 .gap(px(6.))
                                 .text_size(t.typography.caption)
-                                .when(!deleted, |el| el.cursor_pointer())
+                                .cursor_pointer()
                                 .hover(|s| s.bg(t.color.surface_hover))
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     if is_dir {
                                         this.reveal_in_tree(&open, cx);
-                                    } else if !deleted {
-                                        this.pending_open = Some(open.clone());
-                                        cx.notify();
+                                    } else if conflict {
+                                        this.open_file(open.clone(), window, cx);
+                                    } else {
+                                        this.open_diff(open.clone(), base.clone(), window, cx);
                                     }
                                 }))
                                 .child(athena_ui::file_icon(path, is_dir, cx))
@@ -692,6 +1087,31 @@ impl Shell {
                                         .text_color(t.color.content_muted)
                                         .child(dir),
                                 )
+                                .when(!is_dir && !deleted, |el| {
+                                    el.child(row_button(
+                                        ("git-file-open", i),
+                                        "Open File",
+                                        hover.clone(),
+                                        &t,
+                                        cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.open_file(file.clone(), window, cx)
+                                        }),
+                                    ))
+                                })
+                                .when(group != Group::Staged && !conflict, |el| {
+                                    el.child(row_button(
+                                        ("git-file-discard", i),
+                                        "Discard",
+                                        hover.clone(),
+                                        &t,
+                                        cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            let untracked = group == Group::Untracked;
+                                            this.discard(discard.clone(), untracked, window, cx)
+                                        }),
+                                    ))
+                                })
                                 .child(row_button(
                                     ("git-file-action", i),
                                     if stage { "Stage" } else { "Unstage" },
