@@ -2,6 +2,7 @@ mod buffer;
 mod completion;
 mod display;
 mod element;
+mod format;
 mod hover;
 mod image;
 mod line_jump;

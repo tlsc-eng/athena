@@ -21,6 +21,9 @@ use super::item::ItemView;
 /// Typing pauses this long before the server gets the new text.
 const CHANGE_DELAY: Duration = Duration::from_millis(300);
 
+/// A slow formatter never holds up Cmd+S longer than this; the file saves unformatted.
+const FORMAT_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Longest line excerpt shown for a reference.
 const SNIPPET_CHARS: usize = 160;
 
@@ -423,6 +426,50 @@ impl Shell {
             };
             tracing::debug!("hover → {} blocks", blocks.len());
             let _ = weak.update(cx, |e, cx| e.show_hover(request, blocks, cx));
+        })
+        .detach();
+    }
+
+    /// Asks the server to format the file before Cmd+S saves it; the editor always gets an
+    /// answer, empty when the server is missing, fails or is too slow.
+    pub(super) fn lsp_format(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        (tab_size, insert_spaces): (u32, bool),
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let Some(client) = self.document_client(&doc) else {
+            editor.update(cx, |e, cx| e.format_and_save(request, Vec::new(), cx));
+            return;
+        };
+        let weak = editor.downgrade();
+        let late = weak.clone();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(FORMAT_TIMEOUT).await;
+            let _ = late.update(cx, |e, cx| e.format_and_save(request, Vec::new(), cx));
+        })
+        .detach();
+        cx.spawn(async move |_, cx| {
+            let edits = match client.formatting(&doc, tab_size, insert_spaces).await {
+                Ok(edits) => edits,
+                Err(why) => {
+                    tracing::warn!("formatting failed: {why}");
+                    Vec::new()
+                }
+            };
+            tracing::debug!("formatting → {} edits", edits.len());
+            let edits = edits
+                .into_iter()
+                .map(|e| ServerEdit {
+                    start: (e.range.start.line, e.range.start.character),
+                    end: (e.range.end.line, e.range.end.character),
+                    text: e.text,
+                })
+                .collect();
+            let _ = weak.update(cx, |e, cx| e.format_and_save(request, edits, cx));
         })
         .detach();
     }

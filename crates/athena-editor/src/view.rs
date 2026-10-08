@@ -169,6 +169,13 @@ pub enum EditorEvent {
         line: u32,
         character: u32,
     },
+    /// Cmd+S wants the file formatted before it is saved; answer with
+    /// [`EditorView::format_and_save`], with no edits if formatting is not possible.
+    Format {
+        request: u64,
+        tab_size: u32,
+        insert_spaces: bool,
+    },
     /// Suggestions are wanted at a zero-based line and UTF-16 column; answer with
     /// [`EditorView::show_completions`]. `trigger` is the character typed that asked, if any.
     Complete {
@@ -248,6 +255,11 @@ pub struct EditorView {
     pub(crate) line_jump: Option<LineJump>,
     pub(crate) hovering: Hovering,
     pub(crate) completing: Completing,
+    /// Whether Cmd+S formats first, from the workspace; `None` means the language decides.
+    pub(crate) format_setting: Option<bool>,
+    /// The format request a save waits for, and the buffer version it was asked about.
+    pub(crate) formatting: Option<(u64, u64)>,
+    pub(crate) format_requests: u64,
     /// Set around an edit that typing made, which narrows the suggestion list instead of closing it.
     typing: bool,
     pub(crate) marked: Option<String>,
@@ -309,6 +321,9 @@ impl EditorView {
             hovering: Hovering::default(),
             completing: Completing::default(),
             typing: false,
+            format_setting: None,
+            formatting: None,
+            format_requests: 0,
             marked: None,
             find: None,
             find_opening: None,
@@ -1132,9 +1147,7 @@ impl Render for EditorView {
                             b.redo(c);
                         })
                     }))
-                    .on_action(cx.listener(|this, _: &Save, _, cx| {
-                        this.save(cx);
-                    }))
+                    .on_action(cx.listener(|this, _: &Save, _, cx| this.save_formatted(cx)))
                     .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
                     .on_action(cx.listener(|this, _: &FindNext, _, cx| {
                         this.step_find(1);

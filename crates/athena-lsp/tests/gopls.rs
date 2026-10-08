@@ -13,7 +13,7 @@ fn next_event(events: &async_channel::Receiver<Event>, deadline: Instant) -> Opt
 }
 
 #[test]
-fn gopls_reports_an_unused_import_and_answers_lookups_hover_and_completion() {
+fn gopls_reports_an_unused_import_and_answers_lookups_hover_completion_and_formatting() {
     if athena_lsp::find_program("gopls").is_none() {
         eprintln!("gopls not installed; skipping");
         return;
@@ -93,6 +93,13 @@ fn gopls_reports_an_unused_import_and_answers_lookups_hover_and_completion() {
     };
     let list = futures_lite_block_on(client.completion(&file, word_end, None)).unwrap();
     assert!(list.items.iter().any(|i| i.label == "helper"), "{list:?}");
+
+    let messy =
+        "package main\n\nfunc  helper( ) int { return 1 }\n\nfunc main() { _ = helper() }\n";
+    client.did_change(&file, 3, messy.into());
+    let edits = futures_lite_block_on(client.formatting(&file, 4, false)).unwrap();
+    assert!(!edits.is_empty(), "gofmt has spaces to take out");
+    assert!(edits.iter().all(|e| e.range.start.line == 2), "{edits:?}");
 
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);

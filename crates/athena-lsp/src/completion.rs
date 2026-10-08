@@ -57,6 +57,21 @@ pub(crate) fn parse_completions(result: &Value) -> CompletionList {
     }
 }
 
+/// A list of TextEdits, as formatting replies with; anything else is no edits.
+pub(crate) fn parse_text_edits(result: &Value) -> Vec<TextEdit> {
+    result
+        .as_array()
+        .map(|edits| edits.iter().filter_map(text_edit).collect())
+        .unwrap_or_default()
+}
+
+fn text_edit(e: &Value) -> Option<TextEdit> {
+    Some(TextEdit {
+        range: serde_json::from_value(e.get("range")?.clone()).ok()?,
+        text: e.get("newText")?.as_str()?.to_string(),
+    })
+}
+
 fn parse_item(item: &Value) -> Option<CompletionItem> {
     let str_of = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_string);
     let label = str_of("label")?;
@@ -85,17 +100,7 @@ fn parse_item(item: &Value) -> Option<CompletionItem> {
     let additional_edits = item
         .get("additionalTextEdits")
         .and_then(Value::as_array)
-        .map(|edits| {
-            edits
-                .iter()
-                .filter_map(|e| {
-                    Some(TextEdit {
-                        range: serde_json::from_value(e.get("range")?.clone()).ok()?,
-                        text: e.get("newText")?.as_str()?.to_string(),
-                    })
-                })
-                .collect()
-        })
+        .map(|edits| edits.iter().filter_map(text_edit).collect())
         .unwrap_or_default();
     Some(CompletionItem {
         kind: item.get("kind").and_then(Value::as_u64).map(|k| k as u32),

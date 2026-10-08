@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 
-use crate::completion::{CompletionList, parse_completions};
+use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
 use crate::markup::{Hover, parse_hover};
 use crate::protocol::{self, Diagnostic, Location, Position};
 use crate::{ServerKind, env};
@@ -166,6 +166,21 @@ impl Client {
         Ok(parse_hover(&answer(reply).await?))
     }
 
+    /// The edits that format the whole document, indenting with tabs or `tab_size` spaces.
+    pub async fn formatting(
+        &self,
+        path: &Path,
+        tab_size: u32,
+        insert_spaces: bool,
+    ) -> Result<Vec<TextEdit>, String> {
+        let reply = self.request(
+            "textDocument/formatting",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)},
+                   "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}),
+        );
+        Ok(parse_text_edits(&answer(reply).await?))
+    }
+
     /// Suggestions at `at`; `trigger` is the character typed that asked for them, if any.
     pub async fn completion(
         &self,
@@ -306,6 +321,7 @@ impl Session {
                     "definition": {"linkSupport": true},
                     "references": {},
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
+                    "formatting": {},
                     "completion": {
                         "completionItem": {"snippetSupport": true},
                         "contextSupport": true

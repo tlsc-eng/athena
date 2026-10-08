@@ -28,6 +28,9 @@ pub struct Workspace {
     /// Editors save this long after the last keystroke; 0 turns auto save off.
     #[serde(default = "default_autosave_delay_ms")]
     pub autosave_delay_ms: u64,
+    /// Cmd+S formats through the language server first; `None` does so for Go only.
+    #[serde(default)]
+    pub format_on_save: Option<bool>,
     #[serde(default)]
     pub ui: UiState,
 }
@@ -81,6 +84,7 @@ impl Default for Workspace {
             window: None,
             usage_indicator: false,
             autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
+            format_on_save: None,
             ui: UiState::default(),
         }
     }
@@ -336,6 +340,7 @@ mod tests {
         let old = r#"{"projects":[],"active":null,"window":null}"#;
         let w: Workspace = serde_json::from_str(old).unwrap();
         assert_eq!(w.autosave_delay_ms, 1000);
+        assert_eq!(w.format_on_save, None);
         assert_eq!(Workspace::default().autosave_delay_ms, 1000);
         let off = r#"{"projects":[],"active":null,"window":null,"autosave_delay_ms":0}"#;
         assert_eq!(

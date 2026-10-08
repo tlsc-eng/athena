@@ -146,7 +146,11 @@ impl Shell {
             ItemKind::Editor { path } => {
                 let view = cx.new(|cx| EditorView::open(path.clone(), cx));
                 let delay = self.autosave_delay();
-                view.update(cx, |v, cx| v.set_autosave(delay, cx));
+                let format_on_save = self.workspace.format_on_save;
+                view.update(cx, |v, cx| {
+                    v.set_autosave(delay, cx);
+                    v.set_format_on_save(format_on_save);
+                });
                 cx.subscribe(&view, |this, view, event: &EditorEvent, cx| {
                     match event {
                         EditorEvent::Changed => {}
@@ -183,6 +187,14 @@ impl Shell {
                             line,
                             character,
                         } => return this.lsp_hover(&view, *request, (*line, *character), cx),
+                        EditorEvent::Format {
+                            request,
+                            tab_size,
+                            insert_spaces,
+                        } => {
+                            let options = (*tab_size, *insert_spaces);
+                            return this.lsp_format(&view, *request, options, cx);
+                        }
                         EditorEvent::Complete {
                             request,
                             line,
