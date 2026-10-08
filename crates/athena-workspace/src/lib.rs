@@ -12,6 +12,7 @@ pub use persist::{load, save};
 pub use project::{Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -88,8 +89,13 @@ impl Default for Workspace {
 impl Workspace {
     /// Adds `root` (or focuses it if already open) and returns its index.
     pub fn add_project(&mut self, root: PathBuf) -> usize {
-        let root = root.canonicalize().unwrap_or(root);
-        let index = match self.projects.iter().position(|p| p.root == root) {
+        let root = canonical(&root);
+        // Roots saved by older builds may be spelled through a symlink such as /tmp.
+        let index = match self
+            .projects
+            .iter()
+            .position(|p| canonical(&p.root) == root)
+        {
             Some(i) => i,
             None => {
                 self.projects.push(Project::new(root));
@@ -160,10 +166,16 @@ impl Workspace {
             .collect()
     }
 
-    /// Drops projects whose folder no longer exists, keeping the active one if it survives.
+    /// Drops projects whose folder no longer exists and spells roots canonically, merging projects
+    /// that turn out to be the same folder; keeps the active one if it survives.
     pub fn prune_missing(&mut self) {
-        let active_root = self.active_project().map(|p| p.root.clone());
+        let active_root = self.active_project().map(|p| canonical(&p.root));
         self.projects.retain(|p| Path::new(&p.root).is_dir());
+        let mut seen = HashSet::new();
+        self.projects.retain_mut(|p| {
+            p.root = canonical(&p.root);
+            seen.insert(p.root.clone())
+        });
         self.active = active_root
             .and_then(|r| self.projects.iter().position(|p| p.root == r))
             .or(if self.projects.is_empty() {
@@ -174,9 +186,49 @@ impl Workspace {
     }
 }
 
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real folder and a symlink to it, like /private/tmp and /tmp.
+    fn linked_dirs(test: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("athena-ws-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        (real.canonicalize().unwrap(), link)
+    }
+
+    #[test]
+    fn a_folder_reached_through_a_symlink_is_the_same_project() {
+        let (real, link) = linked_dirs("add");
+        let mut w = Workspace::default();
+        w.projects.push(Project::new(link.clone()));
+        assert_eq!(w.add_project(real.clone()), 0);
+        assert_eq!(w.add_project(link), 0);
+        assert_eq!(w.projects.len(), 1);
+        std::fs::remove_dir_all(real.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn loading_merges_roots_that_name_the_same_folder() {
+        let (real, link) = linked_dirs("prune");
+        let mut w = Workspace::default();
+        w.projects.push(Project::new(link));
+        w.projects.push(Project::new(real.clone()));
+        w.active = Some(1);
+        w.prune_missing();
+        assert_eq!(w.projects.len(), 1);
+        assert_eq!(w.projects[0].root, real);
+        assert_eq!(w.active, Some(0));
+        std::fs::remove_dir_all(real.parent().unwrap()).unwrap();
+    }
 
     fn ws(roots: &[&str]) -> Workspace {
         let mut w = Workspace::default();
