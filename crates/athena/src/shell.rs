@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use athena_term::TerminalView;
+use athena_term::{TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{WindowMode, WindowState, Workspace};
 use gpui::{
@@ -105,12 +105,25 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<TerminalView>> {
-        let root = self.workspace.active_project()?.root.clone();
-        let terminal = self
-            .terminals
-            .entry(root.clone())
-            .or_insert_with(|| cx.new(|cx| TerminalView::new(root, cx)))
-            .clone();
+        let project = self.workspace.active_project()?;
+        let (root, saved) = (project.root.clone(), project.terminal);
+        let terminal = match self.terminals.get(&root) {
+            Some(terminal) => terminal.clone(),
+            None => {
+                let terminal = cx.new(|cx| TerminalView::new(root.clone(), saved, cx));
+                let key = root.clone();
+                cx.subscribe(&terminal, move |this, _, event: &TerminalEvent, cx| {
+                    let TerminalEvent::Attached(pane) = event;
+                    if let Some(p) = this.workspace.projects.iter_mut().find(|p| p.root == key) {
+                        p.terminal = Some(*pane);
+                        this.schedule_save(cx);
+                    }
+                })
+                .detach();
+                self.terminals.insert(root, terminal.clone());
+                terminal
+            }
+        };
         if std::mem::take(&mut self.focus_terminal) {
             window.focus(&terminal.focus_handle(cx));
         }
@@ -145,7 +158,9 @@ impl Shell {
     fn close_project(&mut self, _: &CloseProject, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.workspace.active {
             let root = self.workspace.projects[index].root.clone();
-            self.terminals.remove(&root);
+            if let Some(terminal) = self.terminals.remove(&root) {
+                terminal.update(cx, |terminal, _| terminal.kill());
+            }
             self.focus_terminal = true;
             self.workspace.close_project(index);
             self.rail_from = self.workspace.active.unwrap_or(0);

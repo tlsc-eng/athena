@@ -1,21 +1,35 @@
 use std::ops::Range;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::term::TermMode;
+use anyhow::anyhow;
+use athena_proto::{ClientMsg, Connection, ErrorKind, PaneId, ServerMsg};
 use athena_ui::{ActiveTheme, ButtonKind, empty_state};
 use gpui::{
-    App, Bounds, Context, FocusHandle, Focusable, IntoElement, KeyBinding, KeyDownEvent,
-    MouseButton, Pixels, Render, ScrollWheelEvent, Task, UTF16Selection, Window, actions, div,
-    prelude::*, px,
+    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
+    KeyDownEvent, MouseButton, Pixels, Render, ScrollWheelEvent, Task, UTF16Selection, Window,
+    actions, div, prelude::*, px,
 };
 
 use crate::element::TerminalElement;
 use crate::keys;
-use crate::terminal::{GridSize, Terminal};
+use crate::terminal::{GridSize, PaneEvent, Terminal, Transport};
 
 actions!(terminal, [Paste, ClearScrollback]);
 
 const BATCH_BYTES: usize = 2 * 1024 * 1024;
+
+/// Upper bound on one `Input` frame, well under the protocol's frame limit.
+const INPUT_CHUNK: usize = 256 * 1024;
+
+/// A daemon that dies again this soon after a reconnect is not retried automatically.
+const RECONNECT_COOLDOWN: Duration = Duration::from_secs(10);
+
+const SESSION_LOST: &[u8] = b"\x1b[2m[previous session ended; started a new shell]\x1b[0m\r\n";
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -24,11 +38,44 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-/// One shell session rendered as a pane.
+pub enum TerminalEvent {
+    /// The view is now bound to this daemon pane; persist it to re-attach after a relaunch.
+    Attached(PaneId),
+}
+
+struct MuxTransport {
+    conn: Arc<Connection>,
+    pane: PaneId,
+}
+
+impl Transport for MuxTransport {
+    fn write(&self, bytes: Vec<u8>) {
+        for chunk in bytes.chunks(INPUT_CHUNK) {
+            let _ = self.conn.send(&ClientMsg::Input {
+                pane: self.pane,
+                data: chunk.to_vec(),
+            });
+        }
+    }
+
+    fn resize(&self, rows: u16, cols: u16) {
+        let _ = self.conn.send(&ClientMsg::Resize {
+            pane: self.pane,
+            rows,
+            cols,
+        });
+    }
+}
+
+/// One shell session, owned by the `athena-mux` daemon and rendered as a pane.
 pub struct TerminalView {
     terminal: Option<Terminal>,
     error: Option<String>,
     cwd: PathBuf,
+    pane: Option<PaneId>,
+    conn: Option<Arc<Connection>>,
+    session_lost: bool,
+    last_reconnect: Option<Instant>,
     pub(crate) focus: FocusHandle,
     pub(crate) marked: String,
     pub(crate) cursor_bounds: Option<Bounds<Pixels>>,
@@ -37,12 +84,19 @@ pub struct TerminalView {
     _io: Option<Task<()>>,
 }
 
+impl EventEmitter<TerminalEvent> for TerminalView {}
+
 impl TerminalView {
-    pub fn new(cwd: PathBuf, cx: &mut Context<Self>) -> Self {
+    /// Re-attaches to `pane` when given and still alive, otherwise starts a new shell in `cwd`.
+    pub fn new(cwd: PathBuf, pane: Option<PaneId>, cx: &mut Context<Self>) -> Self {
         let mut view = Self {
             terminal: None,
             error: None,
             cwd,
+            pane,
+            conn: None,
+            session_lost: false,
+            last_reconnect: None,
             focus: cx.focus_handle(),
             marked: String::new(),
             cursor_bounds: None,
@@ -55,12 +109,19 @@ impl TerminalView {
             scroll_remainder: 0.,
             _io: None,
         };
-        view.start(cx);
+        view.connect(cx);
         view
     }
 
     pub fn title(&self) -> Option<&str> {
         self.terminal.as_ref()?.title.as_deref()
+    }
+
+    /// Ends the shell for good, as when its project is closed.
+    pub fn kill(&mut self) {
+        if let (Some(conn), Some(pane)) = (&self.conn, self.pane.take()) {
+            let _ = conn.send(&ClientMsg::Kill { pane });
+        }
     }
 
     pub(crate) fn terminal(&self) -> Option<&Terminal> {
@@ -69,48 +130,161 @@ impl TerminalView {
 
     pub(crate) fn resize(&mut self, grid: GridSize) {
         self.grid = grid;
-        if let Some(terminal) = self.terminal.as_mut() {
+        if let Some(terminal) = self.terminal.as_mut()
+            && !terminal.replaying
+        {
             terminal.resize(grid);
         }
     }
 
-    fn start(&mut self, cx: &mut Context<Self>) {
-        let (terminal, output) = match Terminal::spawn(&self.cwd, self.grid) {
-            Ok(pair) => pair,
-            Err(err) => {
-                self.terminal = None;
-                self.error = Some(format!("{err:#}"));
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        let first = match self.pane {
+            Some(pane) => ClientMsg::Attach { pane },
+            None => self.spawn_msg(),
+        };
+        self._io = Some(cx.spawn(async move |this, cx| {
+            let connected = cx
+                .background_executor()
+                .spawn(async move {
+                    let (conn, reader) = open_connection()?;
+                    conn.send(&first)?;
+                    anyhow::Ok((conn, reader))
+                })
+                .await;
+            let (conn, reader) = match connected {
+                Ok(pair) => pair,
+                Err(err) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.error = Some(format!("{err:#}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let conn = Arc::new(conn);
+            if this
+                .update(cx, |this, _| this.conn = Some(conn.clone()))
+                .is_err()
+            {
                 return;
             }
-        };
-        self.terminal = Some(terminal);
-        self.error = None;
-        self._io = Some(cx.spawn(async move |this, cx| {
-            while let Ok(first) = output.recv().await {
+
+            let messages = read_messages(reader);
+            while let Ok(first) = messages.recv().await {
                 // Drain what is already queued so one frame covers a burst of output.
                 let mut batch = vec![first];
                 let mut bytes = 0;
                 while bytes < BATCH_BYTES {
-                    let Ok(next) = output.try_recv() else { break };
-                    if let crate::pty::PtyEvent::Output(chunk) = &next {
-                        bytes += chunk.len();
+                    let Ok(next) = messages.try_recv() else { break };
+                    if let ServerMsg::Output { data, .. } = &next {
+                        bytes += data.len();
                     }
                     batch.push(next);
                 }
                 let alive = this.update(cx, |this, cx| {
-                    let palette = cx.theme().terminal.clone();
-                    if let Some(terminal) = this.terminal.as_mut() {
-                        for event in batch {
-                            terminal.handle(event, &palette);
-                        }
+                    for msg in batch {
+                        this.on_message(msg, cx);
                     }
                     cx.notify();
                 });
                 if alive.is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = this.update(cx, |this, cx| {
+                this.conn = None;
+                let recent = this
+                    .last_reconnect
+                    .is_some_and(|t| t.elapsed() < RECONNECT_COOLDOWN);
+                if recent {
+                    this.error = Some("Lost the connection to the session daemon.".into());
+                } else {
+                    // The daemon died; its shells went with it, so the attach below starts fresh ones.
+                    this.last_reconnect = Some(Instant::now());
+                    this.connect(cx);
+                }
+                cx.notify();
+            });
         }));
+    }
+
+    fn spawn_msg(&self) -> ClientMsg {
+        ClientMsg::Spawn {
+            cwd: self.cwd.clone(),
+            rows: self.grid.rows,
+            cols: self.grid.cols,
+        }
+    }
+
+    fn on_message(&mut self, msg: ServerMsg, cx: &mut Context<Self>) {
+        let palette = cx.theme().terminal.clone();
+        match msg {
+            ServerMsg::Spawned { pane } => {
+                self.pane = Some(pane);
+                self.send(ClientMsg::Attach { pane });
+                cx.emit(TerminalEvent::Attached(pane));
+            }
+            ServerMsg::Attached { pane, rows, cols } => {
+                let Some(conn) = self.conn.clone() else {
+                    return;
+                };
+                // Start at the daemon's size so the replayed screen lays out as it was drawn.
+                let size = GridSize {
+                    rows,
+                    cols,
+                    ..self.grid
+                };
+                let mut terminal = Terminal::new(size, Box::new(MuxTransport { conn, pane }));
+                terminal.replaying = true;
+                self.terminal = Some(terminal);
+            }
+            ServerMsg::Output { data, .. } => {
+                if let Some(terminal) = self.terminal.as_mut() {
+                    terminal.handle(PaneEvent::Output(data), &palette);
+                }
+            }
+            ServerMsg::ReplayDone { .. } => {
+                if let Some(terminal) = self.terminal.as_mut() {
+                    terminal.replaying = false;
+                    if std::mem::take(&mut self.session_lost) {
+                        terminal.handle(PaneEvent::Output(SESSION_LOST.to_vec()), &palette);
+                    }
+                    terminal.resize(self.grid);
+                }
+            }
+            ServerMsg::Exited { code, .. } => {
+                if let Some(terminal) = self.terminal.as_mut() {
+                    terminal.handle(PaneEvent::Exited(code), &palette);
+                }
+            }
+            ServerMsg::Error {
+                kind: ErrorKind::NoSuchPane(_),
+            } => {
+                self.pane = None;
+                self.session_lost = true;
+                self.send(self.spawn_msg());
+            }
+            ServerMsg::Error { kind } => self.error = Some(kind.to_string()),
+            ServerMsg::Hello { .. } | ServerMsg::Panes { .. } => {}
+        }
+    }
+
+    fn send(&self, msg: ClientMsg) {
+        if let Some(conn) = &self.conn {
+            let _ = conn.send(&msg);
+        }
+    }
+
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        self.kill();
+        self.terminal = None;
+        if self.conn.is_some() {
+            self.send(self.spawn_msg());
+        } else {
+            self.connect(cx);
+        }
+        cx.notify();
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -119,9 +293,8 @@ impl TerminalView {
         };
         if terminal.exit.is_some() {
             if event.keystroke.key == "enter" {
-                self.start(cx);
+                self.restart(cx);
                 cx.stop_propagation();
-                cx.notify();
             }
             return;
         }
@@ -232,11 +405,12 @@ impl Render for TerminalView {
             let retry =
                 athena_ui::Button::new("terminal-retry", "Try again", ButtonKind::Secondary)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.start(cx);
+                        this.conn = None;
+                        this.connect(cx);
                         cx.notify();
                     }));
             return root.items_center().justify_center().child(empty_state(
-                "Could not start a shell",
+                "Terminal unavailable",
                 error.clone(),
                 Some(retry),
                 cx,
@@ -336,4 +510,29 @@ impl gpui::EntityInputHandler for TerminalView {
     ) -> Option<usize> {
         None
     }
+}
+
+/// Connects to the session daemon, starting the one installed next to this executable if needed.
+fn open_connection() -> anyhow::Result<(Connection, UnixStream)> {
+    let daemon = std::env::current_exe()?.with_file_name("athena-mux");
+    let socket = athena_proto::socket_path()?;
+    let log = athena_proto::log_path()?;
+    athena_proto::connect_or_spawn(&socket, &daemon, &log).map_err(|e| anyhow!(e))
+}
+
+fn read_messages(mut reader: UnixStream) -> async_channel::Receiver<ServerMsg> {
+    let (tx, rx) = async_channel::bounded(64);
+    let spawned = thread::Builder::new()
+        .name("mux-read".into())
+        .spawn(move || {
+            while let Ok(Some(msg)) = athena_proto::read_frame::<_, ServerMsg>(&mut reader) {
+                if tx.send_blocking(msg).is_err() {
+                    break;
+                }
+            }
+        });
+    if spawned.is_err() {
+        rx.close();
+    }
+    rx
 }

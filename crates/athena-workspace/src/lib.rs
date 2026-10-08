@@ -1,7 +1,7 @@
 mod persist;
 mod project;
 
-pub use persist::{data_dir, load, save};
+pub use persist::{load, save};
 pub use project::{Project, git_branch};
 
 use std::path::{Path, PathBuf};

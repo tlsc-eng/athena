@@ -439,10 +439,12 @@ name = "athena"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "athena-proto",
  "athena-term",
  "athena-ui",
  "athena-workspace",
  "gpui",
+ "libc",
 ]
 
 [[package]]
@@ -477,9 +479,9 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "async-channel 2.5.0",
+ "athena-proto",
  "athena-ui",
  "gpui",
- "portable-pty",
 ]
 
 [[package]]

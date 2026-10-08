@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -7,11 +6,9 @@ use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Handler, Processor, StdSyncHandler};
-use anyhow::Result;
 use athena_ui::TerminalColors;
 
 use crate::colors;
-use crate::pty::{LocalPty, PtyEvent};
 
 const SCROLLBACK_LINES: usize = 10_000;
 const MAX_TITLE: usize = 256;
@@ -26,6 +23,17 @@ impl EventListener for Listener {
     }
 }
 
+/// Where keystrokes and size changes go; the daemon connection in practice.
+pub trait Transport {
+    fn write(&self, bytes: Vec<u8>);
+    fn resize(&self, rows: u16, cols: u16);
+}
+
+pub enum PaneEvent {
+    Output(Vec<u8>),
+    Exited(Option<i32>),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct GridSize {
     pub cols: u16,
@@ -38,16 +46,17 @@ pub struct Terminal {
     term: Term<Listener>,
     parser: Processor<StdSyncHandler>,
     events: Listener,
-    pty: LocalPty,
+    transport: Box<dyn Transport>,
     size: GridSize,
+    /// While replaying history, replies to old queries must not reach the live shell.
+    pub replaying: bool,
     pub title: Option<String>,
     pub exit: Option<Option<i32>>,
     pub bell: bool,
 }
 
 impl Terminal {
-    pub fn spawn(cwd: &Path, size: GridSize) -> Result<(Self, async_channel::Receiver<PtyEvent>)> {
-        let (pty, output) = LocalPty::spawn(cwd, size.rows, size.cols)?;
+    pub fn new(size: GridSize, transport: Box<dyn Transport>) -> Self {
         let events = Listener::default();
         let config = term::Config {
             scrolling_history: SCROLLBACK_LINES,
@@ -57,17 +66,17 @@ impl Terminal {
         };
         let dims = TermSize::new(size.cols as usize, size.rows as usize);
         let term = Term::new(config, &dims, events.clone());
-        let terminal = Self {
+        Self {
             term,
             parser: Processor::new(),
             events,
-            pty,
+            transport,
             size,
+            replaying: false,
             title: None,
             exit: None,
             bell: false,
-        };
-        Ok((terminal, output))
+        }
     }
 
     pub fn term(&self) -> &Term<Listener> {
@@ -78,23 +87,26 @@ impl Terminal {
         *self.term.mode()
     }
 
-    pub fn handle(&mut self, event: PtyEvent, palette: &TerminalColors) {
+    pub fn handle(&mut self, event: PaneEvent, palette: &TerminalColors) {
         match event {
-            PtyEvent::Output(bytes) => {
+            PaneEvent::Output(bytes) => {
                 self.parser.advance(&mut self.term, &bytes);
                 self.drain_events(palette);
             }
-            PtyEvent::Exited(code) => self.exit = Some(code),
+            PaneEvent::Exited(code) => self.exit = Some(code),
         }
     }
 
     fn drain_events(&mut self, palette: &TerminalColors) {
         let events: Vec<Event> = self.events.0.borrow_mut().drain(..).collect();
         for event in events {
+            if self.replaying && !matches!(event, Event::Title(_) | Event::ResetTitle) {
+                continue;
+            }
             match event {
                 Event::Title(title) => self.title = Some(sanitize_title(&title)),
                 Event::ResetTitle => self.title = None,
-                Event::PtyWrite(reply) => self.pty.write(reply.into_bytes()),
+                Event::PtyWrite(reply) => self.transport.write(reply.into_bytes()),
                 Event::ColorRequest(index, format) => {
                     let color = match index {
                         256 => palette.foreground,
@@ -102,11 +114,12 @@ impl Terminal {
                         258 => palette.cursor,
                         i => colors::indexed(i, self.term.colors(), palette),
                     };
-                    self.pty
+                    self.transport
                         .write(format(colors::hsla_to_rgb(color)).into_bytes());
                 }
                 Event::TextAreaSizeRequest(format) => {
-                    self.pty.write(format(self.window_size()).into_bytes());
+                    self.transport
+                        .write(format(self.window_size()).into_bytes());
                 }
                 Event::Bell => self.bell = true,
                 _ => {}
@@ -120,7 +133,7 @@ impl Terminal {
             return;
         }
         self.term.scroll_display(Scroll::Bottom);
-        self.pty.write(bytes);
+        self.transport.write(bytes);
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -142,7 +155,7 @@ impl Terminal {
     pub fn clear_scrollback(&mut self) {
         self.term.clear_screen(ClearMode::Saved);
         if !self.mode().contains(TermMode::ALT_SCREEN) {
-            self.pty.write(vec![0x0c]);
+            self.transport.write(vec![0x0c]);
         }
     }
 
@@ -155,7 +168,7 @@ impl Terminal {
         if grid_changed {
             self.term
                 .resize(TermSize::new(size.cols as usize, size.rows as usize));
-            self.pty.resize(size.rows, size.cols);
+            self.transport.resize(size.rows, size.cols);
         }
     }
 

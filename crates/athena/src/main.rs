@@ -1,4 +1,5 @@
 mod actions;
+mod cli;
 mod shell;
 
 use std::path::PathBuf;
@@ -10,6 +11,9 @@ use gpui::{
 };
 
 fn main() {
+    if let Some(code) = cli::run(std::env::args().skip(1).collect()) {
+        std::process::exit(code);
+    }
     Application::new()
         .with_assets(athena_ui::Assets)
         .run(|cx: &mut App| {
@@ -46,7 +50,7 @@ fn main() {
 }
 
 fn workspace_path() -> PathBuf {
-    athena_workspace::data_dir()
+    athena_proto::data_dir()
         .expect("application support directory")
         .join("workspace.json")
 }

@@ -6,11 +6,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Project {
     pub root: PathBuf,
+    /// Session daemon pane holding this project's shell, re-attached on launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<u64>,
 }
 
 impl Project {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            terminal: None,
+        }
     }
 
     pub fn name(&self) -> String {
