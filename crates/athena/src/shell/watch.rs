@@ -51,6 +51,7 @@ impl Shell {
             .collect();
         let watch = &mut self.watch;
         watch.watchers.retain(|root, _| roots.contains(root));
+        watch.failed.retain(|root| roots.contains(root));
         for root in roots {
             if watch.watchers.contains_key(&root) || watch.failed.contains(&root) {
                 continue;
