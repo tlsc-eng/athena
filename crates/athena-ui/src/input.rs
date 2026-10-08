@@ -23,7 +23,8 @@ actions!(
         SubmitBeside,
         Cancel,
         Up,
-        Down
+        Down,
+        SelectAll
     ]
 );
 
@@ -44,6 +45,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("up", Up, ctx),
         KeyBinding::new("down", Down, ctx),
+        KeyBinding::new("cmd-a", SelectAll, ctx),
     ]);
 }
 
@@ -62,6 +64,8 @@ pub enum InputEvent {
 pub struct TextInput {
     text: String,
     cursor: usize,
+    /// The whole text is selected, so typing or pasting replaces it.
+    all_selected: bool,
     marked: Option<Range<usize>>,
     placeholder: SharedString,
     focus: FocusHandle,
@@ -82,6 +86,7 @@ impl TextInput {
         Self {
             text: String::new(),
             cursor: 0,
+            all_selected: false,
             marked: None,
             placeholder: placeholder.into(),
             focus: cx.focus_handle(),
@@ -97,12 +102,38 @@ impl TextInput {
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.text = text.into();
         self.cursor = self.text.len();
+        self.all_selected = false;
         self.marked = None;
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
 
+    /// Selects the whole text, as a rename field starts, so the first keystroke replaces it.
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.all_selected = !self.text.is_empty();
+        self.cursor = self.text.len();
+        cx.notify();
+    }
+
+    /// The range an edit at the cursor replaces: everything while it is all selected.
+    fn at_cursor(&self) -> Range<usize> {
+        if self.all_selected {
+            0..self.text.len()
+        } else {
+            self.cursor..self.cursor
+        }
+    }
+
+    fn deselect(&mut self, cx: &mut Context<Self>) -> bool {
+        let was = std::mem::take(&mut self.all_selected);
+        if was {
+            cx.notify();
+        }
+        was
+    }
+
     fn edit(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        self.all_selected = false;
         self.text.replace_range(range.clone(), text);
         self.cursor = range.start + text.len();
         cx.emit(InputEvent::Changed);
@@ -150,40 +181,53 @@ impl Render for TextInput {
             .key_context("TextInput")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Backspace, _, cx| {
-                if this.cursor > 0 {
+                if this.all_selected {
+                    this.edit(0..this.text.len(), "", cx);
+                } else if this.cursor > 0 {
                     let start = this.prev_boundary(this.cursor);
                     this.edit(start..this.cursor, "", cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Delete, _, cx| {
-                if this.cursor < this.text.len() {
+                if this.all_selected {
+                    this.edit(0..this.text.len(), "", cx);
+                } else if this.cursor < this.text.len() {
                     let end = this.next_boundary(this.cursor);
                     this.edit(this.cursor..end, "", cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Left, _, cx| {
-                this.cursor = this.prev_boundary(this.cursor);
+                // As in a macOS field, Left on a selection goes to its start.
+                this.cursor = match this.deselect(cx) {
+                    true => 0,
+                    false => this.prev_boundary(this.cursor),
+                };
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Right, _, cx| {
-                this.cursor = this.next_boundary(this.cursor);
+                if !this.deselect(cx) {
+                    this.cursor = this.next_boundary(this.cursor);
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Home, _, cx| {
+                this.deselect(cx);
                 this.cursor = 0;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &End, _, cx| {
+                this.deselect(cx);
                 this.cursor = this.text.len();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
             .on_action(cx.listener(|this, _: &Paste, _, cx| {
                 if let Some(text) = cx
                     .read_from_clipboard()
                     .and_then(|c: ClipboardItem| c.text())
                 {
                     let line = text.lines().next().unwrap_or_default().to_string();
-                    this.edit(this.cursor..this.cursor, &line, cx);
+                    this.edit(this.at_cursor(), &line, cx);
                 }
             }))
             .on_action(cx.listener(|_, _: &Submit, _, cx| cx.emit(InputEvent::Submit)))
@@ -203,6 +247,7 @@ struct InputElement {
 struct InputFrame {
     line: ShapedLine,
     cursor: Option<PaintQuad>,
+    selection: Option<PaintQuad>,
 }
 
 impl IntoElement for InputElement {
@@ -300,7 +345,14 @@ impl Element for InputElement {
         } else {
             line.x_for_index(input.cursor)
         };
-        let cursor = input.focus.is_focused(window).then(|| {
+        let focused = input.focus.is_focused(window);
+        let selection = (focused && input.all_selected).then(|| {
+            fill(
+                Bounds::new(bounds.origin, size(line.width, bounds.size.height)),
+                theme.color.surface_accent,
+            )
+        });
+        let cursor = focused.then(|| {
             fill(
                 Bounds::new(
                     point(bounds.left() + cursor_x, bounds.top()),
@@ -309,7 +361,11 @@ impl Element for InputElement {
                 theme.color.accent,
             )
         });
-        InputFrame { line, cursor }
+        InputFrame {
+            line,
+            cursor,
+            selection,
+        }
     }
 
     fn paint(
@@ -328,6 +384,9 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        if let Some(selection) = frame.selection.take() {
+            window.paint_quad(selection);
+        }
         let _ = frame
             .line
             .paint(bounds.origin, window.line_height(), window, cx);
@@ -362,8 +421,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         let at = self.to_utf16(self.cursor);
+        let start = if self.all_selected { 0 } else { at };
         Some(UTF16Selection {
-            range: at..at,
+            range: start..at,
             reversed: false,
         })
     }
@@ -388,7 +448,7 @@ impl EntityInputHandler for TextInput {
         let range = range
             .map(|r| self.range_from_utf16(&r))
             .or(self.marked.take())
-            .unwrap_or(self.cursor..self.cursor);
+            .unwrap_or(self.at_cursor());
         self.marked = None;
         self.edit(range, text, cx);
     }
@@ -404,7 +464,7 @@ impl EntityInputHandler for TextInput {
         let range = range
             .map(|r| self.range_from_utf16(&r))
             .or(self.marked.clone())
-            .unwrap_or(self.cursor..self.cursor);
+            .unwrap_or(self.at_cursor());
         self.edit(range.clone(), text, cx);
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
     }
