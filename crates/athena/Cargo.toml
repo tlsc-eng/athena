@@ -12,7 +12,7 @@ anyhow.workspace = true
 ignore.workspace = true
 regex.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 rmcp.workspace = true
 tokio.workspace = true
 schemars.workspace = true
