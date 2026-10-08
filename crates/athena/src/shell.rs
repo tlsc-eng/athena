@@ -1,18 +1,24 @@
+mod panes;
+
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
-use athena_term::{TerminalEvent, TerminalView};
+use athena_term::TerminalView;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
-use athena_workspace::{WindowMode, WindowState, Workspace};
+use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
 use gpui::{
-    Animation, AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    PathPromptOptions, Render, Subscription, Task, Window, WindowBounds, div, prelude::*, px,
+    Animation, AnyElement, Bounds, Context, Entity, FocusHandle, FontWeight, IntoElement,
+    MouseButton, PathPromptOptions, Pixels, Render, Subscription, Task, Window, WindowBounds, div,
+    prelude::*, px,
 };
 
 use crate::actions::{
-    AddProject, CloseProject, Minimize, NextProject, PrevProject, SelectProject, ToggleFullScreen,
-    Zoom,
+    AddProject, CloseProject, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+    Minimize, NewTerminal, NextProject, NextTab, PrevProject, PrevTab, SelectProject, SelectTab,
+    SplitDown, SplitRight, ToggleFullScreen, TogglePaneZoom, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -26,11 +32,17 @@ pub struct Shell {
     workspace: Workspace,
     path: PathBuf,
     focus: FocusHandle,
-    terminals: HashMap<PathBuf, Entity<TerminalView>>,
+    items: HashMap<(PathBuf, ItemId), Entity<TerminalView>>,
+    pane_area: Rc<RefCell<Bounds<Pixels>>>,
+    drag: Option<panes::Drag>,
+    zoomed: Option<PaneId>,
+    entering: Option<PaneId>,
+    leaving: Option<PaneId>,
+    tab_switches: u64,
     save_task: Option<Task<()>>,
     rail_from: usize,
     switch_count: u64,
-    focus_terminal: bool,
+    focus_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -66,10 +78,16 @@ impl Shell {
             workspace,
             path,
             focus,
-            terminals: HashMap::new(),
+            items: HashMap::new(),
+            pane_area: Rc::default(),
+            drag: None,
+            zoomed: None,
+            entering: None,
+            leaving: None,
+            tab_switches: 0,
             save_task: None,
             switch_count: 0,
-            focus_terminal: true,
+            focus_pending: true,
             _subscriptions: subscriptions,
         }
     }
@@ -95,39 +113,10 @@ impl Shell {
         self.rail_from = self.workspace.active.unwrap_or(index);
         self.switch_count += 1;
         self.workspace.activate(index);
-        self.focus_terminal = true;
+        self.zoomed = None;
+        self.focus_pending = true;
         self.schedule_save(cx);
         cx.notify();
-    }
-
-    fn active_terminal(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<TerminalView>> {
-        let project = self.workspace.active_project()?;
-        let (root, saved) = (project.root.clone(), project.terminal);
-        let terminal = match self.terminals.get(&root) {
-            Some(terminal) => terminal.clone(),
-            None => {
-                let terminal = cx.new(|cx| TerminalView::new(root.clone(), saved, cx));
-                let key = root.clone();
-                cx.subscribe(&terminal, move |this, _, event: &TerminalEvent, cx| {
-                    let TerminalEvent::Attached(pane) = event;
-                    if let Some(p) = this.workspace.projects.iter_mut().find(|p| p.root == key) {
-                        p.terminal = Some(*pane);
-                        this.schedule_save(cx);
-                    }
-                })
-                .detach();
-                self.terminals.insert(root, terminal.clone());
-                terminal
-            }
-        };
-        if std::mem::take(&mut self.focus_terminal) {
-            window.focus(&terminal.focus_handle(cx));
-        }
-        Some(terminal)
     }
 
     fn add_project(&mut self, _: &AddProject, _: &mut Window, cx: &mut Context<Self>) {
@@ -158,10 +147,9 @@ impl Shell {
     fn close_project(&mut self, _: &CloseProject, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.workspace.active {
             let root = self.workspace.projects[index].root.clone();
-            if let Some(terminal) = self.terminals.remove(&root) {
-                terminal.update(cx, |terminal, _| terminal.kill());
-            }
-            self.focus_terminal = true;
+            self.drop_project_items(&root, cx);
+            self.zoomed = None;
+            self.focus_pending = true;
             self.workspace.close_project(index);
             self.rail_from = self.workspace.active.unwrap_or(0);
             self.switch_count += 1;
@@ -308,8 +296,8 @@ impl Shell {
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
-        let body = match self.active_terminal(window, cx) {
-            Some(terminal) => div().size_full().child(terminal),
+        let body = match self.workspace.active {
+            Some(_) => self.render_panes(window, cx),
             None => div()
                 .flex()
                 .flex_col()
@@ -326,7 +314,8 @@ impl Shell {
                             }),
                     ),
                     cx,
-                )),
+                ))
+                .into_any_element(),
         };
         let pane = div()
             .size_full()
@@ -349,6 +338,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let body = div()
+            .relative()
             .flex_1()
             .min_h_0()
             .flex()
@@ -364,7 +354,7 @@ impl Render for Shell {
             body,
             "launch",
             Animation::new(t.motion.base).with_easing(motion::ease_enter()),
-            |el, d| el.opacity(d).mt(px(4. * (1. - d))),
+            |el, d| el.opacity(d).top(px(4. * (1. - d))),
         );
 
         div()
@@ -378,6 +368,35 @@ impl Render for Shell {
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
             .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())
+            .on_action(cx.listener(|this, _: &NewTerminal, w, cx| this.new_terminal(w, cx)))
+            .on_action(cx.listener(|this, _: &CloseTab, w, cx| this.close_active_tab(w, cx)))
+            .on_action(
+                cx.listener(|this, _: &SplitRight, w, cx| this.split(Axis::Horizontal, w, cx)),
+            )
+            .on_action(cx.listener(|this, _: &SplitDown, w, cx| this.split(Axis::Vertical, w, cx)))
+            .on_action(cx.listener(|this, _: &FocusPaneLeft, w, cx| {
+                this.focus_direction(Direction::Left, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneRight, w, cx| {
+                this.focus_direction(Direction::Right, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneUp, w, cx| {
+                this.focus_direction(Direction::Up, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneDown, w, cx| {
+                this.focus_direction(Direction::Down, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TogglePaneZoom, _, cx| this.toggle_zoom(cx)))
+            .on_action(cx.listener(|this, _: &NextTab, w, cx| this.cycle_tab(1, w, cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, w, cx| this.cycle_tab(-1, w, cx)))
+            .on_action(
+                cx.listener(|this, a: &SelectTab, w, cx| this.activate_tab_in_focused(a.0, w, cx)),
+            )
+            .on_mouse_move(cx.listener(Self::drag_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.drag_end(cx)),
+            )
             .size_full()
             .flex()
             .flex_col()

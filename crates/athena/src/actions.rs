@@ -14,12 +14,27 @@ actions!(
         CloseProject,
         PrevProject,
         NextProject,
+        NewTerminal,
+        CloseTab,
+        SplitRight,
+        SplitDown,
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneUp,
+        FocusPaneDown,
+        TogglePaneZoom,
+        NextTab,
+        PrevTab,
     ]
 );
 
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = athena, no_json)]
 pub struct SelectProject(pub usize);
+
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = athena, no_json)]
+pub struct SelectTab(pub usize);
 
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -37,6 +52,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-w", CloseProject, None),
         KeyBinding::new("cmd-alt-[", PrevProject, None),
         KeyBinding::new("cmd-alt-]", NextProject, None),
+        KeyBinding::new("cmd-t", NewTerminal, None),
+        KeyBinding::new("cmd-w", CloseTab, None),
+        KeyBinding::new("cmd-d", SplitRight, None),
+        KeyBinding::new("cmd-shift-d", SplitDown, None),
+        KeyBinding::new("cmd-alt-left", FocusPaneLeft, None),
+        KeyBinding::new("cmd-alt-right", FocusPaneRight, None),
+        KeyBinding::new("cmd-alt-up", FocusPaneUp, None),
+        KeyBinding::new("cmd-alt-down", FocusPaneDown, None),
+        KeyBinding::new("cmd-shift-enter", TogglePaneZoom, None),
+        KeyBinding::new("cmd-}", NextTab, None),
+        KeyBinding::new("cmd-{", PrevTab, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -44,6 +70,7 @@ pub fn init(cx: &mut App) {
             SelectProject(n - 1),
             None,
         ));
+        bindings.push(KeyBinding::new(&format!("cmd-{n}"), SelectTab(n - 1), None));
     }
     cx.bind_keys(bindings);
 
@@ -63,8 +90,22 @@ pub fn init(cx: &mut App) {
         Menu {
             name: "File".into(),
             items: vec![
+                MenuItem::action("New Terminal", NewTerminal),
                 MenuItem::action("Open Project…", AddProject),
+                MenuItem::separator(),
+                MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close Project", CloseProject),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Split Right", SplitRight),
+                MenuItem::action("Split Down", SplitDown),
+                MenuItem::action("Zoom Pane", TogglePaneZoom),
+                MenuItem::separator(),
+                MenuItem::action("Next Tab", NextTab),
+                MenuItem::action("Previous Tab", PrevTab),
             ],
         },
         Menu {

@@ -4,13 +4,16 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::Workspace;
+use crate::{Project, Workspace};
 
 /// Missing file is an empty workspace; a corrupt one is an error so the caller can keep a copy.
 pub fn load(path: &Path) -> Result<Workspace> {
     match fs::read(path) {
         Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+            let mut workspace: Workspace = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse {}", path.display()))?;
+            workspace.projects.iter_mut().for_each(Project::migrate);
+            Ok(workspace)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Workspace::default()),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
