@@ -107,6 +107,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-/", ToggleComment, ctx),
         KeyBinding::new("escape", Escape, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
+        KeyBinding::new("cmd-alt-g", GoToDefinition, ctx),
     ]);
 }
 

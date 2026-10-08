@@ -48,7 +48,7 @@ fn gopls_reports_an_unused_import_and_finds_definitions() {
         line: 6,
         character: 19,
     };
-    let found = futures_lite_block_on(client.definition(&file, call));
+    let found = futures_lite_block_on(client.definition(&file, call)).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].path, file);
     assert_eq!(found[0].range.start.line, 4);

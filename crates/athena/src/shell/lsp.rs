@@ -14,6 +14,8 @@ use super::item::ItemView;
 /// Typing pauses this long before the server gets the new text.
 const CHANGE_DELAY: Duration = Duration::from_millis(300);
 
+const NO_SERVER: &str = "No language server runs for this file.";
+
 type ServerKey = (PathBuf, ServerKind);
 
 struct Server {
@@ -242,18 +244,32 @@ impl Shell {
             .and_then(|k| self.lsp.servers.get(k))
             .map(|s| s.client.clone())
         else {
-            return;
+            return self.lsp_failed("No definition found", NO_SERVER.into(), cx);
         };
         cx.spawn(async move |this, cx| {
             let found = client.definition(&doc, at).await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(target) = found.into_iter().next() {
-                    this.lsp.jump = Some((target.path, target.range.start));
-                    cx.notify();
+                match found.map(|list| list.into_iter().next()) {
+                    Ok(Some(target)) => {
+                        this.lsp.jump = Some((target.path, target.range.start));
+                        cx.notify();
+                    }
+                    Ok(None) => this.lsp_failed(
+                        "No definition found",
+                        "Nothing is defined under the cursor.".into(),
+                        cx,
+                    ),
+                    Err(why) => this.lsp_failed("Go to definition failed", why, cx),
                 }
             });
         })
         .detach();
+    }
+
+    /// Says why a lookup went nowhere, so a click or key press is never silently ignored.
+    fn lsp_failed(&mut self, title: &str, body: String, cx: &mut Context<Self>) {
+        let title = title.to_string();
+        self.local_notice(NoticeKind::Message { title, body }, cx);
     }
 
     /// Opens a definition found since the last frame; opening a tab needs the window.

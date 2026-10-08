@@ -34,7 +34,9 @@ enum Outgoing {
     Shutdown,
 }
 
-type Pending = Arc<Mutex<HashMap<i64, async_channel::Sender<Value>>>>;
+/// A reply's `result`, or the message of its `error`.
+type Reply = Result<Value, String>;
+type Pending = Arc<Mutex<HashMap<i64, async_channel::Sender<Reply>>>>;
 type Writer = Arc<Mutex<Option<BufWriter<ChildStdin>>>>;
 
 /// One running language server. Calls never block: messages queue until `initialize` has finished.
@@ -82,7 +84,7 @@ impl Client {
         let _ = self.outgoing.try_send(Outgoing::Notify(method, params));
     }
 
-    fn request(&self, method: &'static str, params: Value) -> async_channel::Receiver<Value> {
+    fn request(&self, method: &'static str, params: Value) -> async_channel::Receiver<Reply> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = async_channel::bounded(1);
         self.pending.lock().expect("pending lock").insert(id, tx);
@@ -123,16 +125,13 @@ impl Client {
         );
     }
 
-    pub async fn definition(&self, path: &Path, at: Position) -> Vec<Location> {
+    /// Where the symbol at `at` is defined; `Err` carries the server's own reason.
+    pub async fn definition(&self, path: &Path, at: Position) -> Result<Vec<Location>, String> {
         let reply = self.request(
             "textDocument/definition",
             json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
         );
-        reply
-            .recv()
-            .await
-            .map(|v| protocol::parse_locations(&v))
-            .unwrap_or_default()
+        locations(reply).await
     }
 }
 
@@ -203,7 +202,8 @@ impl Session {
         send(&writer, &request(0, "initialize", self.initialize_params()))?;
         let result = init
             .recv_blocking()
-            .context("the server stopped while starting")?;
+            .context("the server stopped while starting")?
+            .map_err(anyhow::Error::msg)?;
         if result.is_null() {
             bail!("{} refused to start", self.kind.program());
         }
@@ -276,8 +276,15 @@ impl Reader {
                     .as_i64()
                     .and_then(|id| self.pending.lock().expect("pending lock").remove(&id));
                 if let Some(waiter) = waiter {
-                    let result = message.get("result").cloned().unwrap_or(Value::Null);
-                    let _ = waiter.try_send(result);
+                    let reply = match message.get("error") {
+                        Some(error) => Err(error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("the request failed")
+                            .to_string()),
+                        None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+                    };
+                    let _ = waiter.try_send(reply);
                 }
             }
             // Servers wait for these answers; gopls stalls without them.
@@ -307,6 +314,13 @@ impl Reader {
             }
             _ => {}
         }
+    }
+}
+
+async fn locations(reply: async_channel::Receiver<Reply>) -> Result<Vec<Location>, String> {
+    match reply.recv().await {
+        Ok(result) => result.map(|v| protocol::parse_locations(&v)),
+        Err(_) => Err("the language server exited".into()),
     }
 }
 
