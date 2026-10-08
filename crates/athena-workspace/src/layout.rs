@@ -64,6 +64,8 @@ pub enum DiffBase {
     Index,
     /// The file before a Claude Code session first edited it, against the file on disk.
     Snapshot { session: String },
+    /// The file on disk against an edit Claude Code proposes and is waiting on; never saved.
+    Proposal { id: String },
 }
 
 impl ItemKind {

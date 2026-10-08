@@ -31,6 +31,9 @@ pub struct Workspace {
     /// Cmd+S formats through the language server first; `None` does so for Go only.
     #[serde(default)]
     pub format_on_save: Option<bool>,
+    /// Claude Code may connect to Athena as its IDE, to show proposed edits and read diagnostics.
+    #[serde(default)]
+    pub ide_integration: bool,
     #[serde(default)]
     pub ui: UiState,
 }
@@ -88,6 +91,7 @@ impl Default for Workspace {
             usage_indicator: false,
             autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
             format_on_save: None,
+            ide_integration: false,
             ui: UiState::default(),
         }
     }

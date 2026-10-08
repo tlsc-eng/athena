@@ -55,6 +55,11 @@ pub fn lineage(pid: i32, parent: impl Fn(i32) -> Option<i32>) -> Vec<i32> {
     out
 }
 
+/// `pid` and its ancestors, nearest first.
+pub fn ancestry(pid: i32) -> Vec<i32> {
+    lineage(pid, parent)
+}
+
 /// The connecting process and its ancestors.
 pub fn peer_lineage(stream: &UnixStream) -> Vec<i32> {
     peer_pid(stream)

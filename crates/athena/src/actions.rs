@@ -59,6 +59,8 @@ actions!(
         PrevProblem,
         GoToSymbol,
         GoToWorkspaceSymbol,
+        ToggleIdeIntegration,
+        SendToClaude,
     ]
 );
 
@@ -124,6 +126,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-o", GoToSymbol, None),
         // VS Code's ⌘T opens a terminal here, so workspace symbols take ⌘⌥O.
         KeyBinding::new("cmd-alt-o", GoToWorkspaceSymbol, None),
+        // The Claude Code extension's key for "Insert At-Mention" in VS Code.
+        KeyBinding::new("cmd-alt-k", SendToClaude, Some("Editor")),
         // Only in the editor: in a terminal F8 belongs to the program running there.
         KeyBinding::new("f8", NextProblem, Some("Editor")),
         KeyBinding::new("shift-f8", PrevProblem, Some("Editor")),
@@ -161,6 +165,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Save As…", SaveAs),
                 MenuItem::action("Toggle Auto Save", ToggleAutoSave),
                 MenuItem::action("Toggle Format on Save", ToggleFormatOnSave),
+                MenuItem::action("Toggle Claude Code Integration", ToggleIdeIntegration),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close Project", CloseProject),

@@ -1,6 +1,7 @@
 mod branches;
 mod bridge;
 mod claude;
+mod claude_ide;
 mod code_actions;
 mod containers_view;
 mod dnd;
@@ -55,8 +56,8 @@ use crate::actions::{
 };
 use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, GoToSymbol, GoToWorkspaceSymbol,
-    NavigateBack, NavigateForward, NextProblem, PrevProblem, RevealInTree, ShowChanges,
-    ShowProblems, SwitchBranch, ToggleBlame,
+    NavigateBack, NavigateForward, NextProblem, PrevProblem, RevealInTree, SendToClaude,
+    ShowChanges, ShowProblems, SwitchBranch, ToggleBlame, ToggleIdeIntegration,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -112,6 +113,7 @@ pub struct Shell {
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
+    ide: claude_ide::IdeState,
     usage: usage_view::UsageState,
     _usage: Option<Task<()>>,
     zoomed: Option<PaneId>,
@@ -168,6 +170,7 @@ impl Shell {
             cx.on_app_quit(|this, cx| {
                 this.flush_unsaved(cx);
                 this.save_now();
+                this.ide_quit();
                 async {}
             }),
         ];
@@ -250,6 +253,7 @@ impl Shell {
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
+            ide: claude_ide::IdeState::default(),
             usage: usage_view::UsageState::default(),
             _usage: None,
             zoomed: None,
@@ -278,6 +282,7 @@ impl Shell {
         shell.announce_recovery(cx);
         shell.start_usage(window, cx);
         shell.start_git(window, cx);
+        shell.start_ide(window, cx);
         crate::system_notify::set_badge(shell.unread());
         shell
     }
@@ -296,7 +301,8 @@ impl Shell {
 
     fn save_now(&mut self) {
         self.save_task = None;
-        if let Err(err) = athena_workspace::save(&self.path, &self.workspace) {
+        self.sync_ide_folders();
+        if let Err(err) = athena_workspace::save(&self.path, &self.persisted_workspace()) {
             tracing::error!("could not save the workspace: {err:#}");
         }
         if let Err(err) = notices::save(&self.notices_path, &self.notifications) {
@@ -855,6 +861,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &GoToWorkspaceSymbol, w, cx| {
                 this.open_palette_with(palette::Mode::Files, "#", w, cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleIdeIntegration, w, cx| {
+                this.toggle_ide_integration(w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SendToClaude, w, cx| this.send_to_claude(w, cx)))
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)

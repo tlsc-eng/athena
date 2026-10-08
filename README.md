@@ -295,6 +295,30 @@ after pruning) says no copy was kept.
 Snapshots older than 7 days are deleted, then the oldest sessions until the folder is under
 200 MB. `athena notify --edited <file>` reports an edit by hand.
 
+### Claude Code as an IDE (off by default)
+
+**Toggle Claude Code integration** (command palette, or File > Toggle Claude Code Integration)
+lets Claude Code connect to Athena the way it connects to VS Code. It is off by default while the
+protocol is undocumented and may change between Claude Code releases. When it is on:
+
+- Athena listens on a random loopback port and writes `~/.claude/ide/<port>.lock` (owner-only,
+  with a fresh token each launch). Claude Code finds Athena there; the lock lists the open
+  projects and is removed when Athena quits or the setting is turned off.
+- New terminals get `CLAUDE_CODE_SSE_PORT`, so `claude` started in them connects by itself. In a
+  session that was already running, type `/ide`. Athena listens on the same port after a restart
+  when it is free, so older terminals keep finding it.
+- When Claude asks to edit a file, the proposed change opens as "main.rs (Claude's Proposal)":
+  the file on disk against Claude's version. **Accept** (`cmd-enter`) lets Claude Code write it;
+  **Reject** (`cmd-backspace`) or closing the tab declines it. You can still answer in the
+  terminal instead; the tab then closes. Athena never writes the file itself. Claude Code only
+  asks this way when it would otherwise ask for permission, so auto-accept modes skip it.
+- The editor selection goes with each prompt (Claude Code shows "N lines selected"), and
+  `cmd-alt-k` (**Send selection to Claude**) puts `@file#L3-7` into the prompt of the Claude
+  session running in that project's terminals and focuses it.
+- Claude Code reads diagnostics from Athena's language servers before and after each edit.
+
+Quitting with a proposal open answers it as rejected.
+
 ### Playwright MCP
 
 **Enable Playwright MCP** adds a `playwright` server (`@playwright/mcp@0.0.83`, pinned) to the
@@ -345,6 +369,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-shift-m` | Problems tab |
 | `cmd-shift-o` | Go to symbol in file |
 | `cmd-alt-o` | Go to symbol in workspace |
+| `cmd-alt-k` | Send the file and selected lines to Claude (in an editor, with Claude Code integration on) |
 | `f8` / `shift-f8` | Next / previous problem (in an editor only) |
 | `ctrl--` | Go back |
 | `ctrl-shift--` | Go forward (also bound as `ctrl-_`, which is what macOS reports for it) |
@@ -432,6 +457,7 @@ keys while the image viewer has focus.
 | `up` / `down` | Scroll a line |
 | `pageup` / `pagedown` | Scroll a page |
 | `cmd-up` / `cmd-down` | Top / bottom |
+| `cmd-enter` / `cmd-backspace` | Accept / reject a change Claude proposes |
 
 ### File tree, palette and Search tab (text field keys: `crates/athena-ui/src/input.rs`)
 
@@ -479,7 +505,8 @@ athena mcp-stdio              MCP server for Claude Code
 ## Files and logs
 
 Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
-panel sizes, the text zoom and the `autosave_delay_ms` and `format_on_save` settings),
+panel sizes, the text zoom and the `autosave_delay_ms`, `format_on_save` and `ide_integration`
+settings), `ide.env` (the Claude Code integration port that new terminals get),
 `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger

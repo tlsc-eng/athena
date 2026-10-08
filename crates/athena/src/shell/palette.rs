@@ -167,6 +167,11 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Disable Claude Code hooks for this project",
             Box::new(actions::DisableClaudeHooks),
         ),
+        (
+            "Toggle Claude Code integration (diffs, selection, diagnostics)",
+            Box::new(actions::ToggleIdeIntegration),
+        ),
+        ("Send selection to Claude", Box::new(actions::SendToClaude)),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
         ("Problems", Box::new(actions::ShowProblems)),
         ("Go to next problem", Box::new(actions::NextProblem)),

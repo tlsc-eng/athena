@@ -216,6 +216,33 @@ MCP server and the hooks stay.
 5. Does the CLI time out on a long-blocking `openDiff`? No explicit timeout was found around `callIdeRpc`, but
    that is unverified.
 
+## Answers found while implementing (v0.5, same 2.1.295 binary)
+
+Read from the bundle's permission flow (`zo()`, which calls `Lo()`, which calls `openDiff`) and
+cross-checked with claudecode.nvim's `diff.lua`:
+
+1. **Who writes the file on `FILE_SAVED`: Claude Code.** `openDiff` runs inside the permission
+   prompt for the Edit and Write tools. Claude Code diffs its own copy of the old file against the
+   contents the IDE returns, rewrites the tool input from that hunk (`old_string`/`new_string`,
+   or `content` for Write), and then lets the tool run, which writes the file. claudecode.nvim
+   blocks the buffer write for the same reason. **Decision: Athena never writes on Accept**; it
+   answers `[FILE_SAVED, <proposed contents>]`. If it wrote first, the Edit tool would no longer
+   find `old_string`.
+2. **`TAB_CLOSED` means accept.** That answer makes Claude Code keep the proposed contents and
+   allow the edit. So a tab the user closes answers `DIFF_REJECTED`, and `TAB_CLOSED` is only the
+   reply to the `close_tab` call.
+3. **Auto-accept and bypass modes** (open question 1): `openDiff` is reached only from the
+   permission dialog, so modes that skip the dialog never open a diff. Inferred from the code,
+   not tested against a live session. When the user answers in the terminal first, Claude Code
+   calls `close_tab` and ignores whatever the pending `openDiff` returns.
+4. **Timeouts** (open question 5): `callIdeRpc` is `callMCPTool` with `idleTimeoutMs: 0`, so
+   `openDiff` can wait indefinitely. `getDiagnostics` is different: 500 ms for the per-file
+   baseline, 2 s for the full fetch, and baselines stop after 3 timeouts in a row. Athena answers
+   within 450 ms, with an empty list for the requested `uri` if the window is busy.
+5. Severity strings are `Error`, `Warning`, `Info` and `Hint` (`uct()` in the bundle).
+6. The 8 tools the CLI does not call (open question 4) are not implemented; an unknown tool gets
+   an MCP error.
+
 Sources: the local 2.1.295 binary;
 [Claude Code VS Code docs, "The built-in IDE MCP server"](https://code.claude.com/docs/en/ide-integrations);
 [claudecode.nvim PROTOCOL.md](https://github.com/coder/claudecode.nvim/blob/main/PROTOCOL.md);

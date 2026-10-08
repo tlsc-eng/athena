@@ -62,6 +62,7 @@ pub(super) fn diff_title(path: &Path, base: &DiffBase) -> String {
         DiffBase::Head => format!("{name} (Index)"),
         DiffBase::Index => format!("{name} (Working Tree)"),
         DiffBase::Snapshot { .. } => format!("{name} (Claude's Edits)"),
+        DiffBase::Proposal { .. } => format!("{name} (Claude's Proposal)"),
     }
 }
 
@@ -92,6 +93,7 @@ fn sides(base: &DiffBase) -> (&'static str, &'static str, HunkActions) {
                 ..HunkActions::default()
             },
         ),
+        DiffBase::Proposal { .. } => ("On Disk", "Claude's Proposal", HunkActions::default()),
     }
 }
 
@@ -170,6 +172,7 @@ fn load_with(
             };
             (old, read_file(path)?)
         }
+        DiffBase::Proposal { .. } => bail!("Claude's proposed change is no longer waiting."),
     };
     Ok(Sides {
         old: text(old)?,
@@ -235,6 +238,9 @@ impl Shell {
         base: &DiffBase,
         cx: &mut Context<Self>,
     ) -> ItemView {
+        if let DiffBase::Proposal { id } = base {
+            return self.new_proposal_view(path, id, cx);
+        }
         let (old_label, new_label, actions) = sides(base);
         let title = diff_title(path, base);
         let view = cx
@@ -256,7 +262,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let id = view.entity_id();
-        if !self.review.loads.start(id) {
+        if matches!(base, DiffBase::Proposal { .. }) || !self.review.loads.start(id) {
             return;
         }
         let path = view.read(cx).path().to_path_buf();
@@ -367,7 +373,7 @@ impl Shell {
                     git::revert_file(&dir, &rel, &expected, &contents, &backup_dir()?)
                 }),
             ),
-            DiffEvent::OpenFile => return,
+            DiffEvent::OpenFile | DiffEvent::Accept | DiffEvent::Reject => return,
         };
         let root = root.to_path_buf();
         cx.spawn(async move |this, cx| {
