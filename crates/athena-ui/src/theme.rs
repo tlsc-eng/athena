@@ -69,10 +69,26 @@ pub struct TerminalColors {
     pub ansi: [Hsla; 16],
 }
 
+/// Code colours: structure reads by lightness, with only green and amber as hues.
+#[derive(Clone)]
+pub struct SyntaxColors {
+    pub text: Hsla,
+    pub keyword: Hsla,
+    pub function: Hsla,
+    pub type_: Hsla,
+    pub string: Hsla,
+    pub comment: Hsla,
+    pub punctuation: Hsla,
+    pub line_number: Hsla,
+    pub line_number_active: Hsla,
+    pub current_line: Hsla,
+}
+
 #[derive(Clone)]
 pub struct Theme {
     pub color: Colors,
     pub terminal: TerminalColors,
+    pub syntax: SyntaxColors,
     pub typography: Typography,
     pub shape: Shape,
     pub motion: Motion,
@@ -135,6 +151,18 @@ impl Theme {
                     c(0x86cccf),
                     c(0xf9f7f3),
                 ],
+            },
+            syntax: SyntaxColors {
+                text: c(0xefeee7),
+                keyword: c(0xf9f7f3),
+                function: c(0xf9f7f3),
+                type_: c(0x6fb07d),
+                string: c(0xdaa24f),
+                comment: c(0x847f7a),
+                punctuation: c(0xa8a49e),
+                line_number: c(0x5f5a55),
+                line_number_active: c(0xa8a49e),
+                current_line: c(0x1a1614),
             },
             typography: Typography {
                 ui: "Geist".into(),
