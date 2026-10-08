@@ -155,18 +155,18 @@ fn open_folder(path: &Path) -> Option<i32> {
 /// Bare `athena` from a shell: brings the running window forward, or starts the app this
 /// executable belongs to. Returns `None` to start the window in this process (a development build).
 fn open_app() -> Option<i32> {
+    // Homebrew links only the executable, so follow the link to find the bundle.
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .ok()?;
+    let bundle = exe
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))?;
     let running = athena_proto::app_socket_path().is_ok_and(|p| UnixStream::connect(p).is_ok());
     let mut open = Command::new("/usr/bin/open");
     if running {
         open.args(["-b", "io.tlsc.athena"]);
     } else {
-        // Homebrew links only the executable, so follow the link to find the bundle.
-        let exe = std::env::current_exe()
-            .and_then(|p| p.canonicalize())
-            .ok()?;
-        let bundle = exe
-            .ancestors()
-            .find(|p| p.extension().is_some_and(|e| e == "app"))?;
         open.arg(bundle);
     }
     open.status().is_ok_and(|s| s.success()).then_some(0)

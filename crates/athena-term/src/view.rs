@@ -479,8 +479,8 @@ impl TerminalView {
             ),
             Stale::Kept => (
                 "Older sessions are still running",
-                "This terminal connects once the previous session daemon's shells have exited, \
-                 or when you restart sessions.",
+                "This terminal connects once the previous session daemon has exited, or when \
+                 you restart sessions.",
             ),
             Stale::Restarting => (
                 "Restarting sessions",
