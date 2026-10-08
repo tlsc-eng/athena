@@ -1,5 +1,7 @@
 mod bridge;
 mod claude;
+mod containers_view;
+mod drawer;
 mod fuzzy;
 mod item;
 mod notices;
@@ -29,8 +31,8 @@ use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
     EnableClaudeHooks, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, Minimize,
     NewClaudeSession, NewTerminal, NextProject, NextTab, PrevProject, PrevTab, QuickOpen, Quit,
-    SelectProject, SelectTab, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
-    ToggleNotifications, TogglePaneZoom, Zoom,
+    SelectProject, SelectTab, ShowContainers, SplitDown, SplitRight, ToggleFileTree,
+    ToggleFullScreen, ToggleNotifications, TogglePaneZoom, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -54,7 +56,9 @@ pub struct Shell {
     notices_path: PathBuf,
     next_notice: u64,
     toasts: Vec<notices::Toast>,
-    drawer_open: bool,
+    drawer: Option<drawer::DrawerTab>,
+    last_drawer_tab: drawer::DrawerTab,
+    containers: containers_view::ContainersState,
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
@@ -151,7 +155,9 @@ impl Shell {
             notifications,
             notices_path,
             toasts: Vec::new(),
-            drawer_open: false,
+            drawer: None,
+            last_drawer_tab: drawer::DrawerTab::Notifications,
+            containers: containers_view::ContainersState::default(),
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
@@ -292,15 +298,37 @@ impl Shell {
             }))
             .child(div().flex_1())
             .child(self.render_usage_button(cx))
-            .child(self.render_notice_button(cx))
+            .child(
+                self.drawer_button("containers-button", drawer::DrawerTab::Containers, cx)
+                    .child("Containers"),
+            )
+            .child(div().mr(px(8.)).child(self.render_notice_button(cx)))
     }
 
     fn render_notice_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
         let unread = self.unread();
+        let accent = cx.theme().color.accent;
+        self.drawer_button("notices-button", drawer::DrawerTab::Notifications, cx)
+            .child("Notifications")
+            .when(unread > 0, |el| {
+                el.child(
+                    div()
+                        .text_color(accent)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(unread.to_string()),
+                )
+            })
+    }
+
+    fn drawer_button(
+        &self,
+        id: &'static str,
+        tab: drawer::DrawerTab,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let t = cx.theme();
         div()
-            .id("notices-button")
-            .mr(px(8.))
+            .id(id)
             .h(px(24.))
             .px(px(8.))
             .flex()
@@ -308,22 +336,13 @@ impl Shell {
             .gap(px(6.))
             .rounded(t.shape.radius_control)
             .cursor_pointer()
-            .text_color(if self.drawer_open {
+            .text_color(if self.drawer == Some(tab) {
                 t.color.content
             } else {
                 t.color.content_muted
             })
             .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_drawer(cx)))
-            .child("Notifications")
-            .when(unread > 0, |el| {
-                el.child(
-                    div()
-                        .text_color(t.color.accent)
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(unread.to_string()),
-                )
-            })
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_drawer_tab(tab, cx)))
     }
 
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -568,6 +587,9 @@ impl Render for Shell {
                 this.open_palette(palette::Mode::Commands, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleNotifications, _, cx| this.toggle_drawer(cx)))
+            .on_action(cx.listener(|this, _: &ShowContainers, _, cx| {
+                this.toggle_drawer_tab(drawer::DrawerTab::Containers, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &NewClaudeSession, w, cx| this.new_claude_session(w, cx)),
             )

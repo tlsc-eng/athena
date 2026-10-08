@@ -449,6 +449,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "athena-containers",
  "athena-editor",
  "athena-proto",
  "athena-term",

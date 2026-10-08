@@ -3,12 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
-use athena_ui::{ActiveTheme, ButtonKind, motion};
+use athena_ui::{ActiveTheme, motion};
 use athena_workspace::{ItemId, ItemKind};
-use gpui::{
-    Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, Task, Window, div, prelude::*,
-    px,
-};
+use gpui::{Animation, AnyElement, Context, FontWeight, Hsla, Task, Window, div, prelude::*, px};
 use serde::{Deserialize, Serialize};
 
 use super::Shell;
@@ -18,7 +15,6 @@ const KEEP: usize = 200;
 const TOAST_FOR: Duration = Duration::from_secs(5);
 const MAX_TOASTS: usize = 3;
 const RECONNECT_AFTER: Duration = Duration::from_secs(2);
-pub(super) const DRAWER_HEIGHT: f32 = 240.;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(super) struct Notification {
@@ -222,7 +218,7 @@ impl Shell {
             item: target.as_ref().map(|(_, i)| *i),
             kind: notice.kind,
             at: notice.at,
-            read: watching || self.drawer_open,
+            read: watching || self.drawer == Some(super::drawer::DrawerTab::Notifications),
         };
         if !watching {
             if let Some(ItemView::Terminal(view)) = &view {
@@ -345,15 +341,6 @@ impl Shell {
         }
     }
 
-    pub(super) fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
-        self.drawer_open = !self.drawer_open;
-        if self.drawer_open {
-            self.notifications.iter_mut().for_each(|n| n.read = true);
-            self.notices_changed(cx);
-        }
-        cx.notify();
-    }
-
     fn kind_color(&self, kind: &NoticeKind, cx: &Context<Self>) -> Hsla {
         let c = &cx.theme().color;
         match kind {
@@ -433,10 +420,8 @@ impl Shell {
         )
     }
 
-    pub(super) fn render_drawer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.drawer_open {
-            return None;
-        }
+    /// The Notifications tab's list, newest first.
+    pub(super) fn render_notifications(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let rows: Vec<AnyElement> = self
             .notifications
@@ -490,59 +475,34 @@ impl Shell {
             })
             .collect();
         let empty = rows.is_empty();
-        let clear = athena_ui::Button::new("notices-clear", "Clear", ButtonKind::Ghost).on_click(
-            cx.listener(|this, _, _, cx| {
-                this.notifications.clear();
-                this.notices_changed(cx);
-            }),
-        );
-        let drawer = div()
-            .h(px(DRAWER_HEIGHT))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .border_t_1()
-            .border_color(t.color.border)
-            .bg(t.color.surface_sunken)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .h(px(32.))
-                    .flex_none()
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .bg(t.color.surface)
-                    .border_b_1()
-                    .border_color(t.color.border)
-                    .text_size(t.typography.caption)
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Notifications"))
-                    .child(clear),
-            )
-            .child(
-                div()
-                    .id("notices")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .text_size(t.typography.body)
-                    .children(rows)
-                    .when(empty, |el| {
-                        el.flex().items_center().justify_center().child(
-                            div()
-                                .text_size(t.typography.caption)
-                                .text_color(t.color.content_muted)
-                                .child("Finished commands and Claude sessions waiting for you show up here."),
-                        )
-                    }),
-            );
-        Some(motion::animate_if(
-            t.motion.reduced,
-            drawer,
-            "drawer-open",
-            Animation::new(t.motion.base).with_easing(motion::ease_enter()),
-            |el, d| el.opacity(d),
-        ))
+        div()
+            .id("notices")
+            .size_full()
+            .overflow_y_scroll()
+            .text_size(t.typography.body)
+            .children(rows)
+            .when(empty, |el| {
+                el.flex().items_center().justify_center().child(
+                    div()
+                        .text_size(t.typography.caption)
+                        .text_color(t.color.content_muted)
+                        .child(
+                            "Finished commands and Claude sessions waiting for you show up here.",
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn clear_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications.clear();
+        self.notices_changed(cx);
+    }
+
+    pub(super) fn mark_all_read(&mut self, cx: &mut Context<Self>) {
+        if self.notifications.iter().any(|n| !n.read) {
+            self.notifications.iter_mut().for_each(|n| n.read = true);
+            self.notices_changed(cx);
+        }
     }
 }
