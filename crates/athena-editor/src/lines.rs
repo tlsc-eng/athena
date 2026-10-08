@@ -53,7 +53,7 @@ fn stage_name(line: &str, from: usize, out: &mut Vec<(Range<usize>, Token)>) {
         if line[w.clone()].eq_ignore_ascii_case("AS") {
             out.push((w, Token::Keyword));
             if let Some(name) = words.next() {
-                out.push((name, Token::Type));
+                out.push((name, Token::Label));
             }
             return;
         }
@@ -66,7 +66,7 @@ fn flags(line: &str, from: usize, out: &mut Vec<(Range<usize>, Token)>) {
             break;
         }
         let end = line[w.clone()].find('=').map_or(w.end, |i| w.start + i);
-        out.push((w.start..end, Token::Property));
+        out.push((w.start..end, Token::Attribute));
     }
 }
 
@@ -138,7 +138,7 @@ fn variable(line: &str, at: usize, out: &mut Vec<(Range<usize>, Token)>) -> usiz
     if len == 0 {
         return at + 1;
     }
-    out.push((at..at + 1 + len, Token::Variable));
+    out.push((at..at + 1 + len, Token::Embedded));
     at + 1 + len
 }
 
@@ -162,7 +162,7 @@ pub fn dotenv(line: &str) -> Vec<(Range<usize>, Token)> {
     };
     let key_end = key_start + line[key_start..eq].trim_end().len();
     out.push((key_start..key_end, Token::Property));
-    out.push((eq..eq + 1, Token::Punctuation));
+    out.push((eq..eq + 1, Token::Operator));
     let value_start = eq + 1 + (line[eq + 1..].len() - line[eq + 1..].trim_start().len());
     let value = &line[value_start..];
     let (value_end, quote) = match value.as_bytes().first() {
@@ -204,7 +204,7 @@ mod tests {
         let t = spans(line, dockerfile(line));
         assert!(t.contains(&("FROM", Token::Keyword)));
         assert!(t.contains(&("AS", Token::Keyword)));
-        assert!(t.contains(&("build", Token::Type)));
+        assert!(t.contains(&("build", Token::Label)));
         let line = "  # syntax=docker/dockerfile:1";
         assert_eq!(
             spans(line, dockerfile(line)),
@@ -212,10 +212,10 @@ mod tests {
         );
         let line = "COPY --from=build \"/out/${APP}\" /bin/$APP";
         let t = spans(line, dockerfile(line));
-        assert!(t.contains(&("--from", Token::Property)));
+        assert!(t.contains(&("--from", Token::Attribute)));
         assert!(t.contains(&("\"/out/${APP}\"", Token::String)));
-        assert!(t.contains(&("${APP}", Token::Variable)));
-        assert!(t.contains(&("$APP", Token::Variable)));
+        assert!(t.contains(&("${APP}", Token::Embedded)));
+        assert!(t.contains(&("$APP", Token::Embedded)));
         let line = "    && apt-get install -y git";
         assert!(spans(line, dockerfile(line)).is_empty());
     }
@@ -226,9 +226,9 @@ mod tests {
         let t = spans(line, dotenv(line));
         assert!(t.contains(&("export", Token::Keyword)));
         assert!(t.contains(&("DATABASE_URL", Token::Property)));
-        assert!(t.contains(&("=", Token::Punctuation)));
+        assert!(t.contains(&("=", Token::Operator)));
         assert!(t.contains(&("\"postgres://${HOST}/db\"", Token::String)));
-        assert!(t.contains(&("${HOST}", Token::Variable)));
+        assert!(t.contains(&("${HOST}", Token::Embedded)));
         assert!(t.contains(&("# local", Token::Comment)));
         let line = "PORT=8080 # dev";
         let t = spans(line, dotenv(line));
@@ -238,7 +238,7 @@ mod tests {
         assert!(
             !spans(line, dotenv(line))
                 .iter()
-                .any(|(_, t)| *t == Token::Variable)
+                .any(|(_, t)| *t == Token::Embedded)
         );
     }
 }

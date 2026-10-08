@@ -1,4 +1,4 @@
-use athena_ui::ActiveTheme;
+use athena_ui::{ActiveTheme, SyntaxColors};
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font, FontFeatures,
     FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId,
@@ -9,6 +9,54 @@ use gpui::{
 use crate::display::DisplayLine;
 use crate::syntax::Token;
 use crate::view::{EditorLayout, EditorView};
+
+/// How a token is drawn: colour, weight and whether it is underlined.
+#[derive(Clone, Copy, PartialEq)]
+struct TokenStyle {
+    color: Hsla,
+    weight: FontWeight,
+    underline: bool,
+}
+
+impl TokenStyle {
+    fn plain(color: Hsla) -> Self {
+        Self {
+            color,
+            weight: FontWeight::NORMAL,
+            underline: false,
+        }
+    }
+}
+
+fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
+    let color = match token {
+        Token::Keyword => syntax.keyword,
+        Token::Function | Token::Tag | Token::Link => syntax.function,
+        Token::Property => syntax.property,
+        Token::Type | Token::Namespace => syntax.type_,
+        Token::Attribute => syntax.attribute,
+        Token::String => syntax.string,
+        Token::StringSpecial | Token::Number => syntax.string_special,
+        Token::Constant | Token::Escape | Token::Embedded | Token::Label => syntax.constant,
+        Token::VariableBuiltin => syntax.variable_builtin,
+        Token::Operator => syntax.operator,
+        Token::Punctuation => syntax.punctuation,
+        Token::PunctuationSpecial => syntax.punctuation_special,
+        Token::Comment => syntax.comment,
+        Token::Heading => syntax.heading,
+        Token::Error => syntax.error,
+        Token::Variable => syntax.text,
+    };
+    TokenStyle {
+        weight: if token == Token::Heading {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        underline: token == Token::Link,
+        ..TokenStyle::plain(color)
+    }
+}
 
 const LINE_HEIGHT_RATIO: f32 = 1.5;
 const GUTTER_PAD: f32 = 16.;
@@ -103,6 +151,18 @@ impl Element for EditorElement {
             underline: None,
             strikethrough: None,
         };
+        let styled = |len: usize, style: TokenStyle| TextRun {
+            font: Font {
+                weight: style.weight,
+                ..font.clone()
+            },
+            underline: style.underline.then_some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(style.color),
+                wavy: false,
+            }),
+            ..run(len, style.color)
+        };
 
         let mut frame = Frame {
             backgrounds: Vec::new(),
@@ -163,35 +223,33 @@ impl Element for EditorElement {
             let raw = buffer.line(line);
             let display = DisplayLine::new(&raw);
             let start_char = buffer.line_start(line);
+            let line_bytes = rope.line_to_byte(line)..rope.line_to_byte(line + 1);
             let n = raw.chars().count();
-            let mut colors = vec![syntax.text; n];
+            let mut styles = vec![TokenStyle::plain(syntax.text); n];
             for (bytes, token) in &tokens {
+                if bytes.end <= line_bytes.start || bytes.start >= line_bytes.end {
+                    continue;
+                }
                 let a = rope.byte_to_char(bytes.start).max(start_char);
                 let b = rope.byte_to_char(bytes.end).min(start_char + n);
-                let color = match token {
-                    Token::Keyword | Token::Function => syntax.keyword,
-                    Token::Type => syntax.type_,
-                    Token::String | Token::Number => syntax.string,
-                    Token::Comment => syntax.comment,
-                    Token::Punctuation => syntax.punctuation,
-                    Token::Property | Token::Variable => syntax.text,
-                };
-                for c in colors
+                let style = style_for(*token, &syntax);
+                for s in styles
                     .iter_mut()
                     .take(b.saturating_sub(start_char))
                     .skip(a.saturating_sub(start_char))
                 {
-                    *c = color;
+                    *s = style;
                 }
             }
-            let mut runs: Vec<TextRun> = Vec::new();
-            for (i, color) in colors.iter().enumerate() {
+            let mut runs: Vec<(TextRun, TokenStyle)> = Vec::new();
+            for (i, style) in styles.iter().enumerate() {
                 let len = display.char_to_byte[i + 1] - display.char_to_byte[i];
                 match runs.last_mut() {
-                    Some(r) if r.color == *color => r.len += len,
-                    _ => runs.push(run(len, *color)),
+                    Some((r, s)) if s == style => r.len += len,
+                    _ => runs.push((styled(len, *style), *style)),
                 }
             }
+            let runs: Vec<TextRun> = runs.into_iter().map(|(r, _)| r).collect();
             let shaped = text_system.shape_line(
                 SharedString::from(display.text.clone()),
                 font_size,

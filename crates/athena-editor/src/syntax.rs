@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -26,18 +27,32 @@ pub enum Lang {
     DotEnv,
 }
 
-/// Highlight classes; the theme maps each to one of a few muted colours.
+/// Highlight classes; the theme gives each a colour, and headings a heavier weight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Token {
     Keyword,
     Function,
     Type,
     String,
+    StringSpecial,
     Number,
+    Constant,
     Comment,
     Punctuation,
+    PunctuationSpecial,
     Property,
     Variable,
+    VariableBuiltin,
+    Operator,
+    Attribute,
+    Tag,
+    Namespace,
+    Escape,
+    Embedded,
+    Label,
+    Heading,
+    Link,
+    Error,
 }
 
 /// Highlights one line without a parse tree; ranges are byte offsets within the line.
@@ -57,11 +72,26 @@ struct LangSpec {
     filenames: &'static [&'static str],
     engine: Engine,
     comment: Option<&'static str>,
+    /// Which of several patterns capturing one node wins; the bundled queries disagree.
+    first_pattern_wins: bool,
 }
 
 const JS: &str = tree_sitter_javascript::HIGHLIGHT_QUERY;
 const JSX: &str = tree_sitter_javascript::JSX_HIGHLIGHT_QUERY;
 const TS: &str = tree_sitter_typescript::HIGHLIGHTS_QUERY;
+
+/// JSON's query leaves punctuation plain.
+const JSON_EXTRA: &str = r#"
+["{" "}" "[" "]"] @punctuation.bracket
+[":" ","] @punctuation.delimiter
+"#;
+
+/// TOML's query captures the whole pair as a property and leaves the key a type.
+const TOML_EXTRA: &str = r#"
+(pair (bare_key) @property)
+(pair (quoted_key) @property)
+(pair (dotted_key (bare_key) @property))
+"#;
 
 const fn grammar(language: fn() -> Language, query: fn() -> String) -> Engine {
     Engine::Grammar { language, query }
@@ -76,6 +106,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_go::HIGHLIGHTS_QUERY.into(),
         ),
         comment: Some("// "),
+        first_pattern_wins: true,
     },
     LangSpec {
         extensions: &["ts", "mts", "cts"],
@@ -85,6 +116,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || format!("{JS}\n{TS}"),
         ),
         comment: Some("// "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["tsx"],
@@ -94,6 +126,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || format!("{JS}\n{JSX}\n{TS}"),
         ),
         comment: Some("// "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["js", "mjs", "cjs", "jsx"],
@@ -103,6 +136,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || format!("{JS}\n{JSX}"),
         ),
         comment: Some("// "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["yaml", "yml"],
@@ -112,24 +146,27 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_yaml::HIGHLIGHTS_QUERY.into(),
         ),
         comment: Some("# "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["json", "jsonc", "json5"],
         filenames: &[".prettierrc", ".eslintrc", ".babelrc"],
         engine: grammar(
             || tree_sitter_json::LANGUAGE.into(),
-            || tree_sitter_json::HIGHLIGHTS_QUERY.into(),
+            || format!("{}\n{JSON_EXTRA}", tree_sitter_json::HIGHLIGHTS_QUERY),
         ),
         comment: None,
+        first_pattern_wins: true,
     },
     LangSpec {
         extensions: &["toml"],
         filenames: &["Cargo.lock", "uv.lock", "poetry.lock"],
         engine: grammar(
             || tree_sitter_toml_ng::LANGUAGE.into(),
-            || tree_sitter_toml_ng::HIGHLIGHTS_QUERY.into(),
+            || format!("{}\n{TOML_EXTRA}", tree_sitter_toml_ng::HIGHLIGHTS_QUERY),
         ),
         comment: Some("# "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["sh", "bash", "zsh"],
@@ -149,6 +186,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_bash::HIGHLIGHT_QUERY.into(),
         ),
         comment: Some("# "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["rs"],
@@ -158,6 +196,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_rust::HIGHLIGHTS_QUERY.into(),
         ),
         comment: Some("// "),
+        first_pattern_wins: true,
     },
     LangSpec {
         extensions: &["py", "pyi"],
@@ -167,6 +206,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_python::HIGHLIGHTS_QUERY.into(),
         ),
         comment: Some("# "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["css"],
@@ -176,6 +216,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_css::HIGHLIGHTS_QUERY.into(),
         ),
         comment: None,
+        first_pattern_wins: true,
     },
     LangSpec {
         extensions: &["html", "htm"],
@@ -185,6 +226,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_html::HIGHLIGHTS_QUERY.into(),
         ),
         comment: None,
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["md", "markdown"],
@@ -194,6 +236,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_md::HIGHLIGHT_QUERY_BLOCK.into(),
         ),
         comment: None,
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["swift"],
@@ -203,18 +246,21 @@ const SPECS: [LangSpec; Lang::COUNT] = [
             || tree_sitter_swift::HIGHLIGHTS_QUERY.into(),
         ),
         comment: Some("// "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["dockerfile", "containerfile"],
         filenames: &["Dockerfile*", "Containerfile*"],
         engine: Engine::Lines(crate::lines::dockerfile),
         comment: Some("# "),
+        first_pattern_wins: false,
     },
     LangSpec {
         extensions: &["env"],
         filenames: &[".env", ".env.*"],
         engine: Engine::Lines(crate::lines::dotenv),
         comment: Some("# "),
+        first_pattern_wins: false,
     },
 ];
 
@@ -300,22 +346,71 @@ impl Lang {
     }
 }
 
+/// Capture name prefixes and their token; the longest prefix on a `.` boundary wins.
+const CAPTURES: &[(&str, Option<Token>)] = &[
+    ("keyword", Some(Token::Keyword)),
+    ("conditional", Some(Token::Keyword)),
+    ("repeat", Some(Token::Keyword)),
+    ("include", Some(Token::Keyword)),
+    ("storageclass", Some(Token::Keyword)),
+    ("exception", Some(Token::Keyword)),
+    ("charset", Some(Token::Keyword)),
+    ("import", Some(Token::Keyword)),
+    ("keyframes", Some(Token::Keyword)),
+    ("media", Some(Token::Keyword)),
+    ("supports", Some(Token::Keyword)),
+    ("function", Some(Token::Function)),
+    ("method", Some(Token::Function)),
+    ("constructor", Some(Token::Type)),
+    ("type", Some(Token::Type)),
+    ("namespace", Some(Token::Namespace)),
+    ("module", Some(Token::Namespace)),
+    ("string", Some(Token::String)),
+    ("string.special", Some(Token::StringSpecial)),
+    ("string.special.key", Some(Token::Property)),
+    ("string.regexp", Some(Token::StringSpecial)),
+    ("string.escape", Some(Token::Escape)),
+    ("character", Some(Token::String)),
+    ("character.special", Some(Token::StringSpecial)),
+    ("escape", Some(Token::Escape)),
+    ("number", Some(Token::Number)),
+    ("float", Some(Token::Number)),
+    ("boolean", Some(Token::Constant)),
+    ("constant", Some(Token::Constant)),
+    ("comment", Some(Token::Comment)),
+    ("punctuation", Some(Token::Punctuation)),
+    ("punctuation.special", Some(Token::PunctuationSpecial)),
+    ("delimiter", Some(Token::Punctuation)),
+    ("operator", Some(Token::Operator)),
+    ("property", Some(Token::Property)),
+    ("field", Some(Token::Property)),
+    ("variable", Some(Token::Variable)),
+    ("variable.builtin", Some(Token::VariableBuiltin)),
+    ("variable.member", Some(Token::Property)),
+    ("parameter", Some(Token::Variable)),
+    ("attribute", Some(Token::Attribute)),
+    ("tag", Some(Token::Tag)),
+    ("tag.error", Some(Token::Error)),
+    ("embedded", Some(Token::Embedded)),
+    ("label", Some(Token::Label)),
+    ("text.title", Some(Token::Heading)),
+    ("text.uri", Some(Token::Link)),
+    ("text.reference", Some(Token::Link)),
+    ("text.literal", Some(Token::String)),
+    ("none", None),
+    ("spell", None),
+];
+
 fn token_for(capture: &str) -> Option<Token> {
-    let head = capture.split('.').next().unwrap_or(capture);
-    Some(match head {
-        "keyword" | "conditional" | "repeat" | "include" | "storageclass" | "exception" => {
-            Token::Keyword
-        }
-        "function" | "method" | "constructor" => Token::Function,
-        "type" | "tag" | "attribute" | "namespace" | "module" => Token::Type,
-        "string" | "escape" | "character" => Token::String,
-        "number" | "float" | "boolean" | "constant" => Token::Number,
-        "comment" => Token::Comment,
-        "punctuation" | "operator" | "delimiter" => Token::Punctuation,
-        "property" | "field" => Token::Property,
-        "variable" | "label" | "parameter" => Token::Variable,
-        _ => return None,
-    })
+    CAPTURES
+        .iter()
+        .filter(|(prefix, _)| {
+            capture
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        })
+        .max_by_key(|(prefix, _)| prefix.len())
+        .and_then(|(_, token)| *token)
 }
 
 enum Backend {
@@ -374,7 +469,7 @@ impl Syntax {
         *tree = parser.parse_with_options(&mut chunks, tree.as_ref(), None);
     }
 
-    /// Highlighted byte ranges intersecting `bytes`, innermost capture last.
+    /// Highlighted byte ranges intersecting `bytes`, outer before inner so inner ones paint last.
     pub fn highlights(&self, rope: &Rope, bytes: Range<usize>) -> Vec<(Range<usize>, Token)> {
         let tree = match &self.backend {
             Backend::Tree {
@@ -389,14 +484,27 @@ impl Syntax {
         let names = query.capture_names();
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(bytes);
-        let mut out = Vec::new();
+        let first_wins = self.lang.spec().first_pattern_wins;
+        let mut best: HashMap<(usize, usize), (usize, Token)> = HashMap::new();
         let mut captures = cursor.captures(query, tree.root_node(), RopeText(rope));
         while let Some((m, index)) = captures.next() {
             let capture = m.captures()[*index];
-            if let Some(token) = token_for(names[capture.index as usize]) {
-                out.push((capture.node.byte_range(), token));
+            let Some(token) = token_for(names[capture.index as usize]) else {
+                continue;
+            };
+            let range = capture.node.byte_range();
+            let entry = best
+                .entry((range.start, range.end))
+                .or_insert((m.pattern_index, token));
+            if (m.pattern_index < entry.0) == first_wins {
+                *entry = (m.pattern_index, token);
             }
         }
+        let mut out: Vec<_> = best
+            .into_iter()
+            .map(|((start, end), (_, token))| (start..end, token))
+            .collect();
+        out.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
         out
     }
 }
@@ -446,6 +554,113 @@ mod tests {
             .into_iter()
             .map(|(r, t)| (src[r].to_string(), t))
             .collect()
+    }
+
+    /// The token painted over `needle`'s first byte, as the element applies them.
+    fn painted(lang: Lang, src: &str, needle: &str) -> Option<Token> {
+        let at = src.find(needle).expect("needle in source");
+        let rope = Rope::from_str(src);
+        Syntax::new(lang, &rope)
+            .highlights(&rope, 0..src.len())
+            .into_iter()
+            .rfind(|(r, _)| r.contains(&at))
+            .map(|(_, t)| t)
+    }
+
+    #[test]
+    fn json_keys_are_properties() {
+        let src = "{\"name\": \"athena\", \"n\": 1, \"ok\": true}\n";
+        assert_eq!(painted(Lang::Json, src, "\"name\""), Some(Token::Property));
+        assert_eq!(painted(Lang::Json, src, "\"athena\""), Some(Token::String));
+        assert_eq!(painted(Lang::Json, src, "1"), Some(Token::Number));
+        assert_eq!(painted(Lang::Json, src, "true"), Some(Token::Constant));
+        assert_eq!(painted(Lang::Json, src, "{"), Some(Token::Punctuation));
+    }
+
+    #[test]
+    fn yaml_keys_and_values_differ() {
+        let src = "services:\n  web:\n    image: nginx # proxy\n    ports: [80]\n";
+        assert_eq!(painted(Lang::Yaml, src, "image"), Some(Token::Property));
+        assert_eq!(painted(Lang::Yaml, src, "nginx"), Some(Token::String));
+        assert_eq!(painted(Lang::Yaml, src, "80"), Some(Token::Number));
+        assert_eq!(painted(Lang::Yaml, src, "# proxy"), Some(Token::Comment));
+    }
+
+    #[test]
+    fn toml_keys_are_properties_and_tables_types() {
+        let src = "[package]\nname = \"athena\"\nedition.workspace = true\n";
+        assert_eq!(painted(Lang::Toml, src, "package"), Some(Token::Type));
+        assert_eq!(painted(Lang::Toml, src, "name"), Some(Token::Property));
+        assert_eq!(painted(Lang::Toml, src, "workspace"), Some(Token::Property));
+        assert_eq!(painted(Lang::Toml, src, "\"athena\""), Some(Token::String));
+    }
+
+    #[test]
+    fn markdown_headings_are_headings() {
+        let src = "# Title\n\n- item\n\n```go\nx := 1\n```\n";
+        assert_eq!(painted(Lang::Markdown, src, "Title"), Some(Token::Heading));
+        assert_eq!(
+            painted(Lang::Markdown, src, "#"),
+            Some(Token::PunctuationSpecial)
+        );
+        assert_eq!(
+            painted(Lang::Markdown, src, "-"),
+            Some(Token::PunctuationSpecial)
+        );
+        assert_eq!(painted(Lang::Markdown, src, "x :="), Some(Token::String));
+    }
+
+    #[test]
+    fn later_patterns_win_on_the_same_node() {
+        let src = "function f() {}\nf(x);\n";
+        assert_eq!(painted(Lang::TypeScript, src, "f("), Some(Token::Function));
+        assert_eq!(painted(Lang::TypeScript, src, "x)"), Some(Token::Variable));
+        let src = "def f(a):\n    return None\n";
+        assert_eq!(painted(Lang::Python, src, "f("), Some(Token::Function));
+        assert_eq!(painted(Lang::Python, src, "None"), Some(Token::Constant));
+        let src = "let s = self.name\nfunc go() {}\n";
+        assert_eq!(
+            painted(Lang::Swift, src, "self"),
+            Some(Token::VariableBuiltin)
+        );
+        assert_eq!(painted(Lang::Swift, src, "func"), Some(Token::Keyword));
+    }
+
+    #[test]
+    fn earlier_patterns_win_where_the_query_expects_it() {
+        let src = "package main\n\nfunc main() { fmt.Println(len(x)) }\n";
+        assert_eq!(painted(Lang::Go, src, "main() "), Some(Token::Function));
+        assert_eq!(painted(Lang::Go, src, "Println"), Some(Token::Function));
+        assert_eq!(painted(Lang::Go, src, "x)"), Some(Token::Variable));
+        let src = "fn main() { let v = Vec::new(); Some(v); self.x; }\n";
+        assert_eq!(painted(Lang::Rust, src, "main"), Some(Token::Function));
+        assert_eq!(painted(Lang::Rust, src, "let"), Some(Token::Keyword));
+        assert_eq!(painted(Lang::Rust, src, "new"), Some(Token::Function));
+        assert_eq!(painted(Lang::Rust, src, "Some"), Some(Token::Type));
+        assert_eq!(
+            painted(Lang::Rust, src, "self"),
+            Some(Token::VariableBuiltin)
+        );
+        let src = ":root { --gap: 4px; color: var(--gap); }\n";
+        assert_eq!(painted(Lang::Css, src, "--gap:"), Some(Token::Variable));
+        assert_eq!(painted(Lang::Css, src, "color"), Some(Token::Property));
+        assert_eq!(painted(Lang::Css, src, "var"), Some(Token::Function));
+    }
+
+    #[test]
+    fn capture_names_use_the_longest_prefix() {
+        assert_eq!(token_for("string.special.key"), Some(Token::Property));
+        assert_eq!(token_for("string.special"), Some(Token::StringSpecial));
+        assert_eq!(token_for("string"), Some(Token::String));
+        assert_eq!(token_for("keyword.function"), Some(Token::Keyword));
+        assert_eq!(token_for("variable.builtin"), Some(Token::VariableBuiltin));
+        assert_eq!(
+            token_for("punctuation.special"),
+            Some(Token::PunctuationSpecial)
+        );
+        assert_eq!(token_for("text.title"), Some(Token::Heading));
+        assert_eq!(token_for("none"), None);
+        assert_eq!(token_for("stringy"), None);
     }
 
     #[test]
