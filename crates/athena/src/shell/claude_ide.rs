@@ -33,8 +33,18 @@ pub(super) struct IdeState {
     _selection: Option<Task<()>>,
     /// The selection last sent, so an unchanged one is not sent again.
     sent: Option<Value>,
+    /// What the selection was last built from, so a poll that finds nothing new copies no text.
+    seen: Option<SelectionKey>,
     /// Where proposal tabs live, to close one answered from its own toolbar.
     window: Option<AnyWindowHandle>,
+}
+
+#[derive(PartialEq)]
+struct SelectionKey {
+    editor: EntityId,
+    version: Option<u64>,
+    head: Option<(u32, u32)>,
+    selected: Option<usize>,
 }
 
 struct Proposal {
@@ -60,6 +70,36 @@ fn read_text(path: &Path) -> Result<String, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(format!("Could not read {}: {e}", path.display())),
     }
+}
+
+/// A copy of `workspace` without proposal tabs, or `None` when it has none.
+fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
+    let any = workspace
+        .projects
+        .iter()
+        .filter_map(|p| p.layout.as_ref())
+        .any(|l| l.items().any(|i| is_proposal(&i.kind)));
+    if !any {
+        return None;
+    }
+    let mut saved = workspace.clone();
+    for project in &mut saved.projects {
+        let Some(layout) = project.layout.as_mut() else {
+            continue;
+        };
+        let ids: Vec<ItemId> = layout
+            .items()
+            .filter(|i| is_proposal(&i.kind))
+            .map(|i| i.id)
+            .collect();
+        for id in ids {
+            if !layout.close_item(id) {
+                project.layout = None;
+                break;
+            }
+        }
+    }
+    Some(saved)
 }
 
 /// `selection_changed` as VS Code sends it; Claude Code reads the 0-based lines and the text.
@@ -224,33 +264,7 @@ impl Shell {
 
     /// The workspace as saved: a proposal cannot outlive the request that opened it.
     pub(super) fn persisted_workspace(&self) -> Cow<'_, Workspace> {
-        let any = self
-            .workspace
-            .projects
-            .iter()
-            .filter_map(|p| p.layout.as_ref())
-            .any(|l| l.items().any(|i| is_proposal(&i.kind)));
-        if !any {
-            return Cow::Borrowed(&self.workspace);
-        }
-        let mut saved = self.workspace.clone();
-        for project in &mut saved.projects {
-            let Some(layout) = project.layout.as_mut() else {
-                continue;
-            };
-            let ids: Vec<ItemId> = layout
-                .items()
-                .filter(|i| is_proposal(&i.kind))
-                .map(|i| i.id)
-                .collect();
-            for id in ids {
-                if !layout.close_item(id) {
-                    project.layout = None;
-                    break;
-                }
-            }
-        }
-        Cow::Owned(saved)
+        without_proposals(&self.workspace).map_or(Cow::Borrowed(&self.workspace), Cow::Owned)
     }
 
     fn ide_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
@@ -479,6 +493,19 @@ impl Shell {
         let Some((root, editor)) = self.focused_editor_in() else {
             return;
         };
+        let key = {
+            let e = editor.read(cx);
+            SelectionKey {
+                editor: editor.entity_id(),
+                version: e.version(),
+                head: e.cursor_utf16(),
+                selected: e.status().map(|s| s.selected),
+            }
+        };
+        if self.ide.sent.is_some() && self.ide.seen.as_ref() == Some(&key) {
+            return;
+        }
+        self.ide.seen = Some(key);
         let editor = editor.read(cx);
         let Some((start, end, text)) = editor.selection_utf16() else {
             return;
@@ -612,6 +639,40 @@ mod tests {
             "the same selection is not sent twice"
         );
         assert!(changed(&sent, cursor).is_some());
+    }
+
+    #[test]
+    fn proposal_tabs_are_left_out_of_the_saved_workspace_and_focus_stays_valid() {
+        use athena_workspace::{Axis, Layout};
+        let proposal = ItemKind::Diff {
+            path: PathBuf::from("/p/a.rs"),
+            base: DiffBase::Proposal { id: "1:t".into() },
+        };
+        let mut workspace = Workspace::default();
+        workspace.add_project(PathBuf::from("/p"));
+        let mut layout = Layout::new(ItemKind::Terminal { session: None });
+        let terminal_pane = layout.focused;
+        let pane = layout
+            .split(terminal_pane, Axis::Horizontal, proposal.clone())
+            .unwrap();
+        assert_eq!(layout.focused, pane);
+        workspace.projects[0].layout = Some(layout);
+        assert!(without_proposals(&Workspace::default()).is_none());
+
+        let saved = without_proposals(&workspace).unwrap();
+        let layout = saved.projects[0].layout.clone().unwrap();
+        assert!(layout.items().all(|i| !is_proposal(&i.kind)));
+        assert_eq!(layout.focused, terminal_pane);
+        assert!(layout.validated().is_some());
+
+        let mut alone = Workspace::default();
+        alone.add_project(PathBuf::from("/q"));
+        alone.projects[0].layout = Some(Layout::new(proposal));
+        assert!(
+            without_proposals(&alone).unwrap().projects[0]
+                .layout
+                .is_none()
+        );
     }
 
     #[test]

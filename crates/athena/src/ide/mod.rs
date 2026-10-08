@@ -215,7 +215,8 @@ pub struct Server {
     port: u16,
     folders: Vec<PathBuf>,
     runtime: tokio::runtime::Handle,
-    _stop: oneshot::Sender<()>,
+    stop: Option<oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Server {
@@ -245,7 +246,7 @@ impl Server {
         let handle = runtime.handle().clone();
         let (stop, stopped) = oneshot::channel();
         let accepting = shared.clone();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("ide-server".into())
             .spawn(move || {
                 runtime.block_on(async move {
@@ -269,7 +270,8 @@ impl Server {
             port,
             folders: config.folders,
             runtime: handle,
-            _stop: stop,
+            stop: Some(stop),
+            thread: Some(thread),
         };
         Ok((server, rx))
     }
@@ -354,6 +356,12 @@ impl Drop for Server {
             .is_some_and(|w| w.ptr_eq(&Arc::downgrade(&self.shared)))
         {
             *running = None;
+        }
+        drop(running);
+        // Waits for the listener to close, so the next start can bind the same port.
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }

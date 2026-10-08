@@ -310,8 +310,9 @@ protocol is undocumented and may change between Claude Code releases. When it is
 - When Claude asks to edit a file, the proposed change opens as "main.rs (Claude's Proposal)":
   the file on disk against Claude's version. **Accept** (`cmd-enter`) lets Claude Code write it;
   **Reject** (`cmd-backspace`) or closing the tab declines it. You can still answer in the
-  terminal instead; the tab then closes. Athena never writes the file itself. Claude Code only
-  asks this way when it would otherwise ask for permission, so auto-accept modes skip it.
+  terminal instead; the tab then closes. Athena never writes the file itself. As far as
+  Claude Code's own code shows, it asks this way only when it would otherwise ask for
+  permission, so auto-accept modes skip it.
 - The editor selection goes with each prompt (Claude Code shows "N lines selected"), and
   `cmd-alt-k` (**Send selection to Claude**) puts `@file#L3-7` into the prompt of the Claude
   session running in that project's terminals and focuses it.
