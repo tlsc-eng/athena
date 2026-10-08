@@ -1,4 +1,8 @@
+mod fuzzy;
+mod item;
+mod palette;
 mod panes;
+mod tree;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -6,19 +10,20 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_term::{ClaudeState, TerminalView};
+use athena_term::ClaudeState;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
 use gpui::{
-    Animation, AnyElement, Bounds, Context, Entity, FocusHandle, FontWeight, IntoElement,
-    MouseButton, PathPromptOptions, Pixels, Render, Subscription, Task, Window, WindowBounds, div,
-    prelude::*, px,
+    Animation, AnyElement, Bounds, Context, FocusHandle, FontWeight, IntoElement, MouseButton,
+    PathPromptOptions, Pixels, Render, Subscription, Task, Window, WindowBounds, div, prelude::*,
+    px,
 };
 
 use crate::actions::{
-    AddProject, CloseProject, CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    Minimize, NewTerminal, NextProject, NextTab, PrevProject, PrevTab, SelectProject, SelectTab,
-    SplitDown, SplitRight, ToggleFullScreen, TogglePaneZoom, Zoom,
+    AddProject, CloseProject, CloseTab, CommandPalette, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, Minimize, NewTerminal, NextProject, NextTab, PrevProject, PrevTab,
+    QuickOpen, SelectProject, SelectTab, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
+    TogglePaneZoom, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -32,9 +37,12 @@ pub struct Shell {
     workspace: Workspace,
     path: PathBuf,
     focus: FocusHandle,
-    items: HashMap<(PathBuf, ItemId), Entity<TerminalView>>,
+    items: HashMap<(PathBuf, ItemId), item::ItemView>,
     pane_area: Rc<RefCell<Bounds<Pixels>>>,
     drag: Option<panes::Drag>,
+    palette: Option<palette::Palette>,
+    tree: tree::FileTree,
+    tree_visible: bool,
     zoomed: Option<PaneId>,
     entering: Option<PaneId>,
     leaving: Option<PaneId>,
@@ -60,8 +68,9 @@ impl Shell {
                 this.workspace.window = Some(window_state(window.window_bounds()));
                 this.schedule_save(cx);
             }),
-            cx.observe_window_activation(window, |_, window, cx| {
+            cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
+                    this.tree.invalidate();
                     let reduced = motion::system_reduce_motion();
                     if cx.theme().motion.reduced != reduced {
                         cx.global_mut::<athena_ui::Theme>().motion.reduced = reduced;
@@ -81,6 +90,9 @@ impl Shell {
             items: HashMap::new(),
             pane_area: Rc::default(),
             drag: None,
+            palette: None,
+            tree: tree::FileTree::default(),
+            tree_visible: true,
             zoomed: None,
             entering: None,
             leaving: None,
@@ -310,7 +322,18 @@ impl Shell {
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let body = match self.workspace.active {
-            Some(_) => self.render_panes(window, cx),
+            Some(_) => div()
+                .size_full()
+                .flex()
+                .children(self.render_tree(cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.render_panes(window, cx)),
+                )
+                .into_any_element(),
             None => div()
                 .flex()
                 .flex_col()
@@ -417,8 +440,18 @@ impl Render for Shell {
             .font_family(t.typography.ui.clone())
             .text_size(t.typography.body)
             .text_color(t.color.content)
+            .on_action(cx.listener(|this, _: &QuickOpen, w, cx| this.open_palette(true, w, cx)))
+            .on_action(
+                cx.listener(|this, _: &CommandPalette, w, cx| this.open_palette(false, w, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| {
+                this.tree_visible = !this.tree_visible;
+                cx.notify();
+            }))
+            .relative()
             .child(self.render_title_bar(cx))
             .child(body)
+            .children(self.render_palette(cx))
     }
 }
 

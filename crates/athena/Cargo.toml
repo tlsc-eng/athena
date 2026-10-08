@@ -9,8 +9,10 @@ publish.workspace = true
 [dependencies]
 gpui.workspace = true
 anyhow.workspace = true
+ignore.workspace = true
 athena-proto.workspace = true
 libc.workspace = true
+athena-editor.workspace = true
 athena-term.workspace = true
 athena-ui.workspace = true
 athena-workspace.workspace = true

@@ -1,17 +1,19 @@
 use std::path::{Path, PathBuf};
 
+use athena_editor::{EditorEvent, EditorView};
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
 use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, Entity, Focusable,
-    FontWeight, MouseButton, MouseMoveEvent, Pixels, Window, canvas, div, point, prelude::*, px,
-    relative, size,
+    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, FontWeight, MouseButton,
+    MouseMoveEvent, Pixels, PromptLevel, Window, canvas, div, point, prelude::*, px, relative,
+    size,
 };
 
 use super::Shell;
+use super::item::ItemView;
 use crate::actions::NewTerminal;
 
 const TAB_STRIP_HEIGHT: f32 = 32.;
@@ -44,54 +46,54 @@ impl Shell {
         }
     }
 
-    /// The view for an item, created and attached to its saved session on first use.
-    fn item_view(
-        &mut self,
-        root: &Path,
-        item: &Item,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<TerminalView>> {
-        let ItemKind::Terminal { session } = &item.kind else {
-            return None;
-        };
+    /// The view for an item, created (and for terminals attached to their session) on first use.
+    fn item_view(&mut self, root: &Path, item: &Item, cx: &mut Context<Self>) -> Option<ItemView> {
         let key = (root.to_path_buf(), item.id);
         if let Some(view) = self.items.get(&key) {
             return Some(view.clone());
         }
-        let view = cx.new(|cx| TerminalView::new(root.to_path_buf(), *session, cx));
-        let (project_root, item_id) = key.clone();
-        cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
-            let TerminalEvent::Attached(session) = event else {
-                cx.notify();
-                return;
-            };
-            let item = this
-                .workspace
-                .projects
-                .iter_mut()
-                .find(|p| p.root == project_root)
-                .and_then(|p| p.layout.as_mut())
-                .and_then(|l| l.item_mut(item_id));
-            if let Some(item) = item {
-                item.kind = ItemKind::Terminal {
-                    session: Some(*session),
-                };
-                this.schedule_save(cx);
+        let view = match &item.kind {
+            ItemKind::Terminal { session } => {
+                let view = cx.new(|cx| TerminalView::new(root.to_path_buf(), *session, cx));
+                let (project_root, item_id) = key.clone();
+                cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
+                    let TerminalEvent::Attached(session) = event else {
+                        cx.notify();
+                        return;
+                    };
+                    let item = this
+                        .workspace
+                        .projects
+                        .iter_mut()
+                        .find(|p| p.root == project_root)
+                        .and_then(|p| p.layout.as_mut())
+                        .and_then(|l| l.item_mut(item_id));
+                    if let Some(item) = item {
+                        item.kind = ItemKind::Terminal {
+                            session: Some(*session),
+                        };
+                        this.schedule_save(cx);
+                    }
+                })
+                .detach();
+                ItemView::Terminal(view)
             }
-        })
-        .detach();
+            ItemKind::Editor { path } => {
+                let view = cx.new(|cx| EditorView::open(path.clone(), cx));
+                cx.subscribe(&view, |_, _, _: &EditorEvent, cx| cx.notify())
+                    .detach();
+                ItemView::Editor(view)
+            }
+        };
         self.items.insert(key, view.clone());
         Some(view)
     }
 
     fn item_label(&self, root: &Path, item: &Item, cx: &Context<Self>) -> String {
-        match &item.kind {
-            ItemKind::Terminal { .. } => self
-                .items
-                .get(&(root.to_path_buf(), item.id))
-                .map(|v| v.read(cx).label())
-                .unwrap_or_else(|| "Terminal".into()),
-            ItemKind::Editor { path } => path
+        match (self.items.get(&(root.to_path_buf(), item.id)), &item.kind) {
+            (Some(view), _) => view.label(cx),
+            (None, ItemKind::Terminal { .. }) => "Terminal".into(),
+            (None, ItemKind::Editor { path }) => path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "Untitled".into()),
@@ -106,11 +108,11 @@ impl Shell {
         t: &athena_ui::Theme,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
-        let view = self.items.get(&(root.to_path_buf(), item.id))?.read(cx);
-        let (color, word) = match view.claude_state() {
+        let view = self.items.get(&(root.to_path_buf(), item.id))?;
+        let (color, word) = match view.claude_state(cx) {
             Some(ClaudeState::Waiting) => (t.color.warning, Some("needs input")),
             Some(ClaudeState::Running) => (t.color.success, Some("running")),
-            None if view.has_bell() => (t.color.warning, None),
+            None if view.has_bell(cx) => (t.color.warning, None),
             None => return None,
         };
         Some(
@@ -134,7 +136,7 @@ impl Shell {
             .items
             .iter()
             .filter(|((r, _), _)| r == root)
-            .filter_map(|(_, v)| v.read(cx).claude_state());
+            .filter_map(|(_, v)| v.claude_state(cx));
         states.max_by_key(|s| matches!(s, ClaudeState::Waiting))
     }
 
@@ -212,6 +214,59 @@ impl Shell {
         let Some(item) = pane.active_item().map(|i| i.id) else {
             return;
         };
+        let dirty = self
+            .active_root()
+            .and_then(|root| self.items.get(&(root, item)).cloned())
+            .filter(|view| view.is_dirty(cx));
+        if let Some(ItemView::Editor(editor)) = dirty {
+            let name = editor
+                .read(cx)
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                &format!("Save changes to {name}?"),
+                Some("Your changes will be lost if you don't save them."),
+                &["Save", "Don't Save", "Cancel"],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(choice) = answer.await else { return };
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let saved = match choice {
+                        0 => editor.update(cx, |e, cx| e.save(cx)),
+                        1 => true,
+                        _ => false,
+                    };
+                    if saved {
+                        this.close_pane_item(pane.id, item, window, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        self.close_pane_item(pane.id, item, window, cx);
+    }
+
+    fn close_pane_item(
+        &mut self,
+        pane: PaneId,
+        item: ItemId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self
+            .workspace
+            .active_project()
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.pane(pane))
+            .cloned()
+        else {
+            return;
+        };
         let panes = self
             .workspace
             .active_project()
@@ -240,7 +295,7 @@ impl Shell {
             return;
         };
         if let Some(view) = self.items.remove(&(root, item)) {
-            view.update(cx, |view, _| view.kill());
+            view.close(cx);
         }
         let Some(i) = self.workspace.active else {
             return;
@@ -252,6 +307,56 @@ impl Shell {
             project.layout = None;
         }
         self.zoomed = None;
+        self.after_layout_change(window, cx);
+    }
+
+    /// Opens `path` as an editor tab: raises an existing tab, else joins a pane that already holds
+    /// editors, else splits the focused pane so terminals stay visible.
+    pub(super) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(i) = self.workspace.active else {
+            return;
+        };
+        let kind = ItemKind::Editor { path };
+        let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
+            self.workspace.projects[i].layout = Some(Layout::new(kind));
+            return self.after_layout_change(window, cx);
+        };
+        self.zoomed = None;
+        let is_editor = |item: &Item| matches!(item.kind, ItemKind::Editor { .. });
+        let existing = layout.panes().into_iter().find_map(|p| {
+            p.items
+                .iter()
+                .position(|item| item.kind == kind)
+                .map(|index| (p.id, index))
+        });
+        if let Some((pane, index)) = existing {
+            return self.activate_tab(pane, index, window, cx);
+        }
+        let focused = layout.focused;
+        let target = if layout
+            .focused_pane()
+            .is_some_and(|p| p.items.iter().any(is_editor))
+        {
+            Some(focused)
+        } else {
+            layout
+                .panes()
+                .into_iter()
+                .find(|p| p.items.iter().any(is_editor))
+                .map(|p| p.id)
+        };
+        match target {
+            Some(pane) => {
+                layout.focused = pane;
+                layout.add_item(pane, kind);
+                self.tab_switches += 1;
+            }
+            None => {
+                if let Some(pane) = layout.split(focused, Axis::Horizontal, kind) {
+                    self.entering = Some(pane);
+                }
+            }
+        }
         self.after_layout_change(window, cx);
     }
 
@@ -529,6 +634,11 @@ impl Shell {
                 let active = index == pane.active;
                 let item_id = item.id;
                 let group = format!("tab-{}", item.id.0);
+                let close_group = format!("tab-close-{}", item.id.0);
+                let dirty = self
+                    .items
+                    .get(&(root.to_path_buf(), item.id))
+                    .is_some_and(|v| v.is_dirty(cx));
                 div()
                     .id(("tab", item.id.0))
                     .group(group.clone())
@@ -568,16 +678,33 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .rounded(t.shape.radius_control)
+                            .relative()
+                            .group(close_group.clone())
                             .text_color(t.color.content_muted)
-                            .invisible()
-                            .when(active, |el| el.visible())
-                            .group_hover(group, |s| s.visible())
                             .hover(|s| s.bg(t.color.surface_active).text_color(t.color.content))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_item_in(pane_id, item_id, window, cx);
                             }))
-                            .child("×"),
+                            .child(
+                                div()
+                                    .invisible()
+                                    .when(active && !dirty, |el| el.visible())
+                                    .when(dirty, |el| {
+                                        el.group_hover(close_group.clone(), |s| s.visible())
+                                    })
+                                    .when(!dirty, |el| el.group_hover(group, |s| s.visible()))
+                                    .child("×"),
+                            )
+                            .when(dirty, |el| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .size(px(6.))
+                                        .bg(t.color.content_disabled)
+                                        .group_hover(close_group, |s| s.invisible()),
+                                )
+                            }),
                     )
                     .when(active && focused, |el| {
                         el.child(
@@ -608,19 +735,8 @@ impl Shell {
             .as_ref()
             .and_then(|item| self.item_view(root, item, cx))
         {
-            Some(view) => view.into_any_element(),
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(empty_state(
-                    "Editor",
-                    "Files open here once the editor lands.",
-                    None,
-                    cx,
-                ))
-                .into_any_element(),
+            Some(view) => view.element(),
+            None => div().into_any_element(),
         };
         // Opacity only: moving or resizing the box would resize the shell mid-animation.
         let content = motion::animate_if(
@@ -741,7 +857,7 @@ impl Shell {
             .collect();
         for key in keys {
             if let Some(view) = self.items.remove(&key) {
-                view.update(cx, |view, _| view.kill());
+                view.close(cx);
             }
         }
     }

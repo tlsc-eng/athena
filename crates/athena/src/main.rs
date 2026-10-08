@@ -20,6 +20,7 @@ fn main() {
             athena_ui::init(cx);
             actions::init(cx);
             athena_term::init(cx);
+            athena_editor::init(cx);
 
             let path = workspace_path();
             let mut workspace = athena_workspace::load(&path).unwrap_or_else(|err| {

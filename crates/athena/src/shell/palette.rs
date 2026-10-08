@@ -1,0 +1,414 @@
+use std::path::{Path, PathBuf};
+
+use athena_ui::{ActiveTheme, InputEvent, TextInput, motion};
+use gpui::{
+    Action, Animation, AnyElement, Context, Entity, Focusable, FontWeight, HighlightStyle,
+    MouseButton, SharedString, StyledText, Subscription, Window, div, prelude::*, px,
+};
+
+use super::Shell;
+use super::fuzzy;
+use crate::actions;
+
+const MAX_FILES: usize = 20_000;
+const MAX_ROWS: usize = 50;
+
+pub(super) enum Target {
+    File(PathBuf),
+    Command(Box<dyn Action>),
+}
+
+pub(super) struct Entry {
+    label: String,
+    detail: Option<String>,
+    /// What the query is matched against (a project-relative path for files).
+    key: String,
+    target: Target,
+}
+
+pub(super) struct Palette {
+    input: Entity<TextInput>,
+    placeholder_hint: &'static str,
+    entries: Vec<Entry>,
+    hits: Vec<(usize, Vec<usize>)>,
+    selected: usize,
+    _subscription: Subscription,
+}
+
+/// Commands offered in the palette, in the order shown before any typing.
+fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
+    vec![
+        ("New terminal", Box::new(actions::NewTerminal)),
+        ("Split right", Box::new(actions::SplitRight)),
+        ("Split down", Box::new(actions::SplitDown)),
+        ("Close tab", Box::new(actions::CloseTab)),
+        ("Zoom pane", Box::new(actions::TogglePaneZoom)),
+        ("Next tab", Box::new(actions::NextTab)),
+        ("Previous tab", Box::new(actions::PrevTab)),
+        ("Go to file", Box::new(actions::QuickOpen)),
+        ("Toggle file tree", Box::new(actions::ToggleFileTree)),
+        ("Open project", Box::new(actions::AddProject)),
+        ("Close project", Box::new(actions::CloseProject)),
+        ("Next project", Box::new(actions::NextProject)),
+        ("Previous project", Box::new(actions::PrevProject)),
+        ("Toggle full screen", Box::new(actions::ToggleFullScreen)),
+    ]
+}
+
+/// Project files, honouring .gitignore and skipping hidden files.
+fn project_files(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .build()
+        .flatten()
+    {
+        if entry.file_type().is_some_and(|t| t.is_file())
+            && let Ok(rel) = entry.path().strip_prefix(root)
+        {
+            out.push(rel.to_string_lossy().into_owned());
+            if out.len() >= MAX_FILES {
+                break;
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+impl Shell {
+    pub(super) fn open_palette(
+        &mut self,
+        files: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            TextInput::new(
+                if files {
+                    "Go to file…"
+                } else {
+                    "Run a command…"
+                },
+                cx,
+            )
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Changed => this.filter_palette(cx),
+                InputEvent::Up => this.move_palette(-1, cx),
+                InputEvent::Down => this.move_palette(1, cx),
+                InputEvent::Submit => this.run_palette(None, window, cx),
+                InputEvent::Cancel => this.close_palette(window, cx),
+            },
+        );
+        let entries = if files {
+            Vec::new()
+        } else {
+            commands()
+                .into_iter()
+                .map(|(label, action)| Entry {
+                    detail: window
+                        .highest_precedence_binding_for_action(action.as_ref())
+                        .map(|b| keystrokes(&b)),
+                    key: label.to_string(),
+                    label: label.to_string(),
+                    target: Target::Command(action),
+                })
+                .collect()
+        };
+        window.focus(&input.focus_handle(cx));
+        self.palette = Some(Palette {
+            input,
+            placeholder_hint: if files {
+                "No matching files"
+            } else {
+                "No matching commands"
+            },
+            entries,
+            hits: Vec::new(),
+            selected: 0,
+            _subscription: subscription,
+        });
+        self.filter_palette(cx);
+
+        if files && let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) {
+            let walk = cx
+                .background_executor()
+                .spawn(async move { (project_files(&root), root) });
+            cx.spawn(async move |this, cx| {
+                let (files, root) = walk.await;
+                let _ = this.update(cx, |this, cx| {
+                    let Some(palette) = this.palette.as_mut() else {
+                        return;
+                    };
+                    palette.entries = files
+                        .into_iter()
+                        .map(|rel| {
+                            let path = root.join(&rel);
+                            let (dir, name) = match rel.rfind('/') {
+                                Some(i) => (Some(rel[..i].to_string()), rel[i + 1..].to_string()),
+                                None => (None, rel.clone()),
+                            };
+                            Entry {
+                                label: name,
+                                detail: dir,
+                                key: rel,
+                                target: Target::File(path),
+                            }
+                        })
+                        .collect();
+                    this.filter_palette(cx);
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn filter_palette(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        let query = palette.input.read(cx).text().to_string();
+        let mut hits: Vec<(i32, usize, Vec<usize>)> = palette
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| fuzzy::score(&query, &e.key).map(|(s, pos)| (s, i, pos)))
+            .collect();
+        if !query.is_empty() {
+            hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        }
+        palette.hits = hits
+            .into_iter()
+            .take(MAX_ROWS)
+            .map(|(_, i, pos)| (i, pos))
+            .collect();
+        palette.selected = 0;
+        cx.notify();
+    }
+
+    fn move_palette(&mut self, step: isize, cx: &mut Context<Self>) {
+        if let Some(p) = self.palette.as_mut()
+            && !p.hits.is_empty()
+        {
+            p.selected = (p.selected as isize + step).rem_euclid(p.hits.len() as isize) as usize;
+            cx.notify();
+        }
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.focus_active_item(window, cx);
+        cx.notify();
+    }
+
+    fn run_palette(&mut self, row: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.take() else {
+            return;
+        };
+        let Some((index, _)) = palette.hits.get(row.unwrap_or(palette.selected)) else {
+            self.palette = Some(palette);
+            return;
+        };
+        let entry = palette.entries.into_iter().nth(*index);
+        self.focus_active_item(window, cx);
+        match entry.map(|e| e.target) {
+            Some(Target::File(path)) => self.open_file(path, window, cx),
+            Some(Target::Command(action)) => window.dispatch_action(action, cx),
+            None => {}
+        }
+        cx.notify();
+    }
+
+    pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let palette = self.palette.as_ref()?;
+        let t = cx.theme().clone();
+        let rows: Vec<AnyElement> = palette
+            .hits
+            .iter()
+            .enumerate()
+            .map(|(row, (index, positions))| {
+                let entry = &palette.entries[*index];
+                let selected = row == palette.selected;
+                // Positions index `key`; for files the label is the name at the end of it.
+                let offset = entry.key.chars().count() - entry.label.chars().count();
+                let label_bytes: Vec<usize> = entry.label.char_indices().map(|(b, _)| b).collect();
+                let bold: Vec<_> = positions
+                    .iter()
+                    .filter(|&&p| p >= offset)
+                    .filter_map(|&p| {
+                        let b = *label_bytes.get(p - offset)?;
+                        let len = entry.label[b..].chars().next()?.len_utf8();
+                        Some((
+                            b..b + len,
+                            HighlightStyle {
+                                font_weight: Some(FontWeight::SEMIBOLD),
+                                ..Default::default()
+                            },
+                        ))
+                    })
+                    .collect();
+                div()
+                    .id(("palette-row", row))
+                    .h(px(32.))
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .cursor_pointer()
+                    .text_color(if selected {
+                        t.color.accent
+                    } else {
+                        t.color.content
+                    })
+                    .when(!selected, |el| el.hover(|s| s.bg(t.color.surface_hover)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_palette(Some(row), window, cx)
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(8.))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(
+                                StyledText::new(SharedString::from(entry.label.clone()))
+                                    .with_highlights(bold),
+                            )
+                            .children(
+                                matches!(entry.target, Target::File(_))
+                                    .then(|| entry.detail.clone())
+                                    .flatten()
+                                    .map(|d| {
+                                        div()
+                                            .text_size(t.typography.caption)
+                                            .text_color(t.color.content_muted)
+                                            .child(d)
+                                    }),
+                            ),
+                    )
+                    .children(
+                        matches!(entry.target, Target::Command(_))
+                            .then(|| entry.detail.clone())
+                            .flatten()
+                            .map(|k| {
+                                div()
+                                    .font_family(t.typography.mono.clone())
+                                    .text_size(t.typography.caption)
+                                    .text_color(t.color.content_muted)
+                                    .child(k)
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let empty = palette.hits.is_empty() && !palette.input.read(cx).text().is_empty();
+        let panel = div()
+            .id("palette")
+            .w(px(560.))
+            .max_h(px(44. + 32. * 8.5))
+            .flex()
+            .flex_col()
+            .bg(t.color.surface)
+            .border_1()
+            .border_color(t.color.border)
+            .rounded(t.shape.radius_panel)
+            .shadow(vec![t.popover_shadow()])
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .h(px(44.))
+                    .flex_none()
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(t.color.border)
+                    .child(palette.input.clone()),
+            )
+            .child(
+                div()
+                    .id("palette-rows")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .py(px(4.))
+                    .children(rows)
+                    .when(empty, |el| {
+                        el.child(
+                            div()
+                                .h(px(32.))
+                                .px(px(12.))
+                                .flex()
+                                .items_center()
+                                .text_color(t.color.content_muted)
+                                .child(palette.placeholder_hint),
+                        )
+                    }),
+            );
+        let panel = motion::animate_if(
+            t.motion.reduced,
+            panel,
+            "palette-enter",
+            Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+            |el, d| el.opacity(d).top(px(2. * (1. - d))),
+        );
+        Some(
+            div()
+                .id("palette-layer")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .pt(px(96.))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                )
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+}
+
+/// `⌘⇧P`-style label for a binding.
+fn keystrokes(binding: &gpui::KeyBinding) -> String {
+    binding
+        .keystrokes()
+        .iter()
+        .map(|k| {
+            let m = k.modifiers();
+            let mut s = String::new();
+            if m.control {
+                s.push('⌃');
+            }
+            if m.alt {
+                s.push('⌥');
+            }
+            if m.shift {
+                s.push('⇧');
+            }
+            if m.platform {
+                s.push('⌘');
+            }
+            let key = match k.key() {
+                "enter" => "↩".to_string(),
+                "left" => "←".into(),
+                "right" => "→".into(),
+                "up" => "↑".into(),
+                "down" => "↓".into(),
+                other => other.to_uppercase(),
+            };
+            s + &key
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}

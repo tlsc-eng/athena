@@ -25,6 +25,9 @@ actions!(
         TogglePaneZoom,
         NextTab,
         PrevTab,
+        QuickOpen,
+        CommandPalette,
+        ToggleFileTree,
     ]
 );
 
@@ -63,6 +66,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-enter", TogglePaneZoom, None),
         KeyBinding::new("cmd-}", NextTab, None),
         KeyBinding::new("cmd-{", PrevTab, None),
+        KeyBinding::new("cmd-p", QuickOpen, None),
+        KeyBinding::new("cmd-shift-p", CommandPalette, None),
+        KeyBinding::new("cmd-b", ToggleFileTree, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -100,6 +106,10 @@ pub fn init(cx: &mut App) {
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Command Palette", CommandPalette),
+                MenuItem::action("Go to File…", QuickOpen),
+                MenuItem::action("Toggle File Tree", ToggleFileTree),
+                MenuItem::separator(),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),
                 MenuItem::action("Zoom Pane", TogglePaneZoom),
