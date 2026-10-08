@@ -178,9 +178,13 @@ impl Buffer {
 
     /// Writes to `path` and keeps editing it there, highlighting by its new extension.
     pub fn save_as(&mut self, path: PathBuf) -> Result<()> {
+        let old = self.path.replace(path.clone());
+        if let Err(e) = self.save() {
+            self.path = old;
+            return Err(e);
+        }
         self.syntax = Lang::for_path(&path).map(|lang| Syntax::new(lang, &self.rope));
-        self.path = Some(path);
-        self.save()
+        Ok(())
     }
 
     /// Takes the file's current text as one undoable edit and marks it saved.

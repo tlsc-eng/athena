@@ -22,6 +22,7 @@ const ZOOM_STEPS: &[f32] = &[
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.;
 const CHECKER: f32 = 8.;
+const MAX_CHECKER_CELLS: f32 = 8000.;
 const STATUS_HEIGHT: f32 = 28.;
 
 pub fn init(cx: &mut App) {
@@ -275,7 +276,13 @@ fn paint_checker(bounds: Bounds<Pixels>, light: gpui::Hsla, dark: gpui::Hsla, wi
         return;
     }
     window.paint_quad(fill(visible, dark));
-    let cell = px(CHECKER);
+    // Coarser squares on very large areas keep the quad count bounded.
+    let area = f32::from(visible.size.width) * f32::from(visible.size.height);
+    let cell = px(CHECKER
+        * (area / (CHECKER * CHECKER * MAX_CHECKER_CELLS))
+            .sqrt()
+            .max(1.)
+            .ceil());
     let col0 = ((visible.left() - bounds.left()) / cell).floor() as i64;
     let row0 = ((visible.top() - bounds.top()) / cell).floor() as i64;
     let col1 = ((visible.right() - bounds.left()) / cell).ceil() as i64;
@@ -308,6 +315,8 @@ fn fit_scale(info: Info, (vw, vh): (f32, f32)) -> f32 {
 
 /// Where the image's top-left sits in the viewport: centred when smaller, panned when larger.
 fn origin(info: Info, (vw, vh): (f32, f32), scale: f32, pan: Point<f32>) -> (f32, f32) {
+    // The pane may have shrunk since the pan was set.
+    let pan = clamp_pan(info, (vw, vh), scale, pan);
     let (w, h) = (info.width * scale, info.height * scale);
     let x = if w <= vw { (vw - w) / 2. } else { -pan.x };
     let y = if h <= vh { (vh - h) / 2. } else { -pan.y };
@@ -379,7 +388,7 @@ fn svg_size(text: &str) -> Option<(f32, f32)> {
             let trimmed = rest.trim_start();
             if before.is_some_and(char::is_whitespace) && trimmed.starts_with('=') {
                 let value = trimmed[1..].trim_start();
-                let quote = value.chars().next()?;
+                let quote = value.chars().next().filter(|q| matches!(q, '"' | '\''))?;
                 let value = &value[1..];
                 return Some(&value[..value.find(quote)?]);
             }
@@ -390,7 +399,7 @@ fn svg_size(text: &str) -> Option<(f32, f32)> {
         if v.ends_with('%') {
             return None;
         }
-        v.parse().ok().filter(|n: &f32| *n > 0.)
+        v.parse().ok().filter(|n: &f32| n.is_finite() && *n > 0.)
     };
     let view_box = attr("viewBox").and_then(|v| {
         let n: Vec<f32> = v
@@ -447,6 +456,11 @@ mod tests {
             Some((200., 100.))
         );
         assert_eq!(svg_size(r#"<svg width="100%" height="100%">"#), None);
+        assert_eq!(
+            svg_size("<svg width=\u{201c}100\u{201d} height=1e39>"),
+            None
+        );
+        assert_eq!(svg_size(r#"<svg width="inf" height="2">"#), None);
     }
 
     #[test]

@@ -1015,7 +1015,7 @@ impl EditorView {
     fn reload(&mut self, cx: &mut Context<Self>) {
         let mut result = Ok(());
         self.with_buffer(cx, |b| result = b.reload_from_disk());
-        self.conflict = false;
+        self.conflict &= result.is_err();
         self.save_error = result.err().map(|e| format!("{e:#}"));
         self.changed(cx);
     }
