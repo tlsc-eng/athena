@@ -75,6 +75,8 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Next tab", Box::new(actions::NextTab)),
         ("Previous tab", Box::new(actions::PrevTab)),
         ("Go to file", Box::new(actions::QuickOpen)),
+        ("Source control changes", Box::new(actions::ShowChanges)),
+        ("Toggle inline blame", Box::new(actions::ToggleBlame)),
         ("Open file to the side", Box::new(actions::QuickOpenBeside)),
         ("New Claude session", Box::new(actions::NewClaudeSession)),
         (

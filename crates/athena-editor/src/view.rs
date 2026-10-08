@@ -144,6 +144,27 @@ pub enum EditorEvent {
         line: u32,
         character: u32,
     },
+    /// The cursor moved to another zero-based line.
+    CursorMoved {
+        line: u32,
+    },
+}
+
+/// A change bar in the gutter, in zero-based lines of the saved file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GutterMark {
+    Added {
+        start: usize,
+        len: usize,
+    },
+    Modified {
+        start: usize,
+        len: usize,
+    },
+    /// Lines were removed just above `before`.
+    Removed {
+        before: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -206,6 +227,10 @@ pub struct EditorView {
     autosave_task: Option<Task<()>>,
     /// The file changed on disk while this buffer had unsaved edits; the bar asks what to keep.
     conflict: bool,
+    pub(crate) gutter_marks: Vec<GutterMark>,
+    /// A caption drawn after the cursor's line while the cursor stays on that zero-based line.
+    pub(crate) blame: Option<(usize, String)>,
+    cursor_line: usize,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -246,6 +271,9 @@ impl EditorView {
             autosave: None,
             autosave_task: None,
             conflict: false,
+            gutter_marks: Vec::new(),
+            blame: None,
+            cursor_line: 0,
         }
     }
 
@@ -264,6 +292,35 @@ impl EditorView {
     pub fn set_markers(&mut self, markers: Vec<Marker>, cx: &mut Context<Self>) {
         self.markers = markers;
         cx.notify();
+    }
+
+    pub fn set_gutter_marks(&mut self, marks: Vec<GutterMark>, cx: &mut Context<Self>) {
+        if self.gutter_marks != marks {
+            self.gutter_marks = marks;
+            cx.notify();
+        }
+    }
+
+    pub fn set_blame(&mut self, blame: Option<(usize, String)>, cx: &mut Context<Self>) {
+        if self.blame != blame {
+            self.blame = blame;
+            cx.notify();
+        }
+    }
+
+    /// Zero-based line the cursor is on.
+    pub fn cursor_line(&self) -> usize {
+        self.cursor_line
+    }
+
+    fn note_cursor_line(&mut self, cx: &mut Context<Self>) {
+        let Some(line) = self.buffer.as_ref().map(|b| b.line_of(b.selection.head)) else {
+            return;
+        };
+        if line != self.cursor_line {
+            self.cursor_line = line;
+            cx.emit(EditorEvent::CursorMoved { line: line as u32 });
+        }
     }
 
     /// Moves the cursor to a zero-based line and UTF-16 column.
@@ -363,6 +420,7 @@ impl EditorView {
         }
         self.reveal_selection();
         self.autoscroll = true;
+        self.note_cursor_line(cx);
         if edited {
             self.refresh_find(false, cx);
             let version = self.buffer.as_ref().map_or(0, Buffer::version);
@@ -410,6 +468,7 @@ impl EditorView {
             n if n >= 3 => buffer.select_line_at(at),
             _ => buffer.move_to(at, event.modifiers.shift),
         }
+        self.note_cursor_line(cx);
         if event.modifiers.platform && event.click_count == 1 {
             self.definition_at(at, cx);
             cx.notify();
@@ -437,6 +496,7 @@ impl EditorView {
         {
             buffer.move_to(at, true);
             self.autoscroll = true;
+            self.note_cursor_line(cx);
             cx.notify();
         }
     }

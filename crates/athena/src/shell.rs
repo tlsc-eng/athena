@@ -5,6 +5,7 @@ mod dnd;
 mod drawer;
 mod fileops;
 mod fuzzy;
+mod git_view;
 mod item;
 mod lsp;
 mod notices;
@@ -40,6 +41,7 @@ use crate::actions::{
     ToggleAutoSave, ToggleFileTree, ToggleFullScreen, ToggleNotifications, TogglePaneZoom,
     TogglePreview, Zoom,
 };
+use crate::actions::{ShowChanges, ToggleBlame};
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
 const RAIL_WIDTH: f32 = 48.;
@@ -73,6 +75,7 @@ pub struct Shell {
     containers: containers_view::ContainersState,
     playwright: playwright_view::PlaywrightState,
     lsp: lsp::LspState,
+    git: git_view::GitState,
     /// Per project, the pane a file opened from a terminal goes to.
     last_editor_pane: HashMap<PathBuf, PaneId>,
     window_title: String,
@@ -123,6 +126,7 @@ impl Shell {
                 if window.is_window_active() {
                     this.tree.invalidate();
                     this.reload_changed_files(cx);
+                    this.git_kick(cx);
                     let reduced = motion::system_reduce_motion();
                     if cx.theme().motion.reduced != reduced {
                         cx.global_mut::<athena_ui::Theme>().motion.reduced = reduced;
@@ -196,6 +200,7 @@ impl Shell {
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
             lsp: lsp::LspState::default(),
+            git: git_view::GitState::default(),
             last_editor_pane: HashMap::new(),
             window_title: String::new(),
             pending_open: None,
@@ -227,6 +232,7 @@ impl Shell {
         });
         shell.start_notices(window, cx);
         shell.start_usage(window, cx);
+        shell.start_git(window, cx);
         crate::system_notify::set_badge(shell.unread());
         shell
     }
@@ -263,6 +269,7 @@ impl Shell {
         self.zoomed = None;
         self.focus_pending = true;
         self.schedule_save(cx);
+        self.git_kick(cx);
         cx.notify();
     }
 
@@ -372,7 +379,7 @@ impl Shell {
                             .text_color(t.color.content)
                             .child(p.name()),
                     )
-                    .children(athena_workspace::git_branch(&p.root).map(|branch| {
+                    .children(self.git_branch_label(&p.root).map(|branch| {
                         div()
                             .text_color(t.color.content_muted)
                             .child(format!("· {branch}"))
@@ -719,6 +726,10 @@ impl Render for Shell {
                 this.set_playwright_mcp(false, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| this.toggle_tree(cx)))
+            .on_action(cx.listener(|this, _: &ShowChanges, _, cx| {
+                this.toggle_drawer_tab(drawer::DrawerTab::Changes, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleBlame, _, cx| this.toggle_blame(cx)))
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)

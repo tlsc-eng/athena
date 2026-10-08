@@ -43,6 +43,8 @@ actions!(
         TogglePreview,
         SaveAs,
         ToggleAutoSave,
+        ShowChanges,
+        ToggleBlame,
     ]
 );
 
@@ -88,6 +90,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
         KeyBinding::new("cmd-shift-v", TogglePreview, None),
         KeyBinding::new("cmd-shift-s", SaveAs, None),
+        KeyBinding::new("cmd-alt-shift-g", ToggleBlame, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -135,6 +138,8 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::action("Containers", ShowContainers),
                 MenuItem::action("Playwright", ShowPlaywright),
+                MenuItem::action("Source Control Changes", ShowChanges),
+                MenuItem::action("Toggle Inline Blame", ToggleBlame),
                 MenuItem::action("New Browser Preview", NewPreview),
                 MenuItem::action("Open Markdown Preview", TogglePreview),
                 MenuItem::separator(),

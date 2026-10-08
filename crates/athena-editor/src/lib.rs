@@ -9,7 +9,7 @@ mod view;
 pub use buffer::{Buffer, Indent, SaveError, Selection};
 pub use image::{ImageView, is_image_path};
 pub use syntax::{Lang, Token};
-pub use view::{EditorEvent, EditorView, Marker, MarkerSeverity};
+pub use view::{EditorEvent, EditorView, GutterMark, Marker, MarkerSeverity};
 
 /// Registers the editor's and image viewer's key bindings.
 pub fn init(cx: &mut gpui::App) {

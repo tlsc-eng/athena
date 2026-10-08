@@ -155,6 +155,7 @@ impl Shell {
                         }
                         EditorEvent::Saved => {
                             this.lsp_saved(&view, cx);
+                            this.git_kick(cx);
                             let path = view.read(cx).path().to_path_buf();
                             this.refresh_docs(&path, cx);
                             this.sync_siblings(&view, &path, cx);
@@ -173,11 +174,15 @@ impl Shell {
                             };
                             this.lsp_references(&view, at, cx);
                         }
+                        EditorEvent::CursorMoved { line } => {
+                            return this.git_cursor_moved(&view, *line, cx);
+                        }
                     }
                     cx.notify();
                 })
                 .detach();
                 self.lsp_opened(root, &view, cx);
+                self.git_opened(&view, cx);
                 ItemView::Editor(view)
             }
             ItemKind::Image { path } => {
@@ -1014,6 +1019,10 @@ impl Shell {
                     } else {
                         t.color.content_muted
                     })
+                    .when_some(
+                        item.kind.file().and_then(|p| self.git_status_for(p)),
+                        |el, s| el.text_color(super::git_view::status_color(s, &t)),
+                    )
                     .when(!active, |el| {
                         el.hover(|s| {
                             s.bg(t.color.surface_hover)

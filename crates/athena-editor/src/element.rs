@@ -80,6 +80,7 @@ pub struct Frame {
     text: Vec<(Point<Pixels>, ShapedLine)>,
     gutter: Vec<(Point<Pixels>, ShapedLine)>,
     gutter_bounds: Bounds<Pixels>,
+    gutter_marks: Vec<PaintQuad>,
     text_bounds: Bounds<Pixels>,
     overlay: Vec<PaintQuad>,
     marked: Option<(PaintQuad, Point<Pixels>, ShapedLine)>,
@@ -171,6 +172,7 @@ impl Element for EditorElement {
             text: Vec::new(),
             gutter: Vec::new(),
             gutter_bounds: bounds,
+            gutter_marks: Vec::new(),
             text_bounds: bounds,
             overlay: Vec::new(),
             marked: None,
@@ -392,6 +394,34 @@ impl Element for EditorElement {
             );
             let x = numbers_right - label.width;
             frame.gutter.push((point(x, y), label));
+            // Marks come from the saved file, so unsaved line inserts shift them until the next save.
+            for mark in &view.gutter_marks {
+                let (top, height, color) = match *mark {
+                    crate::GutterMark::Added { start, len }
+                        if (start..start + len).contains(line) =>
+                    {
+                        (y, lh, theme.color.success)
+                    }
+                    crate::GutterMark::Modified { start, len }
+                        if (start..start + len).contains(line) =>
+                    {
+                        (y, lh, theme.color.warning)
+                    }
+                    crate::GutterMark::Removed { before } if before == *line => {
+                        (y - px(3.), px(6.), theme.color.danger)
+                    }
+                    _ => continue,
+                };
+                let width = if matches!(mark, crate::GutterMark::Removed { .. }) {
+                    px(4.)
+                } else {
+                    px(2.)
+                };
+                frame.gutter_marks.push(fill(
+                    Bounds::new(point(fold_column.0 + px(2.), top), size(width, height)),
+                    color,
+                ));
+            }
             let chevron = match folded {
                 Some(_) => Some(("▸", syntax.line_number_active)),
                 None if view.gutter_hover && view.fold_at(*line).is_some() => {
@@ -408,6 +438,23 @@ impl Element for EditorElement {
                 );
                 let x = fold_column.0 + (px(FOLD_COLUMN) - shaped.width) / 2.;
                 frame.gutter.push((point(x, y), shaped));
+            }
+
+            if let Some((_, caption)) = view
+                .blame
+                .as_ref()
+                .filter(|(l, _)| *l == *line && *line == head_line && self.focused)
+                .filter(|_| folded.is_none())
+            {
+                let text = text_system.shape_line(
+                    caption.clone().into(),
+                    font_size,
+                    &[run(caption.len(), syntax.comment)],
+                    None,
+                );
+                frame
+                    .text
+                    .push((point(x0 + shaped.width + cell * 3., y), text));
             }
 
             if *line == head_line {
@@ -495,6 +542,9 @@ impl Element for EditorElement {
                 },
             );
             window.paint_quad(fill(frame.gutter_bounds, frame.gutter_bg));
+            for quad in frame.gutter_marks.drain(..) {
+                window.paint_quad(quad);
+            }
             for (origin, line) in &frame.gutter {
                 let _ = line.paint(*origin, lh, window, cx);
             }

@@ -164,11 +164,12 @@ impl Shell {
             })
             .collect();
         let t = cx.theme().clone();
+        let git_theme = t.clone();
         let count = rows.len();
         let list = uniform_list(
             "file-tree",
             count,
-            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 rows[range]
                     .iter()
                     .map(|row| {
@@ -177,6 +178,7 @@ impl Shell {
                         let root = root.clone();
                         let selected = open.as_ref() == Some(&row.entry.path);
                         let unsaved = dirty.contains(&row.entry.path);
+                        let git = this.git_status_for(&row.entry.path);
                         let marker = match (is_dir, row.expanded) {
                             (true, true) => "▾",
                             (true, false) => "▸",
@@ -205,9 +207,10 @@ impl Shell {
                                     .bg(t.color.surface_accent)
                             })
                             .when(!selected, |el| {
-                                el.hover(|s| {
-                                    s.bg(t.color.surface_hover).text_color(t.color.content)
+                                el.when_some(git, |el, s| {
+                                    el.text_color(super::git_view::status_color(s, &git_theme))
                                 })
+                                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
                             })
                             .on_click(cx.listener(
                                 move |this, event: &ClickEvent, window: &mut Window, cx| {
@@ -242,6 +245,7 @@ impl Shell {
                                     div().size(px(6.)).flex_none().bg(t.color.content_disabled),
                                 )
                             })
+                            .children(super::git_view::status_badge(git, is_dir, &git_theme))
                     })
                     .collect::<Vec<_>>()
             }),

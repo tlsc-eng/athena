@@ -15,6 +15,7 @@ pub(super) enum DrawerTab {
     Playwright,
     Notifications,
     References,
+    Changes,
 }
 
 impl DrawerTab {
@@ -24,6 +25,7 @@ impl DrawerTab {
             Self::Playwright => "Playwright",
             Self::Notifications => "Notifications",
             Self::References => "References",
+            Self::Changes => "Changes",
         }
     }
 }
@@ -114,6 +116,7 @@ impl Shell {
             DrawerTab::Playwright,
             DrawerTab::Notifications,
             DrawerTab::References,
+            DrawerTab::Changes,
         ]
         .map(|candidate| {
             let active = candidate == tab;
@@ -160,12 +163,14 @@ impl Shell {
             DrawerTab::Containers => self.render_containers_action(cx),
             DrawerTab::Playwright => self.render_playwright_action(cx),
             DrawerTab::References => self.render_references_count(cx),
+            DrawerTab::Changes => self.render_changes_count(cx),
         };
         let content = match tab {
             DrawerTab::Notifications => self.render_notifications(cx),
             DrawerTab::Containers => self.render_containers(cx),
             DrawerTab::Playwright => self.render_playwright(cx),
             DrawerTab::References => self.render_references(cx),
+            DrawerTab::Changes => self.render_changes(cx),
         };
         let drawer = div()
             .size_full()
