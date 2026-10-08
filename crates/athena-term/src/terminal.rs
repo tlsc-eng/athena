@@ -14,7 +14,7 @@ use athena_ui::TerminalColors;
 
 use crate::{colors, links, search};
 
-const SCROLLBACK_LINES: usize = 10_000;
+pub(crate) const SCROLLBACK_LINES: usize = 10_000;
 const MAX_TITLE: usize = 256;
 /// The daemon notices a new foreground program up to two 500 ms ticks after it starts.
 const TITLE_GRACE: Duration = Duration::from_secs(1);

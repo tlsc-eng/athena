@@ -112,19 +112,20 @@ impl Search {
         });
     }
 
-    /// Keeps match lines on their text after new output pushed lines into scrollback.
-    pub fn follow_scroll<T>(&mut self, term: &Term<T>) {
+    /// Keeps match lines on their text after new output pushed lines into scrollback; false once
+    /// scrollback holds `limit` lines, where the lines pushed can no longer be counted.
+    pub fn follow_scroll<T>(&mut self, term: &Term<T>, limit: usize) -> bool {
         let history = term.grid().history_size();
         let pushed = history.saturating_sub(self.history) as i32;
         self.history = history;
-        if pushed == 0 {
-            return;
+        if pushed != 0 {
+            for m in &mut self.matches {
+                let (start, end) = (*m.start(), *m.end());
+                *m = Point::new(start.line - pushed, start.column)
+                    ..=Point::new(end.line - pushed, end.column);
+            }
         }
-        for m in &mut self.matches {
-            let (start, end) = (*m.start(), *m.end());
-            *m = Point::new(start.line - pushed, start.column)
-                ..=Point::new(end.line - pushed, end.column);
-        }
+        history < limit
     }
 
     /// Per-row pieces of the matches visible in a viewport scrolled back by `display_offset`.
@@ -386,11 +387,43 @@ mod tests {
         s.run(&t, None);
         assert_eq!(found(&s), [(0, 0, 2)]);
         feed(&mut t, "a\r\nb\r\nc\r\n");
-        s.follow_scroll(&t);
+        assert!(s.follow_scroll(&t, 10_000));
         let shifted = found(&s);
         assert!(shifted[0].0 < 0, "{shifted:?}");
         s.run(&t, None);
         assert_eq!(found(&s), shifted, "a fresh search agrees");
+    }
+
+    #[test]
+    fn full_scrollback_reports_that_matches_cannot_be_followed() {
+        let config = Config {
+            scrolling_history: 4,
+            ..Config::default()
+        };
+        let mut t = Term::new(config, &TermSize::new(10, 3), VoidListener);
+        feed(&mut t, "hit\r\n");
+        let mut s = search("hit");
+        s.run(&t, None);
+        feed(&mut t, "a\r\nb\r\n");
+        assert!(s.follow_scroll(&t, 4), "room left: the shift is exact");
+        feed(&mut t, "c\r\nd\r\ne\r\n");
+        assert!(
+            !s.follow_scroll(&t, 4),
+            "scrollback filled up during this output"
+        );
+        let mut fresh = search("hit");
+        fresh.run(&t, None);
+        assert_eq!(found(&fresh), [(-4, 0, 2)]);
+        feed(&mut t, "f\r\n");
+        assert!(
+            !s.follow_scroll(&t, 4),
+            "a full scrollback hides how far lines moved"
+        );
+        s.run(&t, None);
+        assert!(
+            s.matches.is_empty(),
+            "re-running finds the match scrolled out"
+        );
     }
 
     #[test]

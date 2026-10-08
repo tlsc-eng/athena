@@ -25,7 +25,7 @@ use crate::keys;
 use crate::links;
 use crate::mouse::{self, MouseEvent};
 use crate::search::{Search, Span};
-use crate::terminal::{GridSize, Link, PaneEvent, Terminal, Transport};
+use crate::terminal::{GridSize, Link, PaneEvent, SCROLLBACK_LINES, Terminal, Transport};
 
 actions!(
     terminal,
@@ -110,6 +110,8 @@ struct FindBar {
     search: Search,
     /// A re-run for new output is already scheduled.
     rerun_pending: bool,
+    /// Output scrolled a full scrollback, so matches are found again before the next frame.
+    stale: bool,
     _subscription: Subscription,
 }
 
@@ -1098,6 +1100,7 @@ impl TerminalView {
                     input: input.clone(),
                     search,
                     rerun_pending: false,
+                    stale: false,
                     _subscription: subscription,
                 });
                 self.find_closing = None;
@@ -1163,6 +1166,7 @@ impl TerminalView {
         let (Some(find), Some(terminal)) = (self.find.as_mut(), self.terminal.as_mut()) else {
             return;
         };
+        find.stale = false;
         let anchor = find.search.current_match().map(|m| *m.start());
         find.search.run(terminal.term(), anchor);
         if reveal && let Some(m) = find.search.current_match() {
@@ -1192,7 +1196,8 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Keeps highlights on their text as output scrolls, then re-runs the search shortly after.
+    /// Keeps highlights on their text as output scrolls, then re-runs the search shortly after, or
+    /// before the next frame once scrollback is full.
     fn search_after_output(&mut self, cx: &mut Context<Self>) {
         let (Some(find), Some(terminal)) = (self.find.as_mut(), self.terminal.as_ref()) else {
             return;
@@ -1200,8 +1205,11 @@ impl TerminalView {
         if find.search.query().is_empty() {
             return;
         }
-        find.search.follow_scroll(terminal.term());
-        self.schedule_search(cx);
+        if find.search.follow_scroll(terminal.term(), SCROLLBACK_LINES) {
+            self.schedule_search(cx);
+        } else {
+            find.stale = true;
+        }
     }
 
     fn schedule_search(&mut self, cx: &mut Context<Self>) {
@@ -1431,6 +1439,9 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
+        if self.find.as_ref().is_some_and(|f| f.stale) {
+            self.run_search(false);
+        }
         let focused = self.focus.is_focused(window);
         if focused
             && let Some(terminal) = self.terminal.as_mut()
