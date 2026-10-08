@@ -325,11 +325,31 @@ impl Terminal {
         self.term.scroll_display(Scroll::Delta(lines));
     }
 
-    pub fn clear_scrollback(&mut self) {
+    /// Clears scrollback and, outside full-screen programs, the screen above the cursor line.
+    pub fn clear_scrollback(&mut self, at_prompt: bool) {
         self.term.clear_screen(ClearMode::Saved);
-        if !self.mode().contains(TermMode::ALT_SCREEN) {
-            self.transport.write(vec![0x0c]);
+        if self.mode().contains(TermMode::ALT_SCREEN) {
+            return;
         }
+        if at_prompt {
+            self.transport.write(vec![0x0c]);
+            return;
+        }
+        // A running program ignores ^L, so its cursor line moves to the top here instead.
+        let row = self.term.grid().cursor.point.line.0.max(0) as usize;
+        if row > 0 {
+            self.term.scroll_up(row);
+            self.term.move_up(row);
+            self.term.clear_screen(ClearMode::Saved);
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        let start = Point::new(self.term.topmost_line(), Column(0));
+        let end = Point::new(self.term.bottommost_line(), self.term.last_column());
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        self.term.selection = Some(selection);
     }
 
     /// Nudges the PTY size so a full-screen program repaints; replayed bytes alone can leave it stale.
@@ -536,6 +556,54 @@ mod tests {
             ..t.size()
         });
         assert_eq!(t.take_damage(), Damage::Full);
+    }
+
+    #[test]
+    fn clearing_at_the_prompt_drops_scrollback_and_asks_the_shell_to_redraw() {
+        let (mut t, sent) = terminal();
+        for i in 0..12 {
+            feed(&mut t, format!("line {i}\r\n").as_bytes());
+        }
+        t.clear_scrollback(true);
+        assert_eq!(t.term().grid().history_size(), 0);
+        assert_eq!(*sent.0.borrow(), [0x0c]);
+    }
+
+    #[test]
+    fn clearing_under_a_running_program_keeps_only_its_cursor_line() {
+        let (mut t, sent) = terminal();
+        for i in 0..12 {
+            feed(&mut t, format!("line {i}\r\n").as_bytes());
+        }
+        feed(&mut t, b"progress 40%");
+        t.clear_scrollback(false);
+        assert!(sent.0.borrow().is_empty(), "the program is left alone");
+        assert_eq!(t.text_lines(100), ["progress 40%"]);
+        assert_eq!(t.term().grid().cursor.point.line, Line(0));
+        feed(&mut t, b"\rprogress 50%\r\nnext");
+        assert_eq!(t.text_lines(100), ["progress 50%", "next"]);
+    }
+
+    #[test]
+    fn clearing_a_full_screen_program_leaves_its_screen() {
+        let (mut t, sent) = terminal();
+        feed(&mut t, b"\x1b[?1049hmenu");
+        t.clear_scrollback(true);
+        assert!(sent.0.borrow().is_empty());
+        assert_eq!(t.text_lines(100), ["menu"]);
+    }
+
+    #[test]
+    fn select_all_covers_scrollback_and_screen() {
+        let (mut t, _) = terminal();
+        for i in 0..8 {
+            feed(&mut t, format!("line {i}\r\n").as_bytes());
+        }
+        feed(&mut t, b"$ ");
+        t.select_all();
+        let text = t.selection_text().unwrap();
+        assert!(text.starts_with("line 0\nline 1\n"), "{text:?}");
+        assert!(text.trim_end().ends_with("line 7\n$"), "{text:?}");
     }
 
     #[test]

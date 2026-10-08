@@ -21,7 +21,7 @@ use crate::keys;
 use crate::links;
 use crate::terminal::{GridSize, Link, PaneEvent, Terminal, Transport};
 
-actions!(terminal, [Copy, Paste, ClearScrollback]);
+actions!(terminal, [Copy, Paste, ClearScrollback, SelectAll]);
 
 const BATCH_BYTES: usize = 2 * 1024 * 1024;
 
@@ -47,6 +47,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-c", Copy, Some("Terminal")),
         KeyBinding::new("cmd-v", Paste, Some("Terminal")),
         KeyBinding::new("cmd-k", ClearScrollback, Some("Terminal")),
+        KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
     ]);
 }
 
@@ -839,8 +840,19 @@ impl TerminalView {
     }
 
     fn clear_scrollback(&mut self, _: &ClearScrollback, _: &mut Window, cx: &mut Context<Self>) {
+        let at_prompt = self.foreground.as_ref().is_none_or(|p| is_shell(&p.name));
         if let Some(terminal) = self.terminal.as_mut() {
-            terminal.clear_scrollback();
+            terminal.clear_scrollback(at_prompt);
+            cx.notify();
+        }
+    }
+
+    fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            return;
+        }
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.select_all();
             cx.notify();
         }
     }
@@ -898,6 +910,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear_scrollback))
+            .on_action(cx.listener(Self::select_all))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
