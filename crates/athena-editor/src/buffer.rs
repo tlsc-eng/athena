@@ -124,23 +124,23 @@ impl Indent {
         }
     }
 
-    /// Whitespace reaching visual column `col`, in this style.
-    fn fill(self, col: usize) -> String {
+    /// Whitespace reaching column `col`, in this style, a tab spanning `tab` columns.
+    fn fill(self, col: usize, tab: usize) -> String {
         match self {
-            Self::Tab => "\t".repeat(col / TAB_WIDTH) + &" ".repeat(col % TAB_WIDTH),
+            Self::Tab => "\t".repeat(col / tab) + &" ".repeat(col % tab),
             Self::Spaces(_) => " ".repeat(col),
         }
     }
 }
 
-/// The visual column leading blanks reach, and how many chars they are.
-fn indent_width(line: &str) -> (usize, usize) {
+/// The column leading blanks reach, a tab spanning `tab` columns, and how many chars they are.
+fn indent_width(line: &str, tab: usize) -> (usize, usize) {
     let mut col = 0;
     let mut chars = 0;
     for c in line.chars() {
         match c {
             ' ' => col += 1,
-            '\t' => col += TAB_WIDTH - col % TAB_WIDTH,
+            '\t' => col += tab - col % tab,
             _ => break,
         }
         chars += 1;
@@ -977,13 +977,13 @@ impl Buffer {
             if text.is_empty() && (first != last || outdent) {
                 continue;
             }
-            let (col, chars) = indent_width(&text);
+            let (col, chars) = indent_width(&text, TAB_WIDTH);
             let target = match (outdent, col) {
                 (true, 0) => continue,
                 (true, _) => (col - 1) / size * size,
                 (false, _) => (col / size + 1) * size,
             };
-            let fill = self.indent.fill(target);
+            let fill = self.indent.fill(target, TAB_WIDTH);
             // Indentation is ASCII, so its char count is its byte length.
             if fill != text[..chars] {
                 let start = self.line_start(line);
@@ -1004,11 +1004,13 @@ impl Buffer {
 
     /// Rewrites every line's indentation in `to`'s style and keeps using it; one undo step.
     pub fn convert_indentation(&mut self, c: &mut Cursor, to: Indent) {
+        // As in VS Code, a tab is as wide as one level of the file's current indentation.
+        let tab = self.indent.size().max(1);
         let mut changes = Vec::new();
         for line in 0..self.len_lines() {
             let text = self.line(line);
-            let (col, chars) = indent_width(&text);
-            let fill = to.fill(col);
+            let (col, chars) = indent_width(&text, tab);
+            let fill = to.fill(col, tab);
             if fill != text[..chars] {
                 let start = self.line_start(line);
                 changes.push((start..start + chars, fill));
@@ -2546,5 +2548,14 @@ mod tests {
         assert_eq!(b.full_text(), "a\n    b\n        c\n");
         assert_eq!(c.head(), b.line_start(2) + 8);
         assert_eq!(b.indent, Indent::Spaces(4));
+    }
+
+    #[test]
+    fn converting_to_tabs_turns_each_indent_level_into_one_tab() {
+        let mut b = buf("a\n  b\n     c\n", "/x/a.ts");
+        assert_eq!(b.indent, Indent::Spaces(2));
+        let mut c = Cursor::at(0);
+        one_step(&mut b, &mut c, |b, c| b.convert_indentation(c, Indent::Tab));
+        assert_eq!(b.full_text(), "a\n\tb\n\t\t c\n");
     }
 }
