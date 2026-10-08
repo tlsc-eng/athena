@@ -191,7 +191,9 @@ impl Element for EditorElement {
                 let row = view.display.row_of(head_line);
                 let line = row as f32 * f32::from(lh);
                 let height = f32::from(bounds.size.height);
-                if line < view.scroll.y {
+                if std::mem::take(&mut view.center_cursor) {
+                    view.scroll.y = (line - (height - f32::from(lh)) / 2.).max(0.);
+                } else if line < view.scroll.y {
                     view.scroll.y = line;
                 } else if line + f32::from(lh) > view.scroll.y + height {
                     view.scroll.y = line + f32::from(lh) - height;

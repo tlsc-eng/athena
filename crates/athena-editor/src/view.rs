@@ -19,6 +19,7 @@ use gpui::{
 use crate::buffer::{Buffer, Cursor, Edit, SaveError, UNDO_GROUP};
 use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
+use crate::line_jump::LineJump;
 use crate::shared::{self, SharedBuffer};
 
 actions!(
@@ -70,6 +71,7 @@ actions!(
         UnfoldAtCursor,
         FoldAll,
         UnfoldAll,
+        GoToLine,
     ]
 );
 
@@ -127,6 +129,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-k cmd-]", UnfoldAtCursor, ctx),
         KeyBinding::new("cmd-k cmd-0", FoldAll, ctx),
         KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
+        KeyBinding::new("ctrl-g", GoToLine, ctx),
+        KeyBinding::new("cmd-l", GoToLine, ctx),
     ]);
 }
 
@@ -218,6 +222,9 @@ pub struct EditorView {
     pub(crate) viewport: Size<Pixels>,
     pub(crate) layout: Option<EditorLayout>,
     pub(crate) autoscroll: bool,
+    /// The next autoscroll puts the cursor's line mid-screen rather than just in view.
+    pub(crate) center_cursor: bool,
+    pub(crate) line_jump: Option<LineJump>,
     pub(crate) marked: Option<String>,
     find: Option<FindBar>,
     find_opening: Option<Opening>,
@@ -272,6 +279,8 @@ impl EditorView {
             viewport: Size::default(),
             layout: None,
             autoscroll: true,
+            center_cursor: false,
+            line_jump: None,
             marked: None,
             find: None,
             find_opening: None,
@@ -480,7 +489,11 @@ impl EditorView {
         cx.notify();
     }
 
-    fn with_buffer(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Buffer, &mut Cursor)) {
+    pub(crate) fn with_buffer(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Buffer, &mut Cursor),
+    ) {
         let Some(shared) = self.buffer.clone() else {
             return;
         };
@@ -878,6 +891,7 @@ impl Render for EditorView {
             .size_full()
             .flex()
             .flex_col()
+            .relative()
             .bg(t.color.surface_sunken);
         if let Some(error) = &self.error {
             return root.items_center().justify_center().child(empty_state(
@@ -1059,8 +1073,14 @@ impl Render for EditorView {
                         this.display.clear();
                         cx.notify();
                     }))
+                    .on_action(
+                        cx.listener(|this, _: &GoToLine, window, cx| {
+                            this.open_line_jump(window, cx)
+                        }),
+                    )
                     .child(EditorElement::new(cx.entity(), focused)),
             )
+            .children(self.render_line_jump(cx))
             .children(self.render_marker_bar(cx))
             .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
             .children(self.save_error.clone().map(|err| {

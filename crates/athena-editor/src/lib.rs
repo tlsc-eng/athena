@@ -2,6 +2,7 @@ mod buffer;
 mod display;
 mod element;
 mod image;
+mod line_jump;
 mod lines;
 mod shared;
 mod syntax;
