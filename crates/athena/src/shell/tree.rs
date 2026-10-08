@@ -155,6 +155,7 @@ impl Shell {
                             .id(gpui::ElementId::Name(
                                 row.entry.path.to_string_lossy().into_owned().into(),
                             ))
+                            .w_full()
                             .h(px(ROW_HEIGHT))
                             .pl(px(12. + INDENT * row.depth as f32))
                             .pr(px(8.))
@@ -168,8 +169,15 @@ impl Shell {
                             } else {
                                 t.color.content_secondary
                             })
-                            .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
-                            .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                            .when(selected, |el| {
+                                el.font_weight(FontWeight::MEDIUM)
+                                    .bg(t.color.surface_accent)
+                            })
+                            .when(!selected, |el| {
+                                el.hover(|s| {
+                                    s.bg(t.color.surface_hover).text_color(t.color.content)
+                                })
+                            })
                             .on_click(cx.listener(
                                 move |this, event: &ClickEvent, window: &mut Window, cx| {
                                     if is_dir {
