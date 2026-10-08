@@ -1,3 +1,4 @@
+pub mod git;
 mod layout;
 mod persist;
 mod project;
