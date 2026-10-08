@@ -4,6 +4,7 @@ mod fonts;
 mod icons;
 mod input;
 mod logo;
+mod menu;
 pub mod motion;
 mod theme;
 
@@ -12,6 +13,7 @@ pub use components::{Button, ButtonKind, Tooltip, empty_state};
 pub use icons::{FileIcon, ICON_SIZE, file_icon, icon_for};
 pub use input::{InputEvent, TextInput};
 pub use logo::{Glyph, Lockup};
+pub use menu::{ContextMenu, MenuItem};
 pub use theme::{Colors, Motion, Shape, SyntaxColors, TerminalColors, Theme, Typography};
 
 use gpui::App;
@@ -20,6 +22,7 @@ use gpui::App;
 pub fn init(cx: &mut App) {
     fonts::register(cx);
     input::init(cx);
+    menu::init(cx);
     cx.set_global(Theme::dark(motion::system_reduce_motion()));
 }
 
