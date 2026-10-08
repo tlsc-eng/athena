@@ -435,6 +435,11 @@ version = "0.1.0"
 [[package]]
 name = "athena-ui"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "objc2-app-kit",
+]
 
 [[package]]
 name = "athena-workspace"
