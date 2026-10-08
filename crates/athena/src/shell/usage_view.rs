@@ -24,46 +24,9 @@ pub(super) struct UsageState {
     announced: HashMap<(String, String), f32>,
 }
 
-/// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`.
-fn parse_rfc3339(s: &str) -> Option<i64> {
-    let (date, time) = s.split_once('T')?;
-    let mut d = date.split('-').map(|p| p.parse::<i64>());
-    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
-    let (clock, offset) = match time.find(['Z', '+', '-']) {
-        Some(i) => (&time[..i], &time[i..]),
-        None => (time, "Z"),
-    };
-    let mut c = clock.split(':');
-    let (hh, mm) = (
-        c.next()?.parse::<i64>().ok()?,
-        c.next()?.parse::<i64>().ok()?,
-    );
-    let ss = c
-        .next()
-        .and_then(|s| s.split('.').next()?.parse::<i64>().ok())
-        .unwrap_or(0);
-    let shift = match offset.as_bytes().first() {
-        Some(b'+' | b'-') => {
-            let sign = if offset.starts_with('-') { -1 } else { 1 };
-            let mut o = offset[1..].split(':');
-            sign * (o.next()?.parse::<i64>().ok()? * 3600
-                + o.next().and_then(|m| m.parse::<i64>().ok()).unwrap_or(0) * 60)
-        }
-        _ => 0,
-    };
-    // Days from civil date (Howard Hinnant's algorithm).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(days * 86_400 + hh * 3600 + mm * 60 + ss - shift)
-}
-
-fn resets_in(at: &str) -> Option<String> {
+fn resets_in(at: i64) -> Option<String> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
-    let secs = (parse_rfc3339(at)? - now).max(0);
+    let secs = (at - now).max(0);
     Some(match secs {
         0..3600 => format!("resets in {}m", secs / 60),
         3600..86_400 => format!("resets in {}h {}m", secs / 3600, secs % 3600 / 60),
@@ -234,7 +197,9 @@ impl Shell {
                 _ => None,
             })
             .max_by(|a, b| {
-                let five = |w: &&Vec<usage::Window>| w.first().map_or(0., |x| x.used);
+                let five = |w: &&Vec<usage::Window>| {
+                    w.iter().find(|x| x.label == "5h").map_or(-1., |x| x.used)
+                };
                 five(a).total_cmp(&five(b))
             });
         let used = |label: &str| {
@@ -243,13 +208,27 @@ impl Shell {
                 .map(|x| x.used)
         };
         let (five, week) = (used("5h"), used("7d"));
-        let summary = match (five, week) {
-            (Some(f), Some(w)) => format!("5h {f:.0}% · 7d {w:.0}%"),
-            (Some(f), None) => format!("5h {f:.0}%"),
-            _ if self.usage.readings.is_empty() => "Usage…".into(),
-            _ => "Usage unavailable".into(),
-        };
         let color = self.level_color(five.unwrap_or(0.).max(week.unwrap_or(0.)), cx);
+        let part = |label: &str, used: Option<f32>| match used {
+            Some(u) => div().text_color(color).child(format!("{label} {u:.0}%")),
+            None => div()
+                .text_color(t.color.content_muted)
+                .child(format!("{label} n/a")),
+        };
+        let summary = if busiest.is_some() {
+            div()
+                .flex()
+                .gap(px(4.))
+                .child(part("5h", five))
+                .child(div().text_color(t.color.content_muted).child("·"))
+                .child(part("7d", week))
+        } else if self.usage.readings.is_empty() {
+            div().text_color(t.color.content_muted).child("Usage…")
+        } else {
+            div()
+                .text_color(t.color.content_muted)
+                .child("Usage unavailable")
+        };
         div()
             .id("usage")
             .h(px(24.))
@@ -264,7 +243,7 @@ impl Shell {
                 this.usage.open = !this.usage.open;
                 cx.notify();
             }))
-            .when(five.is_some(), |el| {
+            .when(five.is_some() || week.is_some(), |el| {
                 el.child(
                     div()
                         .flex()
@@ -274,7 +253,7 @@ impl Shell {
                         .child(self.bar(week.unwrap_or(0.), 24., cx)),
                 )
             })
-            .child(div().text_color(color).child(summary))
+            .child(summary)
             .into_any_element()
     }
 
@@ -293,6 +272,10 @@ impl Shell {
                 .iter()
                 .map(|(profile, status)| {
                     let body: AnyElement = match status {
+                        Status::Windows(windows) if windows.is_empty() => div()
+                            .text_color(t.color.content_muted)
+                            .child("No usage figures in the response.")
+                            .into_any_element(),
                         Status::Windows(windows) => div()
                             .flex()
                             .flex_col()
@@ -318,7 +301,7 @@ impl Shell {
                                             ),
                                     )
                                     .child(self.bar(w.used, 260., cx))
-                                    .children(w.resets_at.as_deref().and_then(resets_in).map(|r| {
+                                    .children(w.resets_at.and_then(resets_in).map(|r| {
                                         div().text_color(t.color.content_disabled).child(r)
                                     }))
                             }))
@@ -388,24 +371,5 @@ impl Shell {
                 .child(div().flex().justify_end().child(refresh))
                 .into_any_element(),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_timestamps() {
-        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(
-            parse_rfc3339("2026-10-08T12:00:00.123Z"),
-            Some(1_791_460_800)
-        );
-        assert_eq!(
-            parse_rfc3339("2026-10-08T14:00:00+02:00"),
-            Some(1_791_460_800)
-        );
-        assert_eq!(parse_rfc3339("garbage"), None);
     }
 }

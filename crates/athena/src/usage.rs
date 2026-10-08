@@ -8,14 +8,17 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
+const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1";
 /// `security` exit status when the item does not exist.
 const NOT_FOUND: i32 = 44;
+/// Sign-ins rarely appear or vanish, so the Keychain is not asked on every poll.
+const PROFILE_TTL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
@@ -30,7 +33,8 @@ pub struct Window {
     pub label: String,
     /// Percent used, 0 to 100.
     pub used: f32,
-    pub resets_at: Option<String>,
+    /// Seconds since the epoch.
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,8 +91,22 @@ fn security(service: &str, want_secret: bool) -> std::io::Result<std::process::O
     cmd.stdin(Stdio::null()).output()
 }
 
-/// Profiles with a stored Claude Code sign-in. Checking existence does not reveal the secret.
+/// Profiles with a stored Claude Code sign-in, probed at most every 30 minutes.
+/// Checking existence does not reveal the secret.
 pub fn profiles() -> Vec<Profile> {
+    static CACHE: Mutex<Option<(Instant, Vec<Profile>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((at, list)) = cache.as_ref()
+        && at.elapsed() < PROFILE_TTL
+    {
+        return list.clone();
+    }
+    let list = probe_profiles();
+    *cache = Some((Instant::now(), list.clone()));
+    list
+}
+
+fn probe_profiles() -> Vec<Profile> {
     candidates()
         .into_iter()
         .map(|(name, dir)| Profile {
@@ -200,12 +218,72 @@ fn interpret(raw: &str) -> Status {
     }
 }
 
+/// Percent used from `percent`, else `utilization`; `None` when neither is present.
+fn used(w: &Value, fraction: bool) -> Option<f32> {
+    if let Some(p) = w["percent"].as_f64() {
+        return Some(p as f32);
+    }
+    let u = w["utilization"].as_f64()?;
+    // `limits` rows may carry the raw 0–1 fraction; legacy fields are already percentages.
+    Some(if fraction && u <= 1. { u * 100. } else { u } as f32)
+}
+
+/// `resets_at` as epoch seconds, given an RFC 3339 string or a number.
+fn resets_at(v: &Value) -> Option<i64> {
+    if let Some(s) = v.as_str() {
+        return parse_rfc3339(s);
+    }
+    let n = v.as_f64()?;
+    // Epoch milliseconds passed 1e11 in 1973; epoch seconds won't until the year 5138.
+    Some(if n > 1e11 { n / 1000. } else { n } as i64)
+}
+
+/// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`.
+fn parse_rfc3339(s: &str) -> Option<i64> {
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>());
+    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let (clock, offset) = match time.find(['Z', '+', '-']) {
+        Some(i) => (&time[..i], &time[i..]),
+        None => (time, "Z"),
+    };
+    let mut c = clock.split(':');
+    let (hh, mm) = (
+        c.next()?.parse::<i64>().ok()?,
+        c.next()?.parse::<i64>().ok()?,
+    );
+    let ss = c
+        .next()
+        .and_then(|s| s.split('.').next()?.parse::<i64>().ok())
+        .unwrap_or(0);
+    let shift = match offset.as_bytes().first() {
+        Some(b'+' | b'-') => {
+            let sign = if offset.starts_with('-') { -1 } else { 1 };
+            let mut o = offset[1..].split(':');
+            sign * (o.next()?.parse::<i64>().ok()? * 3600
+                + o.next().and_then(|m| m.parse::<i64>().ok()).unwrap_or(0) * 60)
+        }
+        _ => 0,
+    };
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss - shift)
+}
+
 /// Reads the `limits` list, or the older `five_hour` / `seven_day` fields.
+/// A window without a usage figure is left out rather than shown as 0%.
 pub fn parse(v: &Value) -> Vec<Window> {
-    let window = |label: String, w: &Value| Window {
-        label,
-        used: w["utilization"].as_f64().unwrap_or(0.) as f32,
-        resets_at: w["resets_at"].as_str().map(str::to_string),
+    let window = |label: String, w: &Value, fraction: bool| {
+        Some(Window {
+            label,
+            used: used(w, fraction)?,
+            resets_at: resets_at(&w["resets_at"]),
+        })
     };
     if let Some(limits) = v["limits"].as_array() {
         let mut out: Vec<Window> = limits
@@ -220,7 +298,7 @@ pub fn parse(v: &Value) -> Vec<Window> {
                         .to_string(),
                     _ => return None,
                 };
-                Some(window(label, l))
+                window(label, l, true)
             })
             .collect();
         out.sort_by_key(|w| match w.label.as_str() {
@@ -228,12 +306,14 @@ pub fn parse(v: &Value) -> Vec<Window> {
             "7d" => 1,
             _ => 2,
         });
-        return out;
+        if !out.is_empty() {
+            return out;
+        }
     }
     [("5h", "five_hour"), ("7d", "seven_day")]
         .into_iter()
         .filter(|(_, key)| v[*key].is_object())
-        .map(|(label, key)| window(label.to_string(), &v[key]))
+        .filter_map(|(label, key)| window(label.to_string(), &v[key], false))
         .collect()
 }
 
@@ -253,28 +333,130 @@ mod tests {
         );
     }
 
+    /// `/api/oauth/usage?at_wall=1&skip_spend=1` as it answered on 2026-10-08, trimmed.
+    const LIVE: &str = r#"{
+        "five_hour": { "utilization": 39.0, "resets_at": "2026-10-08T17:59:59.885547+00:00",
+                       "limit_dollars": null, "used_dollars": null, "locked_reason": null },
+        "seven_day": { "utilization": 31.0, "resets_at": "2026-10-13T19:59:59.885573+00:00",
+                       "limit_dollars": null, "used_dollars": null, "locked_reason": null },
+        "seven_day_oauth_apps": null,
+        "seven_day_opus": null,
+        "seven_day_sonnet": null,
+        "extra_usage": null,
+        "limits": [
+            { "kind": "session", "group": "session", "percent": 39, "severity": "normal",
+              "resets_at": "2026-10-08T17:59:59.885547+00:00", "scope": null, "is_active": true },
+            { "kind": "weekly_all", "group": "weekly", "percent": 31, "severity": "normal",
+              "resets_at": "2026-10-13T19:59:59.885573+00:00", "scope": null, "is_active": false },
+            { "kind": "weekly_scoped", "group": "weekly", "percent": 14, "severity": "normal",
+              "resets_at": "2026-10-13T19:59:59.885802+00:00",
+              "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null },
+              "is_active": false }
+        ],
+        "spend": null
+    }"#;
+
     #[test]
-    fn reads_limits_and_legacy_shapes() {
-        let limits = json!({ "limits": [
-            { "kind": "weekly_all", "utilization": 18.0, "resets_at": "2026-10-12T00:00:00Z" },
-            { "kind": "session", "utilization": 42.5 },
-            { "kind": "weekly_scoped", "utilization": 5.0, "scope": { "model": { "display_name": "Fable" } } }
+    fn reads_the_live_response() {
+        let w = parse(&serde_json::from_str(LIVE).unwrap());
+        assert_eq!(
+            w,
+            [
+                Window {
+                    label: "5h".into(),
+                    used: 39.,
+                    resets_at: Some(1_791_482_399)
+                },
+                Window {
+                    label: "7d".into(),
+                    used: 31.,
+                    resets_at: Some(1_791_921_599)
+                },
+                Window {
+                    label: "Fable".into(),
+                    used: 14.,
+                    resets_at: Some(1_791_921_599)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn percent_wins_and_fractional_utilization_is_scaled() {
+        let row = |extra: Value| {
+            let mut l = json!({ "kind": "session" });
+            l.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            parse(&json!({ "limits": [l] }))
+        };
+        assert_eq!(row(json!({ "percent": 42 }))[0].used, 42.);
+        assert_eq!(
+            row(json!({ "percent": 42, "utilization": 0.9 }))[0].used,
+            42.
+        );
+        assert_eq!(row(json!({ "utilization": 0.42 }))[0].used, 42.);
+        assert_eq!(row(json!({ "utilization": 42.0 }))[0].used, 42.);
+    }
+
+    #[test]
+    fn window_without_usage_is_left_out() {
+        let v = json!({ "limits": [
+            { "kind": "session", "resets_at": "2026-10-08T17:59:59Z" },
+            { "kind": "weekly_all", "percent": 31 }
         ]});
-        let w = parse(&limits);
         assert_eq!(
-            w.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(),
-            ["5h", "7d", "Fable"]
+            parse(&v)
+                .iter()
+                .map(|w| w.label.as_str())
+                .collect::<Vec<_>>(),
+            ["7d"]
         );
-        assert_eq!(w[0].used, 42.5);
-        let legacy = json!({ "five_hour": { "utilization": 10 }, "seven_day": { "utilization": 3, "resets_at": "x" } });
+        let legacy =
+            json!({ "limits": null, "five_hour": { "resets_at": null }, "seven_day": null });
+        assert!(parse(&legacy).is_empty());
+    }
+
+    #[test]
+    fn empty_limits_fall_back_to_legacy_percentages() {
+        let v = json!({ "limits": [], "five_hour": { "utilization": 0.5 }, "seven_day": null });
         assert_eq!(
-            parse(&legacy)[1],
-            Window {
-                label: "7d".into(),
-                used: 3.,
-                resets_at: Some("x".into())
-            }
+            parse(&v),
+            [Window {
+                label: "5h".into(),
+                used: 0.5,
+                resets_at: None
+            }]
         );
+    }
+
+    #[test]
+    fn resets_at_accepts_epoch_numbers() {
+        let v = json!({ "limits": [
+            { "kind": "session", "percent": 1, "resets_at": 1_791_482_399 },
+            { "kind": "weekly_all", "percent": 1, "resets_at": 1_791_921_599_000_u64 },
+            { "kind": "weekly_scoped", "percent": 1, "resets_at": "soon" }
+        ]});
+        let resets: Vec<_> = parse(&v).iter().map(|w| w.resets_at).collect();
+        assert_eq!(resets, [Some(1_791_482_399), Some(1_791_921_599), None]);
+    }
+
+    #[test]
+    fn parses_timestamps() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339("2026-10-08T12:00:00.123Z"),
+            Some(1_791_460_800)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-08T14:00:00+02:00"),
+            Some(1_791_460_800)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-08T12:00:00.885547+00:00"),
+            Some(1_791_460_800)
+        );
+        assert_eq!(parse_rfc3339("garbage"), None);
     }
 
     #[test]
