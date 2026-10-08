@@ -296,7 +296,11 @@ fn git(root: &Path) -> Command {
     cmd.arg("-C")
         .arg(root)
         .arg("--no-optional-locks")
+        // A repository's own config must not make opening it run a command.
+        .args(["-c", "core.fsmonitor=false"])
         .env("GIT_TERMINAL_PROMPT", "0")
+        // File names like `app/[slug]/page.tsx` are paths, not glob patterns.
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .stdin(Stdio::null());
     cmd
 }
@@ -625,6 +629,46 @@ mod tests {
             .status
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn brackets_are_paths_and_the_repository_fsmonitor_never_runs() {
+        if !available() {
+            eprintln!("git is not installed; skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-git-lit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app/[slug]")).unwrap();
+        std::fs::create_dir_all(dir.join("app/s")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        std::fs::write(dir.join("app/[slug]/page.tsx"), "a\n").unwrap();
+        std::fs::write(dir.join("app/s/page.tsx"), "b\n").unwrap();
+        repo_git(&dir, &["init", "-q"]);
+        let marker = dir.join("fsmonitor-ran");
+        let hook = dir.join("fsmonitor.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        repo_git(&dir, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+
+        stage(&dir, &[PathBuf::from("app/[slug]/page.tsx")]).unwrap();
+        let snap = status(&dir, &prefix(&dir).unwrap(), true).unwrap();
+        let of = |p: &str| {
+            let (_, e) = snap
+                .entries
+                .iter()
+                .find(|(path, _)| *path == dir.join(p))
+                .unwrap();
+            e.status()
+        };
+        assert_eq!(of("app/[slug]/page.tsx"), FileStatus::Added);
+        assert_eq!(of("app/s/page.tsx"), FileStatus::Untracked);
+        assert!(
+            !marker.exists(),
+            "status ran the repository's fsmonitor hook"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
