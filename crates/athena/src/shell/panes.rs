@@ -132,7 +132,7 @@ impl Shell {
         Some(view)
     }
 
-    fn item_label(&self, root: &Path, item: &Item, cx: &Context<Self>) -> String {
+    pub(super) fn item_label(&self, root: &Path, item: &Item, cx: &Context<Self>) -> String {
         match (self.items.get(&(root.to_path_buf(), item.id)), &item.kind) {
             (Some(view), _) => view.label(cx),
             (None, ItemKind::Terminal { .. }) => "Terminal".into(),

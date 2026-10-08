@@ -66,6 +66,7 @@ pub struct Shell {
     lsp: lsp::LspState,
     /// Per project, the pane a file opened from a terminal goes to.
     last_editor_pane: HashMap<PathBuf, PaneId>,
+    window_title: String,
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
@@ -168,6 +169,7 @@ impl Shell {
             playwright: playwright_view::PlaywrightState::default(),
             lsp: lsp::LspState::default(),
             last_editor_pane: HashMap::new(),
+            window_title: String::new(),
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
@@ -269,6 +271,29 @@ impl Shell {
         let len = self.workspace.projects.len() as isize;
         if let Some(active) = self.workspace.active {
             self.switch_to((active as isize + step).rem_euclid(len) as usize, cx);
+        }
+    }
+
+    /// "<active tab> — <project>" for the Window menu, Mission Control and Cmd+`.
+    fn sync_window_title(&mut self, window: &mut Window, cx: &Context<Self>) {
+        let title = match self.workspace.active_project() {
+            None => "Athena".to_string(),
+            Some(project) => {
+                let tab = project
+                    .layout
+                    .as_ref()
+                    .and_then(|l| l.focused_pane())
+                    .and_then(|p| p.active_item())
+                    .map(|item| self.item_label(&project.root, item, cx));
+                match tab {
+                    Some(tab) => format!("{tab} — {}", project.name()),
+                    None => project.name(),
+                }
+            }
+        };
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
         }
     }
 
@@ -528,6 +553,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_previews(cx);
         self.take_lsp_jump(window, cx);
+        self.sync_window_title(window, cx);
         let t = cx.theme().clone();
         let body = div()
             .relative()

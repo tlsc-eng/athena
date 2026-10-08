@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -16,6 +16,8 @@ use crate::{colors, links};
 
 const SCROLLBACK_LINES: usize = 10_000;
 const MAX_TITLE: usize = 256;
+/// The daemon notices a new foreground program up to two 500 ms ticks after it starts.
+const TITLE_GRACE: Duration = Duration::from_secs(1);
 
 /// Collects events the parser raises so they are handled after each `advance`, outside the borrow.
 #[derive(Clone, Default)]
@@ -55,6 +57,7 @@ pub struct Terminal {
     /// While replaying history, replies to old queries must not reach the live shell.
     pub replaying: bool,
     pub title: Option<String>,
+    title_at: Option<Instant>,
     pub exit: Option<Option<i32>>,
     pub bell: bool,
     pub last_output: Instant,
@@ -92,6 +95,7 @@ impl Terminal {
             size,
             replaying: false,
             title: None,
+            title_at: None,
             exit: None,
             bell: false,
             last_output: Instant::now(),
@@ -111,6 +115,14 @@ impl Terminal {
 
     pub fn mode(&self) -> TermMode {
         *self.term.mode()
+    }
+
+    /// Drops a title set before the foreground program changed, so the last program's title
+    /// does not label the next one; a title set by the new program as it started stays.
+    pub fn forget_stale_title(&mut self) {
+        if self.title_at.is_some_and(|at| at.elapsed() > TITLE_GRACE) {
+            self.title = None;
+        }
     }
 
     pub fn handle(&mut self, event: PaneEvent, palette: &TerminalColors) {
@@ -133,7 +145,10 @@ impl Terminal {
                 continue;
             }
             match event {
-                Event::Title(title) => self.title = Some(sanitize_title(&title)),
+                Event::Title(title) => {
+                    self.title = Some(sanitize_title(&title));
+                    self.title_at = Some(Instant::now());
+                }
                 Event::ResetTitle => self.title = None,
                 Event::PtyWrite(reply) => self.transport.write(reply.into_bytes()),
                 Event::ColorRequest(index, format) => {
@@ -447,6 +462,17 @@ mod tests {
         assert_eq!(bare.uri, "http://localhost:3000");
         assert!(t.link_at(1, 0).is_none());
     }
+    #[test]
+    fn a_title_set_as_the_program_starts_survives_the_foreground_change() {
+        let (mut t, _) = terminal();
+        feed(&mut t, b"\x1b]0;claude: fix tests\x07");
+        t.forget_stale_title();
+        assert_eq!(t.title.as_deref(), Some("claude: fix tests"));
+        t.title_at = Instant::now().checked_sub(TITLE_GRACE * 2);
+        t.forget_stale_title();
+        assert_eq!(t.title, None);
+    }
+
     #[test]
     fn titles_lose_control_characters_and_length() {
         assert_eq!(sanitize_title("a\x1b]0;b\x07c"), "a]0;bc");

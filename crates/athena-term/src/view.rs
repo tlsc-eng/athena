@@ -161,19 +161,8 @@ impl TerminalView {
         view
     }
 
-    /// Tab label: the running program, or for an idle shell its title or folder.
+    /// Tab label: the title the program set, else the running program, else the folder.
     pub fn label(&self) -> String {
-        if self.is_claude() {
-            return "Claude".into();
-        }
-        let shell_idle = self.foreground.as_ref().is_none_or(|p| is_shell(&p.name));
-        if !shell_idle {
-            return self
-                .foreground
-                .as_ref()
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-        }
         if let Some(title) = self
             .terminal
             .as_ref()
@@ -181,6 +170,13 @@ impl TerminalView {
             .filter(|t| !t.is_empty())
         {
             return title;
+        }
+        // Claude Code's executable is named after its version.
+        if self.is_claude() {
+            return "Claude".into();
+        }
+        if let Some(p) = self.foreground.as_ref().filter(|p| !is_shell(&p.name)) {
+            return p.name.clone();
         }
         let cwd = self
             .foreground
@@ -544,11 +540,12 @@ impl TerminalView {
                     return;
                 };
                 let had_bell = terminal.bell;
+                let had_title = terminal.title.clone();
                 terminal.handle(PaneEvent::Output(data), &palette);
                 if let Some(text) = terminal.clipboard_write.take() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
-                if terminal.bell != had_bell {
+                if terminal.bell != had_bell || terminal.title != had_title {
                     cx.emit(TerminalEvent::Changed);
                 }
                 if !terminal.replaying {
@@ -556,6 +553,13 @@ impl TerminalView {
                 }
             }
             ServerMsg::Foreground { process, .. } => {
+                let was = self.foreground.as_ref().map(|p| p.pid);
+                if was.is_some()
+                    && was != process.as_ref().map(|p| p.pid)
+                    && let Some(terminal) = self.terminal.as_mut()
+                {
+                    terminal.forget_stale_title();
+                }
                 self.foreground = process;
                 if !self.is_claude() {
                     self.claude_hook = None;
