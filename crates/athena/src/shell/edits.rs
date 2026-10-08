@@ -466,7 +466,7 @@ mod tests {
     fn a_rename_reaches_open_and_closed_files_in_utf16_columns() {
         let dir = temp("multi");
         let closed = dir.join("closed.go");
-        std::fs::write(&closed, "// héllo 😀 wörld\nx := count\n").unwrap();
+        std::fs::write(&closed, "// héllo 😀 wörld\r\nx := count\r\n").unwrap();
         let open = dir.join("open.go");
         let mut fake = Fake::default();
         fake.open
@@ -485,7 +485,8 @@ mod tests {
         assert_eq!(applied, Applied { files: 2, edits: 3 });
         assert_eq!(
             std::fs::read_to_string(&closed).unwrap(),
-            "// héllo 😀 earth\nx := total\n"
+            "// héllo 😀 earth\r\nx := total\r\n",
+            "CRLF line endings survive"
         );
         assert_eq!(fake.open[&open].0, "total++ // 😀\n");
         let (_, on_disk) = apply_checked(&WorkspaceEdit::default(), &mut fake);
