@@ -84,7 +84,7 @@ pub(super) fn resize_handle(
 }
 
 impl Shell {
-    fn active_root(&self) -> Option<PathBuf> {
+    pub(super) fn active_root(&self) -> Option<PathBuf> {
         Some(self.workspace.active_project()?.root.clone())
     }
 
@@ -355,7 +355,10 @@ impl Shell {
             return;
         }
         let mut shown = std::collections::HashSet::new();
-        let covered = self.palette.is_some() || self.palette_closing.is_some() || self.usage_open();
+        let covered = self.palette.is_some()
+            || self.palette_closing.is_some()
+            || self.context_menu.is_some()
+            || self.usage_open();
         if let Some(project) = self.workspace.active_project().filter(|_| !covered)
             && let Some(layout) = &project.layout
         {
@@ -441,36 +444,112 @@ impl Shell {
             .and_then(|root| self.items.get(&(root, item)).cloned())
             .filter(|view| view.is_dirty(cx));
         if let Some(ItemView::Editor(editor)) = dirty {
-            let name = editor
-                .read(cx)
-                .path()
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let answer = window.prompt(
-                PromptLevel::Warning,
-                &format!("Save changes to {name}?"),
-                Some("Your changes will be lost if you don't save them."),
-                &["Save", "Don't Save", "Cancel"],
-                cx,
-            );
-            cx.spawn_in(window, async move |this, cx| {
-                let Ok(choice) = answer.await else { return };
-                let _ = this.update_in(cx, |this, window, cx| {
-                    let saved = match choice {
-                        0 => editor.update(cx, |e, cx| e.save(cx)),
-                        1 => true,
-                        _ => false,
-                    };
-                    if saved {
-                        this.close_pane_item(pane, item, window, cx);
-                    }
-                });
-            })
-            .detach();
-            return;
+            return self.settle_dirty(editor, window, cx, move |this, close, window, cx| {
+                if close {
+                    this.close_pane_item(pane, item, window, cx);
+                }
+            });
         }
         self.close_pane_item(pane, item, window, cx);
+    }
+
+    /// Before an editor with unsaved changes closes: saves it quietly when auto save is on (as VS Code
+    /// does), otherwise asks. `then` learns whether the tab may close.
+    fn settle_dirty(
+        &mut self,
+        editor: Entity<EditorView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        if self.autosave_delay().is_some() && editor.update(cx, |e, cx| e.save(cx)) {
+            return then(self, true, window, cx);
+        }
+        let name = editor
+            .read(cx)
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Save changes to {name}?"),
+            Some("Your changes will be lost if you don't save them."),
+            &["Save", "Don't Save", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                let close = match choice {
+                    0 => editor.update(cx, |e, cx| e.save(cx)),
+                    1 => true,
+                    _ => false,
+                };
+                then(this, close, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Closes several tabs of the active project in order, stopping if the user cancels a save prompt.
+    pub(super) fn close_items(
+        &mut self,
+        mut items: Vec<ItemId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        while !items.is_empty() {
+            let item = items.remove(0);
+            let dirty = self
+                .items
+                .get(&(root.clone(), item))
+                .cloned()
+                .filter(|v| v.is_dirty(cx));
+            if let Some(ItemView::Editor(editor)) = dirty {
+                let root = root.clone();
+                return self.settle_dirty(editor, window, cx, move |this, close, window, cx| {
+                    if close {
+                        this.remove_item_from(&root, item, window, cx);
+                        this.close_items(items, window, cx);
+                    }
+                });
+            }
+            self.remove_item_from(&root, item, window, cx);
+        }
+    }
+
+    /// Moves a tab into a new pane beside its own; a pane's only file tab is opened a second time instead.
+    pub(super) fn split_tab(
+        &mut self,
+        pane: PaneId,
+        item: ItemId,
+        axis: Axis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.zoomed = None;
+        let Some(layout) = self.active_layout() else {
+            return;
+        };
+        let alone = layout.pane(pane).is_some_and(|p| p.items.len() == 1);
+        let new_pane = if alone {
+            let kind = layout
+                .pane(pane)
+                .and_then(|p| p.items.first())
+                .filter(|i| i.kind.file().is_some())
+                .map(|i| i.kind.clone());
+            kind.and_then(|kind| layout.split(pane, axis, kind))
+        } else {
+            layout.split_with_item(pane, axis, item, false)
+        };
+        if new_pane.is_some() {
+            self.entering = new_pane;
+            self.after_layout_change(window, cx);
+        }
     }
 
     fn close_pane_item(
@@ -562,7 +641,7 @@ impl Shell {
     }
 
     /// Closes a tab of the project at `root`, which may no longer be the active one after a fade.
-    fn remove_item_from(
+    pub(super) fn remove_item_from(
         &mut self,
         root: &Path,
         item: ItemId,
@@ -1034,6 +1113,14 @@ impl Shell {
                             this.activate_tab(pane_id, index, window, cx)
                         }
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            if leaving.is_none() {
+                                this.open_tab_menu(pane_id, item_id, event.position, window, cx)
+                            }
+                        }),
+                    )
                     .children(
                         item.kind
                             .file()
@@ -1200,6 +1287,11 @@ impl Shell {
             .bg(t.terminal.background)
             .on_mouse_down(
                 MouseButton::Left,
+                cx.listener(move |this, _, window, cx| this.focus_pane(pane_id, window, cx)),
+            )
+            // So a context menu opened in the pane hands focus back to this pane's tab.
+            .on_mouse_down(
+                MouseButton::Right,
                 cx.listener(move |this, _, window, cx| this.focus_pane(pane_id, window, cx)),
             )
             .child(strip)
@@ -1527,6 +1619,15 @@ impl Shell {
                 view.close(cx);
             }
         }
+    }
+}
+
+/// The same kind of tab as `kind`, showing `path` instead.
+pub(super) fn file_kind_like(kind: &ItemKind, path: PathBuf) -> ItemKind {
+    match kind {
+        ItemKind::Image { .. } => ItemKind::Image { path },
+        ItemKind::Rendered { .. } => ItemKind::Rendered { path },
+        _ => ItemKind::Editor { path },
     }
 }
 

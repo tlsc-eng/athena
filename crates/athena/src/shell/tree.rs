@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use athena_ui::ActiveTheme;
 use athena_ui::motion::{self, Closing, Opening};
+use athena_ui::{ActiveTheme, TextInput};
 use athena_workspace::{Axis, UiState};
 use gpui::{
-    Animation, AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, Window,
-    div, prelude::*, px, uniform_list,
+    Animation, AnyElement, ClickEvent, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
+    ScrollStrategy, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
+    uniform_list,
 };
 
 use super::Shell;
@@ -28,6 +29,23 @@ struct Row {
     depth: usize,
     entry: DirEntry,
     expanded: bool,
+    /// Drawn as the inline name field of [`FileTree::editing`].
+    edit: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EditKind {
+    NewFile,
+    NewFolder,
+    Rename,
+}
+
+/// The inline name field: `target` is the folder a new entry goes in, or the entry being renamed.
+pub(super) struct Edit {
+    pub target: PathBuf,
+    pub kind: EditKind,
+    pub input: Entity<TextInput>,
+    pub _subscriptions: Vec<Subscription>,
 }
 
 /// Expanded folders per project and a cache of folder listings.
@@ -35,12 +53,39 @@ struct Row {
 pub(super) struct FileTree {
     expanded: HashMap<PathBuf, HashSet<PathBuf>>,
     listings: HashMap<PathBuf, Vec<DirEntry>>,
+    pub editing: Option<Edit>,
+    scroll: UniformListScrollHandle,
+    /// A path to bring into view at the next render.
+    reveal: Option<PathBuf>,
 }
 
 impl FileTree {
     /// Drops cached listings so the next render re-reads the disk (e.g. after the window regains focus).
     pub fn invalidate(&mut self) {
         self.listings.clear();
+    }
+
+    /// Opens every folder from `root` down to `path`'s parent and scrolls `path` into view.
+    pub fn reveal(&mut self, root: &Path, path: &Path) {
+        if let Some(parent) = path.parent() {
+            self.expand(root, parent);
+        }
+        self.scroll_to(path);
+    }
+
+    /// Opens `dir` and every folder above it inside `root`.
+    pub fn expand(&mut self, root: &Path, dir: &Path) {
+        let set = self.expanded.entry(root.to_path_buf()).or_default();
+        for d in dir.ancestors() {
+            if d == root || !d.starts_with(root) {
+                break;
+            }
+            set.insert(d.to_path_buf());
+        }
+    }
+
+    pub fn scroll_to(&mut self, path: &Path) {
+        self.reveal = Some(path.to_path_buf());
     }
 
     fn listing(&mut self, dir: &Path) -> &[DirEntry] {
@@ -69,7 +114,11 @@ impl FileTree {
                 depth,
                 entry,
                 expanded: open,
+                edit: false,
             });
+        }
+        if let Some(edit) = &self.editing {
+            splice_edit(&mut rows, root, edit.target.as_path(), edit.kind);
         }
         rows
     }
@@ -81,6 +130,33 @@ impl FileTree {
             self.listings.remove(dir);
         }
     }
+}
+
+/// Marks the row being renamed, or inserts a blank row first inside the folder getting a new entry.
+fn splice_edit(rows: &mut Vec<Row>, root: &Path, target: &Path, kind: EditKind) {
+    if kind == EditKind::Rename {
+        if let Some(row) = rows.iter_mut().find(|r| r.entry.path == target) {
+            row.edit = true;
+        }
+        return;
+    }
+    let (at, depth) = match rows.iter().position(|r| r.entry.path == target) {
+        Some(i) if target != root => (i + 1, rows[i].depth + 1),
+        _ => (0, 0),
+    };
+    rows.insert(
+        at,
+        Row {
+            depth,
+            entry: DirEntry {
+                name: String::new(),
+                path: target.to_path_buf(),
+                is_dir: kind == EditKind::NewFolder,
+            },
+            expanded: false,
+            edit: true,
+        },
+    );
 }
 
 /// One folder's children: .gitignore honoured, `.git` and macOS clutter hidden, folders first.
@@ -166,6 +242,17 @@ impl Shell {
         let t = cx.theme().clone();
         let git_theme = t.clone();
         let count = rows.len();
+        if let Some(path) = self.tree.reveal.take()
+            && let Some(ix) = rows.iter().position(|r| r.entry.path == path)
+        {
+            // A new entry's field sits just below the folder it goes in.
+            let below = rows
+                .get(ix + 1)
+                .is_some_and(|r| r.edit && r.entry.path == path);
+            let ix = if below { ix + 1 } else { ix };
+            self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        }
+        let edit_input = self.tree.editing.as_ref().map(|e| e.input.clone());
         let list = uniform_list(
             "file-tree",
             count,
@@ -176,6 +263,35 @@ impl Shell {
                         let path = row.entry.path.clone();
                         let is_dir = row.entry.is_dir;
                         let root = root.clone();
+                        if row.edit
+                            && let Some(input) = edit_input.clone()
+                        {
+                            return div()
+                                .id("tree-edit-row")
+                                .w_full()
+                                .h(px(ROW_HEIGHT))
+                                .pl(px(12. + INDENT * row.depth as f32))
+                                .pr(px(8.))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(t.typography.caption)
+                                .child(div().w(px(10.)).flex_none())
+                                .child(athena_ui::file_icon(&row.entry.path, is_dir, cx))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h(px(20.))
+                                        .px(px(4.))
+                                        .flex()
+                                        .items_center()
+                                        .bg(t.color.surface_sunken)
+                                        .border_1()
+                                        .border_color(t.color.accent)
+                                        .child(input),
+                                );
+                        }
                         let selected = open.as_ref() == Some(&row.entry.path);
                         let unsaved = dirty.contains(&row.entry.path);
                         let git = this.git_status_for(&row.entry.path);
@@ -212,6 +328,17 @@ impl Shell {
                                 })
                                 .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
                             })
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener({
+                                    let path = path.clone();
+                                    move |this, event: &MouseDownEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        let target = Some((path.clone(), is_dir));
+                                        this.open_tree_menu(target, event.position, window, cx);
+                                    }
+                                }),
+                            )
                             .on_click(cx.listener(
                                 move |this, event: &ClickEvent, window: &mut Window, cx| {
                                     if is_dir {
@@ -250,6 +377,7 @@ impl Shell {
                     .collect::<Vec<_>>()
             }),
         )
+        .track_scroll(self.tree.scroll.clone())
         .flex_1();
         let w = clamp_tree_width(self.workspace.ui.tree_width);
         let panel = div()
@@ -273,7 +401,13 @@ impl Shell {
                     .text_color(t.color.content_muted)
                     .child("Files"),
             )
-            .child(list);
+            .child(list)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.open_tree_menu(None, event.position, window, cx)
+                }),
+            );
         // The box keeps its width throughout, so the panes beside it resize once, not per frame.
         let panel = match self.tree_closing {
             Some(closing) => motion::animate_exit(
@@ -335,5 +469,82 @@ impl Shell {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(path: &str, depth: usize, is_dir: bool) -> Row {
+        Row {
+            depth,
+            entry: DirEntry {
+                name: Path::new(path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                path: PathBuf::from(path),
+                is_dir,
+            },
+            expanded: is_dir,
+            edit: false,
+        }
+    }
+
+    fn rows() -> Vec<Row> {
+        vec![
+            row("/p/src", 0, true),
+            row("/p/src/main.rs", 1, false),
+            row("/p/README.md", 0, false),
+        ]
+    }
+
+    #[test]
+    fn a_new_entry_field_goes_first_inside_its_folder() {
+        let mut r = rows();
+        splice_edit(
+            &mut r,
+            Path::new("/p"),
+            Path::new("/p/src"),
+            EditKind::NewFile,
+        );
+        assert_eq!(r.len(), 4);
+        assert!(r[1].edit && r[1].depth == 1 && !r[1].entry.is_dir);
+
+        let mut r = rows();
+        splice_edit(
+            &mut r,
+            Path::new("/p"),
+            Path::new("/p"),
+            EditKind::NewFolder,
+        );
+        assert!(r[0].edit && r[0].depth == 0 && r[0].entry.is_dir);
+    }
+
+    #[test]
+    fn renaming_turns_the_entry_itself_into_the_field() {
+        let mut r = rows();
+        splice_edit(
+            &mut r,
+            Path::new("/p"),
+            Path::new("/p/README.md"),
+            EditKind::Rename,
+        );
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.iter().filter(|r| r.edit).count(), 1);
+        assert!(r[2].edit);
+    }
+
+    #[test]
+    fn reveal_opens_every_folder_above_the_file_but_not_the_root() {
+        let mut tree = FileTree::default();
+        let root = Path::new("/p");
+        tree.reveal(root, Path::new("/p/a/b/c.rs"));
+        let open = &tree.expanded[root];
+        assert!(open.contains(Path::new("/p/a")) && open.contains(Path::new("/p/a/b")));
+        assert!(!open.contains(root));
+        assert_eq!(tree.reveal.as_deref(), Some(Path::new("/p/a/b/c.rs")));
     }
 }

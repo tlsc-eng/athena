@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use athena_ui::motion::{self, Closing, Opening};
-use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput, empty_state};
+use athena_ui::{
+    ActiveTheme, Button, ButtonKind, ContextMenu, InputEvent, MenuItem, TextInput, empty_state,
+};
 use gpui::{
-    Animation, App, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Point, Render, ScrollWheelEvent, ShapedLine, Size, Subscription, Task, UTF16Selection,
-    Window, actions, div, prelude::*, px,
+    Animation, App, Bounds, ClipboardItem, Context, DismissEvent, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, Size, Subscription, Task,
+    UTF16Selection, Window, actions, div, prelude::*, px,
 };
 
 use crate::buffer::{Buffer, SaveError, UNDO_GROUP};
@@ -231,6 +233,7 @@ pub struct EditorView {
     /// A caption drawn after the cursor's line while the cursor stays on that zero-based line.
     pub(crate) blame: Option<(usize, String)>,
     cursor_line: usize,
+    context_menu: Option<(Entity<ContextMenu>, Subscription)>,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -274,6 +277,7 @@ impl EditorView {
             gutter_marks: Vec::new(),
             blame: None,
             cursor_line: 0,
+            context_menu: None,
         }
     }
 
@@ -822,6 +826,7 @@ impl Render for EditorView {
                     .key_context("Editor")
                     .cursor_text()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
                     .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| {
                         if let Some(head) = this.buffer.as_ref().map(|b| b.selection.head) {
                             this.definition_at(head, cx);
@@ -990,6 +995,7 @@ impl Render for EditorView {
                     .child(EditorElement::new(cx.entity(), focused)),
             )
             .children(self.render_marker_bar(cx))
+            .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
             .children(self.save_error.clone().map(|err| {
                 div()
                     .flex_none()
@@ -1349,6 +1355,51 @@ impl EntityInputHandler for EditorView {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+impl EditorView {
+    fn open_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus);
+        // As in VS Code, a right-click outside the selection moves the cursor there first.
+        if let Some(at) = self.char_at_position(event.position)
+            && let Some(buffer) = self.buffer.as_mut()
+            && !buffer.selection.range().contains(&at)
+        {
+            buffer.move_to(at, false);
+            self.note_cursor_line(false, cx);
+            cx.notify();
+        }
+        let item = |label: &'static str, hint: &'static str, action: Box<dyn gpui::Action>| {
+            MenuItem::new(label, move |window, cx| {
+                window.dispatch_action(action.boxed_clone(), cx)
+            })
+            .hint(hint)
+        };
+        let items = vec![
+            item("Go to Definition", "F12", Box::new(GoToDefinition)),
+            item("Find References", "⇧F12", Box::new(FindReferences)),
+            MenuItem::separator(),
+            item("Cut", "⌘X", Box::new(Cut)),
+            item("Copy", "⌘C", Box::new(Copy)),
+            item("Paste", "⌘V", Box::new(Paste)),
+            MenuItem::separator(),
+            item("Toggle Line Comment", "⌘/", Box::new(ToggleComment)),
+        ];
+        let menu = ContextMenu::build(event.position, items, window, cx);
+        let subscription = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, _, cx| {
+            if this.context_menu.as_ref().is_some_and(|(m, _)| m == menu) {
+                this.context_menu = None;
+                cx.notify();
+            }
+        });
+        self.context_menu = Some((menu, subscription));
+        cx.notify();
     }
 }
 

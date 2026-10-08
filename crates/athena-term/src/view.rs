@@ -9,12 +9,15 @@ use alacritty_terminal::term::TermMode;
 use anyhow::anyhow;
 use athena_proto::{ClientMsg, ConnectError, Connection, ErrorKind, PaneId, Process, ServerMsg};
 use athena_ui::motion::{self, Closing, Opening};
-use athena_ui::{ActiveTheme, ButtonKind, InputEvent, TextInput, Tooltip, empty_state};
+use athena_ui::{
+    ActiveTheme, ButtonKind, ContextMenu, InputEvent, MenuItem, TextInput, Tooltip, empty_state,
+};
 use gpui::{
-    Animation, App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
-    SharedString, Subscription, Task, UTF16Selection, Window, actions, div, prelude::*, px,
+    Animation, App, Bounds, ClipboardItem, Context, CursorStyle, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding, KeyDownEvent, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Render, ScrollWheelEvent, SharedString, Subscription, Task, UTF16Selection, Window, actions,
+    div, prelude::*, px,
 };
 
 use crate::element::{RowCache, TerminalElement};
@@ -172,6 +175,7 @@ pub struct TerminalView {
     mouse_cell: Option<(usize, usize)>,
     _claude_timer: Option<Task<()>>,
     _io: Option<Task<()>>,
+    context_menu: Option<(Entity<ContextMenu>, Subscription)>,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -215,6 +219,7 @@ impl TerminalView {
             mouse_cell: None,
             _claude_timer: None,
             _io: None,
+            context_menu: None,
         };
         view.connect(cx);
         view
@@ -1462,6 +1467,7 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down_other))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down_other))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -1510,6 +1516,7 @@ impl Render for TerminalView {
         .children(self.render_clipboard_notice(cx))
         .children(self.render_status(cx))
         .children(self.render_find(cx))
+        .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
     }
 }
 
@@ -1657,6 +1664,61 @@ pub fn read_messages(mut reader: UnixStream) -> async_channel::Receiver<ServerMs
         rx.close();
     }
     rx
+}
+
+impl TerminalView {
+    fn open_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Programs in mouse mode get the right-click instead.
+        if self.terminal.is_none()
+            || self.stale.is_some()
+            || self.error.is_some()
+            || self.reports_mouse(&event.modifiers)
+        {
+            return;
+        }
+        window.focus(&self.focus);
+        let has_selection = self
+            .terminal
+            .as_ref()
+            .and_then(Terminal::selection_text)
+            .is_some();
+        let this = cx.entity().downgrade();
+        let item = |label: &'static str,
+                    hint: &'static str,
+                    run: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            let this = this.clone();
+            MenuItem::new(label, move |window, cx| {
+                this.update(cx, |view, cx| run(view, window, cx)).ok();
+            })
+            .hint(hint)
+        };
+        let items = vec![
+            item("Copy", "⌘C", |v, w, cx| v.copy(&Copy, w, cx)).disabled(!has_selection),
+            item("Paste", "⌘V", |v, w, cx| v.paste(&Paste, w, cx)),
+            item("Select All", "⌘A", |v, w, cx| {
+                v.select_all(&SelectAll, w, cx)
+            }),
+            MenuItem::separator(),
+            item("Find", "⌘F", |v, w, cx| v.open_search(w, cx)),
+            item("Clear", "⌘K", |v, w, cx| {
+                v.clear_scrollback(&ClearScrollback, w, cx)
+            }),
+        ];
+        let menu = ContextMenu::build(event.position, items, window, cx);
+        let subscription = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, _, cx| {
+            if this.context_menu.as_ref().is_some_and(|(m, _)| m == menu) {
+                this.context_menu = None;
+                cx.notify();
+            }
+        });
+        self.context_menu = Some((menu, subscription));
+        cx.notify();
+    }
 }
 
 #[cfg(test)]

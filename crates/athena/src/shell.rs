@@ -8,6 +8,7 @@ mod fuzzy;
 mod git_view;
 mod item;
 mod lsp;
+mod menus;
 mod notices;
 mod palette;
 mod panes;
@@ -60,6 +61,7 @@ pub struct Shell {
     drag: Option<panes::Drag>,
     palette: Option<palette::Palette>,
     palette_closing: Option<(palette::Palette, motion::Closing)>,
+    context_menu: Option<(gpui::Entity<athena_ui::ContextMenu>, Subscription)>,
     tree: tree::FileTree,
     tree_opening: Option<motion::Opening>,
     tree_closing: Option<motion::Closing>,
@@ -187,6 +189,7 @@ impl Shell {
             drag: None,
             palette: None,
             palette_closing: None,
+            context_menu: None,
             tree: tree::FileTree::default(),
             tree_opening: None,
             tree_closing: None,
@@ -740,6 +743,7 @@ impl Render for Shell {
             .children(self.render_usage_popover(cx))
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
+            .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
     }
 }
 

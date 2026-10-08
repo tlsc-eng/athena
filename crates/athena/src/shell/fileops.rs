@@ -1,6 +1,3 @@
-// Wired up by the context menu in Phase C; until then only the tests call these.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::MetadataExt;
