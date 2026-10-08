@@ -212,6 +212,9 @@ impl Element for EditorElement {
             let Some(head_line) = view.buf().map(|b| b.line_of(view.cursor.head())) else {
                 return;
             };
+            if let Some(top) = view.pending_top.take() {
+                view.scroll.y = view.display.row_of(top) as f32 * f32::from(lh);
+            }
             if view.autoscroll {
                 let row = view.display.row_of(head_line);
                 let line = row as f32 * f32::from(lh);

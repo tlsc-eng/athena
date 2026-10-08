@@ -334,6 +334,19 @@ pub struct EditorView {
     pub(crate) rename: Option<crate::lsp_ui::RenameBox>,
     /// The zero-based line showing the code action lightbulb.
     pub(crate) lightbulb: Option<usize>,
+    /// A restored first line to scroll to once the line height is known.
+    pub(crate) pending_top: Option<usize>,
+}
+
+/// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewState {
+    /// The cursor's line and UTF-16 column, as language servers count them.
+    pub cursor: (u32, u32),
+    /// The buffer line at the top of the viewport.
+    pub top_line: usize,
+    /// Folded regions as their first and last hidden line; the header is the line above.
+    pub folds: Vec<(usize, usize)>,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -396,7 +409,55 @@ impl EditorView {
             context_menu: None,
             rename: None,
             lightbulb: None,
+            pending_top: None,
         }
+    }
+
+    /// The cursor, scroll position and folds, to hand back to [`Self::restore_view_state`].
+    pub fn view_state(&self) -> Option<ViewState> {
+        let b = self.buf()?;
+        let top_line = match (self.pending_top, self.layout.as_ref()) {
+            (Some(line), _) => line,
+            (None, Some(layout)) => {
+                let row = (self.scroll.y / f32::from(layout.line_height))
+                    .floor()
+                    .max(0.) as usize;
+                let rows = self.display.row_count(b.len_lines());
+                self.display.line_of(row.min(rows.saturating_sub(1)))
+            }
+            (None, None) => 0,
+        };
+        Some(ViewState {
+            cursor: b.utf16_position(self.cursor.head()),
+            top_line,
+            folds: self.display.folds().map(|f| (f.start, f.end)).collect(),
+        })
+    }
+
+    /// Puts the cursor, folds and scroll back where [`Self::view_state`] found them; folds that no
+    /// longer match the text are skipped and positions past the end are clamped.
+    pub fn restore_view_state(&mut self, state: &ViewState, cx: &mut Context<Self>) {
+        let Some(lines) = self.buf().map(|b| b.len_lines()) else {
+            return;
+        };
+        self.follow_edits();
+        self.display.clear();
+        for &(start, end) in &state.folds {
+            let fold = Fold { start, end };
+            if start > 0 && end < lines && self.fold_at(start - 1) == Some(fold) {
+                self.display.fold(fold);
+            }
+        }
+        if let Some(shared) = self.buffer.clone() {
+            let b = shared.buffer.borrow();
+            let at = b.char_at_utf16(state.cursor.0, state.cursor.1);
+            b.move_to(&mut self.cursor, at, false);
+        }
+        self.cursor_out_of_folds();
+        self.pending_top = Some(state.top_line.min(lines.saturating_sub(1)));
+        self.autoscroll = false;
+        self.note_cursor_line(false, cx);
+        cx.notify();
     }
 
     fn watch(shared: &SharedBuffer, cx: &mut Context<Self>) -> Subscription {

@@ -27,7 +27,9 @@ pub use lsp_ui::{
 };
 pub use signature::Signature;
 pub use syntax::{Lang, Token};
-pub use view::{EditorEvent, EditorStatus, EditorView, GutterMark, Marker, MarkerSeverity};
+pub use view::{
+    EditorEvent, EditorStatus, EditorView, GutterMark, Marker, MarkerSeverity, ViewState,
+};
 
 /// Registers the editor's and image viewer's key bindings.
 pub fn init(cx: &mut gpui::App) {

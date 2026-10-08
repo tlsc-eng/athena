@@ -72,6 +72,10 @@ impl DisplayMap {
         self.folds.is_empty()
     }
 
+    pub fn folds(&self) -> impl Iterator<Item = Fold> + '_ {
+        self.folds.iter().copied()
+    }
+
     /// The row a line is drawn on; a hidden line maps to its fold's header row.
     pub fn row_of(&self, line: usize) -> usize {
         let mut hidden = 0;
