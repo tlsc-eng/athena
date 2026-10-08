@@ -1877,6 +1877,26 @@ impl Shell {
         self.schedule_save(cx);
     }
 
+    /// Turns formatting on Cmd+S on or off for every language and every open editor.
+    pub(super) fn toggle_format_on_save(&mut self, cx: &mut Context<Self>) {
+        let on = !self.workspace.format_on_save.unwrap_or(false);
+        self.workspace.format_on_save = Some(on);
+        for view in self.items.values() {
+            if let ItemView::Editor(editor) = view {
+                editor.update(cx, |v, _| v.set_format_on_save(Some(on)));
+            }
+        }
+        let (title, body) = match on {
+            true => (
+                "Format on save is on",
+                "⌘S formats through the language server, then saves.",
+            ),
+            false => ("Format on save is off", "⌘S saves without formatting."),
+        };
+        self.transient_notice(title, body.to_string(), cx);
+        self.schedule_save(cx);
+    }
+
     /// Cmd+Shift+S: writes the focused editor to a new file and keeps editing it there.
     pub(super) fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else {

@@ -42,8 +42,8 @@ use crate::actions::{
     FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject,
     NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SaveAs,
     SelectProject, SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight,
-    ToggleAutoSave, ToggleFileTree, ToggleFullScreen, ToggleNotifications, TogglePaneZoom,
-    TogglePreview, Zoom,
+    ToggleAutoSave, ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen, ToggleNotifications,
+    TogglePaneZoom, TogglePreview, Zoom,
 };
 use crate::actions::{
     FindInProject, NavigateBack, NavigateForward, RevealInTree, ShowChanges, ToggleBlame,
@@ -704,6 +704,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &TogglePreview, w, cx| this.toggle_rendered(w, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, w, cx| this.save_as(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleAutoSave, _, cx| this.toggle_autosave(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleFormatOnSave, _, cx| this.toggle_format_on_save(cx)),
+            )
             .on_action(cx.listener(|this, _: &NextTab, w, cx| this.cycle_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, w, cx| this.cycle_tab(-1, w, cx)))
             .on_action(

@@ -71,6 +71,10 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Close tab", Box::new(actions::CloseTab)),
         ("Save as…", Box::new(actions::SaveAs)),
         ("Toggle auto save", Box::new(actions::ToggleAutoSave)),
+        (
+            "Toggle format on save",
+            Box::new(actions::ToggleFormatOnSave),
+        ),
         ("Zoom pane", Box::new(actions::TogglePaneZoom)),
         ("Next tab", Box::new(actions::NextTab)),
         ("Previous tab", Box::new(actions::PrevTab)),
@@ -171,7 +175,15 @@ impl Shell {
                 let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
                 let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
                 let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
-                commands()
+                let mut commands = commands();
+                // The editor's own action, so it only means something with an editor focused.
+                if self.focused_editor().is_some()
+                    && let Ok(action) = cx.build_action("editor::GoToLine", None)
+                {
+                    let at = commands.iter().position(|(l, _)| *l == "Go to file");
+                    commands.insert(at.map_or(0, |i| i + 1), ("Go to line", action));
+                }
+                commands
                     .into_iter()
                     .filter(|(label, _)| {
                         !(label.starts_with("Enable Claude Code hooks") && hooks_on
