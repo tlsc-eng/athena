@@ -1,8 +1,10 @@
 //! `athena-mux`: owns the shells so they outlive the Athena window.
 
+mod notices;
 mod pane;
 mod process;
 mod ring;
+mod scanner;
 mod server;
 
 use std::fs::{self, OpenOptions};
@@ -54,7 +56,11 @@ fn run() -> Result<()> {
         socket.display()
     );
 
-    let server = Arc::new(server::Server::new(socket));
+    let server = Arc::new(server::Server::new(
+        socket,
+        install_zsh_integration(),
+        notify_after(),
+    ));
     server.clone().start_idle_reaper();
     server.clone().start_foreground_poller();
     for stream in listener.incoming() {
@@ -66,4 +72,24 @@ fn run() -> Result<()> {
     }
     drop(lock);
     Ok(())
+}
+
+/// Writes the zsh startup shim; `None` disables integration (opted out or not writable).
+fn install_zsh_integration() -> Option<std::path::PathBuf> {
+    if std::env::var_os("ATHENA_SHELL_INTEGRATION").is_some_and(|v| v == "0") {
+        return None;
+    }
+    let dir = athena_proto::data_dir().ok()?.join("shell/zsh");
+    fs::create_dir_all(&dir).ok()?;
+    fs::write(dir.join(".zshenv"), include_str!("zshenv")).ok()?;
+    Some(dir)
+}
+
+/// Commands shorter than this finish silently.
+fn notify_after() -> std::time::Duration {
+    let secs = std::env::var("ATHENA_NOTIFY_AFTER_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    std::time::Duration::from_secs(secs)
 }

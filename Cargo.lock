@@ -447,6 +447,7 @@ dependencies = [
  "gpui",
  "ignore",
  "libc",
+ "serde_json",
 ]
 
 [[package]]

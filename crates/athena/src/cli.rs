@@ -1,6 +1,11 @@
-use athena_proto::{ClientMsg, ConnectError, ServerMsg};
+use std::io::{IsTerminal, Read};
 
-const USAGE: &str = "usage: athena [mux status | mux stop]";
+use athena_proto::{ClientMsg, ConnectError, NoticeKind, ServerMsg};
+
+const USAGE: &str = "usage: athena [mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running> | notify --title <t> [--body <b>]]";
+
+/// Hook input larger than this is ignored; Claude Code sends a small JSON object.
+const MAX_HOOK_INPUT: u64 = 64 * 1024;
 
 /// Handles command-line subcommands; `None` means start the app.
 pub fn run(args: Vec<String>) -> Option<i32> {
@@ -9,6 +14,7 @@ pub fn run(args: Vec<String>) -> Option<i32> {
         [] => return None,
         ["mux", "status"] => mux_status(),
         ["mux", "stop"] => mux_stop(),
+        ["notify", rest @ ..] => notify(rest),
         _ => {
             eprintln!("{USAGE}");
             return Some(2);
@@ -74,4 +80,49 @@ fn mux_stop() -> anyhow::Result<()> {
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Raises a notice in Athena. Never fails loudly: it runs inside Claude Code hooks, which must not
+/// break because Athena is closed.
+fn notify(args: &[&str]) -> anyhow::Result<()> {
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| *a == name)
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.to_string())
+    };
+    let hook_message = || {
+        let mut input = String::new();
+        if !std::io::stdin().is_terminal() {
+            let _ = std::io::stdin()
+                .take(MAX_HOOK_INPUT)
+                .read_to_string(&mut input);
+        }
+        serde_json::from_str::<serde_json::Value>(&input)
+            .ok()
+            .and_then(|v| {
+                v.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
+    };
+    let kind = match (flag("--event").as_deref(), flag("--title")) {
+        (Some("claude-stop"), _) => NoticeKind::ClaudeStopped,
+        (Some("claude-running"), _) => NoticeKind::ClaudeRunning,
+        (Some("claude-needs-input"), _) => NoticeKind::ClaudeNeedsInput {
+            message: flag("--message").or_else(hook_message).unwrap_or_default(),
+        },
+        (None, Some(title)) => NoticeKind::Message {
+            title,
+            body: flag("--body").unwrap_or_default(),
+        },
+        _ => anyhow::bail!("{USAGE}"),
+    };
+    let pane = std::env::var("ATHENA_PANE_ID")
+        .ok()
+        .and_then(|p| p.parse().ok());
+    if let Ok((conn, _)) = athena_proto::connect(&athena_proto::socket_path()?) {
+        conn.send(&ClientMsg::Notify { pane, kind })?;
+    }
+    Ok(())
 }

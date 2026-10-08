@@ -10,6 +10,7 @@ publish.workspace = true
 gpui.workspace = true
 anyhow.workspace = true
 ignore.workspace = true
+serde_json.workspace = true
 athena-proto.workspace = true
 libc.workspace = true
 athena-editor.workspace = true

@@ -31,7 +31,13 @@ pub struct PaneOutput {
 }
 
 impl Pane {
-    pub fn spawn(id: PaneId, cwd: &Path, rows: u16, cols: u16) -> Result<(Self, PaneOutput)> {
+    pub fn spawn(
+        id: PaneId,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        zdotdir: Option<&Path>,
+    ) -> Result<(Self, PaneOutput)> {
         let cwd = if cwd.is_dir() {
             cwd.to_path_buf()
         } else {
@@ -64,6 +70,15 @@ impl Pane {
         cmd.env("TERM_PROGRAM", "athena");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         cmd.env("ATHENA_PANE_ID", id.to_string());
+        let zsh = cmd
+            .get_env("SHELL")
+            .is_some_and(|s| Path::new(s).ends_with("zsh"));
+        if let Some(dir) = zdotdir.filter(|_| zsh) {
+            if let Some(original) = std::env::var_os("ZDOTDIR") {
+                cmd.env("ATHENA_ORIG_ZDOTDIR", original);
+            }
+            cmd.env("ZDOTDIR", dir);
+        }
         // Apps launched from Finder get no locale, which breaks UTF-8 in most shells.
         if std::env::var_os("LANG").is_none() {
             cmd.env("LANG", "en_US.UTF-8");

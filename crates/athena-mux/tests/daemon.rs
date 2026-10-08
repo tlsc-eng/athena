@@ -4,7 +4,7 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use athena_proto::{ClientMsg, Connection, ServerMsg, connect, read_frame};
+use athena_proto::{ClientMsg, Connection, NoticeKind, ServerMsg, connect, read_frame};
 
 /// A daemon under a throwaway HOME; short path because unix socket paths are capped at 104 bytes.
 struct Daemon {
@@ -20,6 +20,8 @@ impl Daemon {
         let child = Command::new(env!("CARGO_BIN_EXE_athena-mux"))
             .env("HOME", &home)
             .env("ATHENA_TEST_SECRET", "leaked")
+            .env("ATHENA_NOTIFY_AFTER_SECS", "0")
+            .env("SHELL", "/bin/zsh")
             .spawn()
             .unwrap();
         let daemon = Self { home, child };
@@ -253,4 +255,71 @@ fn sigterm_stops_the_daemon_even_if_the_parent_ignored_it() {
         assert!(Instant::now() < deadline, "SIGTERM was ignored");
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn zsh_integration_reports_finished_commands() {
+    let daemon = Daemon::start("notice");
+    let (conn, mut reader) = daemon.connect();
+    conn.send(&ClientMsg::Subscribe).unwrap();
+    conn.send(&ClientMsg::Spawn {
+        cwd: "/tmp".into(),
+        rows: 24,
+        cols: 80,
+    })
+    .unwrap();
+    let ServerMsg::Spawned { pane } = next(&mut reader) else {
+        panic!("expected Spawned")
+    };
+    conn.send(&ClientMsg::Input {
+        pane,
+        data: b"sleep 0.2; false\r".to_vec(),
+    })
+    .unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    loop {
+        if let ServerMsg::Notice(n) = read_frame(&mut reader).unwrap().unwrap() {
+            let NoticeKind::CommandFinished {
+                exit_code, command, ..
+            } = n.kind
+            else {
+                continue;
+            };
+            assert_eq!(n.pane, Some(pane));
+            assert_eq!(exit_code, 1);
+            assert_eq!(command.as_deref(), Some("sleep 0.2; false"));
+            break;
+        }
+    }
+}
+
+#[test]
+fn notices_wait_for_a_subscriber() {
+    let daemon = Daemon::start("backlog");
+    let (sender, _r) = daemon.connect();
+    let kind = NoticeKind::Message {
+        title: "t\x1b".into(),
+        body: "b".into(),
+    };
+    sender
+        .send(&ClientMsg::Notify { pane: None, kind })
+        .unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let (conn, mut reader) = daemon.connect();
+    conn.send(&ClientMsg::Subscribe).unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let Some(ServerMsg::Notice(n)) = read_frame(&mut reader).unwrap() else {
+        panic!("expected the buffered notice")
+    };
+    assert_eq!(
+        n.kind,
+        NoticeKind::Message {
+            title: "t".into(),
+            body: "b".into()
+        }
+    );
 }

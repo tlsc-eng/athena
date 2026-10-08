@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -9,10 +9,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use athena_proto::{
-    ClientMsg, ErrorKind, MAX_OUTPUT_CHUNK, PROTO_VERSION, PaneId, PaneInfo, ServerMsg, read_frame,
-    write_frame,
+    ClientMsg, ErrorKind, MAX_OUTPUT_CHUNK, Notice, NoticeKind, PROTO_VERSION, PaneId, PaneInfo,
+    ServerMsg, read_frame, write_frame,
 };
 
+use crate::notices::{PaneWatcher, clean};
 use crate::pane::{Pane, PaneOutput, READ_CHUNK};
 use crate::process;
 
@@ -21,24 +22,30 @@ const IDLE_EXIT: Duration = Duration::from_secs(60);
 const REAPER_TICK: Duration = Duration::from_secs(5);
 const FOREGROUND_TICK: Duration = Duration::from_millis(500);
 const MAX_DIM: u16 = 1000;
+const BACKLOG: usize = 50;
 
 type ClientId = u64;
 
 pub struct Server {
     socket: PathBuf,
+    zdotdir: Option<PathBuf>,
+    notify_after: Duration,
     state: Mutex<State>,
 }
 
 struct State {
     panes: HashMap<PaneId, Pane>,
     clients: HashMap<ClientId, SyncSender<ServerMsg>>,
+    subscribers: Vec<ClientId>,
+    /// Notices raised while no window was listening, delivered on the next `Subscribe`.
+    backlog: VecDeque<Notice>,
     next_pane: PaneId,
     next_client: ClientId,
     idle_since: Option<Instant>,
 }
 
 impl Server {
-    pub fn new(socket: PathBuf) -> Self {
+    pub fn new(socket: PathBuf, zdotdir: Option<PathBuf>, notify_after: Duration) -> Self {
         // Ids start from the clock so a pane id saved by the GUI never matches a later daemon's pane.
         let epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -46,9 +53,13 @@ impl Server {
             .unwrap_or(0);
         Self {
             socket,
+            zdotdir,
+            notify_after,
             state: Mutex::new(State {
                 panes: HashMap::new(),
                 clients: HashMap::new(),
+                subscribers: Vec::new(),
+                backlog: VecDeque::new(),
                 next_pane: epoch * 1_000_000,
                 next_client: 0,
                 idle_since: None,
@@ -185,6 +196,7 @@ impl Server {
 
         let mut st = self.lock();
         st.clients.remove(&id);
+        st.subscribers.retain(|c| *c != id);
         for pane in st.panes.values_mut() {
             pane.attached.retain(|c| *c != id);
         }
@@ -273,6 +285,16 @@ impl Server {
             ClientMsg::Kill { pane } => {
                 self.lock().panes.remove(&pane);
             }
+            ClientMsg::Subscribe => {
+                let mut st = self.lock();
+                if !st.subscribers.contains(&client) {
+                    st.subscribers.push(client);
+                }
+                for notice in st.backlog.drain(..) {
+                    let _ = tx.send(ServerMsg::Notice(notice));
+                }
+            }
+            ClientMsg::Notify { pane, kind } => self.notify(pane, sanitize(kind)),
             ClientMsg::Shutdown => {
                 eprintln!("athena-mux: shutdown requested");
                 self.exit(self.lock());
@@ -292,7 +314,7 @@ impl Server {
             st.next_pane += 1;
             st.next_pane
         };
-        let (pane, output) = Pane::spawn(id, cwd, rows, cols)?;
+        let (pane, output) = Pane::spawn(id, cwd, rows, cols, self.zdotdir.as_deref())?;
         self.lock().panes.insert(id, pane);
         let server = self.clone();
         thread::Builder::new()
@@ -304,11 +326,15 @@ impl Server {
     /// Copies a pane's output into its history and to every attached client until the shell exits.
     fn pump(self: Arc<Self>, id: PaneId, mut output: PaneOutput) {
         let mut buf = vec![0u8; READ_CHUNK];
+        let mut watcher = PaneWatcher::new(self.notify_after);
         loop {
             let n = match output.reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
+            for kind in watcher.feed(&buf[..n]) {
+                self.notify(Some(id), kind);
+            }
             let Some(targets) = self.record(id, |p| p.ring.push(&buf[..n])) else {
                 let _ = output.child.wait();
                 return;
@@ -326,6 +352,31 @@ impl Server {
         };
         for tx in targets {
             let _ = tx.send(ServerMsg::Exited { pane: id, code });
+        }
+    }
+
+    /// Sends a notice to every subscribed window, or keeps it until one subscribes.
+    fn notify(&self, pane: Option<PaneId>, kind: NoticeKind) {
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let notice = Notice { pane, kind, at };
+        let targets: Vec<_> = {
+            let mut st = self.lock();
+            if st.subscribers.is_empty() {
+                st.backlog.push_back(notice);
+                if st.backlog.len() > BACKLOG {
+                    st.backlog.pop_front();
+                }
+                return;
+            }
+            st.subscribers
+                .iter()
+                .filter_map(|c| st.clients.get(c).cloned())
+                .collect()
+        };
+        for tx in targets {
+            let _ = tx.send(ServerMsg::Notice(notice.clone()));
         }
     }
 
@@ -355,4 +406,27 @@ fn same_user(stream: &UnixStream) -> bool {
     let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
     // SAFETY: geteuid has no preconditions.
     ok && uid == unsafe { libc::geteuid() }
+}
+
+/// Notices from `athena notify` come from scripts; keep their text printable and short too.
+fn sanitize(kind: NoticeKind) -> NoticeKind {
+    match kind {
+        NoticeKind::ClaudeNeedsInput { message } => NoticeKind::ClaudeNeedsInput {
+            message: clean(&message),
+        },
+        NoticeKind::Message { title, body } => NoticeKind::Message {
+            title: clean(&title),
+            body: clean(&body),
+        },
+        NoticeKind::CommandFinished {
+            exit_code,
+            elapsed_ms,
+            command,
+        } => NoticeKind::CommandFinished {
+            exit_code,
+            elapsed_ms,
+            command: command.map(|c: String| clean(&c)),
+        },
+        other => other,
+    }
 }

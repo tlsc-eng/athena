@@ -389,7 +389,7 @@ impl TerminalView {
                 self.send(self.spawn_msg());
             }
             ServerMsg::Error { kind } => self.error = Some(kind.to_string()),
-            ServerMsg::Hello { .. } | ServerMsg::Panes { .. } => {}
+            ServerMsg::Hello { .. } | ServerMsg::Panes { .. } | ServerMsg::Notice(_) => {}
         }
     }
 

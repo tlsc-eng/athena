@@ -1,0 +1,27 @@
+# Athena shell integration. Marks prompts and commands with OSC 133 so Athena can tell when a long
+# command finishes. Set ATHENA_SHELL_INTEGRATION=0 in the environment to turn it off.
+if [[ -n "${ATHENA_ORIG_ZDOTDIR+x}" ]]; then
+  ZDOTDIR="$ATHENA_ORIG_ZDOTDIR"
+  unset ATHENA_ORIG_ZDOTDIR
+else
+  unset ZDOTDIR
+fi
+[[ -f "${ZDOTDIR:-$HOME}/.zshenv" ]] && builtin source "${ZDOTDIR:-$HOME}/.zshenv"
+
+if [[ -o interactive ]]; then
+  _athena_preexec() {
+    _athena_ran=1
+    builtin printf '\e]133;C;%s\a' "$(builtin print -rn -- "${1[1,200]}" | /usr/bin/base64)"
+  }
+  _athena_precmd() {
+    local ret=$?
+    if (( ${_athena_ran:-0} )); then
+      builtin printf '\e]133;D;%d\a' "$ret"
+      _athena_ran=0
+    fi
+    builtin printf '\e]133;A\a'
+  }
+  # First in line, so $? is the command's status and not another hook's.
+  precmd_functions=(_athena_precmd $precmd_functions)
+  preexec_functions=(_athena_preexec $preexec_functions)
+fi

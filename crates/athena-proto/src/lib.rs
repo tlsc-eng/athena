@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to the messages below.
-pub const PROTO_VERSION: u32 = 2;
+pub const PROTO_VERSION: u32 = 3;
 
 /// Largest `Output` payload the daemon sends in one frame.
 pub const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
@@ -48,6 +48,13 @@ pub enum ClientMsg {
         pane: PaneId,
     },
     Shutdown,
+    /// Receive every `Notice`, including ones buffered while no window was connected.
+    Subscribe,
+    /// Raise a notice, as `athena notify` does from Claude Code hooks.
+    Notify {
+        pane: Option<PaneId>,
+        kind: NoticeKind,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -87,6 +94,33 @@ pub enum ServerMsg {
     Foreground {
         pane: PaneId,
         process: Option<Process>,
+    },
+    Notice(Notice),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Notice {
+    pub pane: Option<PaneId>,
+    pub kind: NoticeKind,
+    /// Milliseconds since the Unix epoch, stamped by the daemon.
+    pub at: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum NoticeKind {
+    CommandFinished {
+        exit_code: i32,
+        elapsed_ms: u64,
+        command: Option<String>,
+    },
+    ClaudeRunning,
+    ClaudeStopped,
+    ClaudeNeedsInput {
+        message: String,
+    },
+    Message {
+        title: String,
+        body: String,
     },
 }
 
