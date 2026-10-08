@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use gpui::{Animation, AnimationExt, AnyElement, ElementId, IntoElement};
 
 /// CSS-style cubic-bezier easing, solved for t by Newton iteration.
@@ -49,6 +51,44 @@ pub fn animate_if<E: IntoElement + AnimationExt + 'static>(
     }
 }
 
+/// Marks an element that is animating out; `generation` keys the oneshot so a reopen replays it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Closing {
+    pub since: Instant,
+    pub generation: u64,
+}
+
+impl Closing {
+    pub fn new(generation: u64) -> Self {
+        Self {
+            since: Instant::now(),
+            generation,
+        }
+    }
+}
+
+/// Exit counterpart of [`animate_if`]: eases out, and renders the final (gone) frame when motion is reduced.
+pub fn animate_exit<E: IntoElement + AnimationExt + 'static>(
+    reduced: bool,
+    element: E,
+    id: impl Into<ElementId>,
+    duration: Duration,
+    animator: impl Fn(E, f32) -> E + 'static,
+) -> AnyElement {
+    animate_if(
+        reduced,
+        element,
+        id,
+        Animation::new(duration).with_easing(ease_exit()),
+        animator,
+    )
+}
+
+/// How long to keep a closing element mounted before removing it.
+pub fn exit_delay(reduced: bool, duration: Duration) -> Duration {
+    if reduced { Duration::ZERO } else { duration }
+}
+
 /// Reads macOS "Reduce motion" (System Settings, Accessibility, Display).
 pub fn system_reduce_motion() -> bool {
     #[cfg(target_os = "macos")]
@@ -77,6 +117,13 @@ mod tests {
     fn standard_is_front_loaded() {
         let ease = ease_standard();
         assert!(ease(0.5) > 0.8);
+    }
+
+    #[test]
+    fn exit_delay_is_zero_when_motion_is_reduced() {
+        let d = Duration::from_millis(120);
+        assert_eq!(exit_delay(true, d), Duration::ZERO);
+        assert_eq!(exit_delay(false, d), d);
     }
 
     #[test]
