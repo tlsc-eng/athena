@@ -8,7 +8,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{self, Osc52, Term, TermMode};
+use alacritty_terminal::term::{self, Osc52, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Handler, Processor, StdSyncHandler};
 use athena_ui::TerminalColors;
 
@@ -33,6 +33,13 @@ impl EventListener for Listener {
 pub trait Transport {
     fn write(&self, bytes: Vec<u8>);
     fn resize(&self, rows: u16, cols: u16);
+}
+
+/// Viewport rows changed since the last frame.
+#[derive(Debug, PartialEq)]
+pub enum Damage {
+    Full,
+    Rows(Vec<usize>),
 }
 
 pub enum PaneEvent {
@@ -107,6 +114,16 @@ impl Terminal {
 
     pub fn term(&self) -> &Term<Listener> {
         &self.term
+    }
+
+    /// What changed since the last call, which forgets it.
+    pub fn take_damage(&mut self) -> Damage {
+        let damage = match self.term.damage() {
+            TermDamage::Full => Damage::Full,
+            TermDamage::Partial(lines) => Damage::Rows(lines.map(|l| l.line).collect()),
+        };
+        self.term.reset_damage();
+        damage
     }
 
     pub fn size(&self) -> GridSize {
@@ -483,6 +500,42 @@ mod tests {
         assert_eq!(t.title.as_deref(), Some("finished script"));
         t.forget_stale_title();
         assert_eq!(t.title, None);
+    }
+
+    #[test]
+    fn damage_names_the_rows_written_and_is_forgotten_once_taken() {
+        let (mut t, _) = terminal();
+        assert_eq!(
+            t.take_damage(),
+            Damage::Full,
+            "a new terminal draws everything"
+        );
+        feed(&mut t, b"\x1b[3;1Hhi");
+        let Damage::Rows(rows) = t.take_damage() else {
+            panic!("expected partial damage")
+        };
+        assert!(rows.contains(&2), "{rows:?}");
+        assert!(rows.iter().all(|&r| r == 0 || r == 2), "{rows:?}");
+        let Damage::Rows(rows) = t.take_damage() else {
+            panic!("expected partial damage")
+        };
+        assert_eq!(rows, [2], "only the cursor row once nothing was written");
+    }
+
+    #[test]
+    fn scrolling_back_and_resizing_damage_everything() {
+        let (mut t, _) = terminal();
+        for i in 0..12 {
+            feed(&mut t, format!("line {i}\r\n").as_bytes());
+        }
+        let _ = t.take_damage();
+        t.scroll(2);
+        assert_eq!(t.take_damage(), Damage::Full);
+        t.resize(GridSize {
+            cols: 30,
+            ..t.size()
+        });
+        assert_eq!(t.take_damage(), Damage::Full);
     }
 
     #[test]

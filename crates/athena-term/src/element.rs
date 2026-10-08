@@ -1,30 +1,38 @@
+use std::rc::Rc;
 use std::time::Instant;
 
-use alacritty_terminal::index::Point as GridPoint;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::grid::{Dimensions, Grid};
+use alacritty_terminal::index::{Column, Line, Point as GridPoint};
+use alacritty_terminal::selection::SelectionRange;
+use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
-use athena_ui::ActiveTheme;
+use athena_ui::{ActiveTheme, TerminalColors};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style,
-    TextRun, UnderlineStyle, Window, fill, outline, point, px, relative, size,
+    TextRun, UnderlineStyle, Window, WindowTextSystem, fill, outline, point, px, relative, size,
 };
 
 use crate::colors;
 use crate::glyphs;
-use crate::terminal::GridSize;
+use crate::terminal::{Damage, GridSize, Link, Terminal};
 use crate::view::TerminalView;
 
 const LINE_HEIGHT_RATIO: f32 = 1.4;
 
-/// Logs each prepaint and its duration under `athena::render` when dropped.
-struct PrepaintTimer(Instant);
+/// Logs each prepaint, its duration and the rows it rebuilt under `athena::render` when dropped.
+struct PrepaintTimer {
+    started: Instant,
+    rebuilt: usize,
+}
 
 impl Drop for PrepaintTimer {
     fn drop(&mut self) {
-        let us = self.0.elapsed().as_micros() as u64;
-        tracing::trace!(target: "athena::render", us, "terminal prepaint");
+        let us = self.started.elapsed().as_micros() as u64;
+        let rebuilt = self.rebuilt;
+        tracing::trace!(target: "athena::render", us, rebuilt, "terminal prepaint");
     }
 }
 
@@ -40,14 +48,82 @@ impl TerminalElement {
 }
 
 pub struct Frame {
-    backgrounds: Vec<PaintQuad>,
-    glyphs: Vec<PaintQuad>,
-    text: Vec<(gpui::Point<Pixels>, ShapedLine)>,
+    origin: gpui::Point<Pixels>,
+    rows: Vec<Rc<CachedRow>>,
+    link: Option<PaintQuad>,
     cursor: Option<PaintQuad>,
     cursor_glyph: Option<(gpui::Point<Pixels>, ShapedLine)>,
     cursor_bounds: Option<Bounds<Pixels>>,
     marked: Option<(PaintQuad, gpui::Point<Pixels>, ShapedLine)>,
     line_height: Pixels,
+}
+
+/// One row's quads and text, positioned relative to the grid's top-left corner.
+#[derive(Default)]
+struct CachedRow {
+    backgrounds: Vec<PaintQuad>,
+    glyphs: Vec<PaintQuad>,
+    text: Vec<(gpui::Point<Pixels>, ShapedLine)>,
+}
+
+/// Everything besides cell contents that changes how rows look.
+#[derive(Clone, PartialEq)]
+struct RowKey {
+    cols: usize,
+    rows: usize,
+    cell_width: Pixels,
+    line_height: Pixels,
+    font_size: Pixels,
+    font: SharedString,
+    palette: [Hsla; 23],
+    display_offset: usize,
+    selection: Option<SelectionRange>,
+    focused: bool,
+    hovered_link: Option<Link>,
+}
+
+/// Rows built by earlier prepaints, kept until the terminal reports them damaged.
+#[derive(Default)]
+pub struct RowCache {
+    key: Option<RowKey>,
+    rows: Vec<Option<Rc<CachedRow>>>,
+}
+
+impl RowCache {
+    /// Drops the rows `damage` covers, or every row if anything in `key` changed, and returns
+    /// the rows that need building.
+    fn invalidate(&mut self, key: RowKey, damage: Damage) -> Vec<usize> {
+        // Scrolled back, every new line shifts the view, so damage is not worth mapping.
+        let full =
+            damage == Damage::Full || key.display_offset != 0 || self.key.as_ref() != Some(&key);
+        if full {
+            self.rows = vec![None; key.rows];
+        } else if let Damage::Rows(rows) = damage {
+            for row in rows {
+                if let Some(slot) = self.rows.get_mut(row) {
+                    *slot = None;
+                }
+            }
+        }
+        self.key = Some(key);
+        (0..self.rows.len())
+            .filter(|&row| self.rows[row].is_none())
+            .collect()
+    }
+}
+
+fn palette_key(p: &TerminalColors) -> [Hsla; 23] {
+    let mut key = [p.foreground; 23];
+    key[1..7].copy_from_slice(&[
+        p.bright_foreground,
+        p.dim_foreground,
+        p.background,
+        p.cursor,
+        p.cursor_text,
+        p.selection,
+    ]);
+    key[7..].copy_from_slice(&p.ansi);
+    key
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -67,12 +143,166 @@ struct CellStyle {
 }
 
 struct Run {
-    row: usize,
     col: usize,
     cells: usize,
     text: String,
     style: CellStyle,
     grid_aligned: bool,
+}
+
+/// Turns one viewport row of the grid into quads and shaped text.
+struct RowBuilder<'a> {
+    grid: &'a Grid<Cell>,
+    cols: usize,
+    offset: i32,
+    selection: Option<SelectionRange>,
+    overrides: &'a Colors,
+    palette: &'a TerminalColors,
+    cell_width: Pixels,
+    line_height: Pixels,
+    font_size: Pixels,
+    text_system: &'a WindowTextSystem,
+    text_run: &'a dyn Fn(usize, CellStyle) -> TextRun,
+}
+
+impl RowBuilder<'_> {
+    fn build(&self, row: usize) -> CachedRow {
+        let palette = self.palette;
+        let (cell_width, line_height) = (self.cell_width, self.line_height);
+        let at = |col: usize| point(cell_width * col as f32, line_height * row as f32);
+        let mut out = CachedRow::default();
+        let mut runs: Vec<Run> = Vec::new();
+        let mut bg_run: Option<(usize, usize, Hsla)> = None;
+        let push_bg = |run: Option<(usize, usize, Hsla)>, out: &mut Vec<PaintQuad>| {
+            if let Some((start, end, color)) = run {
+                let b = Bounds::new(
+                    at(start),
+                    size(cell_width * (end - start) as f32, line_height),
+                );
+                out.push(fill(b, color));
+            }
+        };
+
+        let line = Line(row as i32 - self.offset);
+        let cells = &self.grid[line];
+        for col in 0..self.cols {
+            let cell = &cells[Column(col)];
+            let flags = cell.flags;
+
+            let mut fg_color = cell.fg;
+            if flags.contains(Flags::BOLD) {
+                fg_color = match fg_color {
+                    Color::Named(name) if (name as usize) < 8 || name == NamedColor::Foreground => {
+                        Color::Named(name.to_bright())
+                    }
+                    Color::Indexed(i) if i < 8 => Color::Indexed(i + 8),
+                    other => other,
+                };
+            }
+            let mut fg = colors::resolve(fg_color, self.overrides, palette);
+            let mut bg = colors::resolve(cell.bg, self.overrides, palette);
+            if flags.contains(Flags::DIM) {
+                fg = colors::dim(fg, palette);
+            }
+            if flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            if flags.contains(Flags::HIDDEN) {
+                fg = bg;
+            }
+            if self
+                .selection
+                .is_some_and(|s| s.contains(GridPoint::new(line, Column(col))))
+            {
+                bg = palette.selection;
+            }
+
+            match &mut bg_run {
+                Some((_, end, color)) if *end == col && *color == bg => *end = col + 1,
+                _ => {
+                    push_bg(bg_run.take(), &mut out.backgrounds);
+                    if bg != palette.background {
+                        bg_run = Some((col, col + 1, bg));
+                    }
+                }
+            }
+
+            if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let underline = if flags.contains(Flags::UNDERCURL) {
+                Some(Underline::Curly)
+            } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                Some(Underline::Double)
+            } else if flags.intersects(Flags::ALL_UNDERLINES) {
+                Some(Underline::Single)
+            } else {
+                None
+            };
+            let style = CellStyle {
+                fg,
+                bold: flags.contains(Flags::BOLD),
+                underline,
+                underline_color: underline
+                    .and(cell.underline_color())
+                    .map(|c| colors::resolve(c, self.overrides, palette)),
+                strike: flags.contains(Flags::STRIKEOUT),
+            };
+            if cell.c == ' ' && style.underline.is_none() && !style.strike {
+                continue;
+            }
+            if style.underline.is_none()
+                && !style.strike
+                && let Some(quads) = glyphs::quads(
+                    cell.c,
+                    Bounds::new(at(col), size(cell_width, line_height)),
+                    fg,
+                )
+            {
+                out.glyphs.extend(quads);
+                continue;
+            }
+            // Every single-width glyph snaps to its cell, so fallback-font symbols keep the grid.
+            let simple = !flags.contains(Flags::WIDE_CHAR) && cell.zerowidth().is_none();
+            if simple
+                && let Some(run) = runs.last_mut()
+                && run.grid_aligned
+                && run.col + run.cells == col
+                && run.style == style
+            {
+                run.text.push(cell.c);
+                run.cells += 1;
+                continue;
+            }
+            let mut text = String::from(cell.c);
+            text.extend(cell.zerowidth().into_iter().flatten());
+            runs.push(Run {
+                col,
+                cells: if flags.contains(Flags::WIDE_CHAR) {
+                    2
+                } else {
+                    1
+                },
+                text,
+                style,
+                grid_aligned: simple,
+            });
+        }
+        push_bg(bg_run.take(), &mut out.backgrounds);
+
+        for run in runs {
+            let force = run.grid_aligned.then_some(cell_width);
+            let text_runs = [(self.text_run)(run.text.len(), run.style)];
+            let shaped = self.text_system.shape_line(
+                SharedString::from(run.text),
+                self.font_size,
+                &text_runs,
+                force,
+            );
+            out.text.push((at(run.col), shaped));
+        }
+        out
+    }
 }
 
 impl IntoElement for TerminalElement {
@@ -117,7 +347,10 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let _timer = PrepaintTimer(Instant::now());
+        let mut timer = PrepaintTimer {
+            started: Instant::now(),
+            rebuilt: 0,
+        };
         let theme = cx.theme();
         let palette = theme.terminal.clone();
         let font_size = theme.typography.code;
@@ -153,149 +386,34 @@ impl Element for TerminalElement {
             cell_width: cell_width.into(),
             cell_height: line_height.into(),
         };
-        self.view.update(cx, |view, _| view.resize(grid));
+        // Damage is read after the resize, which damages everything itself.
+        let (damage, mut cache) = self.view.update(cx, |view, _| {
+            view.resize(grid);
+            let damage = view.terminal_mut().map(Terminal::take_damage);
+            (damage, std::mem::take(&mut view.rows))
+        });
 
         let view = self.view.read(cx);
         let mut frame = Frame {
-            backgrounds: Vec::new(),
-            glyphs: Vec::new(),
-            text: Vec::new(),
+            origin: bounds.origin,
+            rows: Vec::new(),
+            link: None,
             cursor: None,
             cursor_glyph: None,
             cursor_bounds: None,
             marked: None,
             line_height,
         };
-        let Some(terminal) = view.terminal() else {
+        let (Some(terminal), Some(damage)) = (view.terminal(), damage) else {
+            self.view.update(cx, |view, _| view.rows = cache);
             return frame;
         };
         let term = terminal.term();
         let content = term.renderable_content();
-        let overrides = content.colors;
         let offset = content.display_offset as i32;
         let origin = |col: usize, row: usize| {
             bounds.origin + point(cell_width * col as f32, line_height * row as f32)
         };
-
-        let mut runs: Vec<Run> = Vec::new();
-        let mut bg_run: Option<(usize, usize, usize, Hsla)> = None;
-        let push_bg = |run: Option<(usize, usize, usize, Hsla)>, out: &mut Vec<PaintQuad>| {
-            if let Some((row, start, end, color)) = run {
-                let b = Bounds::new(
-                    origin(start, row),
-                    size(cell_width * (end - start) as f32, line_height),
-                );
-                out.push(fill(b, color));
-            }
-        };
-
-        for cell in content.display_iter {
-            let row = (cell.point.line.0 + offset) as usize;
-            let col = cell.point.column.0;
-            let flags = cell.flags;
-
-            let mut fg_color = cell.fg;
-            if flags.contains(Flags::BOLD) {
-                fg_color = match fg_color {
-                    Color::Named(name) if (name as usize) < 8 || name == NamedColor::Foreground => {
-                        Color::Named(name.to_bright())
-                    }
-                    Color::Indexed(i) if i < 8 => Color::Indexed(i + 8),
-                    other => other,
-                };
-            }
-            let mut fg = colors::resolve(fg_color, overrides, &palette);
-            let mut bg = colors::resolve(cell.bg, overrides, &palette);
-            if flags.contains(Flags::DIM) {
-                fg = colors::dim(fg, &palette);
-            }
-            if flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if flags.contains(Flags::HIDDEN) {
-                fg = bg;
-            }
-            if content.selection.is_some_and(|s| s.contains(cell.point)) {
-                bg = palette.selection;
-            }
-
-            match &mut bg_run {
-                Some((r, _, end, color)) if *r == row && *end == col && *color == bg => {
-                    *end = col + 1
-                }
-                _ => {
-                    push_bg(bg_run.take(), &mut frame.backgrounds);
-                    if bg != palette.background {
-                        bg_run = Some((row, col, col + 1, bg));
-                    }
-                }
-            }
-
-            if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let underline = if flags.contains(Flags::UNDERCURL) {
-                Some(Underline::Curly)
-            } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                Some(Underline::Double)
-            } else if flags.intersects(Flags::ALL_UNDERLINES) {
-                Some(Underline::Single)
-            } else {
-                None
-            };
-            let style = CellStyle {
-                fg,
-                bold: flags.contains(Flags::BOLD),
-                underline,
-                underline_color: underline
-                    .and(cell.underline_color())
-                    .map(|c| colors::resolve(c, overrides, &palette)),
-                strike: flags.contains(Flags::STRIKEOUT),
-            };
-            if cell.c == ' ' && style.underline.is_none() && !style.strike {
-                continue;
-            }
-            if style.underline.is_none()
-                && !style.strike
-                && let Some(quads) = glyphs::quads(
-                    cell.c,
-                    Bounds::new(origin(col, row), size(cell_width, line_height)),
-                    fg,
-                )
-            {
-                frame.glyphs.extend(quads);
-                continue;
-            }
-            // Every single-width glyph snaps to its cell, so fallback-font symbols keep the grid.
-            let simple = !flags.contains(Flags::WIDE_CHAR) && cell.zerowidth().is_none();
-            if simple
-                && let Some(run) = runs.last_mut()
-                && run.grid_aligned
-                && run.row == row
-                && run.col + run.cells == col
-                && run.style == style
-            {
-                run.text.push(cell.c);
-                run.cells += 1;
-                continue;
-            }
-            let mut text = String::from(cell.c);
-            text.extend(cell.zerowidth().into_iter().flatten());
-            runs.push(Run {
-                row,
-                col,
-                cells: if flags.contains(Flags::WIDE_CHAR) {
-                    2
-                } else {
-                    1
-                },
-                text,
-                style,
-                grid_aligned: simple,
-            });
-        }
-        push_bg(bg_run.take(), &mut frame.backgrounds);
-
         let text_run = |len: usize, style: CellStyle| TextRun {
             len,
             font: if style.bold {
@@ -315,13 +433,39 @@ impl Element for TerminalElement {
                 color: Some(style.fg),
             }),
         };
-        for run in runs {
-            let force = run.grid_aligned.then_some(cell_width);
-            let runs = [text_run(run.text.len(), run.style)];
-            let shaped =
-                text_system.shape_line(SharedString::from(run.text), font_size, &runs, force);
-            frame.text.push((origin(run.col, run.row), shaped));
+
+        let key = RowKey {
+            cols: term.columns(),
+            rows: term.screen_lines(),
+            cell_width,
+            line_height,
+            font_size,
+            font: font.family.clone(),
+            palette: palette_key(&palette),
+            display_offset: content.display_offset,
+            selection: content.selection,
+            focused: self.focused,
+            hovered_link: view.hovered_link.clone(),
+        };
+        let stale = cache.invalidate(key, damage);
+        timer.rebuilt = stale.len();
+        let builder = RowBuilder {
+            grid: term.grid(),
+            cols: term.columns(),
+            offset,
+            selection: content.selection,
+            overrides: content.colors,
+            palette: &palette,
+            cell_width,
+            line_height,
+            font_size,
+            text_system: &text_system,
+            text_run: &text_run,
+        };
+        for row in stale {
+            cache.rows[row] = Some(Rc::new(builder.build(row)));
         }
+        frame.rows = cache.rows.iter().flatten().cloned().collect();
 
         if let Some(link) = &view.hovered_link {
             let at = origin(link.start, link.row);
@@ -329,7 +473,7 @@ impl Element for TerminalElement {
                 at + point(px(0.), line_height - px(2.)),
                 size(cell_width * (link.end - link.start) as f32, px(1.)),
             );
-            frame.backgrounds.push(fill(underline, palette.foreground));
+            frame.link = Some(fill(underline, palette.foreground));
         }
 
         let cursor = content.cursor;
@@ -395,6 +539,7 @@ impl Element for TerminalElement {
             frame.cursor = None;
             frame.cursor_glyph = None;
         }
+        self.view.update(cx, |view, _| view.rows = cache);
         frame
     }
 
@@ -415,12 +560,29 @@ impl Element for TerminalElement {
             cx,
         );
         let line_height = frame.line_height;
+        let origin = frame.origin;
+        let shifted = |quad: &PaintQuad| PaintQuad {
+            bounds: quad.bounds + origin,
+            ..quad.clone()
+        };
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for quad in frame.backgrounds.drain(..).chain(frame.glyphs.drain(..)) {
-                window.paint_quad(quad);
+            for row in &frame.rows {
+                for quad in &row.backgrounds {
+                    window.paint_quad(shifted(quad));
+                }
             }
-            for (origin, line) in &frame.text {
-                let _ = line.paint(*origin, line_height, window, cx);
+            if let Some(link) = frame.link.take() {
+                window.paint_quad(link);
+            }
+            for row in &frame.rows {
+                for quad in &row.glyphs {
+                    window.paint_quad(shifted(quad));
+                }
+            }
+            for row in &frame.rows {
+                for (at, line) in &row.text {
+                    let _ = line.paint(origin + *at, line_height, window, cx);
+                }
             }
             if let Some(cursor) = frame.cursor.take() {
                 window.paint_quad(cursor);
@@ -438,5 +600,174 @@ impl Element for TerminalElement {
             view.cursor_bounds = cursor_bounds;
             view.origin = bounds.origin;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alacritty_terminal::index::{Column, Line, Point};
+    use athena_ui::Theme;
+
+    use super::*;
+
+    fn key() -> RowKey {
+        RowKey {
+            cols: 80,
+            rows: 4,
+            cell_width: px(8.),
+            line_height: px(18.),
+            font_size: px(13.),
+            font: "Geist Mono".into(),
+            palette: palette_key(&Theme::dark(false).terminal),
+            display_offset: 0,
+            selection: None,
+            focused: true,
+            hovered_link: None,
+        }
+    }
+
+    /// A cache whose rows were all built for `key`.
+    fn warm(key: RowKey) -> RowCache {
+        let mut cache = RowCache::default();
+        for row in cache.invalidate(key, Damage::Full) {
+            cache.rows[row] = Some(Rc::default());
+        }
+        cache
+    }
+
+    fn rebuilt(cache: &mut RowCache, key: RowKey, damage: Damage) -> Vec<usize> {
+        let stale = cache.invalidate(key, damage);
+        for &row in &stale {
+            cache.rows[row] = Some(Rc::default());
+        }
+        stale
+    }
+
+    #[test]
+    fn the_first_frame_builds_every_row() {
+        let mut cache = RowCache::default();
+        assert_eq!(cache.invalidate(key(), Damage::Rows(vec![])), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn an_unchanged_frame_rebuilds_only_damaged_rows() {
+        let mut cache = warm(key());
+        assert!(rebuilt(&mut cache, key(), Damage::Rows(vec![])).is_empty());
+        assert_eq!(rebuilt(&mut cache, key(), Damage::Rows(vec![2, 0])), [0, 2]);
+        assert!(
+            rebuilt(&mut cache, key(), Damage::Rows(vec![9])).is_empty(),
+            "rows past the screen are ignored"
+        );
+    }
+
+    #[test]
+    fn full_damage_rebuilds_everything() {
+        let mut cache = warm(key());
+        assert_eq!(rebuilt(&mut cache, key(), Damage::Full), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn any_change_besides_cell_contents_rebuilds_everything() {
+        let palette = {
+            let mut p = Theme::dark(false).terminal;
+            p.ansi[3] = p.ansi[4];
+            palette_key(&p)
+        };
+        let selection = SelectionRange::new(
+            Point::new(Line(0), Column(1)),
+            Point::new(Line(1), Column(3)),
+            false,
+        );
+        let link = Link {
+            row: 1,
+            start: 0,
+            end: 4,
+            uri: "https://tlsc.io".into(),
+        };
+        let changes: Vec<(&str, RowKey)> = vec![
+            ("resize", RowKey { rows: 5, ..key() }),
+            ("columns", RowKey { cols: 81, ..key() }),
+            (
+                "cell width",
+                RowKey {
+                    cell_width: px(9.),
+                    ..key()
+                },
+            ),
+            (
+                "line height",
+                RowKey {
+                    line_height: px(20.),
+                    ..key()
+                },
+            ),
+            (
+                "font size",
+                RowKey {
+                    font_size: px(14.),
+                    ..key()
+                },
+            ),
+            (
+                "font",
+                RowKey {
+                    font: "Menlo".into(),
+                    ..key()
+                },
+            ),
+            ("palette", RowKey { palette, ..key() }),
+            (
+                "scrollback",
+                RowKey {
+                    display_offset: 3,
+                    ..key()
+                },
+            ),
+            (
+                "selection",
+                RowKey {
+                    selection: Some(selection),
+                    ..key()
+                },
+            ),
+            (
+                "focus",
+                RowKey {
+                    focused: false,
+                    ..key()
+                },
+            ),
+            (
+                "hovered link",
+                RowKey {
+                    hovered_link: Some(link),
+                    ..key()
+                },
+            ),
+        ];
+        for (what, changed) in changes {
+            let mut cache = warm(key());
+            let rows = changed.rows;
+            assert_eq!(
+                rebuilt(&mut cache, changed.clone(), Damage::Rows(vec![])).len(),
+                rows,
+                "{what} changed"
+            );
+            assert_eq!(
+                rebuilt(&mut cache, key(), Damage::Rows(vec![])).len(),
+                4,
+                "{what} changed back"
+            );
+        }
+    }
+
+    #[test]
+    fn scrolled_back_rebuilds_every_frame() {
+        let back = RowKey {
+            display_offset: 10,
+            ..key()
+        };
+        let mut cache = warm(back.clone());
+        assert_eq!(rebuilt(&mut cache, back, Damage::Rows(vec![])).len(), 4);
     }
 }

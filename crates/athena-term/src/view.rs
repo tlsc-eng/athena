@@ -16,7 +16,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::element::TerminalElement;
+use crate::element::{RowCache, TerminalElement};
 use crate::keys;
 use crate::links;
 use crate::terminal::{GridSize, Link, PaneEvent, Terminal, Transport};
@@ -113,6 +113,7 @@ pub struct TerminalView {
     pub(crate) cursor_bounds: Option<Bounds<Pixels>>,
     pub(crate) origin: gpui::Point<Pixels>,
     pub(crate) hovered_link: Option<Link>,
+    pub(crate) rows: RowCache,
     foreground: Option<Process>,
     selecting: bool,
     claude_state: Option<ClaudeState>,
@@ -151,6 +152,7 @@ impl TerminalView {
             },
             origin: gpui::Point::default(),
             hovered_link: None,
+            rows: RowCache::default(),
             foreground: None,
             selecting: false,
             claude_state: None,
@@ -309,6 +311,10 @@ impl TerminalView {
 
     pub(crate) fn terminal(&self) -> Option<&Terminal> {
         self.terminal.as_ref()
+    }
+
+    pub(crate) fn terminal_mut(&mut self) -> Option<&mut Terminal> {
+        self.terminal.as_mut()
     }
 
     pub(crate) fn resize(&mut self, grid: GridSize) {
