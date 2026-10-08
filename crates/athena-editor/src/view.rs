@@ -17,6 +17,7 @@ actions!(
     editor,
     [
         GoToDefinition,
+        FindReferences,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -108,6 +109,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", Escape, ctx),
         KeyBinding::new("f12", GoToDefinition, ctx),
         KeyBinding::new("cmd-alt-g", GoToDefinition, ctx),
+        KeyBinding::new("shift-f12", FindReferences, ctx),
+        KeyBinding::new("cmd-alt-r", FindReferences, ctx),
     ]);
 }
 
@@ -121,6 +124,11 @@ pub enum EditorEvent {
     Saved,
     /// Zero-based line and UTF-16 column of the symbol to look up.
     GoToDefinition {
+        line: u32,
+        character: u32,
+    },
+    /// Zero-based line and UTF-16 column of the symbol whose uses to list.
+    FindReferences {
         line: u32,
         character: u32,
     },
@@ -598,6 +606,12 @@ impl Render for EditorView {
                     .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| {
                         if let Some(head) = this.buffer.as_ref().map(|b| b.selection.head) {
                             this.definition_at(head, cx);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &FindReferences, _, cx| {
+                        if let Some(b) = this.buffer.as_ref() {
+                            let (line, character) = b.utf16_position(b.selection.head);
+                            cx.emit(EditorEvent::FindReferences { line, character });
                         }
                     }))
                     .on_mouse_move(cx.listener(Self::mouse_move))

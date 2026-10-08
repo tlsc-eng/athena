@@ -133,6 +133,16 @@ impl Client {
         );
         locations(reply).await
     }
+
+    /// Every use of the symbol at `at`, its declaration included.
+    pub async fn references(&self, path: &Path, at: Position) -> Result<Vec<Location>, String> {
+        let reply = self.request(
+            "textDocument/references",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at,
+                   "context": {"includeDeclaration": true}}),
+        );
+        locations(reply).await
+    }
 }
 
 impl Drop for Client {
@@ -240,7 +250,8 @@ impl Session {
                 "textDocument": {
                     "synchronization": {"didSave": true},
                     "publishDiagnostics": {},
-                    "definition": {"linkSupport": true}
+                    "definition": {"linkSupport": true},
+                    "references": {}
                 }
             }
         })

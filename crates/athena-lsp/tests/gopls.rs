@@ -13,7 +13,7 @@ fn next_event(events: &async_channel::Receiver<Event>, deadline: Instant) -> Opt
 }
 
 #[test]
-fn gopls_reports_an_unused_import_and_finds_definitions() {
+fn gopls_reports_an_unused_import_and_finds_definitions_and_references() {
     if athena_lsp::find_program("gopls").is_none() {
         eprintln!("gopls not installed; skipping");
         return;
@@ -52,6 +52,12 @@ fn gopls_reports_an_unused_import_and_finds_definitions() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].path, file);
     assert_eq!(found[0].range.start.line, 4);
+
+    let mut uses = futures_lite_block_on(client.references(&file, call)).unwrap();
+    uses.sort_by_key(|l| l.range.start);
+    let lines: Vec<u32> = uses.iter().map(|l| l.range.start.line).collect();
+    assert_eq!(lines, [4, 6], "the declaration and the call");
+    assert!(uses.iter().all(|l| l.path == file));
 
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);

@@ -4,15 +4,22 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use athena_editor::{EditorView, Lang, Marker, MarkerSeverity};
-use athena_lsp::{Client, Diagnostic, Event, Position, ServerKind, Severity};
+use athena_lsp::{Client, Diagnostic, Event, Location, Position, ServerKind, Severity};
 use athena_proto::{DiagnosticInfo, NoticeKind};
-use gpui::{Context, Entity, Task, Window};
+use athena_ui::ActiveTheme;
+use gpui::{
+    AnyElement, Context, Entity, FontWeight, Task, Window, div, prelude::*, px, uniform_list,
+};
 
 use super::Shell;
+use super::drawer::DrawerTab;
 use super::item::ItemView;
 
 /// Typing pauses this long before the server gets the new text.
 const CHANGE_DELAY: Duration = Duration::from_millis(300);
+
+/// Longest line excerpt shown for a reference.
+const SNIPPET_CHARS: usize = 160;
 
 const NO_SERVER: &str = "No language server runs for this file.";
 
@@ -34,6 +41,52 @@ pub(super) struct LspState {
     documents: HashMap<PathBuf, ServerKey>,
     changes: HashMap<PathBuf, Task<()>>,
     jump: Option<(PathBuf, Position)>,
+    references: References,
+    /// Bumped per lookup so a slow answer cannot replace a newer one.
+    references_asked: u64,
+    reference_opened: Option<usize>,
+}
+
+#[derive(Default)]
+enum References {
+    #[default]
+    Idle,
+    Loading,
+    Found(Rc<Vec<Reference>>),
+    Failed(String),
+}
+
+pub(super) struct Reference {
+    path: PathBuf,
+    at: Position,
+    snippet: String,
+}
+
+/// Reads each file once, off the main thread, for the line every reference sits on.
+fn with_snippets(mut found: Vec<Location>) -> Vec<Reference> {
+    found.sort_by(|a, b| (&a.path, a.range.start).cmp(&(&b.path, b.range.start)));
+    let mut text: Option<(PathBuf, Vec<String>)> = None;
+    found
+        .into_iter()
+        .map(|l| {
+            if text.as_ref().is_none_or(|(p, _)| *p != l.path) {
+                let lines = std::fs::read_to_string(&l.path)
+                    .map(|t| t.lines().map(str::to_string).collect())
+                    .unwrap_or_default();
+                text = Some((l.path.clone(), lines));
+            }
+            let snippet = text
+                .as_ref()
+                .and_then(|(_, lines)| lines.get(l.range.start.line as usize))
+                .map(|line| line.trim().chars().take(SNIPPET_CHARS).collect())
+                .unwrap_or_default();
+            Reference {
+                path: l.path,
+                at: l.range.start,
+                snippet,
+            }
+        })
+        .collect()
 }
 
 fn server_for(lang: Lang) -> (ServerKind, &'static str) {
@@ -264,6 +317,167 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    pub(super) fn lsp_references(
+        &mut self,
+        editor: &Entity<EditorView>,
+        at: Position,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        self.lsp.references_asked += 1;
+        self.lsp.reference_opened = None;
+        self.show_drawer_tab(DrawerTab::References, cx);
+        let Some(client) = self
+            .lsp
+            .documents
+            .get(&doc)
+            .and_then(|k| self.lsp.servers.get(k))
+            .map(|s| s.client.clone())
+        else {
+            self.lsp.references = References::Failed(NO_SERVER.into());
+            return;
+        };
+        self.lsp.references = References::Loading;
+        let asked = self.lsp.references_asked;
+        cx.spawn(async move |this, cx| {
+            let found = client.references(&doc, at).await;
+            let found = match found {
+                Ok(list) => Ok(cx
+                    .background_executor()
+                    .spawn(async move { with_snippets(list) })
+                    .await),
+                Err(why) => Err(why),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.lsp.references_asked != asked {
+                    return;
+                }
+                this.lsp.references = match found {
+                    Ok(list) => References::Found(Rc::new(list)),
+                    Err(why) => References::Failed(why),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn render_references_count(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let References::Found(list) = &self.lsp.references else {
+            return None;
+        };
+        let t = cx.theme();
+        let count = match list.len() {
+            1 => "1 reference".to_string(),
+            n => format!("{n} references"),
+        };
+        Some(
+            div()
+                .text_color(t.color.content_muted)
+                .child(count)
+                .into_any_element(),
+        )
+    }
+
+    /// The References tab: `path:line:col` and the line's text, one row per use.
+    pub(super) fn render_references(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme().clone();
+        let message = |text: String| {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(t.typography.caption)
+                .text_color(t.color.content_muted)
+                .child(text)
+                .into_any_element()
+        };
+        let list = match &self.lsp.references {
+            References::Idle => {
+                return message(
+                    "Press Shift+F12 or ⌘⌥R on a symbol to list where it is used.".into(),
+                );
+            }
+            References::Loading => return message("Finding references…".into()),
+            References::Failed(why) => return message(why.clone()),
+            References::Found(list) if list.is_empty() => {
+                return message("No references found.".into());
+            }
+            References::Found(list) => list.clone(),
+        };
+        let root = self
+            .workspace
+            .active_project()
+            .and_then(|p| p.root.canonicalize().ok());
+        let opened = self.lsp.reference_opened;
+        uniform_list(
+            "references",
+            list.len(),
+            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                range
+                    .map(|i| {
+                        let r = &list[i];
+                        let shown = root
+                            .as_ref()
+                            .and_then(|root| r.path.strip_prefix(root).ok())
+                            .unwrap_or(&r.path);
+                        let place = format!(
+                            "{}:{}:{}",
+                            shown.display(),
+                            r.at.line + 1,
+                            r.at.character + 1
+                        );
+                        let (path, at) = (r.path.clone(), r.at);
+                        let selected = opened == Some(i);
+                        div()
+                            .id(("reference", i))
+                            .w_full()
+                            .h(px(28.))
+                            .px(px(12.))
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.color.surface_hover))
+                            .when(selected, |el| el.bg(t.color.surface_active))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.lsp.reference_opened = Some(i);
+                                this.lsp.jump = Some((path.clone(), at));
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(t.typography.caption)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if selected {
+                                        t.color.accent
+                                    } else {
+                                        t.color.content_secondary
+                                    })
+                                    .child(place),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .font_family(t.typography.mono.clone())
+                                    .text_size(t.typography.caption)
+                                    .text_color(t.color.content_muted)
+                                    .child(r.snippet.clone()),
+                            )
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .size_full()
+        .into_any_element()
     }
 
     /// Says why a lookup went nowhere, so a click or key press is never silently ignored.

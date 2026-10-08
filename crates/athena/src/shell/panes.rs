@@ -99,6 +99,13 @@ impl Shell {
                             };
                             this.lsp_definition(&view, at, cx);
                         }
+                        EditorEvent::FindReferences { line, character } => {
+                            let at = athena_lsp::Position {
+                                line: *line,
+                                character: *character,
+                            };
+                            this.lsp_references(&view, at, cx);
+                        }
                     }
                     cx.notify();
                 })
