@@ -890,10 +890,19 @@ impl Buffer {
             })
             .collect();
         let start = self.line_start(first);
-        let end = start + lines.iter().map(|l| l.chars().count()).sum::<usize>() + (last - first);
-        self.replace(c, start..end, &rewritten.join("\n"), EditKind::Other);
-        let new_end =
-            start + rewritten.iter().map(|l| l.chars().count()).sum::<usize>() + (last - first);
+        let end = self.line_start(last) + self.line_len(last);
+        // Each line keeps the break it had, so CRLF files stay CRLF.
+        let mut text = String::new();
+        for (l, line) in (first..=last).zip(&rewritten) {
+            text.push_str(line);
+            if l < last {
+                text.push_str(
+                    &self.text(self.line_start(l) + self.line_len(l)..self.line_start(l + 1)),
+                );
+            }
+        }
+        self.replace(c, start..end, &text, EditKind::Other);
+        let new_end = start + text.chars().count();
         c.selection = Selection {
             anchor: start,
             head: new_end,
@@ -1765,6 +1774,17 @@ mod tests {
         assert_eq!(c.head(), 11);
         b.delete_word_back(&mut c);
         assert_eq!(b.rope().to_string(), "let  = 1");
+    }
+
+    #[test]
+    fn toggling_comments_keeps_crlf_line_breaks() {
+        let mut b = buf("a := 1\r\nb := 2\r\nc := 3\r\n", "/x/a.go");
+        let mut c = select(0, b.line_start(2));
+        b.toggle_comment(&mut c);
+        assert_eq!(b.full_text(), "// a := 1\r\n// b := 2\r\nc := 3\r\n");
+        assert_eq!(c.selection, select(0, b.line_start(1) + 9).selection);
+        b.toggle_comment(&mut c);
+        assert_eq!(b.full_text(), "a := 1\r\nb := 2\r\nc := 3\r\n");
     }
 
     #[test]
