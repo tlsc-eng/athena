@@ -6,6 +6,7 @@ mod notices;
 mod palette;
 mod panes;
 mod tree;
+mod usage_view;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -55,6 +56,8 @@ pub struct Shell {
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
+    usage: usage_view::UsageState,
+    _usage: Option<Task<()>>,
     zoomed: Option<PaneId>,
     entering: Option<PaneId>,
     leaving: Option<PaneId>,
@@ -141,6 +144,8 @@ impl Shell {
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
+            usage: usage_view::UsageState::default(),
+            _usage: None,
             zoomed: None,
             entering: None,
             leaving: None,
@@ -151,6 +156,7 @@ impl Shell {
             _subscriptions: subscriptions,
         };
         shell.start_notices(window, cx);
+        shell.start_usage(window, cx);
         crate::system_notify::set_badge(shell.unread());
         shell
     }
@@ -269,6 +275,7 @@ impl Shell {
                     }))
             }))
             .child(div().flex_1())
+            .child(self.render_usage_button(cx))
             .child(self.render_notice_button(cx))
     }
 
@@ -567,6 +574,7 @@ impl Render for Shell {
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)
+            .children(self.render_usage_popover(cx))
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
     }

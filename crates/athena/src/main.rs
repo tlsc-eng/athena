@@ -6,6 +6,7 @@ mod mcp;
 mod procinfo;
 mod shell;
 mod system_notify;
+mod usage;
 
 use std::path::PathBuf;
 

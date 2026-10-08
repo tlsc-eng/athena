@@ -20,6 +20,9 @@ pub struct Workspace {
     pub projects: Vec<Project>,
     pub active: Option<usize>,
     pub window: Option<WindowState>,
+    /// The user agreed to show Claude plan usage, which reads Claude Code's Keychain sign-in.
+    #[serde(default)]
+    pub usage_indicator: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
