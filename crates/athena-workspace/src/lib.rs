@@ -26,12 +26,33 @@ pub struct Workspace {
     /// Editors save this long after the last keystroke; 0 turns auto save off.
     #[serde(default = "default_autosave_delay_ms")]
     pub autosave_delay_ms: u64,
+    #[serde(default)]
+    pub ui: UiState,
 }
 
 pub const DEFAULT_AUTOSAVE_DELAY_MS: u64 = 1000;
 
 fn default_autosave_delay_ms() -> u64 {
     DEFAULT_AUTOSAVE_DELAY_MS
+}
+
+/// Panel sizes and visibility, kept off `WindowState` because bounds changes overwrite that wholesale.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct UiState {
+    pub tree_width: f32,
+    pub drawer_height: f32,
+    pub tree_visible: bool,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            tree_width: 240.,
+            drawer_height: 240.,
+            tree_visible: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -58,6 +79,7 @@ impl Default for Workspace {
             window: None,
             usage_indicator: false,
             autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
+            ui: UiState::default(),
         }
     }
 }

@@ -33,7 +33,7 @@ pub fn save(path: &Path, workspace: &Workspace) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{WindowMode, WindowState};
+    use crate::{UiState, WindowMode, WindowState};
 
     #[test]
     fn round_trip() {
@@ -51,6 +51,11 @@ mod tests {
             height: 800.,
             mode: WindowMode::Windowed,
         });
+        w.ui = UiState {
+            tree_width: 300.,
+            drawer_height: 180.,
+            tree_visible: false,
+        };
         save(&path, &w).unwrap();
         assert_eq!(load(&path).unwrap(), w);
         assert_eq!(
@@ -61,5 +66,16 @@ mod tests {
         fs::write(&path, b"{not json").unwrap();
         assert!(load(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_ui_state_loads_defaults() {
+        let w: Workspace =
+            serde_json::from_str(r#"{"projects":[],"active":null,"window":null}"#).unwrap();
+        assert_eq!(w.ui, UiState::default());
+        let ui: UiState = serde_json::from_str(r#"{"tree_width":320}"#).unwrap();
+        assert_eq!(ui.tree_width, 320.);
+        assert_eq!(ui.drawer_height, 240.);
+        assert!(ui.tree_visible);
     }
 }
