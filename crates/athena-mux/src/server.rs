@@ -14,10 +14,12 @@ use athena_proto::{
 };
 
 use crate::pane::{Pane, PaneOutput, READ_CHUNK};
+use crate::process;
 
 const CLIENT_QUEUE: usize = 256;
 const IDLE_EXIT: Duration = Duration::from_secs(60);
 const REAPER_TICK: Duration = Duration::from_secs(5);
+const FOREGROUND_TICK: Duration = Duration::from_millis(500);
 const MAX_DIM: u16 = 1000;
 
 type ClientId = u64;
@@ -77,6 +79,50 @@ impl Server {
                 }
             })
             .expect("spawn reaper thread");
+    }
+
+    /// Tells attached clients when a pane's foreground program changes (shell, vim, claude, ...).
+    pub fn start_foreground_poller(self: Arc<Self>) {
+        thread::Builder::new()
+            .name("mux-foreground".into())
+            .spawn(move || {
+                loop {
+                    thread::sleep(FOREGROUND_TICK);
+                    let updates: Vec<_> = {
+                        let mut st = self.lock();
+                        let State { panes, clients, .. } = &mut *st;
+                        panes
+                            .iter_mut()
+                            .filter(|(_, p)| p.exit.is_none())
+                            .filter_map(|(id, p)| {
+                                let now = p.leader().and_then(process::describe);
+                                if now == p.foreground {
+                                    return None;
+                                }
+                                p.foreground = now.clone();
+                                let targets: Vec<_> = p
+                                    .attached
+                                    .iter()
+                                    .filter_map(|c| clients.get(c).cloned())
+                                    .collect();
+                                Some((
+                                    targets,
+                                    ServerMsg::Foreground {
+                                        pane: *id,
+                                        process: now,
+                                    },
+                                ))
+                            })
+                            .collect()
+                    };
+                    for (targets, msg) in updates {
+                        for tx in targets {
+                            let _ = tx.send(msg.clone());
+                        }
+                    }
+                }
+            })
+            .expect("spawn foreground thread");
     }
 
     fn exit(&self, mut st: MutexGuard<'_, State>) -> ! {
@@ -206,6 +252,10 @@ impl Server {
                     });
                 }
                 let _ = tx.send(ServerMsg::ReplayDone { pane });
+                let _ = tx.send(ServerMsg::Foreground {
+                    pane,
+                    process: p.foreground.clone(),
+                });
                 if let Some(code) = p.exit {
                     let _ = tx.send(ServerMsg::Exited { pane, code });
                 }

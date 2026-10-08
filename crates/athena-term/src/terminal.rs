@@ -1,14 +1,17 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Handler, Processor, StdSyncHandler};
 use athena_ui::TerminalColors;
 
-use crate::colors;
+use crate::{colors, links};
 
 const SCROLLBACK_LINES: usize = 10_000;
 const MAX_TITLE: usize = 256;
@@ -53,6 +56,20 @@ pub struct Terminal {
     pub title: Option<String>,
     pub exit: Option<Option<i32>>,
     pub bell: bool,
+    pub last_output: Instant,
+    /// OSC 52 copy requests are applied only after the user allows them for this terminal.
+    pub allow_clipboard: bool,
+    pub clipboard_write: Option<String>,
+    pub blocked_clipboard: Option<String>,
+}
+
+/// A link under the pointer: viewport row, column range and target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+    pub uri: String,
 }
 
 impl Terminal {
@@ -76,6 +93,10 @@ impl Terminal {
             title: None,
             exit: None,
             bell: false,
+            last_output: Instant::now(),
+            allow_clipboard: false,
+            clipboard_write: None,
+            blocked_clipboard: None,
         }
     }
 
@@ -94,6 +115,9 @@ impl Terminal {
     pub fn handle(&mut self, event: PaneEvent, palette: &TerminalColors) {
         match event {
             PaneEvent::Output(bytes) => {
+                if !self.replaying {
+                    self.last_output = Instant::now();
+                }
                 self.parser.advance(&mut self.term, &bytes);
                 self.drain_events(palette);
             }
@@ -126,6 +150,10 @@ impl Terminal {
                         .write(format(self.window_size()).into_bytes());
                 }
                 Event::Bell => self.bell = true,
+                Event::ClipboardStore(_, text) if self.allow_clipboard => {
+                    self.clipboard_write = Some(text)
+                }
+                Event::ClipboardStore(_, text) => self.blocked_clipboard = Some(text),
                 _ => {}
             }
         }
@@ -138,6 +166,85 @@ impl Terminal {
         }
         self.term.scroll_display(Scroll::Bottom);
         self.transport.write(bytes);
+    }
+
+    /// Grid point and cell half under a viewport position given in cells.
+    pub fn point_at(&self, col: f32, row: f32) -> (Point, Side) {
+        let cols = self.term.columns();
+        let rows = self.term.screen_lines();
+        let c = (col.max(0.) as usize).min(cols.saturating_sub(1));
+        let r = (row.max(0.) as usize).min(rows.saturating_sub(1));
+        let side = if col - c as f32 > 0.5 {
+            Side::Right
+        } else {
+            Side::Left
+        };
+        let line = Line(r as i32 - self.term.grid().display_offset() as i32);
+        (Point::new(line, Column(c)), side)
+    }
+
+    pub fn start_selection(&mut self, clicks: usize, point: Point, side: Side) {
+        let ty = match clicks {
+            2 => SelectionType::Semantic,
+            n if n >= 3 => SelectionType::Lines,
+            _ => SelectionType::Simple,
+        };
+        self.term.selection = Some(Selection::new(ty, point, side));
+    }
+
+    pub fn update_selection(&mut self, point: Point, side: Side) {
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.term.selection.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    /// An OSC 8 hyperlink or a bare http(s) URL at a viewport cell.
+    pub fn link_at(&self, row: usize, col: usize) -> Option<Link> {
+        let offset = self.term.grid().display_offset() as i32;
+        let line = Line(row as i32 - offset);
+        let cols = self.term.columns();
+        if col >= cols || row >= self.term.screen_lines() {
+            return None;
+        }
+        let grid = self.term.grid();
+        if let Some(link) = grid[Point::new(line, Column(col))].hyperlink() {
+            let same =
+                |c: usize| grid[Point::new(line, Column(c))].hyperlink().as_ref() == Some(&link);
+            let start = (0..=col)
+                .rev()
+                .take_while(|&c| same(c))
+                .last()
+                .unwrap_or(col);
+            let end = (col..cols).take_while(|&c| same(c)).last().unwrap_or(col) + 1;
+            return Some(Link {
+                row,
+                start,
+                end,
+                uri: link.uri().to_string(),
+            });
+        }
+        let chars: Vec<char> = (0..cols)
+            .map(|c| grid[Point::new(line, Column(c))].c)
+            .collect();
+        let (start, end, uri) = links::url_at(&chars, col)?;
+        Some(Link {
+            row,
+            start,
+            end,
+            uri,
+        })
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -204,8 +311,103 @@ fn sanitize_title(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
+    use athena_ui::Theme;
+
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct Recorder(Rc<RefCell<Vec<u8>>>);
+
+    impl Transport for Recorder {
+        fn write(&self, bytes: Vec<u8>) {
+            self.0.borrow_mut().extend(bytes);
+        }
+        fn resize(&self, _: u16, _: u16) {}
+    }
+
+    fn terminal() -> (Terminal, Recorder) {
+        let sent = Recorder::default();
+        let size = GridSize {
+            cols: 40,
+            rows: 5,
+            cell_width: 8.,
+            cell_height: 18.,
+        };
+        (Terminal::new(size, Box::new(sent.clone())), sent)
+    }
+
+    fn feed(t: &mut Terminal, bytes: &[u8]) {
+        t.handle(
+            PaneEvent::Output(bytes.to_vec()),
+            &Theme::dark(false).terminal,
+        );
+    }
+
+    #[test]
+    fn clipboard_writes_wait_for_permission() {
+        let (mut t, _) = terminal();
+        feed(&mut t, b"\x1b]52;c;aGk=\x07");
+        assert_eq!(t.blocked_clipboard.as_deref(), Some("hi"));
+        assert_eq!(t.clipboard_write, None);
+        t.allow_clipboard = true;
+        feed(&mut t, b"\x1b]52;c;eW8=\x07");
+        assert_eq!(t.clipboard_write.as_deref(), Some("yo"));
+    }
+
+    #[test]
+    fn clipboard_reads_are_never_answered() {
+        let (mut t, sent) = terminal();
+        t.allow_clipboard = true;
+        feed(&mut t, b"\x1b]52;c;?\x07");
+        assert!(sent.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn replayed_queries_are_not_answered() {
+        let (mut t, sent) = terminal();
+        t.replaying = true;
+        feed(&mut t, b"\x1b[c");
+        assert!(sent.0.borrow().is_empty());
+        t.replaying = false;
+        feed(&mut t, b"\x1b[c");
+        assert!(
+            !sent.0.borrow().is_empty(),
+            "live device-attribute query gets a reply"
+        );
+    }
+
+    #[test]
+    fn selection_copies_text() {
+        let (mut t, _) = terminal();
+        feed(&mut t, b"hello world\r\nsecond");
+        let (start, side) = t.point_at(0., 0.);
+        t.start_selection(1, start, side);
+        let (end, side) = t.point_at(4.9, 0.);
+        t.update_selection(end, side);
+        assert_eq!(t.selection_text().as_deref(), Some("hello"));
+        let (word, side) = t.point_at(7., 0.);
+        t.start_selection(2, word, side);
+        assert_eq!(t.selection_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn finds_osc8_and_bare_links() {
+        let (mut t, _) = terminal();
+        feed(
+            &mut t,
+            b"\x1b]8;;https://tlsc.io\x1b\\site\x1b]8;;\x1b\\ x\r\ngo http://localhost:3000 now",
+        );
+        let link = t.link_at(0, 2).unwrap();
+        assert_eq!(
+            (link.start, link.end, link.uri.as_str()),
+            (0, 4, "https://tlsc.io")
+        );
+        let bare = t.link_at(1, 8).unwrap();
+        assert_eq!(bare.uri, "http://localhost:3000");
+        assert!(t.link_at(1, 0).is_none());
+    }
     #[test]
     fn titles_lose_control_characters_and_length() {
         assert_eq!(sanitize_title("a\x1b]0;b\x07c"), "a]0;bc");

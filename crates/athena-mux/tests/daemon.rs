@@ -49,10 +49,16 @@ impl Drop for Daemon {
     }
 }
 
+/// Next reply, skipping foreground-process updates, which the daemon sends on its own schedule.
 fn next(reader: &mut UnixStream) -> ServerMsg {
-    read_frame(reader)
-        .unwrap()
-        .expect("daemon closed the connection")
+    loop {
+        let msg = read_frame(reader)
+            .unwrap()
+            .expect("daemon closed the connection");
+        if !matches!(msg, ServerMsg::Foreground { .. }) {
+            return msg;
+        }
+    }
 }
 
 /// Reads until `needle` shows up in a pane's output, returning everything read.
@@ -182,6 +188,40 @@ fn shells_do_not_inherit_the_daemon_environment() {
     let out = read_until(&mut reader, &format!("pane=[{pane}]"));
     assert!(out.contains("secret=[]"), "secret leaked: {out}");
     assert!(out.contains(&format!("home=[{}]", daemon.home.display())));
+}
+
+#[test]
+fn reports_the_foreground_program() {
+    let daemon = Daemon::start("fg");
+    let (conn, mut reader) = daemon.connect();
+    conn.send(&ClientMsg::Spawn {
+        cwd: "/tmp".into(),
+        rows: 24,
+        cols: 80,
+    })
+    .unwrap();
+    let ServerMsg::Spawned { pane } = next(&mut reader) else {
+        panic!("expected Spawned")
+    };
+    conn.send(&ClientMsg::Attach { pane }).unwrap();
+    conn.send(&ClientMsg::Input {
+        pane,
+        data: b"sleep 3\r".to_vec(),
+    })
+    .unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    loop {
+        if let ServerMsg::Foreground {
+            process: Some(p), ..
+        } = read_frame(&mut reader).unwrap().unwrap()
+            && p.name == "sleep"
+        {
+            assert!(p.path.is_absolute());
+            break;
+        }
+    }
 }
 
 #[test]

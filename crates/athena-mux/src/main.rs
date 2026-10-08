@@ -1,6 +1,7 @@
 //! `athena-mux`: owns the shells so they outlive the Athena window.
 
 mod pane;
+mod process;
 mod ring;
 mod server;
 
@@ -55,6 +56,7 @@ fn run() -> Result<()> {
 
     let server = Arc::new(server::Server::new(socket));
     server.clone().start_idle_reaper();
+    server.clone().start_foreground_poller();
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let server = server.clone();

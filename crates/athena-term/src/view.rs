@@ -7,19 +7,21 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::term::TermMode;
 use anyhow::anyhow;
-use athena_proto::{ClientMsg, Connection, ErrorKind, PaneId, ServerMsg};
+use athena_proto::{ClientMsg, Connection, ErrorKind, PaneId, Process, ServerMsg};
 use athena_ui::{ActiveTheme, ButtonKind, empty_state};
 use gpui::{
-    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
-    KeyDownEvent, MouseButton, Pixels, Render, ScrollWheelEvent, Task, UTF16Selection, Window,
-    actions, div, prelude::*, px,
+    App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle, Focusable,
+    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Render, ScrollWheelEvent, Task, UTF16Selection, Window, actions, div,
+    prelude::*, px,
 };
 
 use crate::element::TerminalElement;
 use crate::keys;
-use crate::terminal::{GridSize, PaneEvent, Terminal, Transport};
+use crate::links;
+use crate::terminal::{GridSize, Link, PaneEvent, Terminal, Transport};
 
-actions!(terminal, [Paste, ClearScrollback]);
+actions!(terminal, [Copy, Paste, ClearScrollback]);
 
 const BATCH_BYTES: usize = 2 * 1024 * 1024;
 
@@ -33,6 +35,7 @@ const SESSION_LOST: &[u8] = b"\x1b[2m[previous session ended; started a new shel
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-c", Copy, Some("Terminal")),
         KeyBinding::new("cmd-v", Paste, Some("Terminal")),
         KeyBinding::new("cmd-k", ClearScrollback, Some("Terminal")),
     ]);
@@ -41,6 +44,17 @@ pub fn init(cx: &mut App) {
 pub enum TerminalEvent {
     /// The view is now bound to this daemon pane; persist it to re-attach after a relaunch.
     Attached(PaneId),
+    /// Label, bell or Claude state changed; tab strips and the project rail should redraw.
+    Changed,
+}
+
+/// How long a Claude Code session may stay silent before it counts as waiting for the user.
+const CLAUDE_IDLE: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaudeState {
+    Running,
+    Waiting,
 }
 
 struct MuxTransport {
@@ -79,8 +93,14 @@ pub struct TerminalView {
     pub(crate) focus: FocusHandle,
     pub(crate) marked: String,
     pub(crate) cursor_bounds: Option<Bounds<Pixels>>,
+    pub(crate) origin: gpui::Point<Pixels>,
+    pub(crate) hovered_link: Option<Link>,
+    foreground: Option<Process>,
+    selecting: bool,
+    claude_state: Option<ClaudeState>,
     grid: GridSize,
     scroll_remainder: f32,
+    _claude_timer: Option<Task<()>>,
     _io: Option<Task<()>>,
 }
 
@@ -106,15 +126,97 @@ impl TerminalView {
                 cell_width: 8.,
                 cell_height: 18.,
             },
+            origin: gpui::Point::default(),
+            hovered_link: None,
+            foreground: None,
+            selecting: false,
+            claude_state: None,
             scroll_remainder: 0.,
+            _claude_timer: None,
             _io: None,
         };
         view.connect(cx);
         view
     }
 
-    pub fn title(&self) -> Option<&str> {
-        self.terminal.as_ref()?.title.as_deref()
+    /// Tab label: the running program, or for an idle shell its title or folder.
+    pub fn label(&self) -> String {
+        if self.is_claude() {
+            return "Claude".into();
+        }
+        let shell_idle = self.foreground.as_ref().is_none_or(|p| is_shell(&p.name));
+        if !shell_idle {
+            return self
+                .foreground
+                .as_ref()
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+        }
+        if let Some(title) = self
+            .terminal
+            .as_ref()
+            .and_then(|t| t.title.clone())
+            .filter(|t| !t.is_empty())
+        {
+            return title;
+        }
+        let cwd = self
+            .foreground
+            .as_ref()
+            .and_then(|p| p.cwd.clone())
+            .unwrap_or_else(|| self.cwd.clone());
+        cwd.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Terminal".into())
+    }
+
+    pub fn claude_state(&self) -> Option<ClaudeState> {
+        self.claude_state
+    }
+
+    /// A bell rang since the user last looked at this terminal.
+    pub fn has_bell(&self) -> bool {
+        self.terminal.as_ref().is_some_and(|t| t.bell)
+    }
+
+    fn is_claude(&self) -> bool {
+        self.foreground.as_ref().is_some_and(|p| {
+            p.name == "claude"
+                || p.path.ends_with("claude")
+                || p.path.to_string_lossy().contains("/claude/versions/")
+        })
+    }
+
+    fn current_claude_state(&self) -> Option<ClaudeState> {
+        if !self.is_claude() {
+            return None;
+        }
+        let terminal = self.terminal.as_ref()?;
+        if terminal.bell || terminal.last_output.elapsed() >= CLAUDE_IDLE {
+            Some(ClaudeState::Waiting)
+        } else {
+            Some(ClaudeState::Running)
+        }
+    }
+
+    /// Recomputes Claude state now and again once the idle window passes, emitting on change.
+    fn refresh_claude(&mut self, cx: &mut Context<Self>) {
+        let state = self.current_claude_state();
+        if state != self.claude_state {
+            self.claude_state = state;
+            cx.emit(TerminalEvent::Changed);
+        }
+        if state == Some(ClaudeState::Running) {
+            self._claude_timer = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(CLAUDE_IDLE + Duration::from_millis(100))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.refresh_claude(cx);
+                    cx.notify();
+                });
+            }));
+        }
     }
 
     /// Ends the shell for good, as when its project is closed.
@@ -240,9 +342,25 @@ impl TerminalView {
                 self.terminal = Some(terminal);
             }
             ServerMsg::Output { data, .. } => {
-                if let Some(terminal) = self.terminal.as_mut() {
-                    terminal.handle(PaneEvent::Output(data), &palette);
+                let Some(terminal) = self.terminal.as_mut() else {
+                    return;
+                };
+                let had_bell = terminal.bell;
+                terminal.handle(PaneEvent::Output(data), &palette);
+                if let Some(text) = terminal.clipboard_write.take() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
+                if terminal.bell != had_bell {
+                    cx.emit(TerminalEvent::Changed);
+                }
+                if !terminal.replaying {
+                    self.refresh_claude(cx);
+                }
+            }
+            ServerMsg::Foreground { process, .. } => {
+                self.foreground = process;
+                self.refresh_claude(cx);
+                cx.emit(TerminalEvent::Changed);
             }
             ServerMsg::ReplayDone { .. } => {
                 if let Some(terminal) = self.terminal.as_mut() {
@@ -304,10 +422,135 @@ impl TerminalView {
             return;
         }
         if let Some(bytes) = keys::to_esc(&event.keystroke, terminal.mode()) {
+            terminal.clear_selection();
             terminal.input(bytes);
             cx.stop_propagation();
             cx.notify();
         }
+    }
+
+    /// Viewport cell coordinates (fractional) of a window position.
+    fn cell_position(&self, position: gpui::Point<Pixels>) -> (f32, f32) {
+        let local = position - self.origin;
+        (
+            f32::from(local.x) / self.grid.cell_width,
+            f32::from(local.y) / self.grid.cell_height,
+        )
+    }
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        let (col, row) = self.cell_position(event.position);
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+        if event.modifiers.platform
+            && let Some(link) = terminal.link_at(row.max(0.) as usize, col.max(0.) as usize)
+        {
+            if links::openable(&link.uri) {
+                cx.open_url(&link.uri);
+            }
+            return;
+        }
+        let (point, side) = terminal.point_at(col, row);
+        terminal.start_selection(event.click_count, point, side);
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (col, row) = self.cell_position(event.position);
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
+            let (point, side) = terminal.point_at(col, row);
+            terminal.update_selection(point, side);
+            cx.notify();
+            return;
+        }
+        let link = (event.modifiers.platform && col >= 0. && row >= 0.)
+            .then(|| terminal.link_at(row as usize, col as usize))
+            .flatten();
+        if link != self.hovered_link {
+            self.hovered_link = link;
+            cx.notify();
+        }
+    }
+
+    fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.selecting) {
+            return;
+        }
+        if let Some(terminal) = self.terminal.as_mut()
+            && !terminal.has_selection()
+        {
+            terminal.clear_selection();
+            cx.notify();
+        }
+    }
+
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        match self.terminal.as_ref().and_then(Terminal::selection_text) {
+            Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            None => cx.propagate(),
+        }
+    }
+
+    fn allow_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.allow_clipboard = true;
+            if let Some(text) = terminal.blocked_clipboard.take() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            cx.notify();
+        }
+    }
+
+    fn render_clipboard_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.terminal.as_ref()?.blocked_clipboard.as_ref()?;
+        let t = cx.theme();
+        Some(
+            div()
+                .flex_none()
+                .h(px(32.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .border_t_1()
+                .border_color(t.color.border)
+                .bg(t.color.surface)
+                .text_size(t.typography.caption)
+                .text_color(t.color.content_muted)
+                .child("A program in this terminal tried to set the clipboard.")
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .child(
+                            athena_ui::Button::new(
+                                "clipboard-allow",
+                                "Allow for this terminal",
+                                ButtonKind::Secondary,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.allow_clipboard(cx))),
+                        )
+                        .child(
+                            athena_ui::Button::new(
+                                "clipboard-dismiss",
+                                "Dismiss",
+                                ButtonKind::Ghost,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(terminal) = this.terminal.as_mut() {
+                                    terminal.blocked_clipboard = None;
+                                }
+                                cx.notify();
+                            })),
+                        ),
+                ),
+        )
     }
 
     fn scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -389,18 +632,30 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let focused = self.focus.is_focused(window);
+        if focused
+            && let Some(terminal) = self.terminal.as_mut()
+            && std::mem::take(&mut terminal.bell)
+        {
+            cx.emit(TerminalEvent::Changed);
+        }
         let root = div()
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear_scrollback))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, _| window.focus(&this.focus)),
-            )
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .cursor(if self.hovered_link.is_some() {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
             .size_full()
             .flex()
             .flex_col()
@@ -429,8 +684,16 @@ impl Render for TerminalView {
                 .p(px(8.))
                 .child(TerminalElement::new(cx.entity(), focused)),
         )
+        .children(self.render_clipboard_notice(cx))
         .children(self.render_status(cx))
     }
+}
+
+pub(crate) fn is_shell(name: &str) -> bool {
+    matches!(
+        name.trim_start_matches('-'),
+        "zsh" | "bash" | "fish" | "sh" | "dash" | "nu" | "login"
+    )
 }
 
 impl gpui::EntityInputHandler for TerminalView {
@@ -540,4 +803,17 @@ fn read_messages(mut reader: UnixStream) -> async_channel::Receiver<ServerMsg> {
         rx.close();
     }
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_shells_count_as_idle() {
+        assert!(is_shell("-zsh"));
+        assert!(is_shell("bash"));
+        assert!(!is_shell("vim"));
+        assert!(!is_shell("2.1.294"));
+    }
 }

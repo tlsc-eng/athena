@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use anyhow::{Context, Result};
-use athena_proto::{MAX_OUTPUT_CHUNK, PaneId};
+use athena_proto::{MAX_OUTPUT_CHUNK, PaneId, Process};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::ring::Ring;
@@ -18,6 +18,7 @@ pub struct Pane {
     pub ring: Ring,
     pub attached: Vec<u64>,
     pub exit: Option<Option<i32>>,
+    pub foreground: Option<Process>,
     master: Box<dyn MasterPty + Send>,
     input: mpsc::Sender<Vec<u8>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -97,11 +98,17 @@ impl Pane {
             ring: Ring::new(SCROLLBACK_BYTES),
             attached: Vec::new(),
             exit: None,
+            foreground: None,
             master: pair.master,
             input,
             killer,
         };
         Ok((pane, PaneOutput { reader, child }))
+    }
+
+    /// Process group currently in the foreground of the PTY, as the kernel reports it.
+    pub fn leader(&self) -> Option<i32> {
+        self.master.process_group_leader()
     }
 
     pub fn write(&self, data: Vec<u8>) {

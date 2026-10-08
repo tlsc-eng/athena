@@ -267,6 +267,15 @@ impl Element for TerminalElement {
             frame.text.push((origin(run.col, run.row), shaped));
         }
 
+        if let Some(link) = &view.hovered_link {
+            let at = origin(link.start, link.row);
+            let underline = Bounds::new(
+                at + point(px(0.), line_height - px(2.)),
+                size(cell_width * (link.end - link.start) as f32, px(1.)),
+            );
+            frame.backgrounds.push(fill(underline, palette.foreground));
+        }
+
         let cursor = content.cursor;
         let cursor_row = cursor.point.line.0 + offset;
         if cursor.shape != CursorShape::Hidden && (0..grid.rows as i32).contains(&cursor_row) {
@@ -367,7 +376,9 @@ impl Element for TerminalElement {
             }
         });
         let cursor_bounds = frame.cursor_bounds;
-        self.view
-            .update(cx, |view, _| view.cursor_bounds = cursor_bounds);
+        self.view.update(cx, |view, _| {
+            view.cursor_bounds = cursor_bounds;
+            view.origin = bounds.origin;
+        });
     }
 }

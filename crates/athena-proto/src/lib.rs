@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to the messages below.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 
 /// Largest `Output` payload the daemon sends in one frame.
 pub const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
@@ -83,6 +83,20 @@ pub enum ServerMsg {
     Error {
         kind: ErrorKind,
     },
+    /// The pane's foreground process changed; also sent right after an attach.
+    Foreground {
+        pane: PaneId,
+        process: Option<Process>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Process {
+    pub pid: i32,
+    /// Executable name as the kernel records it; some CLIs install under a version number.
+    pub name: String,
+    pub path: PathBuf,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

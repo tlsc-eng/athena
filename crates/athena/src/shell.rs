@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_term::TerminalView;
+use athena_term::{ClaudeState, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
 use gpui::{
@@ -235,7 +235,20 @@ impl Shell {
                     })
                     .tooltip(move |_, cx| Tooltip::view(root.clone(), cx))
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_to(i, cx)))
+                    .relative()
                     .child(monogram)
+                    .children(self.project_claude_state(&project.root, cx).map(|state| {
+                        let color = match state {
+                            ClaudeState::Waiting => t.color.warning,
+                            ClaudeState::Running => t.color.success,
+                        };
+                        div()
+                            .absolute()
+                            .right(px(2.))
+                            .bottom(px(2.))
+                            .size(px(6.))
+                            .bg(color)
+                    }))
             });
 
         let indicator = active.map(|to| {

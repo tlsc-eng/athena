@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use athena_term::{TerminalEvent, TerminalView};
+use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
 use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
@@ -61,7 +61,10 @@ impl Shell {
         let view = cx.new(|cx| TerminalView::new(root.to_path_buf(), *session, cx));
         let (project_root, item_id) = key.clone();
         cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
-            let TerminalEvent::Attached(session) = event;
+            let TerminalEvent::Attached(session) = event else {
+                cx.notify();
+                return;
+            };
             let item = this
                 .workspace
                 .projects
@@ -86,14 +89,53 @@ impl Shell {
             ItemKind::Terminal { .. } => self
                 .items
                 .get(&(root.to_path_buf(), item.id))
-                .and_then(|v| v.read(cx).title().map(str::to_string))
-                .filter(|t| !t.is_empty())
+                .map(|v| v.read(cx).label())
                 .unwrap_or_else(|| "Terminal".into()),
             ItemKind::Editor { path } => path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "Untitled".into()),
         }
+    }
+
+    /// A 6 px square before the label: Claude's state, or a bell nobody has seen yet.
+    fn item_badge(
+        &self,
+        root: &Path,
+        item: &Item,
+        t: &athena_ui::Theme,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let view = self.items.get(&(root.to_path_buf(), item.id))?.read(cx);
+        let (color, word) = match view.claude_state() {
+            Some(ClaudeState::Waiting) => (t.color.warning, Some("needs input")),
+            Some(ClaudeState::Running) => (t.color.success, Some("running")),
+            None if view.has_bell() => (t.color.warning, None),
+            None => return None,
+        };
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().size(px(6.)).bg(color))
+                .children(word.map(|w| div().text_color(color).child(w)))
+                .into_any_element(),
+        )
+    }
+
+    /// Highest-priority Claude state across a project's tabs, for the rail.
+    pub(super) fn project_claude_state(
+        &self,
+        root: &Path,
+        cx: &Context<Self>,
+    ) -> Option<ClaudeState> {
+        let states = self
+            .items
+            .iter()
+            .filter(|((r, _), _)| r == root)
+            .filter_map(|(_, v)| v.read(cx).claude_state());
+        states.max_by_key(|s| matches!(s, ClaudeState::Waiting))
     }
 
     /// Moves keyboard focus to the focused pane's active item.
@@ -516,6 +558,7 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_tab(pane_id, index, window, cx)
                     }))
+                    .children(self.item_badge(root, item, &t, cx))
                     .child(self.item_label(root, item, cx))
                     .child(
                         div()
