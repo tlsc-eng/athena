@@ -1,9 +1,12 @@
 use athena_ui::{ActiveTheme, ButtonKind, motion};
-use gpui::{Animation, AnyElement, Context, FontWeight, MouseButton, div, prelude::*, px};
+use athena_workspace::{Axis, UiState};
+use gpui::{
+    Animation, AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, Window, div,
+    prelude::*, px,
+};
 
 use super::Shell;
-
-const HEIGHT: f32 = 240.;
+use super::panes::{DIVIDER_HIT, Drag, clamp_drawer_height, resize_handle};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum DrawerTab {
@@ -60,7 +63,16 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn render_drawer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn drawer_height(&self, window: &Window) -> f32 {
+        let window_h = f32::from(window.viewport_size().height);
+        clamp_drawer_height(self.workspace.ui.drawer_height, window_h)
+    }
+
+    pub(super) fn render_drawer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let tab = self.drawer?;
         let t = cx.theme().clone();
         let tabs = [
@@ -122,7 +134,7 @@ impl Shell {
             DrawerTab::References => self.render_references(cx),
         };
         let drawer = div()
-            .h(px(HEIGHT))
+            .h(px(self.drawer_height(window)))
             .flex_none()
             .flex()
             .flex_col()
@@ -153,5 +165,41 @@ impl Shell {
             Animation::new(t.motion.base).with_easing(motion::ease_enter()),
             |el, d| el.opacity(d),
         ))
+    }
+
+    /// The drag strip on the drawer's top edge; a double-click restores the default height.
+    pub(super) fn render_drawer_handle(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.drawer?;
+        let h = self.drawer_height(window);
+        Some(
+            resize_handle("drawer-edge", Axis::Vertical, cx.theme().color.accent)
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(h - 1. - DIVIDER_HIT))
+                .h(px(1. + 2. * DIVIDER_HIT))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.drag = None;
+                            this.workspace.ui.drawer_height = UiState::default().drawer_height;
+                            this.schedule_save(cx);
+                            cx.notify();
+                            return;
+                        }
+                        this.drag = Some(Drag::Drawer {
+                            start_y: event.position.y,
+                            start_h: h,
+                        });
+                    }),
+                )
+                .into_any_element(),
+        )
     }
 }

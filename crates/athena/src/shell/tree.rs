@@ -2,14 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use athena_ui::ActiveTheme;
+use athena_workspace::{Axis, UiState};
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, Window, div, prelude::*, px, uniform_list,
+    AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, Window, div,
+    prelude::*, px, uniform_list,
 };
 
 use super::Shell;
 use super::item::ItemView;
+use super::panes::{DIVIDER_HIT, Drag, clamp_tree_width, resize_handle};
 
-pub(super) const TREE_WIDTH: f32 = 240.;
 const ROW_HEIGHT: f32 = 24.;
 const INDENT: f32 = 12.;
 
@@ -115,7 +117,7 @@ impl Shell {
     }
 
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.tree_visible {
+        if !self.workspace.ui.tree_visible {
             return None;
         }
         let root = self.workspace.active_project()?.root.clone();
@@ -208,7 +210,7 @@ impl Shell {
         .flex_1();
         Some(
             div()
-                .w(px(TREE_WIDTH))
+                .w(px(clamp_tree_width(self.workspace.ui.tree_width)))
                 .flex_none()
                 .h_full()
                 .flex()
@@ -230,6 +232,40 @@ impl Shell {
                         .child("Files"),
                 )
                 .child(list)
+                .into_any_element(),
+        )
+    }
+
+    /// The drag strip on the tree's right edge; a double-click restores the default width.
+    pub(super) fn render_tree_handle(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.workspace.ui.tree_visible {
+            return None;
+        }
+        let w = clamp_tree_width(self.workspace.ui.tree_width);
+        Some(
+            resize_handle("tree-edge", Axis::Horizontal, cx.theme().color.accent)
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(w - 1. - DIVIDER_HIT))
+                .w(px(1. + 2. * DIVIDER_HIT))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.drag = None;
+                            this.workspace.ui.tree_width = UiState::default().tree_width;
+                            this.schedule_save(cx);
+                            cx.notify();
+                            return;
+                        }
+                        this.drag = Some(Drag::Tree {
+                            start_x: event.position.x,
+                            start_w: w,
+                        });
+                    }),
+                )
                 .into_any_element(),
         )
     }

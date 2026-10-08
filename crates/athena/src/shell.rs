@@ -1,6 +1,7 @@
 mod bridge;
 mod claude;
 mod containers_view;
+mod dnd;
 mod drawer;
 mod fileops;
 mod fuzzy;
@@ -56,7 +57,6 @@ pub struct Shell {
     drag: Option<panes::Drag>,
     palette: Option<palette::Palette>,
     tree: tree::FileTree,
-    tree_visible: bool,
     notifications: Vec<notices::Notification>,
     notices_path: PathBuf,
     next_notice: u64,
@@ -163,7 +163,6 @@ impl Shell {
             drag: None,
             palette: None,
             tree: tree::FileTree::default(),
-            tree_visible: true,
             next_notice: notifications.iter().map(|n| n.id()).max().unwrap_or(0),
             notifications,
             notices_path,
@@ -508,8 +507,10 @@ impl Shell {
                 .size_full()
                 .flex()
                 .flex_col()
+                .relative()
                 .child(
                     div()
+                        .relative()
                         .flex_1()
                         .min_h_0()
                         .flex()
@@ -520,9 +521,11 @@ impl Shell {
                                 .min_w_0()
                                 .h_full()
                                 .child(self.render_panes(window, cx)),
-                        ),
+                        )
+                        .children(self.render_tree_handle(cx)),
                 )
-                .children(self.render_drawer(cx))
+                .children(self.render_drawer(window, cx))
+                .children(self.render_drawer_handle(window, cx))
                 .into_any_element(),
             None => div()
                 .flex()
@@ -680,7 +683,8 @@ impl Render for Shell {
                 this.set_playwright_mcp(false, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| {
-                this.tree_visible = !this.tree_visible;
+                this.workspace.ui.tree_visible = !this.workspace.ui.tree_visible;
+                this.schedule_save(cx);
                 cx.notify();
             }))
             .relative()

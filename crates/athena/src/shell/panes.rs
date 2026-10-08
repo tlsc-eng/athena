@@ -8,9 +8,9 @@ use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, Entity, FontWeight,
-    MouseButton, MouseMoveEvent, Pixels, PromptLevel, Window, canvas, div, point, prelude::*, px,
-    relative, size,
+    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, ElementId, Entity,
+    FontWeight, Hsla, MouseButton, MouseMoveEvent, Pixels, PromptLevel, SharedString, Window,
+    canvas, div, point, prelude::*, px, relative, size,
 };
 
 use super::Shell;
@@ -18,13 +18,68 @@ use super::item::{ItemView, file_label};
 use crate::actions::NewTerminal;
 
 const TAB_STRIP_HEIGHT: f32 = 32.;
-const DIVIDER_HIT: f32 = 3.;
+/// How far a resize handle reaches past each side of the line it drags.
+pub(super) const DIVIDER_HIT: f32 = 3.;
 
-/// An in-progress divider drag in the active project.
-pub(super) struct Drag {
-    path: NodePath,
+const TREE_MIN: f32 = 160.;
+const TREE_MAX: f32 = 480.;
+const DRAWER_MIN: f32 = 120.;
+/// Window height the drawer must leave for the title bar and panes.
+const DRAWER_ROOM: f32 = 200.;
+
+/// An in-progress resize: a pane divider in the active project, the tree's edge or the drawer's.
+pub(super) enum Drag {
+    Divider {
+        path: NodePath,
+        axis: Axis,
+        split: Bounds<Pixels>,
+    },
+    Tree {
+        start_x: Pixels,
+        start_w: f32,
+    },
+    Drawer {
+        start_y: Pixels,
+        start_h: f32,
+    },
+}
+
+pub(super) fn clamp_tree_width(w: f32) -> f32 {
+    w.clamp(TREE_MIN, TREE_MAX)
+}
+
+pub(super) fn clamp_drawer_height(h: f32, window_h: f32) -> f32 {
+    h.min(window_h - DRAWER_ROOM).max(DRAWER_MIN)
+}
+
+/// A 7 px drag strip that shows a 1 px accent line on hover, for dividers and panel edges.
+pub(super) fn resize_handle(
+    id: impl Into<ElementId>,
     axis: Axis,
-    split: Bounds<Pixels>,
+    accent: Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    let id = id.into();
+    let group = SharedString::from(format!("handle-{id}"));
+    let horizontal = axis == Axis::Horizontal;
+    div()
+        .id(id)
+        .group(group.clone())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(if horizontal {
+            CursorStyle::ResizeLeftRight
+        } else {
+            CursorStyle::ResizeUpDown
+        })
+        .child(
+            div()
+                .when(horizontal, |el| el.w(px(1.)).h_full())
+                .when(!horizontal, |el| el.h(px(1.)).w_full())
+                .invisible()
+                .bg(accent)
+                .group_hover(group, |s| s.visible()),
+        )
 }
 
 impl Shell {
@@ -623,7 +678,7 @@ impl Shell {
     pub(super) fn drag_move(
         &mut self,
         event: &MouseMoveEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = &self.drag else { return };
@@ -632,20 +687,36 @@ impl Shell {
             self.schedule_save(cx);
             return;
         }
-        let (pos, start, len) = match drag.axis {
-            Axis::Horizontal => (event.position.x, drag.split.origin.x, drag.split.size.width),
-            Axis::Vertical => (
-                event.position.y,
-                drag.split.origin.y,
-                drag.split.size.height,
-            ),
-        };
-        let len: f32 = len.into();
-        let ratio = f32::from(pos - start) / len;
-        let path = drag.path.clone();
-        if let Some(layout) = self.active_layout() {
-            layout.set_ratio(&path, ratio, len);
-            cx.notify();
+        match drag {
+            Drag::Divider { path, axis, split } => {
+                let (pos, start, len) = match axis {
+                    Axis::Horizontal => (event.position.x, split.origin.x, split.size.width),
+                    Axis::Vertical => (event.position.y, split.origin.y, split.size.height),
+                };
+                let len: f32 = len.into();
+                let ratio = f32::from(pos - start) / len;
+                let path = path.clone();
+                if let Some(layout) = self.active_layout() {
+                    layout.set_ratio(&path, ratio, len);
+                    cx.notify();
+                }
+            }
+            Drag::Tree { start_x, start_w } => {
+                let w = clamp_tree_width(start_w + f32::from(event.position.x - *start_x));
+                if w != self.workspace.ui.tree_width {
+                    self.workspace.ui.tree_width = w;
+                    cx.notify();
+                }
+            }
+            Drag::Drawer { start_y, start_h } => {
+                let window_h = f32::from(window.viewport_size().height);
+                let h =
+                    clamp_drawer_height(start_h - f32::from(event.position.y - *start_y), window_h);
+                if h != self.workspace.ui.drawer_height {
+                    self.workspace.ui.drawer_height = h;
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -970,42 +1041,22 @@ impl Shell {
         );
         let path = divider.path.clone();
         let axis = divider.axis;
-        let accent = t.color.accent;
-        let group = format!("divider-{index}");
-        div()
-            .id(("divider", index))
-            .group(group.clone())
+        resize_handle(("divider", index), axis, t.color.accent)
             .absolute()
             .left(px(x) - origin.x)
             .top(px(y) - origin.y)
             .w(px(w))
             .h(px(h))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor(if horizontal {
-                CursorStyle::ResizeLeftRight
-            } else {
-                CursorStyle::ResizeUpDown
-            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.drag = Some(Drag {
+                    this.drag = Some(Drag::Divider {
                         path: path.clone(),
                         axis,
                         split,
                     });
                 }),
-            )
-            .child(
-                div()
-                    .when(horizontal, |el| el.w(px(1.)).h_full())
-                    .when(!horizontal, |el| el.h(px(1.)).w_full())
-                    .invisible()
-                    .bg(accent)
-                    .group_hover(group, |s| s.visible()),
             )
             .into_any_element()
     }
@@ -1228,5 +1279,25 @@ fn file_kind(path: PathBuf) -> ItemKind {
         ItemKind::Image { path }
     } else {
         ItemKind::Editor { path }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_width_stays_between_its_limits() {
+        assert_eq!(clamp_tree_width(240.), 240.);
+        assert_eq!(clamp_tree_width(20.), 160.);
+        assert_eq!(clamp_tree_width(900.), 480.);
+    }
+
+    #[test]
+    fn drawer_leaves_room_for_the_panes() {
+        assert_eq!(clamp_drawer_height(240., 900.), 240.);
+        assert_eq!(clamp_drawer_height(800., 900.), 700.);
+        assert_eq!(clamp_drawer_height(40., 900.), 120.);
+        assert_eq!(clamp_drawer_height(240., 250.), 120.);
     }
 }
