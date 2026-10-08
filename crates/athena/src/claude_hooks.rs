@@ -348,6 +348,10 @@ mod tests {
         assert_eq!(stop.len(), 2);
         assert_eq!(stop[0]["hooks"][0]["command"], "lint.sh");
         assert_eq!(stop[1]["hooks"][0]["command"], ours);
+
+        let odd = json!({ "hooks": { "Stop": ["x", { "hooks": "y" }] } });
+        let round_trip = merge(odd.clone(), Path::new(ATHENA), true).unwrap();
+        assert_eq!(merge(round_trip, Path::new(ATHENA), false).unwrap(), odd);
     }
 
     #[test]
