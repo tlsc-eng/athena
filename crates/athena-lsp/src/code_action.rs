@@ -65,8 +65,8 @@ pub(crate) fn parse_code_action(item: &Value) -> Option<CodeAction> {
         });
     }
     let edit = match item.get("edit") {
+        Some(Value::Null) | None => None,
         Some(edit) => Some(parse_workspace_edit(edit)?),
-        None => None,
     };
     Some(CodeAction {
         title,
@@ -118,5 +118,14 @@ mod tests {
         assert_eq!(list[3].disabled.as_deref(), Some("not a call"));
         assert!(list[3].needs_resolve());
         assert!(parse_code_actions(&json!(null)).is_empty());
+    }
+
+    #[test]
+    fn a_null_edit_is_left_for_resolve() {
+        let list = parse_code_actions(&json!([
+            {"title": "Fill struct", "kind": "refactor.rewrite", "edit": null, "data": {"id": 1}}
+        ]));
+        assert_eq!(list.len(), 1);
+        assert!(list[0].edit.is_none() && list[0].needs_resolve());
     }
 }
