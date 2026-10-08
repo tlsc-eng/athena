@@ -99,9 +99,7 @@ impl Shell {
                     .max()
                     .map_or(POLL, |d| d.max(POLL));
                 if this
-                    .update_in(cx, |this, window, cx| {
-                        this.usage_arrived(readings, window, cx)
-                    })
+                    .update(cx, |this, cx| this.usage_arrived(readings, cx))
                     .is_err()
                 {
                     return;
@@ -111,12 +109,7 @@ impl Shell {
         }));
     }
 
-    fn usage_arrived(
-        &mut self,
-        readings: Vec<(Profile, Status)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn usage_arrived(&mut self, readings: Vec<(Profile, Status)>, cx: &mut Context<Self>) {
         let mut crossings = Vec::new();
         for (profile, status) in &readings {
             let Status::Windows(windows) = status else {
@@ -150,7 +143,6 @@ impl Shell {
                     title,
                     body: "Claude plan usage".into(),
                 },
-                window,
                 cx,
             );
         }

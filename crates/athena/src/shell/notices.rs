@@ -225,7 +225,7 @@ impl Shell {
                 view.update(cx, |v, cx| v.mark_attention(cx));
             }
             if window.is_window_active() {
-                self.show_toast(notification.id, window, cx);
+                self.show_toast(notification.id, cx);
             } else {
                 let (title, body) = describe(
                     &notification.kind,
@@ -248,12 +248,7 @@ impl Shell {
     }
 
     /// A notice raised by Athena itself (not a terminal), shown as a toast and kept in the list.
-    pub(super) fn local_notice(
-        &mut self,
-        kind: NoticeKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn local_notice(&mut self, kind: NoticeKind, cx: &mut Context<Self>) {
         self.next_notice += 1;
         let id = self.next_notice;
         self.notifications.push(Notification {
@@ -264,7 +259,7 @@ impl Shell {
             at: now_ms(),
             read: true,
         });
-        self.show_toast(id, window, cx);
+        self.show_toast(id, cx);
         self.notices_changed(cx);
     }
 
@@ -278,8 +273,8 @@ impl Shell {
         cx.notify();
     }
 
-    fn show_toast(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let dismiss = cx.spawn_in(window, async move |this, cx| {
+    fn show_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        let dismiss = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
             let _ = this.update(cx, |this, cx| {
                 this.toasts.retain(|t| t.id != id);

@@ -8,6 +8,7 @@ const HEIGHT: f32 = 240.;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum DrawerTab {
     Containers,
+    Playwright,
     Notifications,
 }
 
@@ -15,6 +16,7 @@ impl DrawerTab {
     fn label(self) -> &'static str {
         match self {
             Self::Containers => "Containers",
+            Self::Playwright => "Playwright",
             Self::Notifications => "Notifications",
         }
     }
@@ -54,7 +56,12 @@ impl Shell {
     pub(super) fn render_drawer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let tab = self.drawer?;
         let t = cx.theme().clone();
-        let tabs = [DrawerTab::Containers, DrawerTab::Notifications].map(|candidate| {
+        let tabs = [
+            DrawerTab::Containers,
+            DrawerTab::Playwright,
+            DrawerTab::Notifications,
+        ]
+        .map(|candidate| {
             let active = candidate == tab;
             div()
                 .id(candidate.label())
@@ -97,10 +104,12 @@ impl Shell {
                     .into_any_element(),
             ),
             DrawerTab::Containers => self.render_containers_action(cx),
+            DrawerTab::Playwright => self.render_playwright_action(cx),
         };
         let content = match tab {
             DrawerTab::Notifications => self.render_notifications(cx),
             DrawerTab::Containers => self.render_containers(cx),
+            DrawerTab::Playwright => self.render_playwright(cx),
         };
         let drawer = div()
             .h(px(HEIGHT))

@@ -75,6 +75,16 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
         ("Notifications", Box::new(actions::ToggleNotifications)),
         ("Containers", Box::new(actions::ShowContainers)),
+        ("Playwright", Box::new(actions::ShowPlaywright)),
+        ("Run Playwright tests", Box::new(actions::RunPlaywright)),
+        (
+            "Enable Playwright MCP for Claude in this project",
+            Box::new(actions::EnablePlaywrightMcp),
+        ),
+        (
+            "Disable Playwright MCP for Claude in this project",
+            Box::new(actions::DisablePlaywrightMcp),
+        ),
         ("Open project", Box::new(actions::AddProject)),
         ("Close project", Box::new(actions::CloseProject)),
         ("Next project", Box::new(actions::NextProject)),
@@ -129,12 +139,16 @@ impl Shell {
             Mode::Commands => commands()
                 .into_iter()
                 .filter(|(label, _)| {
-                    let hooks_on = self
-                        .workspace
-                        .active_project()
-                        .is_some_and(|p| crate::claude_hooks::enabled(&p.root));
+                    let root = self.workspace.active_project().map(|p| p.root.as_path());
+                    let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
+                    let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
+                    let playwright =
+                        root.is_some_and(|r| athena_playwright::find_config(r).is_some());
                     !(label.starts_with("Enable Claude Code hooks") && hooks_on
-                        || label.starts_with("Disable Claude Code hooks") && !hooks_on)
+                        || label.starts_with("Disable Claude Code hooks") && !hooks_on
+                        || label.starts_with("Enable Playwright MCP") && (mcp_on || !playwright)
+                        || label.starts_with("Disable Playwright MCP") && !mcp_on
+                        || *label == "Run Playwright tests" && !playwright)
                 })
                 .map(|(label, action)| Entry {
                     detail: window

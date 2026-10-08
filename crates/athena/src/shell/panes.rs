@@ -63,6 +63,7 @@ impl Shell {
                 let (project_root, item_id) = key.clone();
                 cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
                     let TerminalEvent::Attached(session) = event else {
+                        this.check_playwright_run(cx);
                         cx.notify();
                         return;
                     };

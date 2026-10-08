@@ -34,6 +34,10 @@ actions!(
         ChangeClaudeCommand,
         EnableClaudeHooks,
         DisableClaudeHooks,
+        ShowPlaywright,
+        RunPlaywright,
+        EnablePlaywrightMcp,
+        DisablePlaywrightMcp,
     ]
 );
 
@@ -120,6 +124,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
                 MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::action("Containers", ShowContainers),
+                MenuItem::action("Playwright", ShowPlaywright),
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),

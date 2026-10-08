@@ -87,7 +87,7 @@ impl Shell {
                 return;
             }
             let result = claude_hooks::write(&root, &claude_hooks::athena_command(), enable);
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update(cx, |this, cx| {
                 let (title, body) = match result {
                     Ok(()) if enable => (
                         "Claude Code hooks added".to_string(),
@@ -102,7 +102,7 @@ impl Shell {
                         format!("{e:#}"),
                     ),
                 };
-                this.local_notice(NoticeKind::Message { title, body }, window, cx);
+                this.local_notice(NoticeKind::Message { title, body }, cx);
             });
         })
         .detach();

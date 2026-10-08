@@ -756,7 +756,8 @@ impl Render for TerminalView {
     }
 }
 
-pub(crate) fn is_shell(name: &str) -> bool {
+/// Whether a foreground process name is a shell, i.e. the terminal is at its prompt.
+pub fn is_shell(name: &str) -> bool {
     matches!(
         name.trim_start_matches('-'),
         "zsh" | "bash" | "fish" | "sh" | "dash" | "nu" | "login"

@@ -5,4 +5,6 @@ mod links;
 mod terminal;
 mod view;
 
-pub use view::{ClaudeState, TerminalEvent, TerminalView, init, open_connection, read_messages};
+pub use view::{
+    ClaudeState, TerminalEvent, TerminalView, init, is_shell, open_connection, read_messages,
+};

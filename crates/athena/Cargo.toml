@@ -20,6 +20,7 @@ futures.workspace = true
 athena-proto.workspace = true
 libc.workspace = true
 athena-containers.workspace = true
+athena-playwright.workspace = true
 athena-editor.workspace = true
 athena-term.workspace = true
 athena-ui.workspace = true

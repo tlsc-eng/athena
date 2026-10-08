@@ -7,6 +7,7 @@ mod item;
 mod notices;
 mod palette;
 mod panes;
+mod playwright_view;
 mod quit;
 mod tree;
 mod usage_view;
@@ -29,10 +30,11 @@ use gpui::{
 
 use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
-    EnableClaudeHooks, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, Minimize,
-    NewClaudeSession, NewTerminal, NextProject, NextTab, PrevProject, PrevTab, QuickOpen, Quit,
-    SelectProject, SelectTab, ShowContainers, SplitDown, SplitRight, ToggleFileTree,
-    ToggleFullScreen, ToggleNotifications, TogglePaneZoom, Zoom,
+    DisablePlaywrightMcp, EnableClaudeHooks, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft,
+    FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewTerminal, NextProject, NextTab,
+    PrevProject, PrevTab, QuickOpen, Quit, RunPlaywright, SelectProject, SelectTab, ShowContainers,
+    ShowPlaywright, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen, ToggleNotifications,
+    TogglePaneZoom, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -59,6 +61,7 @@ pub struct Shell {
     drawer: Option<drawer::DrawerTab>,
     last_drawer_tab: drawer::DrawerTab,
     containers: containers_view::ContainersState,
+    playwright: playwright_view::PlaywrightState,
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
@@ -158,6 +161,7 @@ impl Shell {
             drawer: None,
             last_drawer_tab: drawer::DrawerTab::Notifications,
             containers: containers_view::ContainersState::default(),
+            playwright: playwright_view::PlaywrightState::default(),
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
@@ -301,6 +305,10 @@ impl Shell {
             .child(
                 self.drawer_button("containers-button", drawer::DrawerTab::Containers, cx)
                     .child("Containers"),
+            )
+            .child(
+                self.drawer_button("playwright-button", drawer::DrawerTab::Playwright, cx)
+                    .child("Playwright"),
             )
             .child(div().mr(px(8.)).child(self.render_notice_button(cx)))
     }
@@ -605,6 +613,16 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &DisableClaudeHooks, w, cx| {
                 this.set_claude_hooks(false, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowPlaywright, _, cx| {
+                this.toggle_drawer_tab(drawer::DrawerTab::Playwright, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RunPlaywright, w, cx| this.run_playwright(w, cx)))
+            .on_action(cx.listener(|this, _: &EnablePlaywrightMcp, w, cx| {
+                this.set_playwright_mcp(true, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DisablePlaywrightMcp, w, cx| {
+                this.set_playwright_mcp(false, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| {
                 this.tree_visible = !this.tree_visible;
