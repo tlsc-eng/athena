@@ -483,6 +483,70 @@ impl Buffer {
         self.replace(c, range, text, EditKind::Other);
     }
 
+    /// Applies non-overlapping edits, in offsets of the current text, as one undo step, then
+    /// selects `select` within the text the first edit inserts (or puts the cursor after it).
+    pub fn apply_edits(
+        &mut self,
+        c: &mut Cursor,
+        edits: &[(Range<usize>, String)],
+        select: Option<Range<usize>>,
+    ) {
+        let Some((main, main_text)) = edits.first() else {
+            return;
+        };
+        let len = self.len_chars();
+        let clamp = |r: &Range<usize>| r.start.min(len)..r.end.min(len).max(r.start.min(len));
+        let main = clamp(main);
+        let mut order: Vec<(Range<usize>, &str)> = vec![(main.clone(), main_text)];
+        for (range, text) in &edits[1..] {
+            let range = clamp(range);
+            if range.end <= main.start || range.start >= main.end {
+                order.push((range, text));
+            }
+        }
+        // Later edits first, so each one's offsets still hold when it is applied.
+        order.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+        let shift: isize = order
+            .iter()
+            .filter(|(r, _)| r.start < main.start)
+            .map(|(r, t)| t.chars().count() as isize - r.len() as isize)
+            .sum();
+        let before = c.selection;
+        let mut changes = Vec::new();
+        for (range, text) in order {
+            let change = Change {
+                start: range.start,
+                deleted: self.rope.slice(range).to_string(),
+                inserted: text.to_string(),
+            };
+            let edit = self.apply(&change);
+            self.reparse(&edit);
+            changes.push(change);
+        }
+        let start = (main.start as isize + shift) as usize;
+        let select = select.unwrap_or_else(|| {
+            let end = main_text.chars().count();
+            end..end
+        });
+        *c = Cursor {
+            selection: Selection {
+                anchor: start + select.start,
+                head: start + select.end,
+            },
+            goal_column: None,
+        };
+        self.redo.clear();
+        self.last_edit = None;
+        if self.saved_at.is_some_and(|at| at > self.undo.len()) {
+            self.saved_at = None;
+        }
+        self.undo.push(Transaction {
+            changes,
+            before,
+            after: c.selection,
+        });
+    }
+
     pub fn newline(&mut self, c: &mut Cursor) {
         let line = self.line_of(c.selection.head);
         let current = self.line(line);
@@ -792,6 +856,19 @@ impl Buffer {
         };
     }
 
+    /// The identifier the char at `at` belongs to, if it is part of one.
+    pub fn word_at(&self, at: usize) -> Option<Range<usize>> {
+        let len = self.len_chars();
+        if at >= len || !is_word(self.rope.char(at)) {
+            return None;
+        }
+        let mut end = at;
+        while end < len && is_word(self.rope.char(end)) {
+            end += 1;
+        }
+        Some(self.word_start(at)..end)
+    }
+
     /// Where the identifier ending at `at` starts; `at` itself when none ends there.
     pub fn word_start(&self, at: usize) -> usize {
         let mut i = at.min(self.len_chars());
@@ -959,7 +1036,7 @@ fn read_text(path: &Path) -> Result<(String, Option<SystemTime>)> {
     Ok((text, meta.modified().ok()))
 }
 
-fn is_word(c: char) -> bool {
+pub(crate) fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
@@ -1301,6 +1378,35 @@ mod tests {
             versions.push(b.version());
         }
         assert!(versions.windows(2).all(|w| w[0] < w[1]), "{versions:?}");
+    }
+
+    #[test]
+    fn several_edits_apply_as_one_undo_step() {
+        let text = "package main\n\nfunc main() { fmt.Pri }\n";
+        let mut b = buf(text, "/x/main.go");
+        let pri = text.find("Pri").unwrap();
+        let mut c = Cursor::at(pri + 3);
+        let import = b.line_start(1);
+        b.apply_edits(
+            &mut c,
+            &[
+                (pri..pri + 3, "Println()".into()),
+                (import..import, "\nimport \"fmt\"\n".into()),
+            ],
+            Some(8..8),
+        );
+        let want = "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println() }\n";
+        assert_eq!(b.full_text(), want);
+        assert_eq!(
+            c.head(),
+            want.rfind("()").unwrap() + 1,
+            "inside the parentheses"
+        );
+        assert!(b.undo(&mut c));
+        assert_eq!(b.full_text(), text);
+        assert_eq!(c.head(), pri + 3);
+        assert!(b.redo(&mut c));
+        assert_eq!(b.full_text(), want);
     }
 
     #[test]

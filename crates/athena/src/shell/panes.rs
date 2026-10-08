@@ -178,6 +178,20 @@ impl Shell {
                         EditorEvent::CursorMoved { line } => {
                             return this.git_cursor_moved(&view, *line, cx);
                         }
+                        EditorEvent::Hover {
+                            request,
+                            line,
+                            character,
+                        } => return this.lsp_hover(&view, *request, (*line, *character), cx),
+                        EditorEvent::Complete {
+                            request,
+                            line,
+                            character,
+                            trigger,
+                        } => {
+                            let at = (*line, *character);
+                            return this.lsp_complete(&view, *request, at, trigger.clone(), cx);
+                        }
                     }
                     cx.notify();
                 })

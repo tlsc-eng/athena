@@ -3,13 +3,15 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 
+use crate::completion::{CompletionList, parse_completions};
+use crate::markup::{Hover, parse_hover};
 use crate::protocol::{self, Diagnostic, Location, Position};
 use crate::{ServerKind, env};
 
@@ -45,6 +47,8 @@ pub struct Client {
     pending: Pending,
     next_id: AtomicI64,
     child: Arc<Mutex<Option<Child>>>,
+    /// Characters after which the server offers completions, known once it has started.
+    triggers: Arc<OnceLock<Vec<String>>>,
 }
 
 impl Client {
@@ -53,7 +57,9 @@ impl Client {
         let (events_tx, events_rx) = async_channel::unbounded();
         let pending: Pending = Arc::default();
         let child: Arc<Mutex<Option<Child>>> = Arc::default();
+        let triggers: Arc<OnceLock<Vec<String>>> = Arc::default();
         let session = Session {
+            triggers: triggers.clone(),
             kind,
             root,
             outgoing: out_rx,
@@ -76,8 +82,14 @@ impl Client {
             pending,
             next_id: AtomicI64::new(1),
             child,
+            triggers,
         };
         (client, events_rx)
+    }
+
+    /// The server's completion trigger characters; empty until it has started.
+    pub fn completion_triggers(&self) -> &[String] {
+        self.triggers.get().map_or(&[], Vec::as_slice)
     }
 
     fn notify(&self, method: &'static str, params: Value) {
@@ -144,6 +156,34 @@ impl Client {
         );
         locations(reply).await
     }
+
+    /// Documentation for the symbol at `at`; `None` when the server has nothing to say.
+    pub async fn hover(&self, path: &Path, at: Position) -> Result<Option<Hover>, String> {
+        let reply = self.request(
+            "textDocument/hover",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        Ok(parse_hover(&answer(reply).await?))
+    }
+
+    /// Suggestions at `at`; `trigger` is the character typed that asked for them, if any.
+    pub async fn completion(
+        &self,
+        path: &Path,
+        at: Position,
+        trigger: Option<&str>,
+    ) -> Result<CompletionList, String> {
+        let context = match trigger {
+            Some(c) => json!({"triggerKind": 2, "triggerCharacter": c}),
+            None => json!({"triggerKind": 1}),
+        };
+        let reply = self.request(
+            "textDocument/completion",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at,
+                   "context": context}),
+        );
+        Ok(parse_completions(&answer(reply).await?))
+    }
 }
 
 impl Drop for Client {
@@ -170,6 +210,7 @@ struct Session {
     events: async_channel::Sender<Event>,
     pending: Pending,
     child: Arc<Mutex<Option<Child>>>,
+    triggers: Arc<OnceLock<Vec<String>>>,
 }
 
 impl Session {
@@ -218,6 +259,17 @@ impl Session {
         if result.is_null() {
             bail!("{} refused to start", self.kind.program());
         }
+        let triggers = result
+            .pointer("/capabilities/completionProvider/triggerCharacters")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = self.triggers.set(triggers);
         send(&writer, &notification("initialized", json!({})))?;
         let _ = self.events.send_blocking(Event::Ready);
 
@@ -252,7 +304,12 @@ impl Session {
                     "synchronization": {"didSave": true},
                     "publishDiagnostics": {},
                     "definition": {"linkSupport": true},
-                    "references": {}
+                    "references": {},
+                    "hover": {"contentFormat": ["markdown", "plaintext"]},
+                    "completion": {
+                        "completionItem": {"snippetSupport": true},
+                        "contextSupport": true
+                    }
                 }
             }
         })
@@ -330,11 +387,15 @@ impl Reader {
     }
 }
 
+async fn answer(reply: async_channel::Receiver<Reply>) -> Result<Value, String> {
+    reply
+        .recv()
+        .await
+        .unwrap_or_else(|_| Err("the language server exited".into()))
+}
+
 async fn locations(reply: async_channel::Receiver<Reply>) -> Result<Vec<Location>, String> {
-    match reply.recv().await {
-        Ok(result) => result.map(|v| protocol::parse_locations(&v)),
-        Err(_) => Err("the language server exited".into()),
-    }
+    answer(reply).await.map(|v| protocol::parse_locations(&v))
 }
 
 fn request(id: i64, method: &str, params: Value) -> Value {

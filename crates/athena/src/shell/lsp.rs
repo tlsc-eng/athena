@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_editor::{EditorView, Lang, Marker, MarkerSeverity};
-use athena_lsp::{Client, Diagnostic, Event, Location, Position, ServerKind, Severity};
+use athena_editor::{Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, ServerEdit};
+use athena_lsp::{
+    Client, CompletionItem, Diagnostic, Event, Location, MarkupBlock, Position, ServerKind,
+    Severity,
+};
 use athena_proto::{DiagnosticInfo, NoticeKind};
 use athena_ui::ActiveTheme;
 use gpui::{
@@ -106,6 +109,30 @@ fn document_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn completion(item: CompletionItem) -> Completion {
+    let pos = |p: Position| (p.line, p.character);
+    Completion {
+        range: item.range.map(|r| (pos(r.start), pos(r.end))),
+        additional_edits: item
+            .additional_edits
+            .into_iter()
+            .map(|e| ServerEdit {
+                start: pos(e.range.start),
+                end: pos(e.range.end),
+                text: e.text,
+            })
+            .collect(),
+        label: item.label,
+        kind: item.kind,
+        detail: item.detail,
+        filter_text: item.filter_text,
+        sort_text: item.sort_text,
+        text: item.text,
+        select: item.select,
+        preselect: item.preselect,
+    }
+}
+
 fn marker(d: &Diagnostic) -> Marker {
     Marker {
         start: (d.range.start.line, d.range.start.character),
@@ -139,7 +166,10 @@ impl Shell {
         let (Some(lang), Some(version), Some(text)) = (lang, version, text) else {
             return;
         };
-        if self.lsp.documents.contains_key(&doc) {
+        if let Some(client) = self.document_client(&doc) {
+            // Another tab already opened this file in its server.
+            let triggers = client.completion_triggers().to_vec();
+            editor.update(cx, |e, _| e.set_completion_triggers(Some(triggers)));
             return;
         }
         let Some((kind, language_id)) = server_for(lang) else {
@@ -150,7 +180,14 @@ impl Shell {
             return;
         };
         client.did_open(&doc, language_id, version as i64, text);
+        let triggers = client.completion_triggers().to_vec();
+        editor.update(cx, |e, _| e.set_completion_triggers(Some(triggers)));
         self.lsp.documents.insert(doc, key);
+    }
+
+    fn document_client(&self, doc: &Path) -> Option<Rc<Client>> {
+        let key = self.lsp.documents.get(doc)?;
+        Some(self.lsp.servers.get(key)?.client.clone())
     }
 
     fn lsp_client(&mut self, key: &ServerKey, cx: &mut Context<Self>) -> Option<Rc<Client>> {
@@ -189,8 +226,24 @@ impl Shell {
     fn lsp_event(&mut self, key: ServerKey, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Ready => {
-                if let Some(server) = self.lsp.servers.get_mut(&key) {
-                    server.ready = true;
+                let Some(server) = self.lsp.servers.get_mut(&key) else {
+                    return;
+                };
+                server.ready = true;
+                // Editors opened while the server started learn its trigger characters now.
+                let triggers = server.client.completion_triggers().to_vec();
+                let docs: Vec<PathBuf> = self
+                    .lsp
+                    .documents
+                    .iter()
+                    .filter(|(_, k)| **k == key)
+                    .map(|(doc, _)| doc.clone())
+                    .collect();
+                for doc in docs {
+                    for editor in self.editors_showing(&doc, cx) {
+                        let triggers = triggers.clone();
+                        editor.update(cx, |e, _| e.set_completion_triggers(Some(triggers)));
+                    }
                 }
             }
             Event::Diagnostics { path, list } => {
@@ -326,6 +379,94 @@ impl Shell {
                     ),
                     Err(why) => this.lsp_failed("Go to definition failed", why, cx),
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Asks the server about the symbol at `at`; an empty answer shows nothing, as in VS Code.
+    pub(super) fn lsp_hover(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        at: (u32, u32),
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let Some(client) = self.document_client(&doc) else {
+            editor.update(cx, |e, cx| e.show_hover(request, Vec::new(), cx));
+            return;
+        };
+        let at = Position {
+            line: at.0,
+            character: at.1,
+        };
+        tracing::debug!(path = %doc.display(), line = at.line, character = at.character, "hover");
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let found = client.hover(&doc, at).await;
+            let blocks = match found {
+                Ok(Some(hover)) => hover
+                    .blocks
+                    .into_iter()
+                    .map(|b| match b {
+                        MarkupBlock::Text(t) => HoverBlock::Text(t),
+                        MarkupBlock::Code(c) => HoverBlock::Code(c),
+                    })
+                    .collect(),
+                Ok(None) => Vec::new(),
+                Err(why) => {
+                    tracing::debug!("hover failed: {why}");
+                    Vec::new()
+                }
+            };
+            tracing::debug!("hover → {} blocks", blocks.len());
+            let _ = weak.update(cx, |e, cx| e.show_hover(request, blocks, cx));
+        })
+        .detach();
+    }
+
+    /// Asks the server for suggestions at `at`, sending any pending edit first so they fit.
+    pub(super) fn lsp_complete(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        at: (u32, u32),
+        trigger: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let Some(client) = self.document_client(&doc) else {
+            editor.update(cx, |e, cx| {
+                e.show_completions(request, Vec::new(), false, cx)
+            });
+            return;
+        };
+        let at = Position {
+            line: at.0,
+            character: at.1,
+        };
+        tracing::debug!(path = %doc.display(), line = at.line, character = at.character, ?trigger, "completion");
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let (items, incomplete) = match client.completion(&doc, at, trigger.as_deref()).await {
+                Ok(list) => (
+                    list.items.into_iter().map(completion).collect(),
+                    list.incomplete,
+                ),
+                Err(why) => {
+                    tracing::debug!("completion failed: {why}");
+                    (Vec::new(), false)
+                }
+            };
+            tracing::debug!(
+                "completion → {} items, incomplete {incomplete}",
+                items.len()
+            );
+            let _ = weak.update(cx, |e, cx| {
+                e.show_completions(request, items, incomplete, cx)
             });
         })
         .detach();

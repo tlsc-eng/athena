@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use athena_lsp::{Client, Event, Position, ServerKind, Severity};
+use athena_lsp::{Client, Event, MarkupBlock, Position, ServerKind, Severity};
 
 fn next_event(events: &async_channel::Receiver<Event>, deadline: Instant) -> Option<Event> {
     while Instant::now() < deadline {
@@ -13,7 +13,7 @@ fn next_event(events: &async_channel::Receiver<Event>, deadline: Instant) -> Opt
 }
 
 #[test]
-fn gopls_reports_an_unused_import_and_finds_definitions_and_references() {
+fn gopls_reports_an_unused_import_and_answers_lookups_hover_and_completion() {
     if athena_lsp::find_program("gopls").is_none() {
         eprintln!("gopls not installed; skipping");
         return;
@@ -58,6 +58,41 @@ fn gopls_reports_an_unused_import_and_finds_definitions_and_references() {
     let lines: Vec<u32> = uses.iter().map(|l| l.range.start.line).collect();
     assert_eq!(lines, [4, 6], "the declaration and the call");
     assert!(uses.iter().all(|l| l.path == file));
+
+    let hover = futures_lite_block_on(client.hover(&file, call))
+        .unwrap()
+        .expect("gopls describes helper");
+    assert!(
+        hover
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MarkupBlock::Code(code) if code.contains("func helper() int"))),
+        "{hover:?}"
+    );
+    assert_eq!(hover.range.map(|r| r.start.line), Some(6));
+
+    assert!(client.completion_triggers().iter().any(|c| c == "."));
+    let edited = "package main\n\nimport \"fmt\"\n\nfunc helper() int { return 1 }\n\nfunc main() { fmt.Pri; hel }\n";
+    client.did_change(&file, 2, edited.into());
+    let after_pri = Position {
+        line: 6,
+        character: 21,
+    };
+    let list = futures_lite_block_on(client.completion(&file, after_pri, None)).unwrap();
+    let println = list
+        .items
+        .iter()
+        .find(|i| i.label == "Println")
+        .expect("fmt.Println is offered");
+    let range = println.range.expect("gopls sends a text edit");
+    assert_eq!((range.start.character, range.end.character), (18, 21));
+    assert!(println.text.starts_with("Println"));
+    let word_end = Position {
+        line: 6,
+        character: 26,
+    };
+    let list = futures_lite_block_on(client.completion(&file, word_end, None)).unwrap();
+    assert!(list.items.iter().any(|i| i.label == "helper"), "{list:?}");
 
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);

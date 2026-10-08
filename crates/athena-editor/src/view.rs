@@ -17,8 +17,10 @@ use gpui::{
 };
 
 use crate::buffer::{Buffer, Cursor, Edit, SaveError, UNDO_GROUP};
+use crate::completion::Completing;
 use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
+use crate::hover::Hovering;
 use crate::line_jump::LineJump;
 use crate::shared::{self, SharedBuffer};
 
@@ -72,6 +74,8 @@ actions!(
         FoldAll,
         UnfoldAll,
         GoToLine,
+        ShowCompletions,
+        ShowHover,
     ]
 );
 
@@ -131,6 +135,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
         KeyBinding::new("ctrl-g", GoToLine, ctx),
         KeyBinding::new("cmd-l", GoToLine, ctx),
+        KeyBinding::new("ctrl-space", ShowCompletions, ctx),
+        KeyBinding::new("cmd-k cmd-i", ShowHover, ctx),
     ]);
 }
 
@@ -155,6 +161,21 @@ pub enum EditorEvent {
     /// The cursor moved to another zero-based line, or the text of its line changed.
     CursorMoved {
         line: u32,
+    },
+    /// Documentation is wanted for the symbol at a zero-based line and UTF-16 column; answer
+    /// with [`EditorView::show_hover`].
+    Hover {
+        request: u64,
+        line: u32,
+        character: u32,
+    },
+    /// Suggestions are wanted at a zero-based line and UTF-16 column; answer with
+    /// [`EditorView::show_completions`]. `trigger` is the character typed that asked, if any.
+    Complete {
+        request: u64,
+        line: u32,
+        character: u32,
+        trigger: Option<String>,
     },
 }
 
@@ -225,6 +246,10 @@ pub struct EditorView {
     /// The next autoscroll puts the cursor's line mid-screen rather than just in view.
     pub(crate) center_cursor: bool,
     pub(crate) line_jump: Option<LineJump>,
+    pub(crate) hovering: Hovering,
+    pub(crate) completing: Completing,
+    /// Set around an edit that typing made, which narrows the suggestion list instead of closing it.
+    typing: bool,
     pub(crate) marked: Option<String>,
     find: Option<FindBar>,
     find_opening: Option<Opening>,
@@ -281,6 +306,9 @@ impl EditorView {
             autoscroll: true,
             center_cursor: false,
             line_jump: None,
+            hovering: Hovering::default(),
+            completing: Completing::default(),
+            typing: false,
             marked: None,
             find: None,
             find_opening: None,
@@ -512,6 +540,10 @@ impl EditorView {
         self.reveal_selection();
         self.autoscroll = true;
         self.note_cursor_line(edited, cx);
+        self.hide_hover(cx);
+        if !std::mem::take(&mut self.typing) {
+            self.dismiss_completion(cx);
+        }
         if edited {
             self.refresh_find(false, cx);
             cx.emit(EditorEvent::Edited { version });
@@ -545,6 +577,8 @@ impl EditorView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
+        self.hide_hover(cx);
+        self.dismiss_completion(cx);
         if self.click_fold_column(event.position, cx) {
             return;
         }
@@ -581,6 +615,9 @@ impl EditorView {
             self.gutter_hover = hover;
             cx.notify();
         }
+        if event.pressed_button.is_none() {
+            self.hover_pointer(event.position, cx);
+        }
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             self.selecting = false;
             return;
@@ -605,6 +642,8 @@ impl EditorView {
         self.scroll.y = (self.scroll.y - f32::from(delta.y)).clamp(0., max_y);
         self.scroll.x = (self.scroll.x - f32::from(delta.x)).max(0.);
         self.autoscroll = false;
+        self.hide_hover(cx);
+        self.dismiss_completion(cx);
         cx.notify();
     }
 
@@ -929,6 +968,9 @@ impl Render for EditorView {
                             this.gutter_hover = false;
                             cx.notify();
                         }
+                        if !hovered {
+                            this.hover_left(cx);
+                        }
                     }))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                     .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
@@ -937,10 +979,18 @@ impl Render for EditorView {
                     .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
                         this.with_buffer(cx, |b, c| b.move_right(c, false))
                     }))
-                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_rows(-1, false, cx)))
-                    .on_action(
-                        cx.listener(|this, _: &MoveDown, _, cx| this.move_rows(1, false, cx)),
-                    )
+                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                        if this.completion_open() {
+                            return this.step_completion(-1, cx);
+                        }
+                        this.move_rows(-1, false, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                        if this.completion_open() {
+                            return this.step_completion(1, cx);
+                        }
+                        this.move_rows(1, false, cx)
+                    }))
                     .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
                         this.with_buffer(cx, |b, c| b.move_left(c, true))
                     }))
@@ -998,7 +1048,12 @@ impl Render for EditorView {
                         this.move_rows(n, false, cx)
                     }))
                     .on_action(cx.listener(|this, _: &Backspace, _, cx| {
-                        this.with_buffer(cx, |b, c| b.backspace(c))
+                        let open = this.completion_open();
+                        this.typing = open;
+                        this.with_buffer(cx, |b, c| b.backspace(c));
+                        if open {
+                            this.refilter_completion(cx);
+                        }
                     }))
                     .on_action(cx.listener(|this, _: &Delete, _, cx| {
                         this.with_buffer(cx, |b, c| b.delete_forward(c))
@@ -1010,11 +1065,21 @@ impl Render for EditorView {
                         this.with_buffer(cx, |b, c| b.delete_to_line_start(c))
                     }))
                     .on_action(cx.listener(|this, _: &Newline, _, cx| {
+                        if this.completion_open() {
+                            return this.accept_completion(None, cx);
+                        }
                         this.with_buffer(cx, |b, c| b.newline(c))
                     }))
+                    .on_action(cx.listener(|this, _: &Tab, _, cx| {
+                        if this.completion_open() {
+                            return this.accept_completion(None, cx);
+                        }
+                        this.with_buffer(cx, |b, c| b.tab(c))
+                    }))
                     .on_action(
-                        cx.listener(|this, _: &Tab, _, cx| this.with_buffer(cx, |b, c| b.tab(c))),
+                        cx.listener(|this, _: &ShowCompletions, _, cx| this.complete_now(cx)),
                     )
+                    .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.hover_at_cursor(cx)))
                     .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                         this.with_buffer(cx, |b, c| b.select_all(c))
                     }))
@@ -1059,6 +1124,9 @@ impl Render for EditorView {
                         this.with_buffer(cx, |b, c| b.toggle_comment(c))
                     }))
                     .on_action(cx.listener(|this, _: &Escape, _, cx| {
+                        if this.dismiss_completion(cx) || this.hide_hover(cx) {
+                            return;
+                        }
                         if !this.close_find(cx) {
                             let head = this.cursor.head();
                             this.with_buffer(cx, |b, c| b.move_to(c, head, false));
@@ -1081,6 +1149,8 @@ impl Render for EditorView {
                     .child(EditorElement::new(cx.entity(), focused)),
             )
             .children(self.render_line_jump(cx))
+            .children(self.render_hover(cx))
+            .children(focused.then(|| self.render_completion(cx)).flatten())
             .children(self.render_marker_bar(cx))
             .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
             .children(self.save_error.clone().map(|err| {
@@ -1427,7 +1497,9 @@ impl EntityInputHandler for EditorView {
         self.marked = None;
         if !text.is_empty() {
             let text = text.to_string();
+            self.typing = true;
             self.with_buffer(cx, |b, c| b.insert(c, &text));
+            self.completion_after_typing(&text, cx);
         }
     }
 
@@ -1455,9 +1527,12 @@ impl EntityInputHandler for EditorView {
         let head = self.cursor.head();
         let line = buffer.line_of(head);
         let (_, display, shaped) = layout.lines.iter().find(|(l, _, _)| *l == line)?;
-        let col = buffer.column_of(head);
-        let x =
-            layout.text_left + shaped.x_for_index(display.char_to_byte[col]) - px(self.scroll.x);
+        // Another tab's edit can leave last frame's line shorter than the text is now.
+        let byte = display
+            .char_to_byte
+            .get(buffer.column_of(head))
+            .or(display.char_to_byte.last())?;
+        let x = layout.text_left + shaped.x_for_index(*byte) - px(self.scroll.x);
         let row = self.display.row_of(line);
         let y = layout.origin.y + layout.line_height * row as f32 - px(self.scroll.y);
         Some(Bounds::new(

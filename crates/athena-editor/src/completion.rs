@@ -1,0 +1,622 @@
+use std::cmp::Reverse;
+use std::ops::Range;
+use std::time::Duration;
+
+use athena_ui::ActiveTheme;
+use athena_ui::motion::{self, Opening};
+use gpui::{
+    Animation, AnyElement, Context, Corner, FontWeight, HighlightStyle, Hsla, IntoElement,
+    ScrollWheelEvent, StyledText, Task, anchored, deferred, div, point, prelude::*, px,
+};
+
+use crate::buffer::is_word;
+use crate::view::{EditorEvent, EditorView};
+
+/// Typing pauses this long before suggestions are asked for.
+const TYPING_DELAY: Duration = Duration::from_millis(100);
+const MAX_ROWS: usize = 10;
+const ROW_HEIGHT: f32 = 22.;
+const WIDTH: f32 = 420.;
+
+/// A change a language server asks for, in its zero-based lines and UTF-16 columns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerEdit {
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    pub text: String,
+}
+
+/// One suggestion; snippets arrive already reduced to plain text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Completion {
+    pub label: String,
+    /// The protocol's CompletionItemKind number.
+    pub kind: Option<u32>,
+    pub detail: Option<String>,
+    pub filter_text: String,
+    pub sort_text: String,
+    pub text: String,
+    /// What `text` replaces, as the server counts; without it, the word before the cursor.
+    pub range: Option<((u32, u32), (u32, u32))>,
+    /// The part of `text` to select once inserted, in chars.
+    pub select: Option<Range<usize>>,
+    pub additional_edits: Vec<ServerEdit>,
+    pub preselect: bool,
+}
+
+struct Menu {
+    /// Where the word being completed starts, in chars.
+    start: usize,
+    items: Vec<Completion>,
+    /// Indexes into `items` that match what was typed, best first, with the label chars matched.
+    matches: Vec<(usize, Vec<usize>)>,
+    selected: usize,
+    first_row: usize,
+    incomplete: bool,
+    opened: Opening,
+}
+
+#[derive(Default)]
+pub(crate) struct Completing {
+    menu: Option<Menu>,
+    /// The request in flight and where its word starts.
+    pending: Option<(u64, usize)>,
+    requests: u64,
+    timer: Option<Task<()>>,
+    /// Characters that ask for suggestions at once; `None` while no language server has the file.
+    triggers: Option<Vec<String>>,
+}
+
+/// How well `query` matches `candidate` as a case-insensitive subsequence whose first char starts a
+/// word of `candidate`, as VS Code requires; higher is better. Returns the chars matched.
+pub(crate) fn fuzzy_match(query: &str, candidate: &str) -> Option<(i32, Vec<usize>)> {
+    let cand: Vec<char> = candidate.chars().collect();
+    let query: Vec<char> = query.chars().collect();
+    if query.is_empty() {
+        return Some((0, Vec::new()));
+    }
+    // Word starts are worth jumping to, unless that leaves later chars unmatched.
+    [true, false]
+        .into_iter()
+        .filter_map(|prefer_words| align(&query, &cand, prefer_words))
+        .max_by_key(|(score, _)| *score)
+}
+
+fn align(query: &[char], cand: &[char], prefer_words: bool) -> Option<(i32, Vec<usize>)> {
+    let boundary = |i: usize| {
+        i == 0
+            || !cand[i - 1].is_alphanumeric()
+            || (cand[i - 1].is_lowercase() && cand[i].is_uppercase())
+    };
+    let same = |a: char, b: char| a.to_lowercase().eq(b.to_lowercase());
+    let first = query[0];
+    let start = (0..cand.len()).find(|&i| boundary(i) && same(cand[i], first))?;
+    let mut matched = vec![start];
+    let mut score = if start == 0 { 12 } else { 4 } + i32::from(cand[start] == first);
+    let mut at = start + 1;
+    for &q in &query[1..] {
+        let next =
+            |word: bool| (at..cand.len()).find(|&i| same(cand[i], q) && (!word || boundary(i)));
+        let i = match next(false)? {
+            i if i == at || !prefer_words => i,
+            i => next(true).unwrap_or(i),
+        };
+        score += 1 + i32::from(cand[i] == q);
+        if i == at {
+            score += 5;
+        } else if boundary(i) {
+            score += 3;
+        } else {
+            score -= (i - at).min(4) as i32;
+        }
+        matched.push(i);
+        at = i + 1;
+    }
+    Some((score, matched))
+}
+
+impl Menu {
+    fn refilter(&mut self, query: &str) {
+        let mut scored: Vec<(i32, usize)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| Some((fuzzy_match(query, &item.filter_text)?.0, i)))
+            .collect();
+        scored.sort_by(|a, b| {
+            let (x, y) = (&self.items[a.1], &self.items[b.1]);
+            (Reverse(a.0), &x.sort_text, &x.label).cmp(&(Reverse(b.0), &y.sort_text, &y.label))
+        });
+        self.matches = scored
+            .into_iter()
+            .map(|(_, i)| {
+                let chars = fuzzy_match(query, &self.items[i].label).map_or_else(Vec::new, |m| m.1);
+                (i, chars)
+            })
+            .collect();
+        self.selected = if query.is_empty() {
+            self.matches
+                .iter()
+                .position(|(i, _)| self.items[*i].preselect)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.first_row = self.selected.saturating_sub(MAX_ROWS - 1);
+    }
+
+    fn step(&mut self, by: isize) {
+        let len = self.matches.len() as isize;
+        if len == 0 {
+            return;
+        }
+        self.selected = (self.selected as isize + by).rem_euclid(len) as usize;
+        if self.selected < self.first_row {
+            self.first_row = self.selected;
+        } else if self.selected >= self.first_row + MAX_ROWS {
+            self.first_row = self.selected + 1 - MAX_ROWS;
+        }
+    }
+}
+
+impl EditorView {
+    /// Lets typing ask for suggestions, and which characters ask at once; `None` turns that off.
+    pub fn set_completion_triggers(&mut self, triggers: Option<Vec<String>>) {
+        self.completing.triggers = triggers;
+    }
+
+    /// A list is on screen, so Up, Down, Enter and Tab go to it.
+    pub(crate) fn completion_open(&self) -> bool {
+        self.completing
+            .menu
+            .as_ref()
+            .is_some_and(|m| !m.matches.is_empty())
+    }
+
+    pub(crate) fn dismiss_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        self.completing.pending = None;
+        self.completing.timer = None;
+        let was_open = self.completing.menu.take().is_some();
+        if was_open {
+            cx.notify();
+        }
+        was_open
+    }
+
+    /// Ctrl+Space: asks for suggestions for the word before the cursor.
+    pub(crate) fn complete_now(&mut self, cx: &mut Context<Self>) {
+        let Some(start) = self.buf().map(|b| b.word_start(self.cursor.head())) else {
+            return;
+        };
+        self.request_completion(start, None, cx);
+    }
+
+    /// Reacts to text just typed at the cursor: narrows the open list, or asks for one.
+    pub(crate) fn completion_after_typing(&mut self, typed: &str, cx: &mut Context<Self>) {
+        let Some(triggers) = self.completing.triggers.as_ref() else {
+            return;
+        };
+        let mut chars = typed.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            self.dismiss_completion(cx);
+            return;
+        };
+        if triggers.iter().any(|t| t.ends_with(c)) {
+            self.dismiss_completion(cx);
+            let head = self.cursor.head();
+            self.request_completion(head, Some(c.to_string()), cx);
+            return;
+        }
+        if !is_word(c) {
+            self.dismiss_completion(cx);
+            return;
+        }
+        if self.completing.menu.is_some() {
+            self.refilter_completion(cx);
+            return;
+        }
+        if self.completing.pending.is_some() {
+            return;
+        }
+        let head = self.cursor.head();
+        let Some(start) = self.buf().map(|b| b.word_start(head)) else {
+            return;
+        };
+        // Numbers are words too, but nothing completes them.
+        if self.buf().is_some_and(|b| {
+            b.text(start..head)
+                .starts_with(|c: char| c.is_ascii_digit())
+        }) {
+            return;
+        }
+        self.completing.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TYPING_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.completing.timer = None;
+                this.request_completion(start, None, cx);
+            });
+        }));
+    }
+
+    /// The word typed so far from `start`, or `None` once the cursor has left it.
+    fn completion_query(&self, start: usize) -> Option<String> {
+        let head = self.cursor.head();
+        let b = self.buf()?;
+        let inside = head >= start
+            && b.line_of(head) == b.line_of(start)
+            && b.text(start..head).chars().all(is_word);
+        inside.then(|| b.text(start..head))
+    }
+
+    /// Re-narrows the open list after the word changed, closing it once the cursor leaves the word.
+    pub(crate) fn refilter_completion(&mut self, cx: &mut Context<Self>) {
+        let Some(start) = self.completing.menu.as_ref().map(|m| m.start) else {
+            return;
+        };
+        let Some(query) = self.completion_query(start) else {
+            self.dismiss_completion(cx);
+            return;
+        };
+        let Some(menu) = self.completing.menu.as_mut() else {
+            return;
+        };
+        menu.refilter(&query);
+        if menu.incomplete {
+            self.request_completion(start, None, cx);
+        } else if menu.matches.is_empty() {
+            self.dismiss_completion(cx);
+        }
+        cx.notify();
+    }
+
+    fn request_completion(
+        &mut self,
+        start: usize,
+        trigger: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let head = self.cursor.head();
+        let Some((line, character)) = self.buf().map(|b| b.utf16_position(head)) else {
+            return;
+        };
+        self.completing.requests += 1;
+        let request = self.completing.requests;
+        self.completing.pending = Some((request, start));
+        cx.emit(EditorEvent::Complete {
+            request,
+            line,
+            character,
+            trigger,
+        });
+    }
+
+    /// The answer to a [`EditorEvent::Complete`]; dropped if the cursor has left the word since.
+    pub fn show_completions(
+        &mut self,
+        request: u64,
+        items: Vec<Completion>,
+        incomplete: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.completing.pending.as_ref().map(|p| p.0) != Some(request) {
+            return;
+        }
+        let Some((_, start)) = self.completing.pending.take() else {
+            return;
+        };
+        let Some(query) = self.completion_query(start) else {
+            self.dismiss_completion(cx);
+            return;
+        };
+        let opened = self
+            .completing
+            .menu
+            .as_ref()
+            .map_or_else(Opening::now, |m| m.opened);
+        let mut menu = Menu {
+            start,
+            items,
+            matches: Vec::new(),
+            selected: 0,
+            first_row: 0,
+            incomplete,
+            opened,
+        };
+        menu.refilter(&query);
+        if menu.matches.is_empty() {
+            self.dismiss_completion(cx);
+            return;
+        }
+        self.completing.menu = Some(menu);
+        cx.notify();
+    }
+
+    pub(crate) fn step_completion(&mut self, by: isize, cx: &mut Context<Self>) {
+        if let Some(menu) = self.completing.menu.as_mut() {
+            menu.step(by);
+            cx.notify();
+        }
+    }
+
+    /// Inserts the selected suggestion, with any edits it brings elsewhere (imports), as one undo step.
+    pub(crate) fn accept_completion(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        let Some(menu) = self.completing.menu.take() else {
+            return;
+        };
+        self.completing.pending = None;
+        self.completing.timer = None;
+        let Some((item, _)) = menu.matches.get(index.unwrap_or(menu.selected)) else {
+            return;
+        };
+        let item = menu.items[*item].clone();
+        let start = menu.start;
+        self.with_buffer(cx, |b, c| {
+            let head = c.head();
+            // The server's range was for the word when it was asked; it now ends at the cursor.
+            let main = match item.range {
+                Some((from, to)) => {
+                    let from = b.char_at_utf16(from.0, from.1);
+                    from..b.char_at_utf16(to.0, to.1).max(head)
+                }
+                None => start..head,
+            };
+            let mut edits = vec![(main, item.text.clone())];
+            edits.extend(item.additional_edits.iter().map(|e| {
+                let from = b.char_at_utf16(e.start.0, e.start.1);
+                (from..b.char_at_utf16(e.end.0, e.end.1), e.text.clone())
+            }));
+            b.apply_edits(c, &edits, item.select.clone());
+        });
+    }
+
+    fn scroll_completion(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let Some(menu) = self.completing.menu.as_mut() else {
+            return;
+        };
+        let rows = f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y) / ROW_HEIGHT;
+        let max = menu.matches.len().saturating_sub(MAX_ROWS) as isize;
+        let first = (menu.first_row as isize - rows.round() as isize).clamp(0, max);
+        menu.first_row = first as usize;
+        cx.notify();
+    }
+
+    pub(crate) fn render_completion(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.completing.menu.as_ref()?;
+        if menu.matches.is_empty() {
+            return None;
+        }
+        let origin = self.char_origin(menu.start)?;
+        let line_height = self.layout.as_ref()?.line_height;
+        let t = cx.theme();
+        let rows = menu
+            .matches
+            .iter()
+            .enumerate()
+            .skip(menu.first_row)
+            .take(MAX_ROWS)
+            .map(|(row, (index, matched))| {
+                let item = &menu.items[*index];
+                let selected = row == menu.selected;
+                let (letter, color) = kind_badge(item.kind, t);
+                let highlights = matched
+                    .iter()
+                    .filter_map(|&c| {
+                        let (at, ch) = item.label.char_indices().nth(c)?;
+                        Some((
+                            at..at + ch.len_utf8(),
+                            HighlightStyle {
+                                color: Some(t.color.accent),
+                                font_weight: Some(FontWeight::BOLD),
+                                ..Default::default()
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                div()
+                    .id(("completion", row))
+                    .h(px(ROW_HEIGHT))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(t.shape.radius_control)
+                    .cursor_pointer()
+                    .when(selected, |el| el.bg(t.color.surface_accent))
+                    .when(!selected, |el| el.hover(|s| s.bg(t.color.surface_hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.accept_completion(Some(row), cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(16.))
+                            .text_color(color)
+                            .font_weight(FontWeight::BOLD)
+                            .child(letter),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(WIDTH * 0.6))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_color(t.color.content)
+                            .child(StyledText::new(item.label.clone()).with_highlights(highlights)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .flex()
+                            .justify_end()
+                            .text_color(t.color.content_muted)
+                            .children(item.detail.clone()),
+                    )
+            });
+        let shown = menu.matches.len().min(MAX_ROWS) as f32;
+        let height = px(shown * ROW_HEIGHT + 10.);
+        let panel = div()
+            .id("completion-list")
+            .occlude()
+            .w(px(WIDTH))
+            .p(px(4.))
+            .flex()
+            .flex_col()
+            .bg(t.color.surface)
+            .border_1()
+            .border_color(t.color.border)
+            .rounded(t.shape.radius_panel)
+            .shadow(vec![t.popover_shadow()])
+            .font_family(t.typography.mono.clone())
+            .text_size(t.typography.caption)
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+                this.scroll_completion(event, cx);
+            }))
+            .children(rows);
+        let panel = motion::animate_enter(
+            t.motion.reduced,
+            menu.opened.running(t.motion.fast),
+            panel,
+            "completion-open",
+            Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+            |el, d| el.opacity(d),
+        );
+        // Below the line, or above it when the list would run off the bottom of the editor.
+        let below = point(origin.x - px(6.), origin.y + line_height + px(2.));
+        let bottom = self.layout.as_ref()?.origin.y + self.viewport.height;
+        let (position, corner) = if below.y + height > bottom && origin.y - height > px(0.) {
+            (point(below.x, origin.y - px(2.)), Corner::BottomLeft)
+        } else {
+            (below, Corner::TopLeft)
+        };
+        Some(
+            deferred(
+                anchored()
+                    .position(position)
+                    .anchor(corner)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(panel),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+}
+
+/// A letter for the kind of suggestion, coloured as the editor colours that kind of symbol.
+fn kind_badge(kind: Option<u32>, t: &athena_ui::Theme) -> (&'static str, Hsla) {
+    let s = &t.syntax;
+    match kind {
+        Some(2..=4) => ("ƒ", s.function),
+        Some(5 | 10) => ("◆", s.property),
+        Some(6) => ("x", s.text),
+        Some(7 | 8 | 13 | 22 | 25) => ("T", s.type_),
+        Some(9) => ("{}", s.type_),
+        Some(14) => ("k", s.keyword),
+        Some(12 | 20 | 21) => ("c", s.constant),
+        Some(15) => ("⧉", s.string),
+        _ => ("·", t.color.content_muted),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(label: &str, sort: &str) -> Completion {
+        Completion {
+            label: label.into(),
+            kind: Some(3),
+            detail: None,
+            filter_text: label.into(),
+            sort_text: sort.into(),
+            text: label.into(),
+            range: None,
+            select: None,
+            additional_edits: Vec::new(),
+            preselect: false,
+        }
+    }
+
+    #[test]
+    fn fuzzy_matching_starts_at_a_word_and_prefers_prefixes() {
+        assert_eq!(fuzzy_match("pl", "Println").map(|m| m.1), Some(vec![0, 5]));
+        assert!(
+            fuzzy_match("ln", "Println").is_none(),
+            "must start at a word"
+        );
+        assert!(fuzzy_match("x", "Println").is_none());
+        assert_eq!(fuzzy_match("fb", "fooBar").map(|m| m.1), Some(vec![0, 3]));
+        assert_eq!(fuzzy_match("rd", "read_dir").map(|m| m.1), Some(vec![0, 5]));
+        assert_eq!(
+            fuzzy_match("rdx", "readx_dir").map(|m| m.1),
+            Some(vec![0, 3, 4])
+        );
+        assert_eq!(fuzzy_match("", "x"), Some((0, Vec::new())));
+        let prefix = fuzzy_match("pri", "Println").unwrap().0;
+        let scattered = fuzzy_match("pri", "PageRuleItem").unwrap().0;
+        assert!(prefix > scattered, "{prefix} vs {scattered}");
+    }
+
+    #[test]
+    fn the_list_narrows_and_ranks_as_you_type() {
+        let mut menu = Menu {
+            start: 0,
+            items: vec![
+                item("Sprintf", "0"),
+                item("Println", "2"),
+                item("Printf", "1"),
+                item("PageRuleItem", "0"),
+            ],
+            matches: Vec::new(),
+            selected: 0,
+            first_row: 0,
+            incomplete: false,
+            opened: Opening::now(),
+        };
+        let labels = |m: &Menu| -> Vec<String> {
+            m.matches
+                .iter()
+                .map(|(i, _)| m.items[*i].label.clone())
+                .collect()
+        };
+        menu.refilter("");
+        assert_eq!(
+            labels(&menu),
+            ["PageRuleItem", "Sprintf", "Printf", "Println"],
+            "an empty word keeps the server's order"
+        );
+        menu.refilter("pri");
+        assert_eq!(labels(&menu), ["Printf", "Println", "PageRuleItem"]);
+        menu.refilter("pln");
+        assert_eq!(labels(&menu), ["Println"]);
+        assert_eq!(menu.matches[0].1, vec![0, 5, 6]);
+        menu.refilter("q");
+        assert!(menu.matches.is_empty());
+    }
+
+    #[test]
+    fn stepping_wraps_and_scrolls_the_window_of_rows() {
+        let mut menu = Menu {
+            start: 0,
+            items: (0..15).map(|i| item(&format!("a{i:02}"), "")).collect(),
+            matches: Vec::new(),
+            selected: 0,
+            first_row: 0,
+            incomplete: false,
+            opened: Opening::now(),
+        };
+        menu.refilter("a");
+        menu.step(-1);
+        assert_eq!((menu.selected, menu.first_row), (14, 5));
+        menu.step(1);
+        assert_eq!((menu.selected, menu.first_row), (0, 0));
+        for _ in 0..10 {
+            menu.step(1);
+        }
+        assert_eq!((menu.selected, menu.first_row), (10, 1));
+    }
+}
