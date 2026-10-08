@@ -1,11 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use athena_workspace::git::{Decorations, FileStatus};
 use athena_workspace::watch::FolderWatcher;
 use gpui::{Context, Task, Window};
 
 use super::Shell;
 use super::item::ItemView;
+
+/// A batch this large (a build writing its output) re-lists the whole tree instead of path by path.
+const INVALIDATE_ABOVE: usize = 256;
 
 /// One file watcher per open project, feeding debounced batches back to the shell.
 pub(super) struct WatchState {
@@ -70,7 +74,7 @@ impl Shell {
     /// Something outside Athena (or a save) changed files under `root`.
     fn files_changed(&mut self, root: &Path, paths: &[PathBuf], cx: &mut Context<Self>) {
         let everything = paths.iter().any(|p| p == root);
-        if everything {
+        if everything || paths.len() > INVALIDATE_ABOVE {
             self.tree.invalidate();
         } else {
             for path in paths {
@@ -78,11 +82,24 @@ impl Shell {
             }
         }
         let active = self.workspace.active_project().map(|p| p.root.as_path()) == Some(root);
-        if active && paths.iter().any(|p| affects_git(root, p)) {
-            self.git_kick(cx);
+        if active {
+            let decorations = self.git_decorations(root);
+            // FSEvents reports real paths, while decorations are keyed under the project's own root.
+            let real = root.canonicalize().ok();
+            let in_root = |p: &PathBuf| match real.as_ref().and_then(|r| p.strip_prefix(r).ok()) {
+                Some(rel) if !p.starts_with(root) => root.join(rel),
+                _ => p.clone(),
+            };
+            if paths
+                .iter()
+                .any(|p| affects_git(root, &in_root(p), decorations.as_deref()))
+            {
+                self.git_kick(cx);
+            }
         }
+        let changed: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
         for view in self.items.values() {
-            let touched = |file: &Path| everything || paths.iter().any(|p| p == file);
+            let touched = |file: &Path| everything || changed.contains(file);
             match view {
                 ItemView::Editor(editor) if touched(editor.read(cx).path()) => {
                     editor.update(cx, |v, cx| v.check_disk(cx))
@@ -100,12 +117,13 @@ impl Shell {
     }
 }
 
-/// Whether a change can alter `git status`: anything in the work tree, but inside `.git` only the
-/// branch and refs, since `git status` itself rewrites the index and would kick itself forever.
-fn affects_git(root: &Path, path: &Path) -> bool {
+/// Whether a change can alter `git status`: anything in the work tree that is not already known to
+/// be ignored, but inside `.git` only the branch and refs, since `git status` itself rewrites the
+/// index and would kick itself forever.
+fn affects_git(root: &Path, path: &Path, decorations: Option<&Decorations>) -> bool {
     match path.strip_prefix(root.join(".git")) {
         Ok(inside) => inside == Path::new("HEAD") || inside.starts_with("refs"),
-        Err(_) => true,
+        Err(_) => decorations.is_none_or(|d| d.get(path) != Some(FileStatus::Ignored)),
     }
 }
 
@@ -116,11 +134,36 @@ mod tests {
     #[test]
     fn git_internals_other_than_head_and_refs_do_not_refresh_git() {
         let root = Path::new("/p");
-        assert!(affects_git(root, Path::new("/p/src/main.rs")));
-        assert!(affects_git(root, Path::new("/p/.git/HEAD")));
-        assert!(affects_git(root, Path::new("/p/.git/refs/heads/main")));
-        assert!(!affects_git(root, Path::new("/p/.git/index")));
-        assert!(!affects_git(root, Path::new("/p/.git/index.lock")));
-        assert!(affects_git(root, Path::new("/p/.gitignore")));
+        let affects = |p: &str| affects_git(root, Path::new(p), None);
+        assert!(affects("/p/src/main.rs"));
+        assert!(affects("/p/.git/HEAD"));
+        assert!(affects("/p/.git/refs/heads/main"));
+        assert!(!affects("/p/.git/index"));
+        assert!(!affects("/p/.git/index.lock"));
+        assert!(affects("/p/.gitignore"));
+    }
+
+    #[test]
+    fn changes_under_ignored_folders_do_not_refresh_git() {
+        let root = Path::new("/p");
+        let entry = |path: &str, status| athena_workspace::git::Entry {
+            path: path.into(),
+            orig: None,
+            staged: None,
+            unstaged: Some(status),
+        };
+        let decorations = Decorations::new(
+            root,
+            &[
+                (root.join("target"), entry("target/", FileStatus::Ignored)),
+                (root.join("notes"), entry("notes/", FileStatus::Untracked)),
+            ],
+        );
+        let affects = |p: &str| affects_git(root, Path::new(p), Some(&decorations));
+        assert!(!affects("/p/target/debug/build/out.o"));
+        assert!(!affects("/p/target"));
+        assert!(affects("/p/notes/new.md"));
+        assert!(affects("/p/src/main.rs"));
+        assert!(affects("/p/.git/HEAD"));
     }
 }

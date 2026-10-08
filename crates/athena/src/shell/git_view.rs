@@ -189,6 +189,11 @@ impl Shell {
             })
     }
 
+    /// The last status run's decorations for a project, whichever project is active.
+    pub(super) fn git_decorations(&self, root: &Path) -> Option<Rc<Decorations>> {
+        Some(self.git.repos.get(root)?.decorations.clone())
+    }
+
     pub(super) fn git_status_for(&self, path: &Path) -> Option<FileStatus> {
         let root = &self.workspace.active_project()?.root;
         self.git
