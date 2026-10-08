@@ -988,11 +988,20 @@ impl Shell {
             .map(|(i, d)| self.render_divider_handle(i, d, &t, cx))
             .collect();
 
+        // A frame on top, not a border, so zooming does not resize the pane a second time.
+        let zoom_frame = self.zoomed.is_some().then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .border_1()
+                .border_color(t.color.accent)
+        });
         div()
             .relative()
             .size_full()
             .child(recorder)
             .child(tree)
+            .children(zoom_frame)
             .children(handles)
             .into_any_element()
     }
@@ -1152,6 +1161,14 @@ impl Shell {
                             }
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            if leaving.is_none() {
+                                this.close_item_in(pane_id, item_id, window, cx)
+                            }
+                        }),
+                    )
                     .children(
                         item.kind
                             .file()
@@ -1179,6 +1196,7 @@ impl Shell {
                             .group(close_group.clone())
                             .text_color(t.color.content_muted)
                             .hover(|s| s.bg(t.color.surface_active).text_color(t.color.content))
+                            .tooltip(|_, cx| athena_ui::Tooltip::view("Close  ⌘W", cx))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_item_in(pane_id, item_id, window, cx);

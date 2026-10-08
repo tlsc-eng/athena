@@ -3,7 +3,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use athena_proto::NoticeKind;
 use athena_ui::motion::{self, Closing};
-use athena_ui::{ActiveTheme, ButtonKind};
+use athena_ui::{ActiveTheme, ButtonKind, Tooltip};
 use gpui::{
     Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, PromptLevel, Window, div,
     prelude::*, px,
@@ -196,6 +196,7 @@ impl Shell {
                 .cursor_pointer()
                 .text_color(t.color.content_muted)
                 .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                .tooltip(|_, cx| Tooltip::view("Show Claude plan usage", cx))
                 .on_click(cx.listener(|this, _, window, cx| this.enable_usage(window, cx)))
                 .child("Usage")
                 .into_any_element();
@@ -249,6 +250,9 @@ impl Shell {
             .rounded(t.shape.radius_control)
             .cursor_pointer()
             .hover(|s| s.bg(t.color.surface_hover))
+            .when(!self.usage_open(), |el| {
+                el.tooltip(|_, cx| Tooltip::view("Claude plan usage, 5-hour and weekly", cx))
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 // An open popover already closed on this click's mouse-down; don't reopen it.
                 if this.usage_open() {

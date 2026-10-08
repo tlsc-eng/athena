@@ -419,10 +419,12 @@ impl Shell {
             .child(self.render_usage_button(cx))
             .child(
                 self.drawer_button("containers-button", drawer::DrawerTab::Containers, cx)
+                    .tooltip(|_, cx| Tooltip::view("Docker containers for this project", cx))
                     .child("Containers"),
             )
             .child(
                 self.drawer_button("playwright-button", drawer::DrawerTab::Playwright, cx)
+                    .tooltip(|_, cx| Tooltip::view("Playwright test runs", cx))
                     .child("Playwright"),
             )
             .child(div().mr(px(8.)).child(self.render_notice_button(cx)))
@@ -432,6 +434,7 @@ impl Shell {
         let unread = self.unread();
         let accent = cx.theme().color.accent;
         self.drawer_button("notices-button", drawer::DrawerTab::Notifications, cx)
+            .tooltip(|_, cx| Tooltip::view("Notifications  ⌘J", cx))
             .child("Notifications")
             .when(unread > 0, |el| {
                 el.child(
