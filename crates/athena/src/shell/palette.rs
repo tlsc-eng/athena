@@ -30,6 +30,8 @@ pub(super) enum Target {
     Claude(String),
     Branch(super::branches::BranchPick),
     Symbol(PathBuf, Position),
+    /// A recently closed project folder.
+    Folder(PathBuf),
 }
 
 impl Clone for Target {
@@ -40,6 +42,7 @@ impl Clone for Target {
             Self::Claude(command) => Self::Claude(command.clone()),
             Self::Branch(pick) => Self::Branch(pick.clone()),
             Self::Symbol(path, at) => Self::Symbol(path.clone(), *at),
+            Self::Folder(path) => Self::Folder(path.clone()),
         }
     }
 }
@@ -56,6 +59,8 @@ pub(super) enum Mode {
     Symbols,
     /// Symbols anywhere in the project, after `#`.
     WorkspaceSymbols,
+    /// Recently closed project folders.
+    Recent,
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -72,6 +77,7 @@ fn placeholder_hint(mode: Mode) -> &'static str {
     match mode {
         Mode::Files | Mode::FilesBeside => "No matching files",
         Mode::Symbols | Mode::WorkspaceSymbols => "No matching symbols",
+        Mode::Recent => "No recently opened folders",
         _ => "No matching commands",
     }
 }
@@ -191,6 +197,8 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::DisablePlaywrightMcp),
         ),
         ("Open project", Box::new(actions::AddProject)),
+        ("Open recent…", Box::new(actions::OpenRecent)),
+        ("Clear recently opened", Box::new(actions::ClearRecent)),
         ("Close project", Box::new(actions::CloseProject)),
         ("Next project", Box::new(actions::NextProject)),
         ("Previous project", Box::new(actions::PrevProject)),
@@ -232,6 +240,7 @@ impl Shell {
             Mode::Branches => "Switch to a branch, or type a name to create one…",
             Mode::Symbols => "Go to symbol in file…",
             Mode::WorkspaceSymbols => "Go to symbol in workspace…",
+            Mode::Recent => "Open a recent folder…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -254,6 +263,7 @@ impl Shell {
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
             Mode::Commands => self.command_entries(window, cx),
+            Mode::Recent => self.recent_entries(),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
@@ -319,6 +329,26 @@ impl Shell {
                 key: label.to_string(),
                 label: label.to_string(),
                 target: Target::Command(action),
+            })
+            .collect()
+    }
+
+    /// Closed project folders that still exist, newest first.
+    fn recent_entries(&self) -> Vec<Entry> {
+        self.workspace
+            .recent
+            .iter()
+            .filter(|root| root.is_dir())
+            .map(|root| {
+                let key = actions::display_path(root);
+                let label = super::item::file_label(root);
+                Entry {
+                    detail: root.parent().map(actions::display_path),
+                    kind: None,
+                    label,
+                    key,
+                    target: Target::Folder(root.clone()),
+                }
             })
             .collect()
     }
@@ -671,6 +701,7 @@ impl Shell {
             Some(Target::Claude(command)) => self.start_claude_with(command, window, cx),
             Some(Target::Branch(pick)) => self.run_branch(pick, cx),
             Some(Target::Symbol(path, at)) => self.lsp.jump = Some((path, at)),
+            Some(Target::Folder(root)) => self.open_folder(root, cx),
             None => {}
         }
         cx.notify();
@@ -740,7 +771,10 @@ impl Shell {
                             .children(
                                 matches!(
                                     entry.target,
-                                    Target::File(_) | Target::Branch(_) | Target::Symbol(..)
+                                    Target::File(_)
+                                        | Target::Branch(_)
+                                        | Target::Symbol(..)
+                                        | Target::Folder(_)
                                 )
                                 .then(|| entry.detail.clone())
                                 .flatten()

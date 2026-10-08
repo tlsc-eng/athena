@@ -36,7 +36,13 @@ pub struct Workspace {
     pub ide_integration: bool,
     #[serde(default)]
     pub ui: UiState,
+    /// Roots of closed projects, most recently closed first, for Open Recent.
+    #[serde(default)]
+    pub recent: Vec<PathBuf>,
 }
+
+/// Open Recent keeps this many folders, as VS Code does by default.
+pub const MAX_RECENT: usize = 20;
 
 pub const DEFAULT_AUTOSAVE_DELAY_MS: u64 = 1000;
 
@@ -93,6 +99,7 @@ impl Default for Workspace {
             format_on_save: None,
             ide_integration: false,
             ui: UiState::default(),
+            recent: Vec::new(),
         }
     }
 }
@@ -109,10 +116,11 @@ impl Workspace {
         {
             Some(i) => i,
             None => {
-                self.projects.push(Project::new(root));
+                self.projects.push(Project::new(root.clone()));
                 self.projects.len() - 1
             }
         };
+        self.recent.retain(|r| canonical(r) != root);
         self.active = Some(index);
         index
     }
@@ -121,7 +129,10 @@ impl Workspace {
         if index >= self.projects.len() {
             return;
         }
-        self.projects.remove(index);
+        let closed = self.projects.remove(index).root;
+        self.recent.retain(|r| *r != closed);
+        self.recent.insert(0, closed);
+        self.recent.truncate(MAX_RECENT);
         self.active = match self.active {
             _ if self.projects.is_empty() => None,
             Some(a) if a > index => Some(a - 1),
@@ -358,6 +369,36 @@ mod tests {
                 .autosave_delay_ms,
             0
         );
+    }
+
+    #[test]
+    fn closed_projects_become_recent_newest_first_and_reopening_removes_them() {
+        let mut w = ws(&["/n/a", "/n/b", "/n/c"]);
+        w.close_project(0);
+        w.close_project(0);
+        assert_eq!(w.recent, [PathBuf::from("/n/b"), "/n/a".into()]);
+        w.add_project("/n/a".into());
+        assert_eq!(w.recent, [PathBuf::from("/n/b")]);
+        let a = w.projects.iter().position(|p| p.root == Path::new("/n/a"));
+        w.close_project(a.unwrap());
+        assert_eq!(w.recent, [PathBuf::from("/n/a"), "/n/b".into()]);
+    }
+
+    #[test]
+    fn recent_projects_are_capped_without_duplicates() {
+        let mut w = Workspace::default();
+        for i in 0..MAX_RECENT + 5 {
+            w.add_project(PathBuf::from(format!("/n/p{i}")));
+            w.close_project(0);
+        }
+        w.add_project("/n/p24".into());
+        w.close_project(0);
+        assert_eq!(w.recent.len(), MAX_RECENT);
+        assert_eq!(w.recent[0], PathBuf::from("/n/p24"));
+        assert_eq!(w.recent.iter().filter(|r| r.ends_with("p24")).count(), 1);
+        let old: Workspace =
+            serde_json::from_str(r#"{"projects":[],"active":null,"window":null}"#).unwrap();
+        assert!(old.recent.is_empty());
     }
 
     #[test]

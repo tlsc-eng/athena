@@ -679,6 +679,7 @@ impl Render for Shell {
         self.take_lsp_jump(window, cx);
         self.take_pending_open(window, cx);
         self.sync_window_title(window, cx);
+        crate::actions::sync_recent_menu(&self.workspace.recent, cx);
         let t = cx.theme().clone();
         let body = div()
             .relative()
@@ -866,6 +867,19 @@ impl Render for Shell {
                 this.toggle_ide_integration(w, cx)
             }))
             .on_action(cx.listener(|this, _: &SendToClaude, w, cx| this.send_to_claude(w, cx)))
+            .on_action(cx.listener(|this, _: &crate::actions::OpenRecent, w, cx| {
+                this.open_palette(palette::Mode::Recent, w, cx)
+            }))
+            .on_action(
+                cx.listener(|this, a: &crate::actions::OpenRecentProject, _, cx| {
+                    this.open_folder(a.0.clone(), cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {
+                this.workspace.recent.clear();
+                this.schedule_save(cx);
+                cx.notify();
+            }))
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)

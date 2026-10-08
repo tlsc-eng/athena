@@ -1,4 +1,6 @@
-use gpui::{Action, App, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
+use std::path::{Path, PathBuf};
+
+use gpui::{Action, App, Global, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
 
 actions!(
     athena,
@@ -61,6 +63,8 @@ actions!(
         GoToWorkspaceSymbol,
         ToggleIdeIntegration,
         SendToClaude,
+        OpenRecent,
+        ClearRecent,
     ]
 );
 
@@ -71,6 +75,11 @@ pub struct SelectProject(pub usize);
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = athena, no_json)]
 pub struct SelectTab(pub usize);
+
+/// A recently closed project folder, from the File menu.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = athena, no_json)]
+pub struct OpenRecentProject(pub PathBuf);
 
 /// The entry of the open code action menu to run.
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -131,6 +140,8 @@ pub fn init(cx: &mut App) {
         // Only in the editor: in a terminal F8 belongs to the program running there.
         KeyBinding::new("f8", NextProblem, Some("Editor")),
         KeyBinding::new("shift-f8", PrevProblem, Some("Editor")),
+        // VS Code's key, except in a terminal, where the shell's reverse search needs it.
+        KeyBinding::new("ctrl-r", OpenRecent, Some("!Terminal")),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -141,8 +152,54 @@ pub fn init(cx: &mut App) {
         bindings.push(KeyBinding::new(&format!("cmd-{n}"), SelectTab(n - 1), None));
     }
     cx.bind_keys(bindings);
+    sync_recent_menu(&[], cx);
+}
 
-    cx.set_menus(vec![
+/// The recent folders the File menu was last built with.
+struct RecentMenu(Vec<PathBuf>);
+
+impl Global for RecentMenu {}
+
+/// Rebuilds the menu bar when the recently closed folders changed.
+pub fn sync_recent_menu(recent: &[PathBuf], cx: &mut App) {
+    if cx
+        .try_global::<RecentMenu>()
+        .is_some_and(|shown| shown.0 == recent)
+    {
+        return;
+    }
+    cx.set_global(RecentMenu(recent.to_vec()));
+    cx.set_menus(menus(recent));
+}
+
+/// A folder as Open Recent shows it, with the home folder as `~`.
+pub fn display_path(path: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if path.starts_with(&home) && path != home => {
+            format!("~/{}", path.strip_prefix(&home).unwrap_or(path).display())
+        }
+        _ => path.display().to_string(),
+    }
+}
+
+fn recent_menu(recent: &[PathBuf]) -> Menu {
+    let mut items: Vec<MenuItem> = recent
+        .iter()
+        .map(|root| MenuItem::action(display_path(root), OpenRecentProject(root.clone())))
+        .collect();
+    if !items.is_empty() {
+        items.push(MenuItem::separator());
+    }
+    items.push(MenuItem::action("More…", OpenRecent));
+    items.push(MenuItem::action("Clear Recently Opened", ClearRecent));
+    Menu {
+        name: "Open Recent".into(),
+        items,
+    }
+}
+
+fn menus(recent: &[PathBuf]) -> Vec<Menu> {
+    vec![
         Menu {
             name: "Athena".into(),
             items: vec![
@@ -161,6 +218,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("New Terminal", NewTerminal),
                 MenuItem::action("New Claude Session", NewClaudeSession),
                 MenuItem::action("Open Project…", AddProject),
+                MenuItem::submenu(recent_menu(recent)),
                 MenuItem::separator(),
                 MenuItem::action("Save As…", SaveAs),
                 MenuItem::action("Toggle Auto Save", ToggleAutoSave),
@@ -215,12 +273,16 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Next Project", NextProject),
             ],
         },
-    ]);
+    ]
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui::Keystroke;
+    use std::path::{Path, PathBuf};
+
+    use gpui::{KeyBindingContextPredicate, KeyContext, Keystroke};
+
+    use super::display_path;
 
     #[test]
     fn navigation_keystrokes_parse() {
@@ -246,6 +308,34 @@ mod tests {
         ] {
             assert_eq!(Keystroke::parse(source).unwrap().key, key, "{source}");
         }
+    }
+
+    #[test]
+    fn open_recent_leaves_ctrl_r_to_the_terminal() {
+        let only_outside = KeyBindingContextPredicate::parse("!Terminal").unwrap();
+        let stack = |names: &[&str]| -> Vec<KeyContext> {
+            names
+                .iter()
+                .map(|n| KeyContext::parse(n).unwrap())
+                .collect()
+        };
+        assert!(
+            only_outside
+                .depth_of(&stack(&["Shell", "Editor"]))
+                .is_some()
+        );
+        assert!(
+            only_outside
+                .depth_of(&stack(&["Shell", "Terminal"]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recent_folders_under_home_are_shown_with_a_tilde() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(display_path(&home.join("code/x")), "~/code/x");
+        assert_eq!(display_path(Path::new("/opt/x")), "/opt/x");
     }
 
     #[test]
