@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::ops::Range;
@@ -14,6 +15,8 @@ use crate::syntax::{Lang, Syntax, Token, bracket_pair};
 /// Typing within this window joins the previous undo step.
 pub(crate) const UNDO_GROUP: Duration = Duration::from_millis(500);
 const MAX_FILE: u64 = 50 * 1024 * 1024;
+/// Changes kept for views that have not caught up; one further behind starts over.
+const EDIT_LOG: usize = 4096;
 
 /// A selection in char offsets; `head` is where the cursor is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -36,6 +39,61 @@ impl Selection {
 
     pub fn is_empty(&self) -> bool {
         self.anchor == self.head
+    }
+}
+
+/// One view's selection and the column its vertical moves aim for; a buffer has none of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Cursor {
+    pub selection: Selection,
+    goal_column: Option<usize>,
+}
+
+impl Cursor {
+    pub fn at(char: usize) -> Self {
+        Self {
+            selection: Selection::cursor(char),
+            goal_column: None,
+        }
+    }
+
+    pub fn head(&self) -> usize {
+        self.selection.head
+    }
+
+    /// Follows edits made through another view, and clamps to a text of `len` chars.
+    pub fn follow<'a>(&mut self, edits: impl IntoIterator<Item = &'a Edit>, len: usize) {
+        for edit in edits {
+            self.selection.anchor = edit.map(self.selection.anchor);
+            self.selection.head = edit.map(self.selection.head);
+            self.goal_column = None;
+        }
+        self.selection.anchor = self.selection.anchor.min(len);
+        self.selection.head = self.selection.head.min(len);
+    }
+}
+
+/// One applied change, in chars and in lines, so every view of the buffer can follow it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub at: usize,
+    pub removed: usize,
+    pub inserted: usize,
+    pub line: usize,
+    pub lines_removed: usize,
+    pub lines_inserted: usize,
+}
+
+impl Edit {
+    /// Where an offset lands after this edit; one inside the removed text moves to its start.
+    pub fn map(&self, at: usize) -> usize {
+        if at <= self.at {
+            at
+        } else if at >= self.at + self.removed {
+            at - self.removed + self.inserted
+        } else {
+            self.at
+        }
     }
 }
 
@@ -78,7 +136,6 @@ struct Transaction {
 pub struct Buffer {
     rope: Rope,
     pub path: Option<PathBuf>,
-    pub selection: Selection,
     pub indent: Indent,
     syntax: Option<Syntax>,
     version: u64,
@@ -87,10 +144,8 @@ pub struct Buffer {
     undo: Vec<Transaction>,
     redo: Vec<Transaction>,
     last_edit: Option<(EditKind, Instant)>,
-    /// Column the cursor tries to return to on vertical moves across shorter lines.
-    goal_column: Option<usize>,
-    /// (first line, line breaks removed, line breaks inserted) per change, for folds to follow.
-    line_edits: Vec<(usize, usize, usize)>,
+    /// The latest changes, the last one made at `version`.
+    edits: VecDeque<Edit>,
     /// Modification time of the file as last read or written, to notice edits made elsewhere.
     disk_mtime: Option<SystemTime>,
 }
@@ -115,7 +170,6 @@ impl Buffer {
         Self {
             rope,
             path,
-            selection: Selection::default(),
             indent,
             syntax,
             version: 0,
@@ -123,8 +177,7 @@ impl Buffer {
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
-            goal_column: None,
-            line_edits: Vec::new(),
+            edits: VecDeque::new(),
             disk_mtime: None,
         }
     }
@@ -188,7 +241,7 @@ impl Buffer {
     }
 
     /// Takes the file's current text as one undoable edit and marks it saved.
-    pub fn reload_from_disk(&mut self) -> Result<()> {
+    pub fn reload_from_disk(&mut self, c: &mut Cursor) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
         let (text, mtime) = read_text(&path)?;
         self.disk_mtime = mtime;
@@ -209,9 +262,9 @@ impl Buffer {
                 at if at >= old_end => at - old_end + new_end,
                 _ => new_end,
             };
-            let selection = self.selection;
-            self.replace(prefix..old_end, &inserted, EditKind::Other);
-            self.selection = Selection {
+            let selection = c.selection;
+            self.replace(c, prefix..old_end, &inserted, EditKind::Other);
+            c.selection = Selection {
                 anchor: map(selection.anchor),
                 head: map(selection.head),
             };
@@ -322,8 +375,12 @@ impl Buffer {
         self.rope.char_to_byte(char)
     }
 
-    pub fn selected_text(&self) -> String {
-        self.rope.slice(self.selection.range()).to_string()
+    pub fn selected_text(&self, c: &Cursor) -> String {
+        let r = c.selection.range();
+        let len = self.len_chars();
+        self.rope
+            .slice(r.start.min(len)..r.end.min(len))
+            .to_string()
     }
 
     pub fn text(&self, range: Range<usize>) -> String {
@@ -342,11 +399,17 @@ impl Buffer {
         let old_end_char = change.start + change.deleted.chars().count();
         let old_end_byte = self.rope.char_to_byte(old_end_char);
         let old_end_position = self.point(old_end_char);
-        self.line_edits.push((
-            start_position.row,
-            change.deleted.matches('\n').count(),
-            change.inserted.matches('\n').count(),
-        ));
+        if self.edits.len() == EDIT_LOG {
+            self.edits.pop_front();
+        }
+        self.edits.push_back(Edit {
+            at: change.start,
+            removed: old_end_char - change.start,
+            inserted: change.inserted.chars().count(),
+            line: start_position.row,
+            lines_removed: change.deleted.matches('\n').count(),
+            lines_inserted: change.inserted.matches('\n').count(),
+        });
         self.rope.remove(change.start..old_end_char);
         self.rope.insert(change.start, &change.inserted);
         let new_end_char = change.start + change.inserted.chars().count();
@@ -368,8 +431,8 @@ impl Buffer {
     }
 
     /// Replaces `range` with `text` and leaves the cursor after it, as one undo step.
-    fn replace(&mut self, range: Range<usize>, text: &str, kind: EditKind) {
-        let before = self.selection;
+    fn replace(&mut self, c: &mut Cursor, range: Range<usize>, text: &str, kind: EditKind) {
+        let before = c.selection;
         let change = Change {
             start: range.start,
             deleted: self.rope.slice(range.clone()).to_string(),
@@ -378,8 +441,8 @@ impl Buffer {
         let edit = self.apply(&change);
         self.reparse(&edit);
         let at = range.start + text.chars().count();
-        self.selection = Selection::cursor(at);
-        self.goal_column = None;
+        c.selection = Selection::cursor(at);
+        c.goal_column = None;
         self.redo.clear();
 
         let now = Instant::now();
@@ -391,7 +454,7 @@ impl Buffer {
         self.last_edit = Some((kind, now));
         if joins && let Some(last) = self.undo.last_mut() {
             last.changes.push(change);
-            last.after = self.selection;
+            last.after = c.selection;
             return;
         }
         if self.saved_at.is_some_and(|at| at > self.undo.len()) {
@@ -400,91 +463,101 @@ impl Buffer {
         self.undo.push(Transaction {
             changes: vec![change],
             before,
-            after: self.selection,
+            after: c.selection,
         });
     }
 
-    pub fn insert(&mut self, text: &str) {
+    pub fn insert(&mut self, c: &mut Cursor, text: &str) {
         let kind = if text.contains('\n') || text.chars().count() > 1 {
             EditKind::Other
         } else {
             EditKind::Insert
         };
-        self.replace(self.selection.range(), text, kind);
+        self.replace(c, c.selection.range(), text, kind);
     }
 
-    pub fn newline(&mut self) {
-        let line = self.line_of(self.selection.head);
+    /// Replaces `range` with `text` as its own undo step, leaving the cursor after it.
+    pub fn replace_range(&mut self, c: &mut Cursor, range: Range<usize>, text: &str) {
+        let len = self.len_chars();
+        let range = range.start.min(len)..range.end.min(len);
+        self.replace(c, range, text, EditKind::Other);
+    }
+
+    pub fn newline(&mut self, c: &mut Cursor) {
+        let line = self.line_of(c.selection.head);
         let current = self.line(line);
         let mut indent: String = current
             .chars()
             .take_while(|c| *c == ' ' || *c == '\t')
             .collect();
-        let before_cursor = self.text(self.line_start(line)..self.selection.range().start);
+        let before_cursor = self.text(self.line_start(line)..c.selection.range().start);
         if before_cursor.trim_end().ends_with(['{', '(', '[']) {
             indent.push_str(&self.indent.unit());
         }
         self.replace(
-            self.selection.range(),
+            c,
+            c.selection.range(),
             &format!("\n{indent}"),
             EditKind::Other,
         );
     }
 
-    pub fn tab(&mut self) {
+    pub fn tab(&mut self, c: &mut Cursor) {
         let unit = match self.indent {
             Indent::Tab => "\t".to_string(),
-            Indent::Spaces(n) => " ".repeat(n - self.column_of(self.selection.head) % n),
+            Indent::Spaces(n) => " ".repeat(n - self.column_of(c.selection.head) % n),
         };
-        self.replace(self.selection.range(), &unit, EditKind::Insert);
+        self.replace(c, c.selection.range(), &unit, EditKind::Insert);
     }
 
-    pub fn backspace(&mut self) {
-        let range = self.selection.range();
+    pub fn backspace(&mut self, c: &mut Cursor) {
+        let range = c.selection.range();
         if !range.is_empty() {
-            return self.replace(range, "", EditKind::Delete);
+            return self.replace(c, range, "", EditKind::Delete);
         }
         if range.start > 0 {
-            self.replace(range.start - 1..range.start, "", EditKind::Delete);
+            self.replace(c, range.start - 1..range.start, "", EditKind::Delete);
         }
     }
 
-    pub fn delete_forward(&mut self) {
-        let range = self.selection.range();
+    pub fn delete_forward(&mut self, c: &mut Cursor) {
+        let range = c.selection.range();
         if !range.is_empty() {
-            return self.replace(range, "", EditKind::Delete);
+            return self.replace(c, range, "", EditKind::Delete);
         }
         if range.end < self.len_chars() {
-            self.replace(range.start..range.end + 1, "", EditKind::Delete);
+            self.replace(c, range.start..range.end + 1, "", EditKind::Delete);
         }
     }
 
-    pub fn delete_word_back(&mut self) {
-        let end = self.selection.head;
-        let start = if self.selection.is_empty() {
+    pub fn delete_word_back(&mut self, c: &mut Cursor) {
+        let end = c.selection.head;
+        let start = if c.selection.is_empty() {
             self.word_left(end)
         } else {
-            self.selection.range().start
+            c.selection.range().start
         };
         self.replace(
-            start..end.max(self.selection.range().end),
+            c,
+            start..end.max(c.selection.range().end),
             "",
             EditKind::Other,
         );
     }
 
-    pub fn delete_to_line_start(&mut self) {
-        let head = self.selection.head;
+    pub fn delete_to_line_start(&mut self, c: &mut Cursor) {
+        let head = c.selection.head;
         let start = self.line_start(self.line_of(head));
         let start = if start == head && head > 0 {
             head - 1
         } else {
             start
         };
-        self.replace(start..head, "", EditKind::Other);
+        self.replace(c, start..head, "", EditKind::Other);
     }
 
-    pub fn undo(&mut self) -> bool {
+    /// Takes back the last change, whichever view made it, and puts `c` where it was before.
+    pub fn undo(&mut self, c: &mut Cursor) -> bool {
         let Some(tx) = self.undo.pop() else {
             return false;
         };
@@ -497,13 +570,16 @@ impl Buffer {
             let edit = self.apply(&inverse);
             self.reparse(&edit);
         }
-        self.selection = tx.before;
+        *c = Cursor {
+            selection: tx.before,
+            goal_column: None,
+        };
         self.redo.push(tx);
         self.last_edit = None;
         true
     }
 
-    pub fn redo(&mut self) -> bool {
+    pub fn redo(&mut self, c: &mut Cursor) -> bool {
         let Some(tx) = self.redo.pop() else {
             return false;
         };
@@ -511,18 +587,21 @@ impl Buffer {
             let edit = self.apply(change);
             self.reparse(&edit);
         }
-        self.selection = tx.after;
+        *c = Cursor {
+            selection: tx.after,
+            goal_column: None,
+        };
         self.undo.push(tx);
         self.last_edit = None;
         true
     }
 
     /// Comments or uncomments every line the selection touches.
-    pub fn toggle_comment(&mut self) {
+    pub fn toggle_comment(&mut self, c: &mut Cursor) {
         let Some(prefix) = self.lang().and_then(Lang::comment_prefix) else {
             return;
         };
-        let range = self.selection.range();
+        let range = c.selection.range();
         let first = self.line_of(range.start);
         let mut last = self.line_of(range.end);
         if last > first && range.end == self.line_start(last) {
@@ -560,20 +639,20 @@ impl Buffer {
             .collect();
         let start = self.line_start(first);
         let end = start + lines.iter().map(|l| l.chars().count()).sum::<usize>() + (last - first);
-        self.replace(start..end, &rewritten.join("\n"), EditKind::Other);
+        self.replace(c, start..end, &rewritten.join("\n"), EditKind::Other);
         let new_end =
             start + rewritten.iter().map(|l| l.chars().count()).sum::<usize>() + (last - first);
-        self.selection = Selection {
+        c.selection = Selection {
             anchor: start,
             head: new_end,
         };
     }
 
-    fn set_head(&mut self, head: usize, extend: bool) {
+    fn set_head(&self, c: &mut Cursor, head: usize, extend: bool) {
         let head = head.min(self.len_chars());
-        self.selection = if extend {
+        c.selection = if extend {
             Selection {
-                anchor: self.selection.anchor,
+                anchor: c.selection.anchor,
                 head,
             }
         } else {
@@ -581,32 +660,32 @@ impl Buffer {
         };
     }
 
-    pub fn move_left(&mut self, extend: bool) {
-        self.goal_column = None;
-        let r = self.selection.range();
+    pub fn move_left(&self, c: &mut Cursor, extend: bool) {
+        c.goal_column = None;
+        let r = c.selection.range();
         let head = if !extend && !r.is_empty() {
             r.start
         } else {
-            self.selection.head.saturating_sub(1)
+            c.selection.head.saturating_sub(1)
         };
-        self.set_head(head, extend);
+        self.set_head(c, head, extend);
     }
 
-    pub fn move_right(&mut self, extend: bool) {
-        self.goal_column = None;
-        let r = self.selection.range();
+    pub fn move_right(&self, c: &mut Cursor, extend: bool) {
+        c.goal_column = None;
+        let r = c.selection.range();
         let head = if !extend && !r.is_empty() {
             r.end
         } else {
-            self.selection.head + 1
+            c.selection.head + 1
         };
-        self.set_head(head, extend);
+        self.set_head(c, head, extend);
     }
 
-    pub fn move_vertical(&mut self, lines: isize, extend: bool) {
-        let head = self.selection.head;
+    pub fn move_vertical(&self, c: &mut Cursor, lines: isize, extend: bool) {
+        let head = c.selection.head;
         let line = self.line_of(head) as isize;
-        let goal = *self.goal_column.get_or_insert(self.column_of(head));
+        let goal = *c.goal_column.get_or_insert(self.column_of(head));
         let target = line + lines;
         let head = if target < 0 {
             0
@@ -615,61 +694,61 @@ impl Buffer {
         } else {
             self.char_at(target as usize, goal)
         };
-        self.set_head(head, extend);
-        self.goal_column = Some(goal);
+        self.set_head(c, head, extend);
+        c.goal_column = Some(goal);
     }
 
     /// Moves to `line`, keeping the column vertical moves aim for.
-    pub fn move_to_line(&mut self, line: usize, extend: bool) {
-        let goal = *self
+    pub fn move_to_line(&self, c: &mut Cursor, line: usize, extend: bool) {
+        let goal = *c
             .goal_column
-            .get_or_insert(self.column_of(self.selection.head));
+            .get_or_insert(self.column_of(c.selection.head));
         let head = self.char_at(line.min(self.len_lines() - 1), goal);
-        self.set_head(head, extend);
-        self.goal_column = Some(goal);
+        self.set_head(c, head, extend);
+        c.goal_column = Some(goal);
     }
 
-    pub fn move_line_start(&mut self, extend: bool) {
-        self.goal_column = None;
-        let line = self.line_of(self.selection.head);
+    pub fn move_line_start(&self, c: &mut Cursor, extend: bool) {
+        c.goal_column = None;
+        let line = self.line_of(c.selection.head);
         let text = self.line(line);
         let first_code = text.chars().take_while(|c| c.is_whitespace()).count();
-        let col = self.column_of(self.selection.head);
+        let col = self.column_of(c.selection.head);
         // Toggles between the first non-blank character and column 0, as most editors do.
         let target = if col == first_code { 0 } else { first_code };
-        self.set_head(self.line_start(line) + target, extend);
+        self.set_head(c, self.line_start(line) + target, extend);
     }
 
-    pub fn move_line_end(&mut self, extend: bool) {
-        self.goal_column = None;
-        let line = self.line_of(self.selection.head);
-        self.set_head(self.line_start(line) + self.line_len(line), extend);
+    pub fn move_line_end(&self, c: &mut Cursor, extend: bool) {
+        c.goal_column = None;
+        let line = self.line_of(c.selection.head);
+        self.set_head(c, self.line_start(line) + self.line_len(line), extend);
     }
 
-    pub fn move_word(&mut self, forward: bool, extend: bool) {
-        self.goal_column = None;
-        let head = self.selection.head;
+    pub fn move_word(&self, c: &mut Cursor, forward: bool, extend: bool) {
+        c.goal_column = None;
+        let head = c.selection.head;
         let target = if forward {
             self.word_right(head)
         } else {
             self.word_left(head)
         };
-        self.set_head(target, extend);
+        self.set_head(c, target, extend);
     }
 
-    pub fn move_to(&mut self, char: usize, extend: bool) {
-        self.goal_column = None;
-        self.set_head(char, extend);
+    pub fn move_to(&self, c: &mut Cursor, char: usize, extend: bool) {
+        c.goal_column = None;
+        self.set_head(c, char, extend);
     }
 
-    pub fn select_all(&mut self) {
-        self.selection = Selection {
+    pub fn select_all(&self, c: &mut Cursor) {
+        c.selection = Selection {
             anchor: 0,
             head: self.len_chars(),
         };
     }
 
-    pub fn select_word_at(&mut self, char: usize) {
+    pub fn select_word_at(&self, c: &mut Cursor, char: usize) {
         let at = char.min(self.len_chars());
         let class = |c: char| {
             if is_word(c) {
@@ -694,23 +773,32 @@ impl Buffer {
         while end < chars.len() && class(chars[end]) == k {
             end += 1;
         }
-        self.selection = Selection {
+        c.selection = Selection {
             anchor: start,
             head: end,
         };
     }
 
-    pub fn select_line_at(&mut self, char: usize) {
+    pub fn select_line_at(&self, c: &mut Cursor, char: usize) {
         let line = self.line_of(char);
         let end = if line + 1 < self.len_lines() {
             self.line_start(line + 1)
         } else {
             self.len_chars()
         };
-        self.selection = Selection {
+        c.selection = Selection {
             anchor: self.line_start(line),
             head: end,
         };
+    }
+
+    /// Where the identifier ending at `at` starts; `at` itself when none ends there.
+    pub fn word_start(&self, at: usize) -> usize {
+        let mut i = at.min(self.len_chars());
+        while i > 0 && is_word(self.rope.char(i - 1)) {
+            i -= 1;
+        }
+        i
     }
 
     fn word_left(&self, from: usize) -> usize {
@@ -738,9 +826,10 @@ impl Buffer {
         i
     }
 
-    /// Line edits since the last call, oldest first.
-    pub fn take_line_edits(&mut self) -> Vec<(usize, usize, usize)> {
-        std::mem::take(&mut self.line_edits)
+    /// The changes made after `version`, oldest first; `None` once they are no longer all kept.
+    pub fn edits_since(&self, version: u64) -> Option<impl Iterator<Item = &Edit>> {
+        let behind = usize::try_from(self.version.checked_sub(version)?).ok()?;
+        (behind <= self.edits.len()).then(|| self.edits.iter().skip(self.edits.len() - behind))
     }
 
     /// The region `line` can fold: up to the line before the furthest closing bracket of a bracket
@@ -775,9 +864,8 @@ impl Buffer {
         }
     }
 
-    /// The bracket at or just before the cursor and its partner, as char offsets.
-    pub fn matching_bracket(&self) -> Option<(usize, usize)> {
-        let head = self.selection.head;
+    /// The bracket at or just before `head` and its partner, as char offsets.
+    pub fn matching_bracket(&self, head: usize) -> Option<(usize, usize)> {
         let at = [head, head.wrapping_sub(1)].into_iter().find(|&i| {
             i < self.len_chars() && bracket_pair(&self.rope.char(i).to_string()).is_some()
         })?;
@@ -917,81 +1005,83 @@ mod tests {
     #[test]
     fn typing_groups_into_one_undo_step() {
         let mut b = buf("", "/x/a.ts");
-        for c in "hello".chars() {
-            b.insert(&c.to_string());
+        let mut c = Cursor::default();
+        for ch in "hello".chars() {
+            b.insert(&mut c, &ch.to_string());
         }
         assert_eq!(b.rope().to_string(), "hello");
-        assert!(b.undo());
+        assert!(b.undo(&mut c));
         assert_eq!(b.rope().to_string(), "");
-        assert!(b.redo());
+        assert!(b.redo(&mut c));
         assert_eq!(b.rope().to_string(), "hello");
-        assert_eq!(b.selection, Selection::cursor(5));
+        assert_eq!(c.selection, Selection::cursor(5));
     }
 
     #[test]
     fn undoing_to_the_saved_state_is_clean() {
         let mut b = buf("x", "/x/a.ts");
-        b.move_to(1, false);
-        b.insert("y");
+        let mut c = Cursor::at(1);
+        b.insert(&mut c, "y");
         assert!(b.is_dirty());
-        b.undo();
+        b.undo(&mut c);
         assert!(!b.is_dirty());
-        b.redo();
+        b.redo(&mut c);
         assert!(b.is_dirty());
-        b.undo();
-        b.insert("z");
-        b.undo();
+        b.undo(&mut c);
+        b.insert(&mut c, "z");
+        b.undo(&mut c);
         assert!(!b.is_dirty(), "back at the original text");
-        b.redo();
-        b.undo();
-        b.undo();
+        b.redo(&mut c);
+        b.undo(&mut c);
+        b.undo(&mut c);
         assert!(!b.is_dirty());
     }
 
     #[test]
     fn newline_keeps_indent_and_opens_blocks() {
         let mut b = buf("func main() {", "/x/main.go");
-        b.move_to(13, false);
-        b.newline();
+        b.newline(&mut Cursor::at(13));
         assert_eq!(b.rope().to_string(), "func main() {\n\t");
         let mut b = buf("  if (x) {", "/x/a.ts");
-        b.move_to(10, false);
-        b.newline();
+        b.newline(&mut Cursor::at(10));
         assert_eq!(b.rope().to_string(), "  if (x) {\n    ");
     }
 
     #[test]
     fn vertical_moves_remember_the_column() {
-        let mut b = buf("abcdef\nab\nabcdef", "/x/a.ts");
-        b.move_to(5, false);
-        b.move_vertical(1, false);
-        assert_eq!(b.selection.head, 9);
-        b.move_vertical(1, false);
-        assert_eq!(b.selection.head, 15);
+        let b = buf("abcdef\nab\nabcdef", "/x/a.ts");
+        let mut c = Cursor::at(5);
+        b.move_vertical(&mut c, 1, false);
+        assert_eq!(c.head(), 9);
+        b.move_vertical(&mut c, 1, false);
+        assert_eq!(c.head(), 15);
     }
 
     #[test]
     fn word_motion_and_delete() {
         let mut b = buf("let foo_bar = 1", "/x/a.ts");
-        b.move_to(11, false);
-        b.move_word(false, false);
-        assert_eq!(b.selection.head, 4);
-        b.move_word(true, false);
-        assert_eq!(b.selection.head, 11);
-        b.delete_word_back();
+        let mut c = Cursor::at(11);
+        b.move_word(&mut c, false, false);
+        assert_eq!(c.head(), 4);
+        b.move_word(&mut c, true, false);
+        assert_eq!(c.head(), 11);
+        b.delete_word_back(&mut c);
         assert_eq!(b.rope().to_string(), "let  = 1");
     }
 
     #[test]
     fn toggles_line_comments() {
         let mut b = buf("\tx := 1\n\ty := 2\n", "/x/a.go");
-        b.selection = Selection {
-            anchor: 0,
-            head: 14,
+        let mut c = Cursor {
+            selection: Selection {
+                anchor: 0,
+                head: 14,
+            },
+            ..Default::default()
         };
-        b.toggle_comment();
+        b.toggle_comment(&mut c);
         assert_eq!(b.rope().to_string(), "\t// x := 1\n\t// y := 2\n");
-        b.toggle_comment();
+        b.toggle_comment(&mut c);
         assert_eq!(b.rope().to_string(), "\tx := 1\n\ty := 2\n");
     }
 
@@ -1018,8 +1108,7 @@ mod tests {
         let path = dir.join("main.go");
         fs::write(&path, "package main\n").unwrap();
         let mut b = Buffer::open(&path).unwrap();
-        b.move_to(b.len_chars(), false);
-        b.insert("x");
+        b.insert(&mut Cursor::at(b.len_chars()), "x");
         assert!(b.is_dirty());
         b.save().unwrap();
         assert!(!b.is_dirty());
@@ -1058,8 +1147,9 @@ mod tests {
     fn save_detects_external_change() {
         let path = temp_file("conflict", "a\n");
         let mut b = Buffer::open(&path).unwrap();
+        let mut c = Cursor::default();
         assert!(!b.changed_on_disk());
-        b.insert("x");
+        b.insert(&mut c, "x");
         b.save_checked().unwrap();
         assert!(
             !b.changed_on_disk(),
@@ -1067,7 +1157,7 @@ mod tests {
         );
         write_elsewhere(&path, "theirs\n");
         assert!(b.changed_on_disk());
-        b.insert("y");
+        b.insert(&mut c, "y");
         assert!(matches!(b.save_checked(), Err(SaveError::Conflict)));
         assert_eq!(fs::read_to_string(&path).unwrap(), "theirs\n");
         b.save().unwrap();
@@ -1079,18 +1169,18 @@ mod tests {
     fn reload_keeps_the_cursor_and_can_be_undone() {
         let path = temp_file("reload", "one\ntwo\nthree\n");
         let mut b = Buffer::open(&path).unwrap();
-        b.move_to(b.line_start(2) + 2, false);
+        let mut c = Cursor::at(b.line_start(2) + 2);
         write_elsewhere(&path, "one\nTWO!\nthree\n");
-        b.reload_from_disk().unwrap();
+        b.reload_from_disk(&mut c).unwrap();
         assert_eq!(b.full_text(), "one\nTWO!\nthree\n");
         assert_eq!(
-            b.selection.head,
+            c.head(),
             b.line_start(2) + 2,
             "cursor after the change moves with it"
         );
         assert!(!b.is_dirty());
         assert!(!b.changed_on_disk());
-        b.undo();
+        b.undo(&mut c);
         assert_eq!(b.full_text(), "one\ntwo\nthree\n");
         assert!(b.is_dirty());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -1112,23 +1202,20 @@ mod tests {
 
     #[test]
     fn matching_bracket_pairs_nested() {
-        let mut b = buf("func f() {\n\tif x { g(\"}\") }\n}\n", "/x/a.go");
-        b.move_to(9, false);
-        assert_eq!(b.matching_bracket(), Some((9, b.len_chars() - 2)));
-        b.move_to(b.len_chars() - 1, false);
-        assert_eq!(b.matching_bracket(), Some((b.len_chars() - 2, 9)));
+        let b = buf("func f() {\n\tif x { g(\"}\") }\n}\n", "/x/a.go");
+        assert_eq!(b.matching_bracket(9), Some((9, b.len_chars() - 2)));
+        assert_eq!(
+            b.matching_bracket(b.len_chars() - 1),
+            Some((b.len_chars() - 2, 9))
+        );
         let inner = b.full_text().find("{ g").unwrap();
-        b.move_to(inner + 1, false);
         let close = b.full_text().rfind(") }").unwrap() + 2;
-        assert_eq!(b.matching_bracket(), Some((inner, close)));
-        b.move_to(3, false);
-        assert_eq!(b.matching_bracket(), None);
+        assert_eq!(b.matching_bracket(inner + 1), Some((inner, close)));
+        assert_eq!(b.matching_bracket(3), None);
 
-        let mut plain = buf("a (b [c] d) e", "/x/notes.txt");
-        plain.move_to(2, false);
-        assert_eq!(plain.matching_bracket(), Some((2, 10)));
-        plain.move_to(8, false);
-        assert_eq!(plain.matching_bracket(), Some((7, 5)));
+        let plain = buf("a (b [c] d) e", "/x/notes.txt");
+        assert_eq!(plain.matching_bracket(2), Some((2, 10)));
+        assert_eq!(plain.matching_bracket(8), Some((7, 5)));
     }
 
     #[test]
@@ -1148,22 +1235,93 @@ mod tests {
 
     #[test]
     fn edits_report_line_deltas() {
+        let lines = |b: &Buffer, since: u64| -> Vec<(usize, usize, usize)> {
+            b.edits_since(since)
+                .unwrap()
+                .map(|e| (e.line, e.lines_removed, e.lines_inserted))
+                .collect()
+        };
         let mut b = buf("a\nb\nc", "/x/a.ts");
-        b.take_line_edits();
-        b.move_to(2, false);
-        b.insert("x\ny\n");
-        b.select_all();
-        b.backspace();
-        assert_eq!(b.take_line_edits(), vec![(1, 0, 2), (0, 4, 0)]);
-        b.undo();
-        assert_eq!(b.take_line_edits(), vec![(0, 0, 4)]);
+        let mut c = Cursor::at(2);
+        b.insert(&mut c, "x\ny\n");
+        b.select_all(&mut c);
+        b.backspace(&mut c);
+        assert_eq!(lines(&b, 0), vec![(1, 0, 2), (0, 4, 0)]);
+        let seen = b.version();
+        b.undo(&mut c);
+        assert_eq!(lines(&b, seen), vec![(0, 0, 4)]);
+        assert!(b.edits_since(b.version() + 1).is_none());
+    }
+
+    #[test]
+    fn two_cursors_share_one_buffer_and_its_undo_history() {
+        let mut b = buf("one\ntwo\n", "/x/a.go");
+        let mut left = Cursor::at(0);
+        let mut right = Cursor::at(b.line_start(1) + 1);
+        let seen = b.version();
+        b.insert(&mut left, "zero\n");
+        assert_eq!(b.full_text(), "zero\none\ntwo\n");
+        right.follow(b.edits_since(seen).unwrap(), b.len_chars());
+        assert_eq!(
+            b.line_of(right.head()),
+            2,
+            "the other cursor moves down with the text"
+        );
+        assert_eq!(b.column_of(right.head()), 1);
+        assert_eq!(left.head(), 5, "each view keeps its own cursor");
+
+        let seen = b.version();
+        assert!(b.undo(&mut right), "undo is the buffer's, not the view's");
+        assert_eq!(b.full_text(), "one\ntwo\n");
+        assert_eq!(
+            right.head(),
+            0,
+            "the undoing view's cursor goes where the edit was"
+        );
+        left.follow(b.edits_since(seen).unwrap(), b.len_chars());
+        assert_eq!(left.head(), 0);
+    }
+
+    #[test]
+    fn versions_only_grow_whichever_cursor_edits() {
+        let mut b = buf("", "/x/a.go");
+        let (mut one, mut two) = (Cursor::default(), Cursor::default());
+        let mut versions = vec![b.version()];
+        for i in 0..6 {
+            let c = if i % 2 == 0 { &mut one } else { &mut two };
+            if i == 4 {
+                b.undo(c);
+            } else {
+                b.insert(c, "x");
+            }
+            two.follow(
+                b.edits_since(*versions.last().unwrap()).unwrap(),
+                b.len_chars(),
+            );
+            versions.push(b.version());
+        }
+        assert!(versions.windows(2).all(|w| w[0] < w[1]), "{versions:?}");
+    }
+
+    #[test]
+    fn a_cursor_inside_removed_text_moves_to_where_it_was() {
+        let mut b = buf("abcdef", "/x/a.txt");
+        let mut other = Cursor::at(3);
+        let mut c = Cursor {
+            selection: Selection { anchor: 1, head: 5 },
+            ..Default::default()
+        };
+        let seen = b.version();
+        b.insert(&mut c, "XY");
+        other.follow(b.edits_since(seen).unwrap(), b.len_chars());
+        assert_eq!(b.full_text(), "aXYf");
+        assert_eq!(other.head(), 1);
     }
 
     #[test]
     fn highlights_follow_edits() {
         let mut b = buf("package main\n", "/x/main.go");
-        b.move_to(b.len_chars(), false);
-        b.insert("func f() {}\n");
+        b.insert(&mut Cursor::at(b.len_chars()), "func f() {}\n");
         let tokens = b.highlights(0..b.len_lines());
         let text = b.rope().to_string();
         assert!(

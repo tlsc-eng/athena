@@ -5,10 +5,16 @@ use super::item::ItemView;
 
 impl Shell {
     fn dirty_editors(&self, cx: &Context<Self>) -> Vec<gpui::Entity<athena_editor::EditorView>> {
+        // Tabs on the same file share one buffer; list and save it once.
+        let mut paths = std::collections::HashSet::new();
         self.items
             .values()
             .filter_map(|v| match v {
-                ItemView::Editor(e) if e.read(cx).is_dirty() => Some(e.clone()),
+                ItemView::Editor(e)
+                    if e.read(cx).is_dirty() && paths.insert(e.read(cx).path().to_path_buf()) =>
+                {
+                    Some(e.clone())
+                }
                 _ => None,
             })
             .collect()

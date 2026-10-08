@@ -183,11 +183,12 @@ impl Element for EditorElement {
         // Keep the cursor's line on screen after edits and keyboard moves.
         self.view.update(cx, |view, _| {
             view.viewport = bounds.size;
-            let Some(buffer) = view.buffer.as_ref() else {
+            view.follow_edits();
+            let Some(head_line) = view.buf().map(|b| b.line_of(view.cursor.head())) else {
                 return;
             };
             if view.autoscroll {
-                let row = view.display.row_of(buffer.line_of(buffer.selection.head));
+                let row = view.display.row_of(head_line);
                 let line = row as f32 * f32::from(lh);
                 let height = f32::from(bounds.size.height);
                 if line < view.scroll.y {
@@ -199,9 +200,10 @@ impl Element for EditorElement {
         });
 
         let view = self.view.read(cx);
-        let Some(buffer) = view.buffer.as_ref() else {
+        let Some(shared) = view.buffer.clone() else {
             return frame;
         };
+        let buffer = shared.buffer.borrow();
         let total = buffer.len_lines();
         let digits = total.to_string().len().max(3);
         let numbers_right = bounds.left() + px(GUTTER_PAD) + cell * digits as f32;
@@ -224,8 +226,8 @@ impl Element for EditorElement {
             tokens.extend(buffer.highlights(run[0]..run[run.len() - 1] + 1));
         }
         let rope = buffer.rope();
-        let selection = buffer.selection.range();
-        let head = buffer.selection.head;
+        let selection = view.cursor.selection.range();
+        let head = view.cursor.head();
         let head_line = buffer.line_of(head);
 
         // Horizontal autoscroll needs the cursor line shaped, so it is settled before painting.
@@ -286,7 +288,7 @@ impl Element for EditorElement {
         let finds = view.find_matches().to_vec();
         let brackets = selection
             .is_empty()
-            .then(|| buffer.matching_bracket())
+            .then(|| buffer.matching_bracket(head))
             .flatten()
             .map_or(Vec::new(), |(a, b)| vec![a..a + 1, b..b + 1]);
         let marks: Vec<(std::ops::Range<usize>, crate::MarkerSeverity)> = view

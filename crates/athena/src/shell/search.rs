@@ -539,6 +539,10 @@ impl Shell {
         let mut count = 0;
         for editor in editors {
             let path = editor.read(cx).path().to_path_buf();
+            // Tabs on the same file share one buffer, which must be replaced in only once.
+            if open.contains(&path) {
+                continue;
+            }
             let Some(text) = editor.read(cx).text() else {
                 continue;
             };

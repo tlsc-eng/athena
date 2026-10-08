@@ -3,10 +3,11 @@ mod display;
 mod element;
 mod image;
 mod lines;
+mod shared;
 mod syntax;
 mod view;
 
-pub use buffer::{Buffer, Indent, SaveError, Selection};
+pub use buffer::{Buffer, Cursor, Edit, Indent, SaveError, Selection};
 pub use image::{ImageView, is_image_path};
 pub use syntax::{Lang, Token};
 pub use view::{EditorEvent, EditorView, GutterMark, Marker, MarkerSeverity};

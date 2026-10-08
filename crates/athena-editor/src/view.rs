@@ -1,7 +1,8 @@
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use athena_ui::motion::{self, Closing, Opening};
@@ -15,9 +16,10 @@ use gpui::{
     UTF16Selection, Window, actions, div, prelude::*, px,
 };
 
-use crate::buffer::{Buffer, SaveError, UNDO_GROUP};
+use crate::buffer::{Buffer, Cursor, Edit, SaveError, UNDO_GROUP};
 use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
+use crate::shared::{self, SharedBuffer};
 
 actions!(
     editor,
@@ -203,7 +205,12 @@ struct FindBar {
 }
 
 pub struct EditorView {
-    pub(crate) buffer: Option<Buffer>,
+    /// Shared with every other tab on the same file; the cursor and folds stay per view.
+    pub(crate) buffer: Option<Rc<SharedBuffer>>,
+    pub(crate) cursor: Cursor,
+    /// The buffer version this view's cursor and folds have followed up to.
+    seen: u64,
+    _buffer_watch: Option<Subscription>,
     error: Option<String>,
     path: PathBuf,
     pub(crate) focus: FocusHandle,
@@ -245,13 +252,19 @@ impl Focusable for EditorView {
 }
 
 impl EditorView {
+    /// Shows `path`, sharing the buffer of any other tab already showing it.
     pub fn open(path: PathBuf, cx: &mut Context<Self>) -> Self {
-        let (buffer, error) = match Buffer::open(&path) {
+        let (buffer, error) = match shared::open(&path, cx) {
             Ok(b) => (Some(b), None),
             Err(e) => (None, Some(format!("{e:#}"))),
         };
+        let seen = buffer.as_ref().map_or(0, |b| b.buffer.borrow().version());
+        let watch = buffer.as_ref().map(|b| Self::watch(b, cx));
         Self {
             buffer,
+            cursor: Cursor::default(),
+            seen,
+            _buffer_watch: watch,
             error,
             path,
             focus: cx.focus_handle(),
@@ -281,16 +294,66 @@ impl EditorView {
         }
     }
 
+    fn watch(shared: &SharedBuffer, cx: &mut Context<Self>) -> Subscription {
+        cx.observe(&shared.signal, |this, _, cx| this.buffer_changed(cx))
+    }
+
+    pub(crate) fn buf(&self) -> Option<Ref<'_, Buffer>> {
+        self.buffer.as_ref().map(|b| b.buffer.borrow())
+    }
+
+    /// Another view edited or saved the shared buffer.
+    fn buffer_changed(&mut self, cx: &mut Context<Self>) {
+        if self.follow_edits() {
+            self.refresh_find(false, cx);
+            self.note_cursor_line(true, cx);
+        }
+        if self.conflict && self.buf().is_some_and(|b| !b.changed_on_disk()) {
+            self.conflict = false;
+        }
+        if self.buf().is_some_and(|b| !b.is_dirty()) {
+            self.save_error = None;
+        }
+        self.changed(cx);
+    }
+
+    /// Moves the cursor and folds past edits made since this view last looked; false if none.
+    pub(crate) fn follow_edits(&mut self) -> bool {
+        let Some(shared) = self.buffer.clone() else {
+            return false;
+        };
+        let b = shared.buffer.borrow();
+        if b.version() == self.seen {
+            return false;
+        }
+        match b.edits_since(self.seen) {
+            Some(edits) => {
+                let edits: Vec<Edit> = edits.copied().collect();
+                for e in &edits {
+                    self.display
+                        .apply_edit(e.line, e.lines_removed, e.lines_inserted);
+                }
+                self.cursor.follow(&edits, b.len_chars());
+            }
+            None => {
+                self.display.clear();
+                self.cursor.follow([], b.len_chars());
+            }
+        }
+        self.seen = b.version();
+        true
+    }
+
     pub fn lang(&self) -> Option<crate::Lang> {
-        self.buffer.as_ref()?.lang()
+        self.buf()?.lang()
     }
 
     pub fn text(&self) -> Option<String> {
-        Some(self.buffer.as_ref()?.full_text())
+        Some(self.buf()?.full_text())
     }
 
     pub fn version(&self) -> Option<u64> {
-        Some(self.buffer.as_ref()?.version())
+        Some(self.buf()?.version())
     }
 
     pub fn set_markers(&mut self, markers: Vec<Marker>, cx: &mut Context<Self>) {
@@ -318,7 +381,7 @@ impl EditorView {
     }
 
     fn note_cursor_line(&mut self, edited: bool, cx: &mut Context<Self>) {
-        let Some(line) = self.buffer.as_ref().map(|b| b.line_of(b.selection.head)) else {
+        let Some(line) = self.buf().map(|b| b.line_of(self.cursor.head())) else {
             return;
         };
         if line != self.cursor_line || edited {
@@ -329,22 +392,21 @@ impl EditorView {
 
     /// Replaces the whole text as one undoable edit spanning only the part that differs.
     pub fn replace_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.with_buffer(cx, |b| replace_differing(b, text));
+        self.with_buffer(cx, |b, c| replace_differing(b, c, text));
     }
 
     /// Moves the cursor to a zero-based line and UTF-16 column.
     pub fn go_to_position(&mut self, line: u32, character: u32, cx: &mut Context<Self>) {
-        self.with_buffer(cx, |b| {
+        self.with_buffer(cx, |b, c| {
             let at = b.char_at_utf16(line, character);
-            b.move_to(at, false);
+            b.move_to(c, at, false);
         });
     }
 
     fn markers_at_cursor(&self) -> Vec<&Marker> {
-        let Some(b) = self.buffer.as_ref() else {
+        let Some((line, _)) = self.buf().map(|b| b.utf16_position(self.cursor.head())) else {
             return Vec::new();
         };
-        let (line, _) = b.utf16_position(b.selection.head);
         let mut found: Vec<&Marker> = self
             .markers
             .iter()
@@ -355,8 +417,7 @@ impl EditorView {
     }
 
     fn definition_at(&self, char: usize, cx: &mut Context<Self>) {
-        if let Some(b) = self.buffer.as_ref() {
-            let (line, character) = b.utf16_position(char);
+        if let Some((line, character)) = self.buf().map(|b| b.utf16_position(char)) {
             cx.emit(EditorEvent::GoToDefinition { line, character });
         }
     }
@@ -367,31 +428,32 @@ impl EditorView {
 
     /// 1-based cursor line and column, and the selected text if any.
     pub fn cursor(&self) -> Option<(u32, u32, Option<String>)> {
-        let b = self.buffer.as_ref()?;
-        let head = b.selection.head;
+        let b = self.buf()?;
+        let head = self.cursor.head().min(b.len_chars());
         let line = b.line_of(head);
-        let selection = (!b.selection.is_empty()).then(|| b.selected_text());
+        let selection = (!self.cursor.selection.is_empty()).then(|| b.selected_text(&self.cursor));
         Some((line as u32 + 1, b.column_of(head) as u32 + 1, selection))
     }
 
     /// Moves the cursor to the start of a 1-based line and scrolls it into view.
     pub fn go_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
-        self.with_buffer(cx, |b| {
+        self.with_buffer(cx, |b, c| {
             let line = (line.max(1) as usize - 1).min(b.len_lines().saturating_sub(1));
             let at = b.line_start(line);
-            b.move_to(at, false);
+            b.move_to(c, at, false);
         });
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.buffer.as_ref().is_some_and(Buffer::is_dirty)
+        self.buf().is_some_and(|b| b.is_dirty())
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(buffer) = self.buffer.as_mut() else {
+        let Some(shared) = self.buffer.clone() else {
             return false;
         };
-        let result = match buffer.save_checked() {
+        let checked = shared.buffer.borrow_mut().save_checked();
+        let result = match checked {
             Err(SaveError::Conflict) => {
                 self.conflict = true;
                 cx.notify();
@@ -403,6 +465,7 @@ impl EditorView {
         self.save_error = result.as_ref().err().map(|e| format!("{e:#}"));
         if result.is_ok() {
             cx.emit(EditorEvent::Saved);
+            shared.changed(cx);
         }
         self.changed(cx);
         result.is_ok()
@@ -417,23 +480,29 @@ impl EditorView {
         cx.notify();
     }
 
-    fn with_buffer(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Buffer)) {
-        let Some(buffer) = self.buffer.as_mut() else {
+    fn with_buffer(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Buffer, &mut Cursor)) {
+        let Some(shared) = self.buffer.clone() else {
             return;
         };
-        let before = buffer.version();
-        f(buffer);
-        let edited = buffer.version() != before;
-        for (first, old, new) in buffer.take_line_edits() {
-            self.display.apply_edit(first, old, new);
-        }
+        self.follow_edits();
+        let mut cursor = self.cursor;
+        let (before, version) = {
+            let mut b = shared.buffer.borrow_mut();
+            let before = b.version();
+            f(&mut b, &mut cursor);
+            (before, b.version())
+        };
+        let edited = version != before;
+        // Folds follow this view's own edits too; the cursor is the one the edit left.
+        self.follow_edits();
+        self.cursor = cursor;
         self.reveal_selection();
         self.autoscroll = true;
         self.note_cursor_line(edited, cx);
         if edited {
             self.refresh_find(false, cx);
-            let version = self.buffer.as_ref().map_or(0, Buffer::version);
             cx.emit(EditorEvent::Edited { version });
+            shared.changed(cx);
             self.changed(cx);
         } else {
             cx.notify();
@@ -448,7 +517,7 @@ impl EditorView {
     /// Buffer char under a window position, from last frame's layout.
     fn char_at_position(&self, position: Point<Pixels>) -> Option<usize> {
         let layout = self.layout.as_ref()?;
-        let buffer = self.buffer.as_ref()?;
+        let buffer = self.buf()?;
         let y = position.y - layout.origin.y + px(self.scroll.y);
         let rows = self.display.row_count(buffer.len_lines());
         let row = ((y / layout.line_height).floor().max(0.) as usize).min(rows.saturating_sub(1));
@@ -469,14 +538,17 @@ impl EditorView {
         let Some(at) = self.char_at_position(event.position) else {
             return;
         };
-        let Some(buffer) = self.buffer.as_mut() else {
+        self.follow_edits();
+        let Some(buffer) = self.buffer.clone() else {
             return;
         };
+        let b = buffer.buffer.borrow();
         match event.click_count {
-            2 => buffer.select_word_at(at),
-            n if n >= 3 => buffer.select_line_at(at),
-            _ => buffer.move_to(at, event.modifiers.shift),
+            2 => b.select_word_at(&mut self.cursor, at),
+            n if n >= 3 => b.select_line_at(&mut self.cursor, at),
+            _ => b.move_to(&mut self.cursor, at, event.modifiers.shift),
         }
+        drop(b);
         self.note_cursor_line(false, cx);
         if event.modifiers.platform && event.click_count == 1 {
             self.definition_at(at, cx);
@@ -501,9 +573,9 @@ impl EditorView {
             return;
         }
         if let Some(at) = self.char_at_position(event.position)
-            && let Some(buffer) = self.buffer.as_mut()
+            && let Some(buffer) = self.buffer.clone()
         {
-            buffer.move_to(at, true);
+            buffer.buffer.borrow().move_to(&mut self.cursor, at, true);
             self.autoscroll = true;
             self.note_cursor_line(false, cx);
             cx.notify();
@@ -514,8 +586,7 @@ impl EditorView {
         let lh = self.layout.as_ref().map_or(px(20.), |l| l.line_height);
         let delta = event.delta.pixel_delta(lh);
         let lines = self
-            .buffer
-            .as_ref()
+            .buf()
             .map_or(1, |b| self.display.row_count(b.len_lines())) as f32;
         let max_y = ((lines - 1.) * f32::from(lh)).max(0.);
         self.scroll.y = (self.scroll.y - f32::from(delta.y)).clamp(0., max_y);
@@ -525,22 +596,23 @@ impl EditorView {
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
-        if let Some(buffer) = &self.buffer {
-            let text = if buffer.selection.is_empty() {
-                let line = buffer.line_of(buffer.selection.head);
+        let text = self.buf().map(|buffer| {
+            if self.cursor.selection.is_empty() {
+                let line = buffer.line_of(self.cursor.head());
                 format!("{}\n", buffer.line(line))
             } else {
-                buffer.selected_text()
-            };
+                buffer.selected_text(&self.cursor)
+            }
+        });
+        if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
     fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self
-            .buffer
-            .as_ref()
-            .map(Buffer::selected_text)
+            .buf()
+            .map(|b| b.selected_text(&self.cursor))
             .filter(|s| !s.is_empty() && !s.contains('\n'));
         let input = match &self.find {
             Some(find) => find.input.clone(),
@@ -616,18 +688,18 @@ impl EditorView {
         else {
             return;
         };
-        let (Some(find), Some(buffer)) = (self.find.as_mut(), self.buffer.as_mut()) else {
+        let (Some(find), Some(buffer)) = (self.find.as_mut(), self.buffer.as_ref()) else {
             return;
         };
-        find.matches = buffer.find_all(&query);
-        let head = buffer.selection.range().start;
+        find.matches = buffer.buffer.borrow().find_all(&query);
+        let head = self.cursor.selection.range().start;
         find.current = find
             .matches
             .iter()
             .position(|m| m.start >= head)
             .unwrap_or(0);
         if jump && let Some(m) = find.matches.get(find.current) {
-            buffer.selection = crate::Selection {
+            self.cursor.selection = crate::Selection {
                 anchor: m.start,
                 head: m.end,
             };
@@ -637,7 +709,7 @@ impl EditorView {
     }
 
     fn step_find(&mut self, step: isize) {
-        let (Some(find), Some(buffer)) = (self.find.as_mut(), self.buffer.as_mut()) else {
+        let Some(find) = self.find.as_mut() else {
             return;
         };
         if find.matches.is_empty() {
@@ -646,7 +718,7 @@ impl EditorView {
         let len = find.matches.len() as isize;
         find.current = (find.current as isize + step).rem_euclid(len) as usize;
         let m = &find.matches[find.current];
-        buffer.selection = crate::Selection {
+        self.cursor.selection = crate::Selection {
             anchor: m.start,
             head: m.end,
         };
@@ -757,7 +829,7 @@ impl EditorView {
 }
 
 /// Replaces `b`'s text with `text` through one edit covering only the changed span, keeping the selection.
-fn replace_differing(b: &mut Buffer, text: &str) {
+fn replace_differing(b: &mut Buffer, c: &mut Cursor, text: &str) {
     let old: Vec<char> = b.rope().chars().collect();
     let new: Vec<char> = text.chars().collect();
     if old == new {
@@ -777,13 +849,13 @@ fn replace_differing(b: &mut Buffer, text: &str) {
         // Inside the changed span, keep the offset; replacements rarely change lengths much.
         at => at.min(new_end),
     };
-    let selection = b.selection;
-    b.selection = crate::Selection {
-        anchor: prefix,
-        head: old_end,
-    };
-    b.insert(&new[prefix..new_end].iter().collect::<String>());
-    b.selection = crate::Selection {
+    let selection = c.selection;
+    b.replace_range(
+        c,
+        prefix..old_end,
+        &new[prefix..new_end].iter().collect::<String>(),
+    );
+    c.selection = crate::Selection {
         anchor: map(selection.anchor),
         head: map(selection.head),
     };
@@ -828,13 +900,12 @@ impl Render for EditorView {
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
                     .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| {
-                        if let Some(head) = this.buffer.as_ref().map(|b| b.selection.head) {
-                            this.definition_at(head, cx);
-                        }
+                        this.definition_at(this.cursor.head(), cx);
                     }))
                     .on_action(cx.listener(|this, _: &FindReferences, _, cx| {
-                        if let Some(b) = this.buffer.as_ref() {
-                            let (line, character) = b.utf16_position(b.selection.head);
+                        let head = this.cursor.head();
+                        if let Some((line, character)) = this.buf().map(|b| b.utf16_position(head))
+                        {
                             cx.emit(EditorEvent::FindReferences { line, character });
                         }
                     }))
@@ -847,20 +918,20 @@ impl Render for EditorView {
                     }))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                     .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
-                        this.with_buffer(cx, |b| b.move_left(false))
+                        this.with_buffer(cx, |b, c| b.move_left(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
-                        this.with_buffer(cx, |b| b.move_right(false))
+                        this.with_buffer(cx, |b, c| b.move_right(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_rows(-1, false, cx)))
                     .on_action(
                         cx.listener(|this, _: &MoveDown, _, cx| this.move_rows(1, false, cx)),
                     )
                     .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
-                        this.with_buffer(cx, |b| b.move_left(true))
+                        this.with_buffer(cx, |b, c| b.move_left(c, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
-                        this.with_buffer(cx, |b| b.move_right(true))
+                        this.with_buffer(cx, |b, c| b.move_right(c, true))
                     }))
                     .on_action(
                         cx.listener(|this, _: &SelectUp, _, cx| this.move_rows(-1, true, cx)),
@@ -869,40 +940,40 @@ impl Render for EditorView {
                         cx.listener(|this, _: &SelectDown, _, cx| this.move_rows(1, true, cx)),
                     )
                     .on_action(cx.listener(|this, _: &MoveWordLeft, _, cx| {
-                        this.with_buffer(cx, |b| b.move_word(false, false))
+                        this.with_buffer(cx, |b, c| b.move_word(c, false, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveWordRight, _, cx| {
-                        this.with_buffer(cx, |b| b.move_word(true, false))
+                        this.with_buffer(cx, |b, c| b.move_word(c, true, false))
                     }))
                     .on_action(cx.listener(|this, _: &SelectWordLeft, _, cx| {
-                        this.with_buffer(cx, |b| b.move_word(false, true))
+                        this.with_buffer(cx, |b, c| b.move_word(c, false, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectWordRight, _, cx| {
-                        this.with_buffer(cx, |b| b.move_word(true, true))
+                        this.with_buffer(cx, |b, c| b.move_word(c, true, true))
                     }))
                     .on_action(cx.listener(|this, _: &MoveLineStart, _, cx| {
-                        this.with_buffer(cx, |b| b.move_line_start(false))
+                        this.with_buffer(cx, |b, c| b.move_line_start(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveLineEnd, _, cx| {
-                        this.with_buffer(cx, |b| b.move_line_end(false))
+                        this.with_buffer(cx, |b, c| b.move_line_end(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &SelectLineStart, _, cx| {
-                        this.with_buffer(cx, |b| b.move_line_start(true))
+                        this.with_buffer(cx, |b, c| b.move_line_start(c, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectLineEnd, _, cx| {
-                        this.with_buffer(cx, |b| b.move_line_end(true))
+                        this.with_buffer(cx, |b, c| b.move_line_end(c, true))
                     }))
                     .on_action(cx.listener(|this, _: &MoveDocStart, _, cx| {
-                        this.with_buffer(cx, |b| b.move_to(0, false))
+                        this.with_buffer(cx, |b, c| b.move_to(c, 0, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveDocEnd, _, cx| {
-                        this.with_buffer(cx, |b| b.move_to(usize::MAX, false))
+                        this.with_buffer(cx, |b, c| b.move_to(c, usize::MAX, false))
                     }))
                     .on_action(cx.listener(|this, _: &SelectDocStart, _, cx| {
-                        this.with_buffer(cx, |b| b.move_to(0, true))
+                        this.with_buffer(cx, |b, c| b.move_to(c, 0, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectDocEnd, _, cx| {
-                        this.with_buffer(cx, |b| b.move_to(usize::MAX, true))
+                        this.with_buffer(cx, |b, c| b.move_to(c, usize::MAX, true))
                     }))
                     .on_action(cx.listener(|this, _: &PageUp, _, cx| {
                         let n = this.page_lines();
@@ -913,51 +984,49 @@ impl Render for EditorView {
                         this.move_rows(n, false, cx)
                     }))
                     .on_action(cx.listener(|this, _: &Backspace, _, cx| {
-                        this.with_buffer(cx, Buffer::backspace)
+                        this.with_buffer(cx, |b, c| b.backspace(c))
                     }))
                     .on_action(cx.listener(|this, _: &Delete, _, cx| {
-                        this.with_buffer(cx, Buffer::delete_forward)
+                        this.with_buffer(cx, |b, c| b.delete_forward(c))
                     }))
                     .on_action(cx.listener(|this, _: &DeleteWordBack, _, cx| {
-                        this.with_buffer(cx, Buffer::delete_word_back)
+                        this.with_buffer(cx, |b, c| b.delete_word_back(c))
                     }))
                     .on_action(cx.listener(|this, _: &DeleteToLineStart, _, cx| {
-                        this.with_buffer(cx, Buffer::delete_to_line_start)
+                        this.with_buffer(cx, |b, c| b.delete_to_line_start(c))
+                    }))
+                    .on_action(cx.listener(|this, _: &Newline, _, cx| {
+                        this.with_buffer(cx, |b, c| b.newline(c))
                     }))
                     .on_action(
-                        cx.listener(|this, _: &Newline, _, cx| {
-                            this.with_buffer(cx, Buffer::newline)
-                        }),
-                    )
-                    .on_action(
-                        cx.listener(|this, _: &Tab, _, cx| this.with_buffer(cx, Buffer::tab)),
+                        cx.listener(|this, _: &Tab, _, cx| this.with_buffer(cx, |b, c| b.tab(c))),
                     )
                     .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                        this.with_buffer(cx, Buffer::select_all)
+                        this.with_buffer(cx, |b, c| b.select_all(c))
                     }))
                     .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
                     .on_action(cx.listener(|this, _: &Cut, _, cx| {
                         this.copy(cx);
-                        this.with_buffer(cx, |b| {
-                            if b.selection.is_empty() {
-                                b.select_line_at(b.selection.head);
+                        this.with_buffer(cx, |b, c| {
+                            if c.selection.is_empty() {
+                                b.select_line_at(c, c.head());
                             }
-                            b.backspace();
+                            b.backspace(c);
                         })
                     }))
                     .on_action(cx.listener(|this, _: &Paste, _, cx| {
                         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                            this.with_buffer(cx, |b| b.insert(&text));
+                            this.with_buffer(cx, |b, c| b.insert(c, &text));
                         }
                     }))
                     .on_action(cx.listener(|this, _: &Undo, _, cx| {
-                        this.with_buffer(cx, |b| {
-                            b.undo();
+                        this.with_buffer(cx, |b, c| {
+                            b.undo(c);
                         })
                     }))
                     .on_action(cx.listener(|this, _: &Redo, _, cx| {
-                        this.with_buffer(cx, |b| {
-                            b.redo();
+                        this.with_buffer(cx, |b, c| {
+                            b.redo(c);
                         })
                     }))
                     .on_action(cx.listener(|this, _: &Save, _, cx| {
@@ -973,14 +1042,12 @@ impl Render for EditorView {
                         cx.notify();
                     }))
                     .on_action(cx.listener(|this, _: &ToggleComment, _, cx| {
-                        this.with_buffer(cx, Buffer::toggle_comment)
+                        this.with_buffer(cx, |b, c| b.toggle_comment(c))
                     }))
                     .on_action(cx.listener(|this, _: &Escape, _, cx| {
                         if !this.close_find(cx) {
-                            let head = this.buffer.as_ref().map(|b| b.selection.head);
-                            if let Some(head) = head {
-                                this.with_buffer(cx, |b| b.move_to(head, false));
-                            }
+                            let head = this.cursor.head();
+                            this.with_buffer(cx, |b, c| b.move_to(c, head, false));
                         }
                     }))
                     .on_action(cx.listener(|this, _: &FoldAtCursor, _, cx| this.fold_at_cursor(cx)))
@@ -1015,7 +1082,7 @@ impl Render for EditorView {
 impl EditorView {
     /// The region `line` can fold, cached until the text changes.
     pub(crate) fn fold_at(&self, line: usize) -> Option<Fold> {
-        let buffer = self.buffer.as_ref()?;
+        let buffer = self.buf()?;
         let mut cache = self.fold_cache.borrow_mut();
         if cache.0 != buffer.version() {
             *cache = (buffer.version(), HashMap::new());
@@ -1025,31 +1092,37 @@ impl EditorView {
 
     /// Unfolds whatever hides the selection's ends, as a cursor never sits inside a fold.
     fn reveal_selection(&mut self) {
-        let Some(b) = self.buffer.as_ref() else {
-            return;
-        };
         if self.display.is_empty() {
             return;
         }
-        let (anchor, head) = (b.line_of(b.selection.anchor), b.line_of(b.selection.head));
+        let selection = self.cursor.selection;
+        let Some((anchor, head)) = self
+            .buf()
+            .map(|b| (b.line_of(selection.anchor), b.line_of(selection.head)))
+        else {
+            return;
+        };
         self.display.reveal(anchor);
         self.display.reveal(head);
     }
 
     /// Vertical moves count visual rows, so folded blocks are stepped over.
     fn move_rows(&mut self, rows: isize, extend: bool, cx: &mut Context<Self>) {
-        let Some(b) = self.buffer.as_ref() else {
+        let Some((line, lines)) = self
+            .buf()
+            .map(|b| (b.line_of(self.cursor.head()), b.len_lines()))
+        else {
             return;
         };
-        let row = self.display.row_of(b.line_of(b.selection.head)) as isize + rows;
-        let count = self.display.row_count(b.len_lines()) as isize;
+        let row = self.display.row_of(line) as isize + rows;
+        let count = self.display.row_count(lines) as isize;
         let target = (0..count)
             .contains(&row)
             .then(|| self.display.line_of(row as usize));
-        let len = b.len_lines() as isize;
-        self.with_buffer(cx, |b| match target {
-            Some(line) => b.move_to_line(line, extend),
-            None => b.move_vertical(if row < 0 { -len } else { len }, extend),
+        let len = lines as isize;
+        self.with_buffer(cx, |b, c| match target {
+            Some(line) => b.move_to_line(c, line, extend),
+            None => b.move_vertical(c, if row < 0 { -len } else { len }, extend),
         });
     }
 
@@ -1062,7 +1135,7 @@ impl EditorView {
         }
         let Some(line) = self
             .char_at_position(position)
-            .and_then(|at| Some(self.buffer.as_ref()?.line_of(at)))
+            .and_then(|at| Some(self.buf()?.line_of(at)))
         else {
             return false;
         };
@@ -1079,18 +1152,19 @@ impl EditorView {
 
     /// Moves a cursor that a new fold swallowed up to that fold's header.
     fn cursor_out_of_folds(&mut self) {
-        let Some(b) = self.buffer.as_mut() else {
+        let Some(shared) = self.buffer.clone() else {
             return;
         };
-        let line = b.line_of(b.selection.head);
+        let b = shared.buffer.borrow();
+        let line = b.line_of(self.cursor.head());
         if let Some(fold) = self.display.fold_containing(line) {
-            let col = b.column_of(b.selection.head);
-            b.move_to(b.char_at(fold.header(), col), false);
+            let col = b.column_of(self.cursor.head());
+            b.move_to(&mut self.cursor, b.char_at(fold.header(), col), false);
         }
     }
 
     fn fold_at_cursor(&mut self, cx: &mut Context<Self>) {
-        let Some(line) = self.buffer.as_ref().map(|b| b.line_of(b.selection.head)) else {
+        let Some(line) = self.buf().map(|b| b.line_of(self.cursor.head())) else {
             return;
         };
         // The innermost open region around the cursor, as VS Code picks it.
@@ -1107,7 +1181,7 @@ impl EditorView {
     }
 
     fn unfold_at_cursor(&mut self, cx: &mut Context<Self>) {
-        if let Some(line) = self.buffer.as_ref().map(|b| b.line_of(b.selection.head))
+        if let Some(line) = self.buf().map(|b| b.line_of(self.cursor.head()))
             && self.display.unfold_at(line)
         {
             cx.notify();
@@ -1115,7 +1189,7 @@ impl EditorView {
     }
 
     fn fold_all(&mut self, cx: &mut Context<Self>) {
-        let Some(lines) = self.buffer.as_ref().map(Buffer::len_lines) else {
+        let Some(lines) = self.buf().map(|b| b.len_lines()) else {
             return;
         };
         self.display.clear();
@@ -1165,11 +1239,13 @@ impl EditorView {
 
     /// Picks up a change made on disk by another program: a clean buffer reloads, a dirty one asks.
     pub fn check_disk(&mut self, cx: &mut Context<Self>) {
-        let Some(buffer) = &self.buffer else { return };
-        if !buffer.changed_on_disk() {
+        let Some((changed, dirty)) = self.buf().map(|b| (b.changed_on_disk(), b.is_dirty())) else {
+            return;
+        };
+        if !changed {
             return;
         }
-        if buffer.is_dirty() {
+        if dirty {
             self.conflict = true;
             cx.notify();
         } else {
@@ -1180,33 +1256,55 @@ impl EditorView {
     /// Replaces the buffer with the file on disk, as one step that undo can take back.
     fn reload(&mut self, cx: &mut Context<Self>) {
         let mut result = Ok(());
-        self.with_buffer(cx, |b| result = b.reload_from_disk());
+        self.with_buffer(cx, |b, c| result = b.reload_from_disk(c));
         self.conflict &= result.is_err();
         self.save_error = result.err().map(|e| format!("{e:#}"));
+        if let Some(shared) = &self.buffer {
+            shared.changed(cx);
+        }
         self.changed(cx);
     }
 
     /// Keeps this buffer's text, replacing what another program wrote.
     fn overwrite(&mut self, cx: &mut Context<Self>) {
-        let Some(buffer) = self.buffer.as_mut() else {
+        let Some(shared) = self.buffer.clone() else {
             return;
         };
-        let result = buffer.save();
+        let result = shared.buffer.borrow_mut().save();
         self.conflict = false;
         self.save_error = result.as_ref().err().map(|e| format!("{e:#}"));
         if result.is_ok() {
             cx.emit(EditorEvent::Saved);
+            shared.changed(cx);
         }
         self.changed(cx);
     }
 
     /// Writes the buffer to `path` and keeps editing it there.
+    /// Writes the buffer to `path` and keeps editing it there; other tabs stay on the old file.
     pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> anyhow::Result<()> {
-        let buffer = self
+        let shared = self
             .buffer
-            .as_mut()
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("nothing to save"))?;
-        buffer.save_as(path.clone())?;
+        // Only this view and the store's weak entry hold an unshared buffer.
+        if Rc::strong_count(&shared) > 2 {
+            let mut fork = {
+                let b = shared.buffer.borrow();
+                let mut fork = Buffer::new(&b.full_text(), Some(path.clone()));
+                fork.indent = b.indent;
+                fork
+            };
+            fork.save()?;
+            let fork = shared::adopt(fork, &path, cx);
+            self.seen = fork.buffer.borrow().version();
+            self._buffer_watch = Some(Self::watch(&fork, cx));
+            self.cursor.follow([], fork.buffer.borrow().len_chars());
+            self.buffer = Some(fork);
+        } else {
+            shared.buffer.borrow_mut().save_as(path.clone())?;
+            shared::register(&shared, &path, cx);
+        }
         // A new language folds differently, and the fold cache is keyed only on the text version.
         self.display.clear();
         *self.fold_cache.borrow_mut() = Default::default();
@@ -1309,7 +1407,7 @@ impl EntityInputHandler for EditorView {
         self.marked = None;
         if !text.is_empty() {
             let text = text.to_string();
-            self.with_buffer(cx, |b| b.insert(&text));
+            self.with_buffer(cx, |b, c| b.insert(c, &text));
         }
     }
 
@@ -1333,8 +1431,8 @@ impl EntityInputHandler for EditorView {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
-        let buffer = self.buffer.as_ref()?;
-        let head = buffer.selection.head;
+        let buffer = self.buf()?;
+        let head = self.cursor.head();
         let line = buffer.line_of(head);
         let (_, display, shaped) = layout.lines.iter().find(|(l, _, _)| *l == line)?;
         let col = buffer.column_of(head);
@@ -1410,13 +1508,13 @@ mod tests {
     #[test]
     fn replacing_text_is_one_undo_step_that_keeps_the_cursor() {
         let mut b = Buffer::new("let old = 1;\nkeep\nold();\n", None);
-        b.move_to(b.line_start(1) + 2, false);
-        replace_differing(&mut b, "let new = 1;\nkeep\nnew();\n");
+        let mut c = Cursor::at(b.line_start(1) + 2);
+        replace_differing(&mut b, &mut c, "let new = 1;\nkeep\nnew();\n");
         assert_eq!(b.full_text(), "let new = 1;\nkeep\nnew();\n");
-        assert_eq!(b.selection.head, b.line_start(1) + 2);
-        b.undo();
+        assert_eq!(c.head(), b.line_start(1) + 2);
+        b.undo(&mut c);
         assert_eq!(b.full_text(), "let old = 1;\nkeep\nold();\n");
-        replace_differing(&mut b, "let old = 1;\nkeep\nold();\n");
-        assert!(!b.undo(), "an unchanged text adds no undo step");
+        replace_differing(&mut b, &mut c, "let old = 1;\nkeep\nold();\n");
+        assert!(!b.undo(&mut c), "an unchanged text adds no undo step");
     }
 }

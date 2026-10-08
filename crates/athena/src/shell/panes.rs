@@ -160,7 +160,6 @@ impl Shell {
                             this.git_kick(cx);
                             let path = view.read(cx).path().to_path_buf();
                             this.refresh_docs(&path, cx);
-                            this.sync_siblings(&view, &path, cx);
                         }
                         EditorEvent::GoToDefinition { line, character } => {
                             let at = athena_lsp::Position {
@@ -1647,18 +1646,6 @@ impl Shell {
                 ItemView::Image(image) => image.update(cx, |v, cx| v.reload_if_changed(cx)),
                 ItemView::Doc(doc) => doc.update(cx, |v, cx| v.refresh(cx)),
                 _ => {}
-            }
-        }
-    }
-
-    /// Other tabs on the same file pick up a save: clean ones reload, dirty ones show the conflict bar.
-    fn sync_siblings(&self, saved: &Entity<EditorView>, path: &Path, cx: &mut Context<Self>) {
-        for view in self.items.values() {
-            if let ItemView::Editor(editor) = view
-                && editor != saved
-                && editor.read(cx).path() == path
-            {
-                editor.update(cx, |v, cx| v.check_disk(cx));
             }
         }
     }
