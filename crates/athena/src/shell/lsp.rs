@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use athena_editor::{
     Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, ServerEdit, Signature,
@@ -31,6 +31,10 @@ const SNIPPET_CHARS: usize = 160;
 
 const NO_SERVER: &str = "No language server runs for this file.";
 
+/// A server that stops this many times within `CRASH_WINDOW` is left stopped, as in VS Code.
+const MAX_CRASHES: usize = 5;
+const CRASH_WINDOW: Duration = Duration::from_secs(180);
+
 type ServerKey = (PathBuf, ServerKind);
 
 struct Server {
@@ -44,10 +48,14 @@ pub(super) struct LspState {
     servers: HashMap<ServerKey, Server>,
     /// Servers that failed to start, not retried until Athena restarts.
     failed: HashMap<ServerKey, String>,
-    diagnostics: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// Each file's diagnostics and the server that published them.
+    diagnostics: HashMap<PathBuf, (ServerKey, Vec<Diagnostic>)>,
     /// Documents the servers have open, and which server has each.
     documents: HashMap<PathBuf, ServerKey>,
     changes: HashMap<PathBuf, Task<()>>,
+    /// When each server last stopped unexpectedly, within `CRASH_WINDOW`.
+    crashes: HashMap<ServerKey, Vec<Instant>>,
+    restarts: HashMap<ServerKey, Task<()>>,
     pub(super) jump: Option<(PathBuf, Position)>,
     references: References,
     /// The project the references were asked from; other projects show the drawer tab empty.
@@ -97,6 +105,11 @@ fn with_snippets(mut found: Vec<Location>) -> Vec<Reference> {
             }
         })
         .collect()
+}
+
+/// How long to wait before restarting a server that has stopped `crashes` times in the window.
+fn restart_delay(crashes: usize) -> Option<Duration> {
+    (crashes < MAX_CRASHES).then(|| Duration::from_millis(500) * (1 << crashes.saturating_sub(1)))
 }
 
 fn server_for(lang: Lang) -> Option<(ServerKind, &'static str)> {
@@ -260,7 +273,7 @@ impl Shell {
             }
             Event::Diagnostics { path, list } => {
                 let doc = document_key(&path);
-                self.lsp.diagnostics.insert(doc.clone(), list);
+                self.lsp.diagnostics.insert(doc.clone(), (key, list));
                 for editor in self.editors_showing(&doc, cx) {
                     self.push_markers(&editor, &doc, cx);
                 }
@@ -269,17 +282,88 @@ impl Shell {
                 let Some(server) = self.lsp.servers.remove(&key) else {
                     return;
                 };
-                self.lsp.documents.retain(|_, k| *k != key);
+                self.lsp.documents.retain(|doc, k| {
+                    let keep = *k != key;
+                    if !keep {
+                        self.lsp.changes.remove(doc);
+                    }
+                    keep
+                });
+                self.clear_diagnostics(&key, cx);
                 let program = key.1.program();
                 tracing::warn!("{program} stopped: {why}");
-                let title = if server.ready {
-                    format!("{program} stopped; it restarts when you open a file")
-                } else {
-                    self.lsp.failed.insert(key, why.clone());
-                    format!("{program} could not start")
+                let crashes = {
+                    let times = self.lsp.crashes.entry(key.clone()).or_default();
+                    times.retain(|t| t.elapsed() < CRASH_WINDOW);
+                    times.push(Instant::now());
+                    times.len()
+                };
+                let title = match restart_delay(crashes).filter(|_| server.ready) {
+                    Some(delay) => {
+                        self.schedule_lsp_restart(key, delay, cx);
+                        format!("{program} stopped; restarting it")
+                    }
+                    None if server.ready => {
+                        self.lsp.failed.insert(key, why.clone());
+                        format!("{program} stopped {crashes} times in 3 minutes; not restarting it")
+                    }
+                    None => {
+                        self.lsp.failed.insert(key, why.clone());
+                        format!("{program} could not start")
+                    }
                 };
                 self.local_notice(NoticeKind::Message { title, body: why }, cx);
             }
+        }
+    }
+
+    /// Drops what a stopped server reported; its replacement publishes afresh.
+    fn clear_diagnostics(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        let files: Vec<PathBuf> = self
+            .lsp
+            .diagnostics
+            .iter()
+            .filter(|(_, (k, _))| k == key)
+            .map(|(file, _)| file.clone())
+            .collect();
+        for file in files {
+            self.lsp.diagnostics.remove(&file);
+            for editor in self.editors_showing(&file, cx) {
+                self.push_markers(&editor, &file, cx);
+            }
+        }
+    }
+
+    fn schedule_lsp_restart(&mut self, key: ServerKey, delay: Duration, cx: &mut Context<Self>) {
+        let task_key = key.clone();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| this.restart_lsp(&task_key, cx));
+        });
+        self.lsp.restarts.insert(key, task);
+    }
+
+    /// Starts a stopped server again by reopening the files of its language that its project shows.
+    fn restart_lsp(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        self.lsp.restarts.remove(key);
+        let editors: Vec<Entity<EditorView>> = self
+            .items
+            .iter()
+            .filter(|((root, _), _)| *root == key.0)
+            .filter_map(|(_, view)| match view {
+                ItemView::Editor(e) => Some(e.clone()),
+                _ => None,
+            })
+            .filter(|e| {
+                e.read(cx)
+                    .lang()
+                    .and_then(server_for)
+                    .is_some_and(|(kind, _)| kind == key.1)
+            })
+            .collect();
+        tracing::info!(root = %key.0.display(), files = editors.len(), "restarting {}", key.1.program());
+        for editor in editors {
+            self.lsp_opened(&key.0, &editor, cx);
         }
     }
 
@@ -298,7 +382,7 @@ impl Shell {
             .lsp
             .diagnostics
             .get(doc)
-            .map(|list| list.iter().map(marker).collect())
+            .map(|(_, list)| list.iter().map(marker).collect())
             .unwrap_or_default();
         editor.update(cx, |e, cx| e.set_markers(markers, cx));
     }
@@ -784,6 +868,8 @@ impl Shell {
         self.lsp.servers.retain(|(r, _), _| r != root);
         self.lsp.failed.retain(|(r, _), _| r != root);
         self.lsp.documents.retain(|_, (r, _)| r != root);
+        self.lsp.crashes.retain(|(r, _), _| r != root);
+        self.lsp.restarts.retain(|(r, _), _| r != root);
     }
 
     /// Diagnostics for `path`, or for every file under `roots`, 1-based for people and Claude.
@@ -800,7 +886,7 @@ impl Shell {
                 Some(p) => file.as_path() == p,
                 None => roots.iter().any(|r| file.starts_with(r)),
             })
-            .flat_map(|(file, list)| {
+            .flat_map(|(file, (_, list))| {
                 list.iter().map(move |d| DiagnosticInfo {
                     path: file.clone(),
                     line: d.range.start.line + 1,
@@ -813,5 +899,25 @@ impl Shell {
             .collect();
         out.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_crashed_server_restarts_later_each_time_and_then_stays_stopped() {
+        let delays: Vec<_> = (1..=MAX_CRASHES).map(restart_delay).collect();
+        assert_eq!(
+            delays,
+            [
+                Some(Duration::from_millis(500)),
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(2)),
+                Some(Duration::from_secs(4)),
+                None,
+            ]
+        );
     }
 }
