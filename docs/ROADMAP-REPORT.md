@@ -41,6 +41,14 @@ looked at it. Start with [What to check when you're back](#what-to-check-when-yo
 - Performance: terminal row cache (E1), daemon foreground poll off the lock (E4), non-blocking
   delivery with lagging clients dropped (E5), closed tabs no longer leak a thread (E6), coalesced
   shell redraws (E2), notices capped (E3).
+- Hardening (a robustness sweep run before tagging v0.3.0):
+  - **Crash and data-loss fixes:** Cmd+/ no longer crashes on lines indented with NBSP or U+3000. Saving through a symlink updates the target and keeps the link. Language servers can no longer crash the editor with overlapping edits.
+  - **Unsaved work:** panics are logged to `app.log` with a copy of each unsaved buffer. A Dock quit or logout saves or keeps recovery copies, offered on the next launch. Auto save no longer recreates a file deleted on disk.
+  - **Workspace file:** `workspace.json` is fsynced, and only a file that fails to parse is moved aside, to a timestamped copy.
+  - **Replace All** acts only on the results the user saw.
+  - **Session daemon:** closing a pane hangs up every process on its pty and kills anything that ignores it. Shells no tab ever attached to end after 60 s. No signal is sent to a pid that may have been reused. A client dropped for falling behind gets a short replay.
+  - **Language servers** restart after a crash, with backoff, and reopen their files. Writes to a server go through one thread.
+  - **Smaller fixes:** git output waits have a time limit. App-socket replies are trimmed to fit the frame limit. A closed project's state is cleared.
 
 ## Your requests
 
@@ -113,6 +121,13 @@ From the commits:
 - Navigate forward is bound as `ctrl-_` because that is what macOS reports for ⌃⇧-.
 - The double-click divider ease is the one size animation allowed over live terminals.
 - "No definition found" and similar lookups are transient toasts, not saved notifications.
+- Hardening:
+  - A project whose folder is missing at launch is dropped from the list, but its shells are left running in the daemon. A temporarily unmounted volume should not cost live sessions.
+  - Shells are ended automatically only when no tab ever attached to them within 60 s.
+  - Recovery copies live under `~/Library/Application Support/athena/recovery/`. The newest 10 offered sessions are kept.
+  - Cmd+S on a file deleted on disk shows the bar instead of silently recreating it, as VS Code would.
+  - Hard-linked files are rewritten in place, so links survive but that save is not atomic.
+  - A language server that stops 5 times within 3 minutes stays stopped.
 
 ## Corrections to the running log
 
