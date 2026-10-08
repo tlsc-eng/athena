@@ -70,6 +70,11 @@ pub struct SelectProject(pub usize);
 #[action(namespace = athena, no_json)]
 pub struct SelectTab(pub usize);
 
+/// The entry of the open code action menu to run.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = athena, no_json)]
+pub struct ApplyCodeAction(pub usize);
+
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &Hide, cx| cx.hide());

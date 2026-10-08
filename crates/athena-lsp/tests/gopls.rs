@@ -275,6 +275,14 @@ fn gopls_renames_fixes_imports_lists_symbols_and_finds_implementations() {
             .all(|a| a.kind.as_deref() == Some("source.organizeImports")),
         "{organize:?}"
     );
+    let organized = match organize.first().and_then(|a| a.edit.as_ref()) {
+        Some(edit) => match edit.changes.as_slice() {
+            [FileChange::Edit { edits, .. }] => apply_text_edits(main, edits).unwrap(),
+            other => panic!("unexpected organize imports edit {other:?}"),
+        },
+        None => panic!("organize imports offers no edit: {organize:?}"),
+    };
+    assert!(organized.contains("\"fmt\""), "{organized}");
 
     let symbols = futures_lite_block_on(client.document_symbols(&main_file)).unwrap();
     let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();

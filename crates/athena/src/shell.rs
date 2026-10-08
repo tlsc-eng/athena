@@ -1,6 +1,7 @@
 mod branches;
 mod bridge;
 mod claude;
+mod code_actions;
 mod containers_view;
 mod dnd;
 mod drawer;
@@ -97,6 +98,7 @@ pub struct Shell {
     playwright: playwright_view::PlaywrightState,
     lsp: lsp::LspState,
     problems: problems::ProblemsState,
+    code_actions: code_actions::CodeActionState,
     git: git_view::GitState,
     review: review::ReviewState,
     search: search::SearchState,
@@ -236,6 +238,7 @@ impl Shell {
             playwright: playwright_view::PlaywrightState::default(),
             lsp: lsp::LspState::default(),
             problems: problems::ProblemsState::default(),
+            code_actions: code_actions::CodeActionState::default(),
             git: git_view::GitState::default(),
             review: review::ReviewState::default(),
             search: search::SearchState::default(),
@@ -818,6 +821,16 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ShowProblems, _, cx| this.toggle_problems(cx)))
             .on_action(cx.listener(|this, _: &NextProblem, _, cx| this.go_to_problem(true, cx)))
             .on_action(cx.listener(|this, _: &PrevProblem, _, cx| this.go_to_problem(false, cx)))
+            .on_action(
+                cx.listener(|this, _: &athena_editor::ShowCodeActions, w, cx| {
+                    this.show_code_actions(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, a: &crate::actions::ApplyCodeAction, _, cx| {
+                    this.apply_code_action(a.0, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &athena_editor::RenameSymbol, w, cx| {
                 this.lsp_rename_start(w, cx)
             }))

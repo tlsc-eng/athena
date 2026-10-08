@@ -208,6 +208,7 @@ impl Shell {
         };
         let doc = document_key(&path);
         self.push_markers(editor, &doc, cx);
+        self.watch_for_lightbulb(editor, cx);
         let (Some(lang), Some(version), Some(text)) = (lang, version, text) else {
             return;
         };
@@ -330,6 +331,7 @@ impl Shell {
                 for editor in self.editors_showing(&doc, cx) {
                     self.push_markers(&editor, &doc, cx);
                 }
+                self.diagnostics_moved_lightbulb(&doc, cx);
                 // The title bar counter and the Problems tab follow every report.
                 cx.notify();
             }
@@ -653,6 +655,12 @@ impl Shell {
             editor.update(cx, |e, cx| e.format_and_save(request, Vec::new(), cx));
             return;
         };
+        // Go files have their imports organized as they are formatted, as VS Code's Go setup does.
+        let organize = self
+            .lsp
+            .documents
+            .get(&doc)
+            .is_some_and(|(_, kind)| *kind == ServerKind::Go);
         let weak = editor.downgrade();
         let late = weak.clone();
         cx.spawn(async move |_, cx| {
@@ -661,15 +669,27 @@ impl Shell {
         })
         .detach();
         cx.spawn(async move |_, cx| {
-            let edits = match client.formatting(&doc, tab_size, insert_spaces).await {
+            let imports = async {
+                match organize {
+                    true => super::code_actions::organize_imports(&client, &doc).await,
+                    false => Vec::new(),
+                }
+            };
+            let (imports, formatted) =
+                futures::join!(imports, client.formatting(&doc, tab_size, insert_spaces));
+            let edits = match formatted {
                 Ok(edits) => edits,
                 Err(why) => {
                     tracing::warn!("formatting failed: {why}");
                     Vec::new()
                 }
             };
-            tracing::debug!("formatting → {} edits", edits.len());
-            let edits = edits
+            tracing::debug!(
+                "formatting → {} edits, organize imports → {}",
+                edits.len(),
+                imports.len()
+            );
+            let edits = super::code_actions::merge_save_edits(imports, edits)
                 .into_iter()
                 .map(|e| ServerEdit {
                     start: (e.range.start.line, e.range.start.character),
