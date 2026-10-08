@@ -24,6 +24,7 @@ mod quit;
 mod rename;
 mod review;
 mod search;
+mod shortcuts;
 mod status_bar;
 mod tree;
 mod usage_view;
@@ -288,6 +289,7 @@ impl Shell {
         shell.start_usage(window, cx);
         shell.start_git(window, cx);
         shell.start_ide(window, cx);
+        shell.start_keymap(window, cx);
         crate::system_notify::set_badge(shell.unread());
         shell
     }
@@ -891,6 +893,11 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &crate::actions::ThemeDark, w, cx| {
                 this.set_theme_choice(athena_workspace::ThemeChoice::Dark, w, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenKeyboardShortcuts, w, cx| {
+                    this.open_keymap_file(w, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {
                 this.workspace.recent.clear();
                 this.schedule_save(cx);

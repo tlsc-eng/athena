@@ -68,6 +68,7 @@ actions!(
         ThemeFollowSystem,
         ThemeLight,
         ThemeDark,
+        OpenKeyboardShortcuts,
     ]
 );
 
@@ -171,6 +172,11 @@ pub fn sync_recent_menu(recent: &[PathBuf], cx: &mut App) {
     {
         return;
     }
+    rebuild_menus(recent, cx);
+}
+
+/// Sets the menu bar again, which also refreshes the shortcuts it shows.
+pub fn rebuild_menus(recent: &[PathBuf], cx: &mut App) {
     cx.set_global(RecentMenu(recent.to_vec()));
     cx.set_menus(menus(recent));
 }
@@ -227,6 +233,7 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Toggle Auto Save", ToggleAutoSave),
                 MenuItem::action("Toggle Format on Save", ToggleFormatOnSave),
                 MenuItem::action("Toggle Claude Code Integration", ToggleIdeIntegration),
+                MenuItem::action("Keyboard Shortcuts", OpenKeyboardShortcuts),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close Project", CloseProject),

@@ -212,6 +212,10 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Theme: light", Box::new(actions::ThemeLight)),
         ("Theme: dark", Box::new(actions::ThemeDark)),
+        (
+            "Open keyboard shortcuts file",
+            Box::new(actions::OpenKeyboardShortcuts),
+        ),
     ]
 }
 

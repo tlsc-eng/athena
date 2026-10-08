@@ -3,6 +3,7 @@ mod app_socket;
 mod claude_hooks;
 mod cli;
 mod ide;
+mod keymap;
 mod mcp;
 mod procinfo;
 mod shell;
