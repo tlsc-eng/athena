@@ -109,8 +109,7 @@ pub struct Shell {
     content_switches: panes::ContentSwitches,
     /// Each pane's tab strip scroll, and the tab it last scrolled into view.
     tab_scroll: HashMap<(PathBuf, PaneId), (gpui::ScrollHandle, Option<ItemId>)>,
-    /// A split easing to 50 % after a divider double-click: its path, starting ratio, start and generation.
-    ratio_anim: Option<(athena_workspace::NodePath, f32, motion::Opening, u64)>,
+    ratio_anim: Option<panes::RatioAnim>,
     /// Keys oneshot animations so reopening something replays them.
     generation: u64,
     save_task: Option<Task<()>>,

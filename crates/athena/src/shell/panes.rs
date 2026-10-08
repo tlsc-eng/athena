@@ -58,6 +58,32 @@ impl ContentSwitches {
     }
 }
 
+/// A split easing to 50 % after a divider double-click.
+pub(super) struct RatioAnim {
+    root: PathBuf,
+    path: NodePath,
+    from: f32,
+    opening: motion::Opening,
+    generation: u64,
+}
+
+impl RatioAnim {
+    /// The ratio to draw for the split at `path` in `root` heading for `to`, if this is that split.
+    fn ratio(
+        &self,
+        root: &Path,
+        path: &NodePath,
+        to: f32,
+        duration: std::time::Duration,
+    ) -> Option<f32> {
+        if self.root != root || self.path != *path {
+            return None;
+        }
+        let d = (self.opening.since.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.);
+        Some(self.from + (to - self.from) * motion::ease_standard()(d))
+    }
+}
+
 /// An in-progress resize: a pane divider in the active project, the tree's edge or the drawer's.
 pub(super) enum Drag {
     Divider {
@@ -1002,6 +1028,8 @@ impl Shell {
     }
 
     fn after_layout_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The eased split's path may now name another split.
+        self.ratio_anim = None;
         self.note_editor_pane();
         self.focus_active_item(window, cx);
         self.schedule_save(cx);
@@ -1118,10 +1146,11 @@ impl Shell {
         .absolute()
         .size_full();
 
-        if self.ratio_anim.is_some() {
+        let easing = self.ratio_anim.as_ref().is_some_and(|a| a.root == root);
+        if easing {
             window.request_animation_frame();
         }
-        let dividers = if self.zoomed.is_some() || self.ratio_anim.is_some() {
+        let dividers = if self.zoomed.is_some() || easing {
             Vec::new()
         } else {
             layout.layout(self.pane_area()).1
@@ -1177,14 +1206,11 @@ impl Shell {
                 let horizontal = *axis == Axis::Horizontal;
                 // The one sanctioned size animation over live panes, interpolated here rather than
                 // through an animation wrapper, which would re-key both panes and replay their fades.
-                let ratio = match self.ratio_anim.as_ref().filter(|a| a.0 == *path) {
-                    Some(&(_, from, opening, _)) => {
-                        let d =
-                            (opening.since.elapsed().as_secs_f32() / fast.as_secs_f32()).min(1.);
-                        from + (*ratio - from) * motion::ease_standard()(d)
-                    }
-                    None => *ratio,
-                };
+                let ratio = self
+                    .ratio_anim
+                    .as_ref()
+                    .and_then(|a| a.ratio(root, path, *ratio, fast))
+                    .unwrap_or(*ratio);
                 let first_box = div()
                     .flex_none()
                     .overflow_hidden()
@@ -1757,12 +1783,25 @@ impl Shell {
         let reduced = cx.theme().motion.reduced;
         if !reduced && (from - 0.5).abs() > f32::EPSILON {
             let generation = self.next_generation();
-            self.ratio_anim = Some((path, from, motion::Opening::now(), generation));
+            let Some(root) = self.active_root() else {
+                return;
+            };
+            self.ratio_anim = Some(RatioAnim {
+                root,
+                path,
+                from,
+                opening: motion::Opening::now(),
+                generation,
+            });
             let delay = cx.theme().motion.fast;
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.ratio_anim.as_ref().is_some_and(|a| a.3 == generation) {
+                    if this
+                        .ratio_anim
+                        .as_ref()
+                        .is_some_and(|a| a.generation == generation)
+                    {
                         this.ratio_anim = None;
                         cx.notify();
                     }
@@ -2138,6 +2177,24 @@ mod tests {
         assert_eq!(successor_pane(&layout, area, middle, gone), Some(right));
         let all = |_: PaneId| true;
         assert_eq!(successor_pane(&layout, area, middle, all), None);
+    }
+
+    #[test]
+    fn an_easing_split_is_matched_by_project_and_path() {
+        let anim = RatioAnim {
+            root: PathBuf::from("/a"),
+            path: vec![true],
+            from: 0.2,
+            opening: motion::Opening::now(),
+            generation: 1,
+        };
+        let long = std::time::Duration::from_secs(60);
+        let start = anim.ratio(Path::new("/a"), &vec![true], 0.5, long).unwrap();
+        assert!((start - 0.2).abs() < 0.05);
+        let done = anim.ratio(Path::new("/a"), &vec![true], 0.5, std::time::Duration::ZERO);
+        assert_eq!(done, Some(0.5));
+        assert_eq!(anim.ratio(Path::new("/b"), &vec![true], 0.5, long), None);
+        assert_eq!(anim.ratio(Path::new("/a"), &vec![false], 0.5, long), None);
     }
 
     #[test]
