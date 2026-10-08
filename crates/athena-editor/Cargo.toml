@@ -7,3 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ropey.workspace = true
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+streaming-iterator.workspace = true
+anyhow.workspace = true
