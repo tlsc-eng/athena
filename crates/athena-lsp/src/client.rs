@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
@@ -40,7 +40,8 @@ enum Outgoing {
 /// A reply's `result`, or the message of its `error`.
 type Reply = Result<Value, String>;
 type Pending = Arc<Mutex<HashMap<i64, async_channel::Sender<Reply>>>>;
-type Writer = Arc<Mutex<Option<BufWriter<ChildStdin>>>>;
+/// Frames for the one thread that writes to the server, so no writer waits on another.
+type Frames = mpsc::Sender<Value>;
 
 /// One running language server. Calls never block: messages queue until `initialize` has finished.
 pub struct Client {
@@ -66,17 +67,21 @@ impl Client {
             signature_triggers: signature_triggers.clone(),
             kind,
             root,
-            outgoing: out_rx,
+            outgoing: out_rx.clone(),
             events: events_tx.clone(),
             pending: pending.clone(),
             child: child.clone(),
         };
+        let waiters = pending.clone();
         let spawned = thread::Builder::new()
             .name(format!("lsp-{}", kind.program()))
             .spawn(move || {
                 if let Err(e) = session.run() {
                     let _ = events_tx.send_blocking(Event::Stopped(format!("{e:#}")));
                 }
+                // Requests sent while it failed to start are answered rather than left waiting.
+                out_rx.close();
+                waiters.lock().expect("pending lock").clear();
             });
         if spawned.is_err() {
             let _ = events_rx.close();
@@ -90,6 +95,15 @@ impl Client {
             signature_triggers,
         };
         (client, events_rx)
+    }
+
+    /// The server's process id, once it is running.
+    pub fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .expect("child lock")
+            .as_ref()
+            .map(Child::id)
     }
 
     /// The server's completion trigger characters; empty until it has started.
@@ -111,9 +125,14 @@ impl Client {
         tracing::debug!(id, method, "lsp request");
         let (tx, rx) = async_channel::bounded(1);
         self.pending.lock().expect("pending lock").insert(id, tx);
-        let _ = self
+        // Once the server has gone the queue is closed, and the waiter is told so at once.
+        if self
             .outgoing
-            .try_send(Outgoing::Request(id, method, params));
+            .try_send(Outgoing::Request(id, method, params))
+            .is_err()
+        {
+            self.pending.lock().expect("pending lock").remove(&id);
+        }
         rx
     }
 
@@ -274,10 +293,21 @@ impl Session {
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
         *self.child.lock().expect("child lock") = Some(child);
+        self.serve(stdin, stdout)
+    }
 
-        let writer: Writer = Arc::new(Mutex::new(Some(BufWriter::new(stdin))));
+    fn serve(
+        self,
+        stdin: impl Write + Send + 'static,
+        stdout: impl Read + Send + 'static,
+    ) -> Result<()> {
+        let (writer, frames) = mpsc::channel();
+        thread::Builder::new()
+            .name("lsp-writer".into())
+            .spawn(move || write_frames(BufWriter::new(stdin), frames))?;
         let reader = Reader {
             writer: writer.clone(),
+            outgoing: self.outgoing.clone(),
             pending: self.pending.clone(),
             events: self.events.clone(),
         };
@@ -290,7 +320,7 @@ impl Session {
             self.pending.lock().expect("pending lock").insert(0, tx);
             rx
         };
-        send(&writer, &request(0, "initialize", self.initialize_params()))?;
+        send(&writer, request(0, "initialize", self.initialize_params()))?;
         let result = init
             .recv_blocking()
             .context("the server stopped while starting")?
@@ -318,7 +348,7 @@ impl Session {
             "/capabilities/signatureHelpProvider/retriggerCharacters",
         ));
         let _ = self.signature_triggers.set(signature);
-        send(&writer, &notification("initialized", json!({})))?;
+        send(&writer, notification("initialized", json!({})))?;
         let _ = self.events.send_blocking(Event::Ready);
 
         while let Ok(message) = self.outgoing.recv_blocking() {
@@ -327,10 +357,10 @@ impl Session {
                 Outgoing::Request(id, method, params) => request(id, method, params),
                 Outgoing::Shutdown => break,
             };
-            send(&writer, &frame)?;
+            send(&writer, frame)?;
         }
-        let _ = send(&writer, &request(i64::MAX, "shutdown", Value::Null));
-        let _ = send(&writer, &notification("exit", Value::Null));
+        let _ = send(&writer, request(i64::MAX, "shutdown", Value::Null));
+        let _ = send(&writer, notification("exit", Value::Null));
         Ok(())
     }
 
@@ -372,7 +402,8 @@ impl Session {
 }
 
 struct Reader {
-    writer: Writer,
+    writer: Frames,
+    outgoing: async_channel::Receiver<Outgoing>,
     pending: Pending,
     events: async_channel::Sender<Event>,
 }
@@ -383,9 +414,10 @@ impl Reader {
         while let Ok(Some(message)) = read_message(&mut input) {
             self.handle(message);
         }
-        // Waiters see a closed channel instead of hanging.
+        // Waiters see a closed channel instead of hanging; closing the queue first means a
+        // request that misses this clear is refused by the queue instead.
+        self.outgoing.close();
         self.pending.lock().expect("pending lock").clear();
-        *self.writer.lock().expect("writer lock") = None;
         let _ = self
             .events
             .send_blocking(Event::Stopped("the language server exited".into()));
@@ -427,7 +459,7 @@ impl Reader {
                 };
                 let _ = send(
                     &self.writer,
-                    &json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    json!({"jsonrpc": "2.0", "id": id, "result": result}),
                 );
             }
             (Some("textDocument/publishDiagnostics"), None) => {
@@ -461,14 +493,25 @@ fn notification(method: &str, params: Value) -> Value {
     json!({"jsonrpc": "2.0", "method": method, "params": params})
 }
 
-fn send(writer: &Writer, message: &Value) -> Result<()> {
-    let body = serde_json::to_vec(message)?;
-    let mut guard = writer.lock().expect("writer lock");
-    let out = guard.as_mut().context("the language server has exited")?;
-    write!(out, "Content-Length: {}\r\n\r\n", body.len())?;
-    out.write_all(&body)?;
-    out.flush()?;
-    Ok(())
+fn send(writer: &Frames, message: Value) -> Result<()> {
+    writer
+        .send(message)
+        .map_err(|_| anyhow!("the language server has exited"))
+}
+
+/// Writes queued frames in order until the server stops reading or every sender is gone.
+fn write_frames(mut out: impl Write, frames: mpsc::Receiver<Value>) {
+    for message in frames {
+        let Ok(body) = serde_json::to_vec(&message) else {
+            continue;
+        };
+        let written = write!(out, "Content-Length: {}\r\n\r\n", body.len())
+            .and_then(|()| out.write_all(&body))
+            .and_then(|()| out.flush());
+        if written.is_err() {
+            return;
+        }
+    }
 }
 
 fn read_message(input: &mut impl BufRead) -> Result<Option<Value>> {
@@ -500,6 +543,82 @@ fn read_message(input: &mut impl BufRead) -> Result<Option<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixStream;
+    use std::time::Instant;
+
+    fn write_message(out: &mut impl Write, message: &Value) {
+        let body = serde_json::to_vec(message).unwrap();
+        write!(out, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+        out.write_all(&body).unwrap();
+    }
+
+    /// A server that floods configuration requests while the client sends a huge didChange.
+    #[test]
+    fn answering_server_requests_never_waits_behind_a_large_write() {
+        const REQUESTS: i64 = 2000;
+        let (client_end, server_end) = UnixStream::pair().unwrap();
+        let (out_tx, out_rx) = async_channel::unbounded();
+        let (events_tx, events) = async_channel::unbounded();
+        let session = Session {
+            kind: ServerKind::Go,
+            root: PathBuf::from("/tmp"),
+            outgoing: out_rx,
+            events: events_tx,
+            pending: Arc::default(),
+            child: Arc::default(),
+            triggers: Arc::default(),
+            signature_triggers: Arc::default(),
+        };
+        let stdin = client_end.try_clone().unwrap();
+        thread::spawn(move || session.serve(stdin, client_end));
+
+        let (done_tx, done) = mpsc::channel();
+        thread::spawn(move || {
+            let mut input = BufReader::new(server_end.try_clone().unwrap());
+            let mut output = server_end;
+            let init = read_message(&mut input).unwrap().unwrap();
+            write_message(
+                &mut output,
+                &json!({"jsonrpc": "2.0", "id": init["id"], "result": {"capabilities": {}}}),
+            );
+            let initialized = read_message(&mut input).unwrap().unwrap();
+            assert_eq!(initialized["method"], "initialized");
+            for id in 0..REQUESTS {
+                write_message(
+                    &mut output,
+                    &json!({"jsonrpc": "2.0", "id": 1000 + id, "method": "workspace/configuration",
+                            "params": {"items": [{"section": "gopls"}]}}),
+                );
+            }
+            let (mut replies, mut changed) = (0, false);
+            while replies < REQUESTS || !changed {
+                let message = read_message(&mut input).unwrap().unwrap();
+                match message["method"].as_str() {
+                    Some("textDocument/didChange") => changed = true,
+                    Some(_) => {}
+                    None => replies += 1,
+                }
+            }
+            let _ = done_tx.send(());
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(events.try_recv(), Ok(Event::Ready)) {
+            assert!(Instant::now() < deadline, "never became ready");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let text = "x".repeat(4 * 1024 * 1024);
+        out_tx
+            .try_send(Outgoing::Notify(
+                "textDocument/didChange",
+                json!({"contentChanges": [{"text": text}]}),
+            ))
+            .unwrap();
+        assert!(
+            done.recv_timeout(Duration::from_secs(20)).is_ok(),
+            "client and server deadlocked"
+        );
+    }
 
     #[test]
     fn frames_are_read_with_their_length() {

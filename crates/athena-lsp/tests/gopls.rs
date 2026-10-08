@@ -118,6 +118,79 @@ fn gopls_reports_an_unused_import_and_answers_lookups_hover_completion_formattin
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_killed_gopls_reports_stopped_and_a_new_one_reports_the_open_file_again() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("athena-lsp-crash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(dir.join("go.mod"), "module example.com/crash\n\ngo 1.21\n").unwrap();
+    let source = "package main\n\nimport \"os\"\n\nfunc main() {}\n";
+    let file = dir.join("main.go");
+    std::fs::write(&file, source).unwrap();
+
+    let reports_unused_import = |client: &Client, events: &async_channel::Receiver<Event>| {
+        client.did_open(&file, "go", 1, source.into());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match next_event(events, deadline).expect("no diagnostics from gopls in time") {
+                Event::Diagnostics { path, list }
+                    if path == file && list.iter().any(|d| d.message.contains("\"os\"")) =>
+                {
+                    return;
+                }
+                Event::Stopped(why) => panic!("gopls stopped: {why}"),
+                _ => {}
+            }
+        }
+    };
+
+    let (client, events) = Client::start(ServerKind::Go, dir.clone());
+    reports_unused_import(&client, &events);
+    // gopls may run under a version manager's shim, so the process tree goes, as in a crash.
+    let mut tree = vec![client.pid().expect("gopls is running").to_string()];
+    let mut i = 0;
+    while i < tree.len() {
+        let children = std::process::Command::new("pgrep")
+            .args(["-P", &tree[i]])
+            .output()
+            .unwrap();
+        tree.extend(
+            String::from_utf8_lossy(&children.stdout)
+                .split_whitespace()
+                .map(String::from),
+        );
+        i += 1;
+    }
+    let killed = std::process::Command::new("kill")
+        .arg("-KILL")
+        .args(&tree)
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match next_event(&events, deadline).expect("no Stopped after gopls was killed") {
+            Event::Stopped(_) => break,
+            _ => continue,
+        }
+    }
+    let at = Position {
+        line: 4,
+        character: 5,
+    };
+    assert!(futures_lite_block_on(client.hover(&file, at)).is_err());
+    drop(client);
+
+    let (client, events) = Client::start(ServerKind::Go, dir.clone());
+    reports_unused_import(&client, &events);
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A minimal executor: the definition future only waits on a channel the reader thread fills.
 fn futures_lite_block_on<F: std::future::Future>(future: F) -> F::Output {
     use std::pin::pin;
