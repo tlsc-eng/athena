@@ -52,6 +52,7 @@ athena-ui = { path = "crates/athena-ui" }
 athena-containers = { path = "crates/athena-containers" }
 athena-playwright = { path = "crates/athena-playwright" }
 athena-preview = { path = "crates/athena-preview" }
+athena-lsp = { path = "crates/athena-lsp" }
 
 [profile.release]
 lto = "thin"

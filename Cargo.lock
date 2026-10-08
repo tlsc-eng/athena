@@ -500,6 +500,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "athena-lsp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "athena-mux"
 version = "0.1.0"
 dependencies = [
