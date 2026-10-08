@@ -317,7 +317,15 @@ impl TerminalView {
         }
     }
 
+    /// Hangs up the daemon connection; dropping it alone leaves its reader thread blocked.
+    fn disconnect(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            conn.close();
+        }
+    }
+
     fn connect(&mut self, cx: &mut Context<Self>) {
+        self.disconnect();
         self.error = None;
         self.set_stale(None, cx);
         let first = match self.pane {
@@ -835,6 +843,12 @@ impl TerminalView {
     }
 }
 
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        self.disconnect();
+    }
+}
+
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -884,7 +898,6 @@ impl Render for TerminalView {
             let retry =
                 athena_ui::Button::new("terminal-retry", "Try again", ButtonKind::Secondary)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.conn = None;
                         this.connect(cx);
                         cx.notify();
                     }));

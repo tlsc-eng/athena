@@ -45,6 +45,12 @@ impl Connection {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         write_frame(&mut *writer, msg)
     }
+
+    /// Hangs up both directions, so a thread reading the stream `connect` returned sees EOF.
+    pub fn close(&self) {
+        let writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = writer.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// Connects and completes the `Hello` exchange; the returned stream yields `ServerMsg` frames.
@@ -206,4 +212,28 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> io::Result<Arc<AtomicBool>> {
         flag.store(true, Ordering::Release);
     });
     Ok(exited)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_ends_a_reader_blocked_on_the_cloned_stream() {
+        let (ours, _daemon) = UnixStream::pair().unwrap();
+        let mut reader = ours.try_clone().unwrap();
+        let conn = Connection {
+            writer: Mutex::new(ours),
+            daemon_pid: 0,
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(read_frame::<_, ServerMsg>(&mut reader).ok());
+        });
+        thread::sleep(Duration::from_millis(50));
+        assert!(done_rx.try_recv().is_err(), "reader is blocked");
+        conn.close();
+        let read = done_rx.recv_timeout(Duration::from_secs(2));
+        assert!(matches!(read, Ok(Some(None))), "{read:?}");
+    }
 }
