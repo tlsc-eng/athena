@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "athena"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "athena-containers"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-channel 2.5.0",
  "bollard",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "athena-editor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "athena-ui",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "athena-lsp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "athena-mux"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "athena-proto",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "athena-playwright"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "athena-preview"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-channel 2.5.0",
  "athena-ui",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "athena-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "athena-term"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "athena-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "gpui",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "athena-workspace"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "notify",
