@@ -554,8 +554,10 @@ impl TerminalView {
             }
             ServerMsg::Foreground { process, .. } => {
                 let was = self.foreground.as_ref().map(|p| p.pid);
-                if was.is_some()
-                    && was != process.as_ref().map(|p| p.pid)
+                // On attach, a replayed title over an idle shell came from a program now gone.
+                let attached_to_shell =
+                    was.is_none() && process.as_ref().is_some_and(|p| is_shell(&p.name));
+                if (was.is_some() && was != process.as_ref().map(|p| p.pid) || attached_to_shell)
                     && let Some(terminal) = self.terminal.as_mut()
                 {
                     terminal.forget_stale_title();

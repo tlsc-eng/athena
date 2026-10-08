@@ -120,7 +120,7 @@ impl Terminal {
     /// Drops a title set before the foreground program changed, so the last program's title
     /// does not label the next one; a title set by the new program as it started stays.
     pub fn forget_stale_title(&mut self) {
-        if self.title_at.is_some_and(|at| at.elapsed() > TITLE_GRACE) {
+        if self.title_at.is_none_or(|at| at.elapsed() > TITLE_GRACE) {
             self.title = None;
         }
     }
@@ -147,7 +147,8 @@ impl Terminal {
             match event {
                 Event::Title(title) => {
                     self.title = Some(sanitize_title(&title));
-                    self.title_at = Some(Instant::now());
+                    // A replayed title's age is unknown, so it counts as old.
+                    self.title_at = (!self.replaying).then(Instant::now);
                 }
                 Event::ResetTitle => self.title = None,
                 Event::PtyWrite(reply) => self.transport.write(reply.into_bytes()),
@@ -469,6 +470,17 @@ mod tests {
         t.forget_stale_title();
         assert_eq!(t.title.as_deref(), Some("claude: fix tests"));
         t.title_at = Instant::now().checked_sub(TITLE_GRACE * 2);
+        t.forget_stale_title();
+        assert_eq!(t.title, None);
+    }
+
+    #[test]
+    fn a_replayed_title_counts_as_old() {
+        let (mut t, _) = terminal();
+        t.replaying = true;
+        feed(&mut t, b"\x1b]0;finished script\x07");
+        t.replaying = false;
+        assert_eq!(t.title.as_deref(), Some("finished script"));
         t.forget_stale_title();
         assert_eq!(t.title, None);
     }
