@@ -115,18 +115,36 @@ fn read_file(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// Shown above a review of Claude's edits that falls back to the index.
+const SKIPPED_NOTE: &str = "No copy from before Claude's edits was kept because the file was over \
+                            20 MB or not a regular file. Showing changes against the index.";
+
 /// Both sides of a diff, read off the main thread.
-fn load(
+#[derive(Debug, PartialEq, Eq)]
+struct Sides {
+    old: String,
+    new: String,
+    /// A review of Claude's edits whose baseline was skipped, compared with the index instead.
+    against_index: bool,
+}
+
+fn load(root: &Path, path: &Path, orig: Option<PathBuf>, base: &DiffBase) -> Result<Sides> {
+    load_with(root, path, orig, base, snapshots::store)
+}
+
+fn load_with(
     root: &Path,
     path: &Path,
     orig: Option<PathBuf>,
     base: &DiffBase,
-) -> Result<(String, String)> {
+    store: impl FnOnce() -> Result<PathBuf>,
+) -> Result<Sides> {
     let rel = || {
         path.strip_prefix(root)
             .map(Path::to_path_buf)
             .context("the file is outside the project")
     };
+    let mut against_index = false;
     let (old, new) = match base {
         DiffBase::Head => {
             let rel = rel()?;
@@ -138,9 +156,13 @@ fn load(
         }
         DiffBase::Index => (git::show(root, Rev::Index, &rel()?)?, read_file(path)?),
         DiffBase::Snapshot { session } => {
-            let old = match snapshots::read(&snapshots::store()?, session, path) {
+            let old = match snapshots::read(&store()?, session, path) {
                 Before::Text(t) => Some(t),
                 Before::Absent => None,
+                Before::Skipped => {
+                    against_index = true;
+                    git::show(root, Rev::Index, &rel()?)?
+                }
                 Before::Unknown => bail!(
                     "No copy of the file from before Claude's edits was kept. Enable Claude Code \
                      hooks for this project to keep one from the next session on."
@@ -149,7 +171,11 @@ fn load(
             (old, read_file(path)?)
         }
     };
-    Ok((text(old)?, text(new)?))
+    Ok(Sides {
+        old: text(old)?,
+        new: text(new)?,
+        against_index,
+    })
 }
 
 /// Stages one hunk; staging the last hunk of a deleted file stages the deletion.
@@ -236,6 +262,7 @@ impl Shell {
         let path = view.read(cx).path().to_path_buf();
         let orig = self.git_orig_path(root, &path);
         let (root, base) = (root.to_path_buf(), base.clone());
+        let (label, _, _) = sides(&base);
         let weak = view.downgrade();
         cx.spawn(async move |this, cx| {
             let (task_root, task_base) = (root.clone(), base.clone());
@@ -246,7 +273,14 @@ impl Shell {
             let view = weak.upgrade();
             if let Some(view) = &view {
                 let _ = view.update(cx, |v, cx| match loaded {
-                    Ok((old, new)) => v.set_texts(old, new, cx),
+                    Ok(sides) => {
+                        let (old_label, note) = match sides.against_index {
+                            true => ("Index", Some(SKIPPED_NOTE)),
+                            false => (label, None),
+                        };
+                        v.set_old_label(old_label, note, cx);
+                        v.set_texts(sides.old, sides.new, cx)
+                    }
                     Err(err) => {
                         tracing::debug!(path = %v.path().display(), "diff: {err:#}");
                         v.set_error(format!("{err:#}"), cx)
@@ -443,13 +477,17 @@ mod tests {
         sh(&["mv", "old.txt", "new.txt"]);
         std::fs::write(dir.join("new.txt"), "one\ntwo\n").unwrap();
         let path = dir.join("new.txt");
+        let pair = |s: Sides| (s.old, s.new);
         let staged = load(&dir, &path, Some(PathBuf::from("old.txt")), &DiffBase::Head).unwrap();
-        assert_eq!(staged, ("one\n".to_string(), "one\n".to_string()));
+        assert_eq!(pair(staged), ("one\n".to_string(), "one\n".to_string()));
         let unstaged = load(&dir, &path, None, &DiffBase::Index).unwrap();
-        assert_eq!(unstaged, ("one\n".to_string(), "one\ntwo\n".to_string()));
+        assert_eq!(
+            pair(unstaged),
+            ("one\n".to_string(), "one\ntwo\n".to_string())
+        );
         std::fs::write(dir.join("fresh.txt"), "new\n").unwrap();
         let untracked = load(&dir, &dir.join("fresh.txt"), None, &DiffBase::Index).unwrap();
-        assert_eq!(untracked, (String::new(), "new\n".to_string()));
+        assert_eq!(pair(untracked), (String::new(), "new\n".to_string()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -481,7 +519,8 @@ mod tests {
         git_out(&["commit", "-qm", "init"]);
 
         std::fs::remove_file(dir.join("gone.txt")).unwrap();
-        let (old, new) = load(&dir, &dir.join("gone.txt"), None, &DiffBase::Index).unwrap();
+        let Sides { old, new, .. } =
+            load(&dir, &dir.join("gone.txt"), None, &DiffBase::Index).unwrap();
         assert_eq!((old.as_str(), new.as_str()), ("a\nb\n", ""));
         stage_hunk(&dir, Path::new("gone.txt"), &old, &new).unwrap();
         assert_eq!(git_out(&["ls-files", "--", "gone.txt"]), "");
@@ -501,13 +540,59 @@ mod tests {
         std::fs::write(dir.join("new.txt"), "n\n").unwrap();
         git_out(&["add", "new.txt"]);
         let rel = Path::new("new.txt");
-        let (old, new) = load(&dir, &dir.join("new.txt"), None, &DiffBase::Head).unwrap();
+        let Sides { old, new, .. } =
+            load(&dir, &dir.join("new.txt"), None, &DiffBase::Head).unwrap();
         assert_eq!((old.as_str(), new.as_str()), ("", "n\n"));
         unstage_hunk(&dir, rel, rel, &new, &old).unwrap();
         assert_eq!(
             git_out(&["status", "--porcelain", "--", "new.txt"]),
             "?? new.txt\n"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_review_whose_baseline_was_skipped_compares_with_the_index() {
+        if !git::available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-review-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let (repo, store) = (dir.join("repo"), dir.join("store"));
+        let ok = std::process::Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let fifo = repo.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: c_path is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        snapshots::take(&store, "s-1", &fifo).unwrap();
+        std::fs::remove_file(&fifo).unwrap();
+        std::fs::write(&fifo, "now a file\n").unwrap();
+        let base = DiffBase::Snapshot {
+            session: "s-1".into(),
+        };
+        let sides = load_with(&repo, &fifo, None, &base, || Ok(store.clone())).unwrap();
+        assert_eq!(
+            sides,
+            Sides {
+                old: String::new(),
+                new: "now a file\n".into(),
+                against_index: true,
+            }
+        );
+        let other = DiffBase::Snapshot {
+            session: "s-2".into(),
+        };
+        let err = load_with(&repo, &fifo, None, &other, || Ok(store.clone())).unwrap_err();
+        assert!(err.to_string().contains("hooks"), "{err:#}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

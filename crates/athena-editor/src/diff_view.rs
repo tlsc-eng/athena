@@ -201,6 +201,8 @@ pub struct DiffView {
     title: SharedString,
     old_label: SharedString,
     new_label: SharedString,
+    /// Why the old side is not what the tab names, shown under the toolbar.
+    note: Option<SharedString>,
     actions: HunkActions,
     inline: bool,
     loaded: Option<Rc<Loaded>>,
@@ -239,6 +241,7 @@ impl DiffView {
             title: title.into(),
             old_label: old_label.into(),
             new_label: new_label.into(),
+            note: None,
             actions,
             inline: false,
             loaded: None,
@@ -264,6 +267,21 @@ impl DiffView {
     /// The new side's text as last diffed, to check a file has not moved on before reverting.
     pub fn new_text(&self) -> Option<&str> {
         Some(&self.loaded.as_ref()?.new.text)
+    }
+
+    /// Names the old side, with a note when it is not the version the tab title promises.
+    pub fn set_old_label(
+        &mut self,
+        label: impl Into<SharedString>,
+        note: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        let (label, note) = (label.into(), note.map(SharedString::from));
+        if self.old_label != label || self.note != note {
+            self.old_label = label;
+            self.note = note;
+            cx.notify();
+        }
     }
 
     /// Diffs two texts off the main thread; the same texts again, shown or in progress, are ignored.
@@ -989,6 +1007,18 @@ impl Render for DiffView {
             )
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .child(self.render_toolbar(cx))
+            .children(self.note.clone().map(|note| {
+                div()
+                    .flex_none()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .border_b_1()
+                    .border_color(t.color.border)
+                    .bg(t.color.warning.opacity(0.10))
+                    .text_size(t.typography.caption)
+                    .text_color(t.color.content_secondary)
+                    .child(note)
+            }))
             .child(self.render_body(cx))
     }
 }

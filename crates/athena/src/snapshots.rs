@@ -19,8 +19,10 @@ const MAX_FILE: u64 = 20 * 1024 * 1024;
 /// What a session's snapshot says about a file before its first edit.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Before {
-    /// No snapshot was taken (hooks off, file too large or not a regular file, another session).
+    /// No snapshot was taken (hooks off, or the file was first edited in another session).
     Unknown,
+    /// The hook saw the file but kept no copy: it was too large or not a regular file.
+    Skipped,
     /// The session created the file.
     Absent,
     Text(Vec<u8>),
@@ -88,7 +90,7 @@ pub fn read(store: &Path, session: &str, path: &Path) -> Before {
     }
     let base = store.join(session).join(key(path));
     if base.with_extension("skip").exists() {
-        return Before::Unknown;
+        return Before::Skipped;
     }
     if base.with_extension("new").exists() {
         return Before::Absent;
@@ -208,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_too_large_to_copy_stays_unknown_after_claude_shrinks_it() {
+    fn a_file_too_large_to_copy_stays_skipped_after_claude_shrinks_it() {
         let dir = temp("large");
         let (store, file) = (dir.join("store"), dir.join("big.log"));
         fs::File::create(&file)
@@ -216,10 +218,10 @@ mod tests {
             .set_len(MAX_FILE + 1)
             .unwrap();
         take(&store, "s-1", &file).unwrap();
-        assert_eq!(read(&store, "s-1", &file), Before::Unknown);
+        assert_eq!(read(&store, "s-1", &file), Before::Skipped);
         fs::write(&file, "edited by Claude\n").unwrap();
         take(&store, "s-1", &file).unwrap();
-        assert_eq!(read(&store, "s-1", &file), Before::Unknown);
+        assert_eq!(read(&store, "s-1", &file), Before::Skipped);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -241,7 +243,7 @@ mod tests {
             let _ = fs::OpenOptions::new().write(true).open(&fifo);
         }
         assert_eq!(taken, Ok(true), "take must not block on a FIFO");
-        assert_eq!(read(&store, "s-1", &fifo), Before::Unknown);
+        assert_eq!(read(&store, "s-1", &fifo), Before::Skipped);
         assert!(
             store
                 .join("s-1")
