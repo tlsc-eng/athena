@@ -47,6 +47,17 @@ impl Pane {
 
         let mut cmd = CommandBuilder::new_default_prog();
         cmd.cwd(&cwd);
+        // The daemon inherits whatever launched it (an IDE, an agent session with tokens), so
+        // shells get only what login(1) would give them and rebuild the rest from their profile.
+        cmd.env_clear();
+        for (key, value) in std::env::vars_os() {
+            if inherited(&key) {
+                cmd.env(key, value);
+            }
+        }
+        if cmd.get_env("PATH").is_none() {
+            cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "athena");
@@ -116,3 +127,20 @@ impl Drop for Pane {
 }
 
 pub const READ_CHUNK: usize = MAX_OUTPUT_CHUNK;
+
+const INHERITED: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PATH",
+    "TMPDIR",
+    "LANG",
+    "SSH_AUTH_SOCK",
+    "__CF_USER_TEXT_ENCODING",
+];
+
+fn inherited(key: &std::ffi::OsStr) -> bool {
+    let key = key.to_string_lossy();
+    INHERITED.contains(&key.as_ref()) || key.starts_with("LC_")
+}

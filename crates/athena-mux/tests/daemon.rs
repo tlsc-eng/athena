@@ -19,6 +19,7 @@ impl Daemon {
         std::fs::create_dir_all(&home).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_athena-mux"))
             .env("HOME", &home)
+            .env("ATHENA_TEST_SECRET", "leaked")
             .spawn()
             .unwrap();
         let daemon = Self { home, child };
@@ -155,4 +156,30 @@ fn shutdown_removes_socket() {
     let status = daemon.child.wait().unwrap();
     assert!(status.success());
     assert!(!daemon.socket().exists());
+}
+
+#[test]
+fn shells_do_not_inherit_the_daemon_environment() {
+    let daemon = Daemon::start("env");
+    let (conn, mut reader) = daemon.connect();
+    conn.send(&ClientMsg::Spawn {
+        cwd: "/tmp".into(),
+        rows: 24,
+        cols: 80,
+    })
+    .unwrap();
+    let ServerMsg::Spawned { pane } = next(&mut reader) else {
+        panic!("expected Spawned")
+    };
+    conn.send(&ClientMsg::Attach { pane }).unwrap();
+    let probe =
+        b"echo \"secret=[${ATHENA_TEST_SECRET}] home=[${HOME}] pane=[${ATHENA_PANE_ID}]\"\r";
+    conn.send(&ClientMsg::Input {
+        pane,
+        data: probe.to_vec(),
+    })
+    .unwrap();
+    let out = read_until(&mut reader, &format!("pane=[{pane}]"));
+    assert!(out.contains("secret=[]"), "secret leaked: {out}");
+    assert!(out.contains(&format!("home=[{}]", daemon.home.display())));
 }
