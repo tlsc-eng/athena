@@ -57,9 +57,22 @@ pub struct Motion {
     pub slow: Duration,
 }
 
+/// Terminal palette: the 16 ANSI colours plus defaults, minted at one tonal level.
+#[derive(Clone)]
+pub struct TerminalColors {
+    pub foreground: Hsla,
+    pub background: Hsla,
+    pub cursor: Hsla,
+    pub cursor_text: Hsla,
+    pub selection: Hsla,
+    /// Normal 0..8 then bright 8..16, in ANSI order.
+    pub ansi: [Hsla; 16],
+}
+
 #[derive(Clone)]
 pub struct Theme {
     pub color: Colors,
+    pub terminal: TerminalColors,
     pub typography: Typography,
     pub shape: Shape,
     pub motion: Motion,
@@ -97,6 +110,31 @@ impl Theme {
                 tooltip_bg: c(0xf9f7f3),
                 tooltip_fg: c(0x1a1614),
                 focus_ring: c(0xeb5e43),
+            },
+            terminal: TerminalColors {
+                foreground: c(0xefeee7),
+                background: c(0x0b0807),
+                cursor: c(0xeb5e43),
+                cursor_text: c(0x0b0807),
+                selection: c(0x331510),
+                ansi: [
+                    c(0x312d2a),
+                    c(0xee6476),
+                    c(0x6fb07d),
+                    c(0xdaa24f),
+                    c(0x73a3d5),
+                    c(0xc287bc),
+                    c(0x50afb4),
+                    c(0xd5d4ce),
+                    c(0x5f5a55),
+                    c(0xff939c),
+                    c(0x94cf9f),
+                    c(0xf0c374),
+                    c(0x9cc2ea),
+                    c(0xdcabd6),
+                    c(0x86cccf),
+                    c(0xf9f7f3),
+                ],
             },
             typography: Typography {
                 ui: "Geist".into(),

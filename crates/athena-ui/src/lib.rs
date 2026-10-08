@@ -8,7 +8,7 @@ mod theme;
 pub use assets::Assets;
 pub use components::{Button, ButtonKind, Tooltip, empty_state};
 pub use logo::{Glyph, Lockup};
-pub use theme::{Colors, Motion, Shape, Theme, Typography};
+pub use theme::{Colors, Motion, Shape, TerminalColors, Theme, Typography};
 
 use gpui::App;
 
