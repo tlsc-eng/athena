@@ -292,32 +292,15 @@ impl Shell {
         for (root, id, old, new) in moved {
             let key = (root.clone(), id);
             match self.items.get(&key).cloned() {
-                // Unsaved edits follow the file rather than being dropped with the old view.
-                Some(ItemView::Editor(editor)) if editor.read(cx).is_dirty() => {
-                    if let Err(err) = editor.update(cx, |e, cx| e.save_as(new, cx)) {
-                        self.transient_notice("Could not save the file", format!("{err:#}"), cx);
-                        // The editor still writes to the old path, so the tab must say so too.
-                        let item = self
-                            .workspace
-                            .projects
-                            .iter_mut()
-                            .find(|p| p.root == root)
-                            .and_then(|p| p.layout.as_mut())
-                            .and_then(|l| l.item_mut(id));
-                        if let Some(item) = item {
-                            item.kind = super::panes::file_kind_like(&item.kind, old);
-                        }
-                        continue;
-                    }
+                // The editor follows the file, keeping its cursor and any unsaved edits.
+                Some(ItemView::Editor(editor)) => {
+                    editor.update(cx, |e, cx| e.set_path(new, cx));
                     self.lsp_closed(&old, cx);
                     self.lsp_opened(&root, &editor, cx);
                 }
                 Some(view) => {
                     self.items.remove(&key);
                     view.close(cx);
-                    if matches!(view, ItemView::Editor(_)) {
-                        self.lsp_closed(&old, cx);
-                    }
                 }
                 None => {}
             }

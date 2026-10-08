@@ -240,6 +240,16 @@ impl Buffer {
         Ok(())
     }
 
+    /// Follows the file to `path` after it was renamed or moved, highlighting by its new name.
+    pub fn set_path(&mut self, path: PathBuf) {
+        let lang = Lang::for_path(&path).or_else(|| Lang::for_shebang(&self.line(0)));
+        if lang != self.lang() {
+            self.syntax = lang.map(|lang| Syntax::new(lang, &self.rope));
+        }
+        self.disk_mtime = modified(&path).or(self.disk_mtime);
+        self.path = Some(path);
+    }
+
     /// Takes the file's current text as one undoable edit and marks it saved.
     pub fn reload_from_disk(&mut self, c: &mut Cursor) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
@@ -1275,6 +1285,16 @@ mod tests {
         assert_eq!(fs::read_to_string(&to).unwrap(), "const x = 1\n");
         assert!(!b.is_dirty());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_renamed_file_keeps_its_edits_and_takes_the_new_language() {
+        let mut b = buf("const x = 1\n", "/x/a.txt");
+        b.insert(&mut Cursor::default(), "export ");
+        b.set_path(PathBuf::from("/x/a.ts"));
+        assert_eq!(b.lang(), Some(Lang::TypeScript));
+        assert!(b.is_dirty(), "unsaved edits stay unsaved");
+        assert_eq!(b.full_text(), "export const x = 1\n");
     }
 
     #[test]

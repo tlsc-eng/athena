@@ -472,6 +472,30 @@ impl EditorView {
         Some((line as u32 + 1, b.column_of(head) as u32 + 1, selection))
     }
 
+    /// Zero-based cursor line and UTF-16 column, as [`Self::go_to_position`] takes them.
+    pub fn cursor_utf16(&self) -> Option<(u32, u32)> {
+        let b = self.buf()?;
+        Some(b.utf16_position(self.cursor.head()))
+    }
+
+    /// Follows the file to `path` after it was renamed on disk, keeping any unsaved edits.
+    /// The caller re-registers the file with its language server.
+    pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(shared) = self.buffer.clone() {
+            let moved = shared.buffer.borrow().path.as_deref() != Some(path.as_path());
+            if moved {
+                shared.buffer.borrow_mut().set_path(path.clone());
+                shared::register(&shared, &path, cx);
+                shared.changed(cx);
+            }
+        }
+        // The new name may be another language, which folds differently.
+        self.display.clear();
+        *self.fold_cache.borrow_mut() = Default::default();
+        self.path = path;
+        self.changed(cx);
+    }
+
     /// Moves the cursor to the start of a 1-based line and scrolls it into view.
     pub fn go_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
         self.with_buffer(cx, |b, c| {
@@ -1559,12 +1583,14 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus);
+        self.hide_hover(cx);
+        self.dismiss_completion(cx);
         // As in VS Code, a right-click outside the selection moves the cursor there first.
         if let Some(at) = self.char_at_position(event.position)
-            && let Some(buffer) = self.buffer.as_mut()
-            && !buffer.selection.range().contains(&at)
+            && let Some(buffer) = self.buffer.clone()
+            && !self.cursor.selection.range().contains(&at)
         {
-            buffer.move_to(at, false);
+            buffer.buffer.borrow().move_to(&mut self.cursor, at, false);
             self.note_cursor_line(false, cx);
             cx.notify();
         }

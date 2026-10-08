@@ -208,7 +208,12 @@ impl Bridge {
         let root = match args.project {
             Some(p) => projects
                 .into_iter()
-                .find(|x| x.root == Path::new(&p) || x.name == p)
+                .find(|x| {
+                    let asked = Path::new(&p);
+                    x.root == asked
+                        || asked.canonicalize().is_ok_and(|c| c == x.root)
+                        || x.name == p
+                })
                 .map(|x| x.root),
             None => match ask(AppMsg::WhoAmI).await? {
                 AppReply::Caller {

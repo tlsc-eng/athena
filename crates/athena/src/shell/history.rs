@@ -78,10 +78,7 @@ impl Shell {
         let project = self.workspace.active_project()?;
         let item = project.layout.as_ref()?.focused_pane()?.active_item()?;
         let cursor = match self.items.get(&(project.root.clone(), item.id)) {
-            Some(ItemView::Editor(editor)) => editor
-                .read(cx)
-                .cursor()
-                .map(|(line, col, _)| (line.saturating_sub(1), col.saturating_sub(1))),
+            Some(ItemView::Editor(editor)) => editor.read(cx).cursor_utf16(),
             _ => None,
         };
         Some(Loc {
