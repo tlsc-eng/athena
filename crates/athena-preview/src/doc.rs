@@ -150,8 +150,9 @@ impl DocView {
         self.error = None;
         let next = markdown::render_file(&self.path, &text);
         match &self.shown {
-            // Swapping the body in place keeps the scroll position; a newly needed Mermaid needs a reload.
-            Some(shown) if shown.mermaid || !next.mermaid => {
+            // Swapping the body in place keeps the scroll position; a page still loading, or one
+            // that now needs Mermaid, is loaded afresh.
+            Some(shown) if self.loaded && (shown.mermaid || !next.mermaid) => {
                 if *shown != next {
                     web.run_script(&format!("athenaUpdate({})", js_string(&next.body)));
                 }
