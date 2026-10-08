@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use athena_editor::{EditorEvent, EditorView, ImageView, is_image_path};
@@ -29,6 +30,33 @@ const TREE_MAX: f32 = 480.;
 const DRAWER_MIN: f32 = 120.;
 /// Window height the drawer must leave for the title bar and panes.
 const DRAWER_ROOM: f32 = 200.;
+
+/// Per pane, how often its shown tab changed and when it last did, so only that pane's content fades.
+#[derive(Default)]
+pub(super) struct ContentSwitches(HashMap<(PathBuf, PaneId), (u64, motion::Opening)>);
+
+impl ContentSwitches {
+    fn note(&mut self, root: &Path, pane: PaneId) {
+        let entry = self
+            .0
+            .entry((root.to_path_buf(), pane))
+            .or_insert((0, motion::Opening::now()));
+        entry.0 += 1;
+        entry.1 = motion::Opening::now();
+    }
+
+    /// The fade key for the pane's content, and whether its fade should still play.
+    fn fade(&self, root: &Path, pane: PaneId, duration: std::time::Duration) -> (u64, bool) {
+        match self.0.get(&(root.to_path_buf(), pane)) {
+            Some((count, opening)) => (*count, opening.running(duration)),
+            None => (0, false),
+        }
+    }
+
+    fn retain(&mut self, keep: impl Fn(&(PathBuf, PaneId)) -> bool) {
+        self.0.retain(|key, _| keep(key));
+    }
+}
 
 /// An in-progress resize: a pane divider in the active project, the tree's edge or the drawer's.
 pub(super) enum Drag {
@@ -425,8 +453,30 @@ impl Shell {
             }
             None => self.workspace.projects[i].layout = Some(Layout::new(kind)),
         }
-        self.tab_switches += 1;
+        if let Some(focused) = self.active_layout().map(|l| l.focused) {
+            self.note_content_switch(focused);
+        }
         self.after_layout_change(window, cx);
+    }
+
+    fn start_layout(
+        &mut self,
+        project: usize,
+        kind: ItemKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let layout = Layout::new(kind);
+        let focused = layout.focused;
+        self.workspace.projects[project].layout = Some(layout);
+        self.note_content_switch(focused);
+        self.after_layout_change(window, cx);
+    }
+
+    fn note_content_switch(&mut self, pane: PaneId) {
+        if let Some(root) = self.active_root() {
+            self.content_switches.note(&root, pane);
+        }
     }
 
     fn note_tab_born(&mut self, item: Option<ItemId>) {
@@ -706,12 +756,19 @@ impl Shell {
         let Some(project) = self.workspace.projects.iter_mut().find(|p| p.root == root) else {
             return;
         };
+        let shown = project.layout.as_ref().and_then(|l| {
+            let (pane, at) = l.find_item(item)?;
+            (l.pane(pane)?.active == at).then_some(pane)
+        });
         if let Some(layout) = project.layout.as_mut()
             && !layout.close_item(item)
         {
             project.layout = None;
             // A fresh layout numbers its tabs from the start again.
             self.history.forget_root(root);
+        }
+        if let Some(pane) = shown {
+            self.content_switches.note(root, pane);
         }
         // A fade that ends after a project switch must not touch the now-active project's zoom or focus.
         if self.active_root().as_deref() == Some(root) {
@@ -737,8 +794,7 @@ impl Shell {
             .copied();
         let kind = file_kind(path);
         let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
-            self.workspace.projects[i].layout = Some(Layout::new(kind));
-            return self.after_layout_change(window, cx);
+            return self.start_layout(i, kind, window, cx);
         };
         self.zoomed = None;
         let is_editor = |item: &Item| item.kind.file().is_some();
@@ -772,7 +828,7 @@ impl Shell {
                 layout.focused = pane;
                 let born = layout.add_item(pane, kind);
                 self.note_tab_born(born);
-                self.tab_switches += 1;
+                self.note_content_switch(pane);
             }
             None => {
                 if let Some(pane) = layout.split(focused, Axis::Horizontal, kind) {
@@ -796,8 +852,7 @@ impl Shell {
         self.record_location(cx);
         let kind = file_kind(path);
         let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
-            self.workspace.projects[i].layout = Some(Layout::new(kind));
-            return self.after_layout_change(window, cx);
+            return self.start_layout(i, kind, window, cx);
         };
         self.zoomed = None;
         let focused = layout.focused;
@@ -861,7 +916,7 @@ impl Shell {
         };
         let len = pane.items.len() as isize;
         pane.active = (pane.active as isize + step).rem_euclid(len) as usize;
-        self.tab_switches += 1;
+        self.note_content_switch(focused);
         self.after_layout_change(window, cx);
     }
 
@@ -892,7 +947,7 @@ impl Shell {
         }
         if p.active != index {
             p.active = index;
-            self.tab_switches += 1;
+            self.note_content_switch(pane);
         }
         self.after_layout_change(window, cx);
     }
@@ -1010,6 +1065,7 @@ impl Shell {
         }
         let live = |(r, p): &(PathBuf, PaneId)| *r != root || layout.pane(*p).is_some();
         self.tab_scroll.retain(|key, _| live(key));
+        self.content_switches.retain(live);
 
         let area = self.pane_area.clone();
         let recorder = canvas(
@@ -1390,9 +1446,11 @@ impl Shell {
         let drop_layer = cx
             .has_active_drag()
             .then(|| self.render_drop_layer(pane_id, &t, cx));
+        let (switches, fresh) = self.content_switches.fade(root, pane_id, t.motion.fast);
         // Opacity only: moving or resizing the box would resize the shell mid-animation.
-        let content = motion::animate_if(
+        let content = motion::animate_enter(
             t.motion.reduced,
+            fresh,
             div()
                 .flex_1()
                 .min_h_0()
@@ -1401,7 +1459,7 @@ impl Shell {
                 .children(drop_layer),
             (
                 "tab-content",
-                active.map_or(0, |i| i.id.0) ^ (self.tab_switches << 32),
+                active.map_or(0, |i| i.id.0) ^ (switches << 32),
             ),
             Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
             |el, d| el.opacity(d),
@@ -1525,7 +1583,7 @@ impl Shell {
             .map(|(_, at)| at);
         if layout.move_item(item, to, strip_drop_index(here, before, len)) {
             self.zoomed = None;
-            self.after_tab_moved(item, None, window, cx);
+            self.after_tab_moved(item, drag.pane, None, window, cx);
         }
     }
 
@@ -1563,13 +1621,14 @@ impl Shell {
         };
         if let Some(new_pane) = moved {
             self.zoomed = None;
-            self.after_tab_moved(drag.item, new_pane, window, cx);
+            self.after_tab_moved(drag.item, drag.pane, new_pane, window, cx);
         }
     }
 
     fn after_tab_moved(
         &mut self,
         item: ItemId,
+        from: PaneId,
         new_pane: Option<PaneId>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1579,7 +1638,13 @@ impl Shell {
             self.entering = new_pane;
         }
         self.note_tab_born(Some(item));
-        self.tab_switches += 1;
+        let to = self
+            .active_layout()
+            .and_then(|l| l.find_item(item))
+            .map(|(p, _)| p);
+        for pane in to.filter(|_| new_pane.is_none()).into_iter().chain([from]) {
+            self.note_content_switch(pane);
+        }
         self.after_layout_change(window, cx);
     }
 
@@ -1856,6 +1921,7 @@ impl Shell {
     /// Hangs up every shell in a project that is being closed.
     pub(super) fn drop_project_items(&mut self, root: &Path, cx: &mut Context<Self>) {
         self.tab_scroll.retain(|(r, _), _| r != root);
+        self.content_switches.retain(|(r, _)| r != root);
         let keys: Vec<_> = self
             .items
             .keys()
@@ -1891,6 +1957,21 @@ fn file_kind(path: PathBuf) -> ItemKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tab_switch_fades_only_its_own_pane() {
+        let (a, b) = (Path::new("/a"), Path::new("/b"));
+        let long = std::time::Duration::from_secs(60);
+        let mut switches = ContentSwitches::default();
+        switches.note(a, PaneId(1));
+        switches.note(a, PaneId(1));
+        assert_eq!(switches.fade(a, PaneId(1), long), (2, true));
+        assert_eq!(switches.fade(a, PaneId(2), long), (0, false));
+        assert_eq!(switches.fade(b, PaneId(1), long), (0, false));
+        assert!(!switches.fade(a, PaneId(1), std::time::Duration::ZERO).1);
+        switches.retain(|(r, _)| r != a);
+        assert_eq!(switches.fade(a, PaneId(1), long), (0, false));
+    }
 
     #[test]
     fn tree_width_stays_between_its_limits() {

@@ -105,7 +105,7 @@ pub struct Shell {
     tab_born: Option<(ItemId, motion::Opening)>,
     /// A tab fading out before it is closed, with its project.
     tab_leaving: Option<(PathBuf, ItemId, motion::Closing)>,
-    tab_switches: u64,
+    content_switches: panes::ContentSwitches,
     /// Each pane's tab strip scroll, and the tab it last scrolled into view.
     tab_scroll: HashMap<(PathBuf, PaneId), (gpui::ScrollHandle, Option<ItemId>)>,
     /// A split easing to 50 % after a divider double-click: its path, starting ratio, start and generation.
@@ -232,7 +232,7 @@ impl Shell {
             leaving: None,
             tab_born: None,
             tab_leaving: None,
-            tab_switches: 0,
+            content_switches: panes::ContentSwitches::default(),
             tab_scroll: HashMap::new(),
             ratio_anim: None,
             generation: 0,
