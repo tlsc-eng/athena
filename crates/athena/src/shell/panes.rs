@@ -420,6 +420,17 @@ impl Shell {
         let Some(item) = pane.active_item().map(|i| i.id) else {
             return;
         };
+        self.close_tab(pane.id, item, window, cx);
+    }
+
+    /// Closes a tab, asking first whether to save an editor with unsaved changes.
+    fn close_tab(
+        &mut self,
+        pane: PaneId,
+        item: ItemId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let dirty = self
             .active_root()
             .and_then(|root| self.items.get(&(root, item)).cloned())
@@ -447,14 +458,14 @@ impl Shell {
                         _ => false,
                     };
                     if saved {
-                        this.close_pane_item(pane.id, item, window, cx);
+                        this.close_pane_item(pane, item, window, cx);
                     }
                 });
             })
             .detach();
             return;
         }
-        self.close_pane_item(pane.id, item, window, cx);
+        self.close_pane_item(pane, item, window, cx);
     }
 
     fn close_pane_item(
@@ -488,15 +499,24 @@ impl Shell {
         {
             return;
         }
+        if self.leaving.is_some_and(|(p, _)| p == pane.id) {
+            return;
+        }
         if pane.items.len() == 1 && panes > 1 && !cx.theme().motion.reduced {
             // Fade the pane out first; its sibling takes the space once it is gone.
-            self.leaving = Some(pane.id);
+            let generation = self.next_generation();
+            self.leaving = Some((pane.id, motion::Closing::new(generation)));
             let delay = cx.theme().motion.fast;
             cx.notify();
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.leaving = None;
+                    if this
+                        .leaving
+                        .is_some_and(|(_, c)| c.generation == generation)
+                    {
+                        this.leaving = None;
+                    }
                     this.remove_item_from(&root, item, window, cx);
                 });
             })
@@ -559,8 +579,14 @@ impl Shell {
         {
             project.layout = None;
         }
-        self.zoomed = None;
-        self.after_layout_change(window, cx);
+        // A fade that ends after a project switch must not touch the now-active project's zoom or focus.
+        if self.active_root().as_deref() == Some(root) {
+            self.zoomed = None;
+            self.after_layout_change(window, cx);
+        } else {
+            self.schedule_save(cx);
+            cx.notify();
+        }
     }
 
     /// Opens `path` as an editor tab: raises an existing tab, else joins the focused pane if it
@@ -652,15 +678,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The clicked tab is not raised first, so a background tab fades out without showing.
         if let Some(layout) = self.active_layout() {
             layout.focused = pane;
-            if let Some(p) = layout.pane_mut(pane)
-                && let Some(index) = p.items.iter().position(|i| i.id == item)
-            {
-                p.active = index;
-            }
         }
-        self.close_active_tab(window, cx);
+        self.close_tab(pane, item, window, cx);
     }
 
     pub(super) fn focus_direction(
@@ -838,10 +860,6 @@ impl Shell {
         }
         let live = |(r, p): &(PathBuf, PaneId)| *r != root || layout.pane(*p).is_some();
         self.tab_scroll.retain(|key, _| live(key));
-        // A tab scrolled into view moves the strip after this frame's fades were decided.
-        if std::mem::take(&mut self.tab_revealed) {
-            window.request_animation_frame();
-        }
 
         let area = self.pane_area.clone();
         let recorder = canvas(
@@ -1090,11 +1108,25 @@ impl Shell {
         if *revealed != active_id {
             scroll.scroll_to_item(pane.active);
             *revealed = active_id;
-            self.tab_revealed = true;
         }
         let scroll = scroll.clone();
+        let edges = |s: &gpui::ScrollHandle| {
+            let (offset, max) = (-s.offset().x, s.max_offset().width);
+            (offset > px(0.5), max - offset > px(0.5))
+        };
         // Last frame's scroll position: the strip is laid out after this render.
-        let (offset, max) = (-scroll.offset().x, scroll.max_offset().width);
+        let (left, right) = edges(&scroll);
+        let check = scroll.clone();
+        let fades_stale = canvas(
+            move |_, window, _| {
+                if edges(&check) != (left, right) {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0();
         let fade = |left: bool| {
             let (solid, clear) = (t.color.surface, t.color.surface.opacity(0.));
             let (from, to) = if left { (solid, clear) } else { (clear, solid) };
@@ -1127,8 +1159,9 @@ impl Shell {
                     .track_scroll(&scroll)
                     .children(tabs),
             )
-            .when(offset > px(0.5), |el| el.child(fade(true)))
-            .when(max - offset > px(0.5), |el| el.child(fade(false)));
+            .when(left, |el| el.child(fade(true)))
+            .when(right, |el| el.child(fade(false)))
+            .child(fades_stale);
 
         let active = pane.active_item().cloned();
         let content: AnyElement = match active
@@ -1163,11 +1196,11 @@ impl Shell {
             .child(strip)
             .child(content);
 
-        if self.leaving == Some(pane_id) {
+        if let Some((_, closing)) = self.leaving.filter(|(p, _)| *p == pane_id) {
             return motion::animate_exit(
                 t.motion.reduced,
                 body,
-                ("pane-leave", pane_id.0),
+                ("pane-leave", closing.generation),
                 t.motion.fast,
                 |el, d| el.opacity(1. - d),
             );

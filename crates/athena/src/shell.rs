@@ -86,14 +86,13 @@ pub struct Shell {
     zoomed: Option<PaneId>,
     entering: Option<PaneId>,
     pane_opening: Option<(PaneId, motion::Opening)>,
-    leaving: Option<PaneId>,
+    leaving: Option<(PaneId, motion::Closing)>,
     tab_born: Option<(ItemId, motion::Opening)>,
     /// A tab fading out before it is closed, with its project.
     tab_leaving: Option<(PathBuf, ItemId, motion::Closing)>,
     tab_switches: u64,
     /// Each pane's tab strip scroll, and the tab it last scrolled into view.
     tab_scroll: HashMap<(PathBuf, PaneId), (gpui::ScrollHandle, Option<ItemId>)>,
-    tab_revealed: bool,
     /// A split easing to 50 % after a divider double-click: its path, starting ratio, start and generation.
     ratio_anim: Option<(athena_workspace::NodePath, f32, motion::Opening, u64)>,
     /// Keys oneshot animations so reopening something replays them.
@@ -213,7 +212,6 @@ impl Shell {
             tab_leaving: None,
             tab_switches: 0,
             tab_scroll: HashMap::new(),
-            tab_revealed: false,
             ratio_anim: None,
             generation: 0,
             save_task: None,
