@@ -15,6 +15,7 @@ use alacritty_terminal::vte::ansi::{
 };
 use athena_ui::TerminalColors;
 
+use crate::marks::{self, Command, Commands, Mark, Scanner};
 use crate::{colors, links, search};
 
 pub(crate) const SCROLLBACK_LINES: usize = 10_000;
@@ -75,6 +76,23 @@ pub struct Terminal {
     pub allow_clipboard: bool,
     pub clipboard_write: Option<String>,
     pub blocked_clipboard: Option<String>,
+    marks: Scanner,
+    commands: Commands,
+    /// Where the last `A` mark put the prompt, as history size plus screen line, until it is tagged.
+    prompt_start: Option<usize>,
+    /// The newest tagged prompt: its command id and where it was tagged.
+    prompt: Option<(u32, usize)>,
+}
+
+/// Why the last command's output cannot be copied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoOutput {
+    /// No command finished with shell-integration marks in this terminal.
+    NoCommand,
+    /// The shell marked the end of the command but not where its output began.
+    Unmarked,
+    /// The command's prompt has scrolled out of the scrollback.
+    Gone,
 }
 
 /// A link under the pointer: viewport row, column range and target.
@@ -112,6 +130,10 @@ impl Terminal {
             allow_clipboard: false,
             clipboard_write: None,
             blocked_clipboard: None,
+            marks: Scanner::default(),
+            commands: Commands::default(),
+            prompt_start: None,
+            prompt: None,
         }
     }
 
@@ -151,11 +173,163 @@ impl Terminal {
                 if !self.replaying {
                     self.last_output = Instant::now();
                 }
-                self.parser.advance(&mut self.term, &bytes);
+                // Each mark is recorded where the cursor is once the bytes before it are parsed.
+                let mut from = 0;
+                for (end, mark) in self.marks.feed(&bytes) {
+                    self.parser.advance(&mut self.term, &bytes[from..end]);
+                    from = end;
+                    self.on_mark(mark);
+                }
+                self.parser.advance(&mut self.term, &bytes[from..]);
+                self.tag_prompt(false);
                 self.drain_events(palette);
             }
             PaneEvent::Exited(code) => self.exit = Some(code),
         }
+    }
+
+    fn on_mark(&mut self, mark: Mark) {
+        if self.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        match mark {
+            Mark::Prompt => self.prompt_start = Some(self.cursor_abs()),
+            Mark::Command => self.tag_prompt(true),
+            Mark::Output => {
+                self.tag_prompt(true);
+                let cursor = self.term.grid().cursor.point.line;
+                if let Some((id, line)) = self.find_prompt(true)
+                    && let Some(command) = self.commands.get_mut(id)
+                {
+                    command.output_start = Some(cursor.0 - line.0);
+                }
+            }
+            Mark::Finished(code) => {
+                let cursor = self.term.grid().cursor.point;
+                let end = cursor.line.0 + i32::from(cursor.column.0 > 0);
+                // Output can be long enough to move the prompt, so it is looked up, not assumed.
+                let found = self.find_prompt(false);
+                if let Some(command) = self.prompt.and_then(|(id, _)| self.commands.get_mut(id)) {
+                    command.exit = Some(code);
+                    command.output_end = found.map(|(_, line)| end - line.0);
+                }
+            }
+        }
+    }
+
+    fn cursor_abs(&self) -> usize {
+        let grid = self.term.grid();
+        grid.history_size() + grid.cursor.point.line.0.max(0) as usize
+    }
+
+    /// The grid line an absolute position from [`Self::cursor_abs`] is on now, if still shown.
+    fn line_at_abs(&self, abs: usize) -> Option<Line> {
+        let line = Line(abs as i32 - self.term.grid().history_size() as i32);
+        (self.term.topmost_line() <= line && line <= self.term.bottommost_line()).then_some(line)
+    }
+
+    /// Tags the line the last `A` mark started on, once the prompt is drawn there or `now`.
+    fn tag_prompt(&mut self, now: bool) {
+        let Some(line) = self.prompt_start.and_then(|abs| self.line_at_abs(abs)) else {
+            return;
+        };
+        let cell = &self.term.grid()[line][Column(0)];
+        if !now && cell.c == ' ' && cell.zerowidth().is_none() {
+            return;
+        }
+        let id = self.commands.start();
+        self.term.grid_mut()[line][Column(0)].push_zerowidth(marks::tag(id));
+        self.prompt = self.prompt_start.take().map(|abs| (id, abs));
+    }
+
+    /// The command tagged on a grid line.
+    pub fn tag_at(&self, line: Line) -> Option<u32> {
+        self.term.grid()[line][Column(0)]
+            .zerowidth()?
+            .iter()
+            .find_map(|&c| marks::tag_id(c))
+    }
+
+    /// The newest prompt's line, searched up from the cursor; `retag` puts the tag back when the
+    /// shell redrew the prompt (a transient prompt) since it was tagged.
+    fn find_prompt(&mut self, retag: bool) -> Option<(u32, Line)> {
+        let (id, abs) = self.prompt?;
+        let top = self.term.topmost_line();
+        let mut line = self.term.grid().cursor.point.line;
+        while line >= top {
+            if self.tag_at(line) == Some(id) {
+                return Some((id, line));
+            }
+            line -= 1;
+        }
+        let line = self.line_at_abs(abs).filter(|_| retag)?;
+        self.term.grid_mut()[line][Column(0)].push_zerowidth(marks::tag(id));
+        Some((id, line))
+    }
+
+    /// The command whose prompt starts on a grid line, for its gutter mark.
+    pub fn command_at(&self, line: Line) -> Option<Command> {
+        self.commands.get(self.tag_at(line)?).copied()
+    }
+
+    /// Scrolls the previous (or next) prompt to the top of the view; past the last one it
+    /// returns to the live screen. False when there is nowhere to go.
+    pub fn scroll_to_prompt(&mut self, up: bool) -> bool {
+        let offset = self.term.grid().display_offset() as i32;
+        let top = Line(-offset);
+        let lines = self.term.topmost_line().0..=self.term.bottommost_line().0;
+        let mut prompts = lines.map(Line).filter(|&l| self.tag_at(l).is_some());
+        let target = if up {
+            prompts.rfind(|&l| l < top)
+        } else {
+            prompts.find(|&l| l > top)
+        };
+        let wanted = match target {
+            Some(line) => (-line.0).max(0),
+            None if up => return false,
+            None => 0,
+        };
+        if wanted == offset {
+            return false;
+        }
+        self.term.scroll_display(Scroll::Delta(wanted - offset));
+        true
+    }
+
+    /// The text the newest finished command printed, as the shell marked it.
+    pub fn last_output(&self) -> Result<String, NoOutput> {
+        let (id, command) = self
+            .commands
+            .newest_first()
+            .find_map(|id| Some((id, *self.commands.get(id)?)).filter(|(_, c)| c.exit.is_some()))
+            .ok_or(NoOutput::NoCommand)?;
+        let (Some(start), Some(end)) = (command.output_start, command.output_end) else {
+            return Err(if command.output_start.is_none() {
+                NoOutput::Unmarked
+            } else {
+                NoOutput::Gone
+            });
+        };
+        let top = self.term.topmost_line();
+        let mut line = self.term.bottommost_line();
+        while line >= top && self.tag_at(line) != Some(id) {
+            line -= 1;
+        }
+        if line < top {
+            return Err(NoOutput::Gone);
+        }
+        let (first, last) = (Line(line.0 + start), Line(line.0 + end - 1));
+        if last < first {
+            return Ok(String::new());
+        }
+        let text = self.term.bounds_to_string(
+            Point::new(first, Column(0)),
+            Point::new(
+                last.min(self.term.bottommost_line()),
+                self.term.last_column(),
+            ),
+        );
+        Ok(strip_tags(&text).trim_end_matches('\n').to_string())
     }
 
     fn drain_events(&mut self, palette: &TerminalColors) {
@@ -244,7 +418,10 @@ impl Terminal {
     }
 
     pub fn selection_text(&self) -> Option<String> {
-        self.term.selection_to_string().filter(|s| !s.is_empty())
+        self.term
+            .selection_to_string()
+            .map(|s| strip_tags(&s))
+            .filter(|s| !s.is_empty())
     }
 
     /// An OSC 8 hyperlink or a bare http(s) URL at a viewport cell.
@@ -431,6 +608,13 @@ impl Terminal {
             cell_height: self.size.cell_height as u16,
         }
     }
+}
+
+/// `text` without the zero-width tags marking prompt lines.
+fn strip_tags(text: &str) -> String {
+    text.chars()
+        .filter(|&c| marks::tag_id(c).is_none())
+        .collect()
 }
 
 fn sanitize_title(title: &str) -> String {
@@ -709,5 +893,126 @@ mod tests {
     fn titles_lose_control_characters_and_length() {
         assert_eq!(sanitize_title("a\x1b]0;b\x07c"), "a]0;bc");
         assert_eq!(sanitize_title(&"x".repeat(1000)).len(), MAX_TITLE);
+    }
+
+    const PROMPT: &[u8] = b"\x1b]133;A\x07$ \x1b]133;B\x07";
+
+    fn run(t: &mut Terminal, command: &str, output: &[&str], code: i32) {
+        feed(t, PROMPT);
+        feed(t, format!("{command}\r\n\x1b]133;C\x07").as_bytes());
+        for line in output {
+            feed(t, format!("{line}\r\n").as_bytes());
+        }
+        feed(t, format!("\x1b]133;D;{code}\x07").as_bytes());
+    }
+
+    fn prompts(t: &Terminal) -> Vec<(i32, Option<Option<i32>>)> {
+        (t.term.topmost_line().0..=t.term.bottommost_line().0)
+            .filter_map(|l| Some((l, t.command_at(Line(l))?.exit)))
+            .collect()
+    }
+
+    #[test]
+    fn shell_marks_tag_prompts_with_their_exit_status_and_output() {
+        let (mut t, _) = terminal();
+        run(&mut t, "ls", &["a", "b"], 0);
+        run(&mut t, "false", &[], 1);
+        feed(&mut t, PROMPT);
+        assert_eq!(
+            prompts(&t),
+            [(0, Some(Some(0))), (3, Some(Some(1))), (4, None)]
+        );
+        assert_eq!(t.last_output(), Ok(String::new()));
+        let (mut t, _) = terminal();
+        run(&mut t, "ls", &["a", "b"], 0);
+        assert_eq!(t.last_output(), Ok("a\nb".to_string()));
+    }
+
+    #[test]
+    fn tags_never_reach_copied_text() {
+        let (mut t, _) = terminal();
+        run(&mut t, "ls", &["a"], 0);
+        t.select_all();
+        let text = t.selection_text().unwrap();
+        assert!(text.starts_with("$ ls\na"), "{text:?}");
+        assert!(text.chars().all(|c| marks::tag_id(c).is_none()));
+    }
+
+    #[test]
+    fn marks_split_across_chunks_land_in_the_same_place() {
+        let (mut whole, _) = terminal();
+        run(&mut whole, "ls", &["a", "b"], 2);
+        let (mut bytewise, _) = terminal();
+        let mut bytes = PROMPT.to_vec();
+        bytes.extend(b"ls\r\n\x1b]133;C\x07a\r\nb\r\n\x1b]133;D;2\x1b\\");
+        for b in bytes {
+            feed(&mut bytewise, &[b]);
+        }
+        assert_eq!(prompts(&bytewise), prompts(&whole));
+        assert_eq!(bytewise.last_output(), Ok("a\nb".to_string()));
+    }
+
+    #[test]
+    fn a_redrawn_prompt_is_tagged_again_when_the_command_starts() {
+        let (mut t, _) = terminal();
+        feed(&mut t, PROMPT);
+        feed(
+            &mut t,
+            b"ls\r\x1b[2K> ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+        );
+        assert_eq!(prompts(&t), [(0, Some(Some(0)))]);
+        assert_eq!(t.last_output(), Ok("out".to_string()));
+    }
+
+    #[test]
+    fn prompts_are_found_after_the_scrollback_fills() {
+        let (mut t, _) = terminal();
+        let filler: Vec<String> = (0..SCROLLBACK_LINES + 50).map(|i| format!("{i}")).collect();
+        let filler: Vec<&str> = filler.iter().map(String::as_str).collect();
+        run(&mut t, "seq", &filler, 0);
+        assert_eq!(
+            t.last_output(),
+            Err(NoOutput::Gone),
+            "its prompt was dropped"
+        );
+        run(&mut t, "printf", &["x", "y"], 0);
+        let output: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
+        let output: Vec<&str> = output.iter().map(String::as_str).collect();
+        run(&mut t, "long", &output, 0);
+        assert_eq!(t.term.grid().history_size(), SCROLLBACK_LINES);
+        assert_eq!(t.last_output(), Ok(output.join("\n")));
+
+        feed(&mut t, PROMPT);
+        assert!(t.scroll_to_prompt(true));
+        let top = Line(-(t.term.grid().display_offset() as i32));
+        assert!(
+            t.command_at(top).is_some(),
+            "the long command's prompt is at the top"
+        );
+        assert!(t.scroll_to_prompt(true));
+        let higher = Line(-(t.term.grid().display_offset() as i32));
+        assert!(higher < top && t.command_at(higher).is_some());
+        assert!(t.scroll_to_prompt(false));
+        assert_eq!(Line(-(t.term.grid().display_offset() as i32)), top);
+        assert!(
+            t.scroll_to_prompt(false),
+            "past the last prompt is the live screen"
+        );
+        assert_eq!(t.term.grid().display_offset(), 0);
+        assert!(!t.scroll_to_prompt(false));
+    }
+
+    #[test]
+    fn full_screen_programs_and_unmarked_output_are_left_alone() {
+        let (mut t, _) = terminal();
+        assert_eq!(t.last_output(), Err(NoOutput::NoCommand));
+        feed(
+            &mut t,
+            b"\x1b[?1049h\x1b]133;A\x07$ \x1b]133;B\x07\x1b[?1049l",
+        );
+        assert!(prompts(&t).is_empty());
+        feed(&mut t, PROMPT);
+        feed(&mut t, b"ls\r\nx\r\n\x1b]133;D;0\x07");
+        assert_eq!(t.last_output(), Err(NoOutput::Unmarked));
     }
 }

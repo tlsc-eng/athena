@@ -25,7 +25,7 @@ use crate::keys;
 use crate::links;
 use crate::mouse::{self, MouseEvent};
 use crate::search::{Search, Span};
-use crate::terminal::{GridSize, Link, PaneEvent, SCROLLBACK_LINES, Terminal, Transport};
+use crate::terminal::{GridSize, Link, NoOutput, PaneEvent, SCROLLBACK_LINES, Terminal, Transport};
 
 actions!(
     terminal,
@@ -38,7 +38,10 @@ actions!(
         FindNext,
         FindPrevious,
         ToggleMatchCase,
-        ToggleRegex
+        ToggleRegex,
+        ScrollToPreviousCommand,
+        ScrollToNextCommand,
+        CopyLastCommandOutput
     ]
 );
 
@@ -74,6 +77,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-f", Find, Some("Terminal")),
         KeyBinding::new("cmd-g", FindNext, Some("Terminal")),
         KeyBinding::new("cmd-shift-g", FindPrevious, Some("Terminal")),
+        KeyBinding::new("cmd-up", ScrollToPreviousCommand, Some("Terminal")),
+        KeyBinding::new("cmd-down", ScrollToNextCommand, Some("Terminal")),
         KeyBinding::new("shift-enter", FindPrevious, find),
         KeyBinding::new("alt-c", ToggleMatchCase, find),
         KeyBinding::new("alt-r", ToggleRegex, find),
@@ -87,6 +92,8 @@ pub enum TerminalEvent {
     Changed,
     /// The right-click menu opened or closed; it is drawn in-window, under native web views.
     ContextMenu { open: bool },
+    /// Something the user asked for could not be done, worth a toast.
+    Notice { title: String, body: String },
     /// Cmd+click on a file named in the output, with its one-based line and column if given;
     /// `path` stays relative when neither the shell's folder nor the project has it.
     OpenFile {
@@ -1117,6 +1124,36 @@ impl TerminalView {
         }
     }
 
+    fn scroll_to_command(&mut self, up: bool, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut()
+            && terminal.scroll_to_prompt(up)
+        {
+            cx.notify();
+        }
+    }
+
+    /// Copies what the newest finished command printed, as the shell's OSC 133 marks bound it.
+    fn copy_last_output(&mut self, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal.as_ref() else {
+            return;
+        };
+        let body = match terminal.last_output() {
+            Ok(text) => return cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Err(NoOutput::NoCommand) => {
+                "No command has finished here with shell integration marks (OSC 133). The README \
+                 shows how to turn them on for zsh and bash."
+            }
+            Err(NoOutput::Unmarked) => {
+                "The shell did not mark where the output started (OSC 133;C)."
+            }
+            Err(NoOutput::Gone) => "The command's output has scrolled out of the scrollback.",
+        };
+        cx.emit(TerminalEvent::Notice {
+            title: "Nothing to copy".into(),
+            body: body.into(),
+        });
+    }
+
     fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
         if !self.focus.is_focused(window) {
             return;
@@ -1513,52 +1550,62 @@ impl Render for TerminalView {
         {
             cx.emit(TerminalEvent::Changed);
         }
-        let root = div()
-            .id("terminal")
-            .track_focus(&self.focus)
-            .key_context("Terminal")
-            .on_key_down(cx.listener(Self::key_down))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::clear_scrollback))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(|this, _: &Find, window, cx| this.open_search(window, cx)))
-            .on_action(cx.listener(|this, _: &FindNext, window, cx| {
-                if this.find.is_some() {
-                    this.step_search(true, cx)
+        let root =
+            div()
+                .id("terminal")
+                .track_focus(&self.focus)
+                .key_context("Terminal")
+                .on_key_down(cx.listener(Self::key_down))
+                .on_action(cx.listener(Self::copy))
+                .on_action(cx.listener(Self::paste))
+                .on_action(cx.listener(Self::clear_scrollback))
+                .on_action(cx.listener(Self::select_all))
+                .on_action(cx.listener(|this, _: &Find, window, cx| this.open_search(window, cx)))
+                .on_action(cx.listener(|this, _: &ScrollToPreviousCommand, _, cx| {
+                    this.scroll_to_command(true, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ScrollToNextCommand, _, cx| {
+                    this.scroll_to_command(false, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &CopyLastCommandOutput, _, cx| this.copy_last_output(cx)),
+                )
+                .on_action(cx.listener(|this, _: &FindNext, window, cx| {
+                    if this.find.is_some() {
+                        this.step_search(true, cx)
+                    } else {
+                        this.open_search(window, cx)
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
+                    if this.find.is_some() {
+                        this.step_search(false, cx)
+                    } else {
+                        this.open_search(window, cx)
+                    }
+                }))
+                .on_modifiers_changed(cx.listener(Self::modifiers_changed))
+                .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down_other))
+                .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down_other))
+                .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
+                .on_mouse_move(cx.listener(Self::mouse_move))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+                .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up_other))
+                .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up_other))
+                .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up_other))
+                .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up_other))
+                .cursor(if self.hovered_link.is_some() {
+                    CursorStyle::PointingHand
                 } else {
-                    this.open_search(window, cx)
-                }
-            }))
-            .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
-                if this.find.is_some() {
-                    this.step_search(false, cx)
-                } else {
-                    this.open_search(window, cx)
-                }
-            }))
-            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
-            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down_other))
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down_other))
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
-            .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up_other))
-            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up_other))
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up_other))
-            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up_other))
-            .cursor(if self.hovered_link.is_some() {
-                CursorStyle::PointingHand
-            } else {
-                CursorStyle::IBeam
-            })
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(t.terminal.background);
+                    CursorStyle::IBeam
+                })
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(t.terminal.background);
 
         if let Some(stale) = self.stale {
             return root
@@ -1790,6 +1837,10 @@ impl TerminalView {
             .as_ref()
             .and_then(Terminal::selection_text)
             .is_some();
+        let has_output = self
+            .terminal
+            .as_ref()
+            .is_some_and(|t| t.last_output().is_ok());
         let this = cx.entity().downgrade();
         let item = |label: &'static str,
                     hint: &'static str,
@@ -1806,6 +1857,10 @@ impl TerminalView {
             item("Select All", "⌘A", |v, w, cx| {
                 v.select_all(&SelectAll, w, cx)
             }),
+            item("Copy Last Command Output", "", |v, _, cx| {
+                v.copy_last_output(cx)
+            })
+            .disabled(!has_output),
             MenuItem::separator(),
             item("Find", "⌘F", |v, w, cx| v.open_search(w, cx)),
             item("Clear", "⌘K", |v, w, cx| {

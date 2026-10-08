@@ -187,6 +187,9 @@ impl Shell {
                             this.notify_coalesced(cx);
                             return;
                         }
+                        TerminalEvent::Notice { title, body } => {
+                            return this.transient_notice(title.clone(), body.clone(), cx);
+                        }
                         TerminalEvent::OpenFile { path, line, column } => {
                             return this.open_file_link(path.clone(), *line, *column, cx);
                         }

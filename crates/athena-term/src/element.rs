@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::colors;
 use crate::glyphs;
+use crate::marks;
 use crate::search::Span;
 use crate::terminal::{Damage, GridSize, Link, Terminal};
 use crate::view::TerminalView;
@@ -58,6 +59,8 @@ pub struct Frame {
     cursor_glyph: Option<(gpui::Point<Pixels>, ShapedLine)>,
     cursor_bounds: Option<Bounds<Pixels>>,
     marked: Option<(PaintQuad, gpui::Point<Pixels>, ShapedLine)>,
+    /// Dots left of prompt lines the shell marked, coloured by how the command ended.
+    prompts: Vec<PaintQuad>,
     line_height: Pixels,
 }
 
@@ -113,6 +116,38 @@ impl RowCache {
             .filter(|&row| self.rows[row].is_none())
             .collect()
     }
+}
+
+/// Edge of a prompt dot; it fits in the 8px padding left of the grid.
+const PROMPT_DOT: f32 = 6.;
+
+/// A dot beside each visible prompt line: filled once its command finished (success or failure
+/// colour), an outline while it runs, as VS Code marks commands.
+fn prompt_dots(
+    terminal: &Terminal,
+    origin: gpui::Point<Pixels>,
+    line_height: Pixels,
+    (success, failure, running): (Hsla, Hsla, Hsla),
+) -> Vec<PaintQuad> {
+    let term = terminal.term();
+    let offset = term.grid().display_offset() as i32;
+    (0..term.screen_lines())
+        .filter_map(|row| {
+            let command = terminal.command_at(Line(row as i32 - offset))?;
+            let at = origin
+                + point(
+                    px(-PROMPT_DOT - 1.),
+                    line_height * row as f32 + (line_height - px(PROMPT_DOT)) / 2.,
+                );
+            let dot = Bounds::new(at, size(px(PROMPT_DOT), px(PROMPT_DOT)));
+            let round = |quad: PaintQuad| quad.corner_radii(px(PROMPT_DOT / 2.));
+            Some(match command.exit {
+                Some(Some(0) | None) => round(fill(dot, success)),
+                Some(Some(_)) => round(fill(dot, failure)),
+                None => round(outline(dot, running, BorderStyle::Solid)),
+            })
+        })
+        .collect()
 }
 
 /// Search highlights for one frame; drawn over the cached rows, so they never invalidate them.
@@ -294,7 +329,14 @@ impl RowBuilder<'_> {
                 continue;
             }
             // Every single-width glyph snaps to its cell, so fallback-font symbols keep the grid.
-            let simple = !flags.contains(Flags::WIDE_CHAR) && cell.zerowidth().is_none();
+            let mut extra = cell
+                .zerowidth()
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&c| marks::tag_id(c).is_none())
+                .peekable();
+            let simple = !flags.contains(Flags::WIDE_CHAR) && extra.peek().is_none();
             if simple
                 && let Some(run) = runs.last_mut()
                 && run.grid_aligned
@@ -306,7 +348,7 @@ impl RowBuilder<'_> {
                 continue;
             }
             let mut text = String::from(cell.c);
-            text.extend(cell.zerowidth().into_iter().flatten());
+            text.extend(extra);
             runs.push(Run {
                 col,
                 cells: if flags.contains(Flags::WIDE_CHAR) {
@@ -385,6 +427,11 @@ impl Element for TerminalElement {
         let theme = cx.theme();
         let palette = theme.terminal.clone();
         let match_color = theme.color.warning;
+        let prompt_colors = (
+            theme.color.success,
+            theme.color.danger,
+            theme.color.content_muted,
+        );
         let font_size = theme.typography.code;
         let font = Font {
             family: theme.typography.mono.clone(),
@@ -435,6 +482,7 @@ impl Element for TerminalElement {
             cursor_glyph: None,
             cursor_bounds: None,
             marked: None,
+            prompts: Vec::new(),
             line_height,
         };
         let (Some(terminal), Some(damage)) = (view.terminal(), damage) else {
@@ -501,6 +549,7 @@ impl Element for TerminalElement {
         frame.rows = cache.rows.iter().flatten().cloned().collect();
         let spans = view.search_spans(content.display_offset, term.screen_lines(), term.columns());
         frame.matches = match_quads(&spans, cell_width, line_height, match_color);
+        frame.prompts = prompt_dots(terminal, bounds.origin, line_height, prompt_colors);
 
         if let Some(link) = &view.hovered_link {
             let at = origin(link.start, link.row);
@@ -633,6 +682,10 @@ impl Element for TerminalElement {
                 let _ = line.paint(origin, line_height, window, cx);
             }
         });
+        // The dots sit in the padding left of the grid, outside its content mask.
+        for dot in frame.prompts.drain(..) {
+            window.paint_quad(dot);
+        }
         let cursor_bounds = frame.cursor_bounds;
         self.view.update(cx, |view, _| {
             view.cursor_bounds = cursor_bounds;
@@ -841,5 +894,40 @@ mod tests {
         };
         let mut cache = warm(back.clone());
         assert_eq!(rebuilt(&mut cache, back, Damage::Rows(vec![])).len(), 4);
+    }
+
+    struct Silent;
+
+    impl crate::terminal::Transport for Silent {
+        fn write(&self, _: Vec<u8>) {}
+        fn resize(&self, _: u16, _: u16) {}
+    }
+
+    #[test]
+    fn prompt_lines_get_a_dot_in_the_padding_coloured_by_their_exit() {
+        let size = GridSize {
+            cols: 20,
+            rows: 6,
+            cell_width: 8.,
+            cell_height: 18.,
+        };
+        let mut terminal = Terminal::new(size, Box::new(Silent));
+        let palette = Theme::dark(false).terminal;
+        for bytes in [
+            &b"\x1b]133;A\x07$ \x1b]133;B\x07ok\r\n\x1b]133;C\x07\x1b]133;D;0\x07"[..],
+            b"\x1b]133;A\x07$ \x1b]133;B\x07no\r\n\x1b]133;C\x07\x1b]133;D;1\x07",
+            b"\x1b]133;A\x07$ \x1b]133;B\x07",
+        ] {
+            terminal.handle(crate::terminal::PaneEvent::Output(bytes.to_vec()), &palette);
+        }
+        let (ok, bad, running) = (gpui::green(), gpui::red(), gpui::blue());
+        let origin = point(px(100.), px(50.));
+        let dots = prompt_dots(&terminal, origin, px(18.), (ok, bad, running));
+        assert_eq!(dots.len(), 3);
+        assert_eq!(dots[0].background, ok.into());
+        assert_eq!(dots[1].background, bad.into());
+        assert_eq!(dots[2].border_color, running);
+        assert!(dots.iter().all(|d| d.bounds.right() < origin.x));
+        assert_eq!(dots[1].bounds.top(), origin.y + px(18. + 6.));
     }
 }

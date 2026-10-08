@@ -95,6 +95,19 @@ const EDITOR_COMMANDS: &[(&str, &str)] = &[
     ("Go to type definition", "editor::GoToTypeDefinition"),
 ];
 
+/// Terminal actions the palette offers while a terminal is focused.
+const TERMINAL_COMMANDS: &[(&str, &str)] = &[
+    (
+        "Copy last command output",
+        "terminal::CopyLastCommandOutput",
+    ),
+    (
+        "Scroll to previous command",
+        "terminal::ScrollToPreviousCommand",
+    ),
+    ("Scroll to next command", "terminal::ScrollToNextCommand"),
+];
+
 /// Commands offered for starting Claude; typing anything else offers that too.
 const CLAUDE_COMMANDS: &[&str] = &["claude", "claude-tlsc", "claude-ai"];
 
@@ -322,6 +335,13 @@ impl Shell {
                 }
             }
         }
+        if self.focused_terminal() {
+            for (label, name) in TERMINAL_COMMANDS {
+                if let Ok(action) = cx.build_action(name, None) {
+                    commands.push((label, action));
+                }
+            }
+        }
         commands
             .into_iter()
             .filter(|(label, _)| {
@@ -341,6 +361,19 @@ impl Shell {
                 target: Target::Command(action),
             })
             .collect()
+    }
+
+    fn focused_terminal(&self) -> bool {
+        let Some(project) = self.workspace.active_project() else {
+            return false;
+        };
+        let item = project
+            .layout
+            .as_ref()
+            .and_then(|l| l.focused_pane())
+            .and_then(|p| p.active_item());
+        item.and_then(|item| self.items.get(&(project.root.clone(), item.id)))
+            .is_some_and(|view| matches!(view, super::item::ItemView::Terminal(_)))
     }
 
     /// Closed project folders that still exist, newest first.
