@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use athena_ui::{ActiveTheme, Theme};
 use gpui::{
@@ -29,6 +29,8 @@ const FONTS: &[(&str, &str, &[u8])] = &[
         include_bytes!("../../athena-ui/assets/fonts/GeistMono-Regular.ttf"),
     ),
 ];
+/// Typing pauses this long before the preview follows the editor.
+const FOLLOW_DELAY: Duration = Duration::from_millis(250);
 /// Larger documents are not rendered; the editor still opens them.
 const MAX_DOCUMENT: u64 = 10 * 1024 * 1024;
 
@@ -63,6 +65,7 @@ pub struct DocView {
     /// What the page shows now; `None` until it has been loaded.
     shown: Option<Rendered>,
     error: Option<String>,
+    pending_text: Option<Task<()>>,
     _events: Task<()>,
 }
 
@@ -99,6 +102,7 @@ impl DocView {
             mtime: None,
             shown: None,
             error: None,
+            pending_text: None,
             _events,
         }
     }
@@ -133,22 +137,32 @@ impl DocView {
             return;
         }
         self.mtime = mtime;
-        self.render_page(cx);
-    }
-
-    fn render_page(&mut self, cx: &mut Context<Self>) {
-        let Some(web) = &self.web else { return };
-        let text = match read_document(&self.path) {
-            Ok(text) => text,
+        match read_document(&self.path) {
+            Ok(text) => self.render_text(&text, cx),
             Err(error) => {
                 self.error = Some(error);
                 self.sync_hidden();
                 cx.notify();
-                return;
             }
-        };
+        }
+    }
+
+    /// Shows unsaved editor text shortly after typing pauses, as VS Code's preview follows the buffer.
+    pub fn follow_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.pending_text = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLLOW_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.pending_text = None;
+                this.render_text(&text, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn render_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(web) = &self.web else { return };
         self.error = None;
-        let next = markdown::render_file(&self.path, &text);
+        let next = markdown::render_file(&self.path, text);
         match &self.shown {
             // Swapping the body in place keeps the scroll position; a page still loading, or one
             // that now needs Mermaid, is loaded afresh.
@@ -157,7 +171,10 @@ impl DocView {
                     web.run_script(&format!("athenaUpdate({})", js_string(&next.body)));
                 }
             }
-            _ => web.load_html(&page(&next, cx.theme())),
+            _ => {
+                self.loaded = false;
+                web.load_html(&page(&next, cx.theme()));
+            }
         }
         self.shown = Some(next);
         self.sync_hidden();
@@ -166,7 +183,10 @@ impl DocView {
 
     fn web_event(&mut self, event: WebEvent, cx: &mut Context<Self>) {
         match event {
-            WebEvent::Finished => self.loaded = true,
+            WebEvent::Finished => {
+                self.loaded = true;
+                self.error = None;
+            }
             WebEvent::Failed(message) => self.error = Some(message),
             WebEvent::OpenLocal(path) => cx.emit(DocEvent::OpenFile(path)),
             WebEvent::OpenExternal(url) => cx.open_url(&url),
@@ -316,11 +336,16 @@ fn font_faces() -> &'static str {
 }
 
 fn nonce() -> String {
-    let n = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
-        ^ (u128::from(std::process::id()) << 64);
-    format!("{n:x}")
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    let random = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
+    if random.is_err() {
+        let n = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        bytes = n.to_le_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The whole page: Athena's palette, inline fonts, and Mermaid only when the document uses it.
@@ -349,7 +374,7 @@ clusterBorder:'{border}',edgeLabelBackground:'{bg}',noteBkgColor:'{accent_surfac
 noteTextColor:'{strong}',noteBorderColor:'{accent}',actorBkg:'{surface}',\
 actorBorder:'{border_strong}',actorTextColor:'{strong}',signalColor:'{muted}',\
 signalTextColor:'{text}',fontSize:'14px'}}}});\
-mermaid.run();</script>",
+document.addEventListener('DOMContentLoaded',function(){{mermaid.run();}});</script>",
             border_strong = hex(c.border_strong),
             accent_surface = hex(c.surface_accent),
         )
@@ -359,7 +384,9 @@ mermaid.run();</script>",
     format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data: https: http:; font-src data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data: https: http:; font-src data:; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<script nonce="{nonce}">window.athenaUpdate=function(html){{document.getElementById('content').innerHTML=html;if(window.mermaid)mermaid.run();}};</script>
+{mermaid}
 <style>
 {fonts}
 :root{{color-scheme:dark}}
@@ -391,8 +418,6 @@ del{{color:{faint}}}
 ::selection{{background:{selection}}}
 </style></head>
 <body><div id="content">{body}</div>
-<script nonce="{nonce}">window.athenaUpdate=function(html){{document.getElementById('content').innerHTML=html;if(window.mermaid)mermaid.run();}};</script>
-{mermaid}
 </body></html>"#,
         fonts = font_faces(),
         selection = hex(c.surface_accent),

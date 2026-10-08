@@ -94,6 +94,7 @@ impl Shell {
                         EditorEvent::Changed => {}
                         EditorEvent::Edited { .. } => {
                             this.lsp_edited(&view, cx);
+                            this.follow_docs(&view, cx);
                             view.update(cx, |v, cx| v.schedule_autosave(cx));
                         }
                         EditorEvent::Saved => {
@@ -1124,6 +1125,29 @@ impl Shell {
         self.lsp_opened(root, editor, cx);
         self.tree.invalidate();
         self.after_layout_change(window, cx);
+    }
+
+    /// Previews of the file an editor changed show its unsaved text.
+    fn follow_docs(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let path = editor.read(cx).path();
+        let docs: Vec<_> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                ItemView::Doc(doc) if doc.read(cx).path() == path => Some(doc.clone()),
+                _ => None,
+            })
+            .collect();
+        if docs.is_empty() {
+            return;
+        }
+        let Some(text) = editor.read(cx).text() else {
+            return;
+        };
+        for doc in docs {
+            let text = text.clone();
+            doc.update(cx, |d, cx| d.follow_text(text, cx));
+        }
     }
 
     /// Re-renders previews of `path` after its editor saved it.

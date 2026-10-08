@@ -13,8 +13,8 @@ use objc2_foundation::{
     NSURLRequest,
 };
 use objc2_web_kit::{
-    WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKUIDelegate,
-    WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+    WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
+    WKNavigationType, WKUIDelegate, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -62,7 +62,12 @@ define_class!(
             let url = unsafe { action.request().URL() };
             if self.ivars().mode == Mode::Document {
                 let url = url.map(|u| url_string(&u)).unwrap_or_default();
-                return handler.call((self.document_policy(&url),));
+                // SAFETY: reading a live navigation action on the main thread.
+                let clicked = unsafe {
+                    action.navigationType() == WKNavigationType::LinkActivated
+                        && action.targetFrame().is_some_and(|f| f.isMainFrame())
+                };
+                return handler.call((self.document_policy(&url, clicked),));
             }
             let policy = if url.is_some_and(|u| allowed(&url_string(&u))) {
                 WKNavigationActionPolicy::Allow
@@ -119,10 +124,14 @@ impl Delegate {
         unsafe { msg_send![super(this), init] }
     }
 
-    /// A document only navigates within itself; links are handed to the app instead.
-    fn document_policy(&self, url: &str) -> WKNavigationActionPolicy {
+    /// A document only navigates within itself; clicked links are handed to the app, and
+    /// anything else (refresh tags, frames) goes nowhere.
+    fn document_policy(&self, url: &str, clicked: bool) -> WKNavigationActionPolicy {
         if url.to_ascii_lowercase().starts_with("about:") {
             return WKNavigationActionPolicy::Allow;
+        }
+        if !clicked {
+            return WKNavigationActionPolicy::Cancel;
         }
         let event = match crate::markdown::local_path(url) {
             Some(path) => Some(WebEvent::OpenLocal(path)),
