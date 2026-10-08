@@ -13,24 +13,19 @@ pub enum Mark {
     Finished(Option<i32>),
 }
 
-/// OSC bodies longer than this are not shell-integration marks, which are a few bytes.
-const MAX_BODY: usize = 64;
+/// Bytes of an OSC body kept; a mark's letter and exit code come first, and the rest (such as
+/// the command line zsh's `C` carries) is not needed.
+const KEPT_BODY: usize = 32;
 
 #[derive(Default)]
 enum State {
     #[default]
     Ground,
     Escape,
-    /// Inside `ESC ]`, holding the body while it is short enough to be a mark.
-    Osc {
-        body: Vec<u8>,
-        long: bool,
-    },
+    /// Inside `ESC ]`, holding the start of the body.
+    Osc(Vec<u8>),
     /// An `ESC` inside the body, which `\` turns into the string terminator.
-    OscEscape {
-        body: Vec<u8>,
-        long: bool,
-    },
+    OscEscape(Vec<u8>),
 }
 
 /// Finds marks in the byte stream before the terminal parses it, carrying partial sequences
@@ -48,46 +43,36 @@ impl Scanner {
             self.state = match (std::mem::take(&mut self.state), b) {
                 (State::Ground, 0x1b) => State::Escape,
                 (State::Ground, _) => State::Ground,
-                (State::Escape, b']') => State::Osc {
-                    body: Vec::new(),
-                    long: false,
-                },
+                (State::Escape, b']') => State::Osc(Vec::new()),
                 (State::Escape, 0x1b) => State::Escape,
                 (State::Escape, _) => State::Ground,
-                (State::Osc { body, long }, 0x07) => {
-                    found.extend(mark(&body, long).map(|m| (i + 1, m)));
+                (State::Osc(body), 0x07) => {
+                    found.extend(mark(&body).map(|m| (i + 1, m)));
                     State::Ground
                 }
-                (State::Osc { body, long }, 0x1b) => State::OscEscape { body, long },
+                (State::Osc(body), 0x1b) => State::OscEscape(body),
                 // CAN and SUB abort a control string.
-                (State::Osc { .. }, 0x18 | 0x1a) => State::Ground,
-                (State::Osc { mut body, long }, b) => {
-                    let long = long || body.len() >= MAX_BODY;
-                    if !long {
+                (State::Osc(_), 0x18 | 0x1a) => State::Ground,
+                (State::Osc(mut body), b) => {
+                    if body.len() < KEPT_BODY {
                         body.push(b);
                     }
-                    State::Osc { body, long }
+                    State::Osc(body)
                 }
-                (State::OscEscape { body, long }, b'\\') => {
-                    found.extend(mark(&body, long).map(|m| (i + 1, m)));
+                (State::OscEscape(body), b'\\') => {
+                    found.extend(mark(&body).map(|m| (i + 1, m)));
                     State::Ground
                 }
-                (State::OscEscape { .. }, b']') => State::Osc {
-                    body: Vec::new(),
-                    long: false,
-                },
-                (State::OscEscape { .. }, _) => State::Ground,
+                (State::OscEscape(_), b']') => State::Osc(Vec::new()),
+                (State::OscEscape(_), _) => State::Ground,
             };
         }
         found
     }
 }
 
-fn mark(body: &[u8], long: bool) -> Option<Mark> {
-    if long {
-        return None;
-    }
-    let body = std::str::from_utf8(body).ok()?;
+fn mark(body: &[u8]) -> Option<Mark> {
+    let body = String::from_utf8_lossy(body);
     let rest = body
         .strip_prefix("133;")
         .or_else(|| body.strip_prefix("633;"))?;
@@ -209,20 +194,23 @@ mod tests {
     }
 
     #[test]
-    fn other_sequences_are_ignored() {
+    fn other_sequences_are_ignored_and_long_marks_still_count() {
         let mut s = Scanner::default();
         let mut long = b"\x1b]133;A".to_vec();
         long.extend([b'x'; 100]);
         long.push(0x07);
+        let mut command = b"\x1b]133;C;".to_vec();
+        command.extend([b'Q'; 300]);
+        command.push(0x07);
         let bytes = [
             &b"\x1b]0;title\x07\x1b[31m\x1b]1337;A\x07\x1b]133;Z\x07\x1b]133;A\x18"[..],
             &long,
+            &command,
             b"\x1b]133;D\x07",
         ]
         .concat();
-        let found = s.feed(&bytes);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].1, Mark::Finished(None));
+        let found: Vec<Mark> = s.feed(&bytes).into_iter().map(|(_, m)| m).collect();
+        assert_eq!(found, [Mark::Output, Mark::Finished(None)]);
     }
 
     #[test]

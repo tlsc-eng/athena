@@ -1003,6 +1003,20 @@ mod tests {
     }
 
     #[test]
+    fn athenas_own_zsh_marks_without_b_are_enough() {
+        let (mut t, _) = terminal();
+        // precmd sends A before zle draws the prompt, in a later write; preexec sends C with the
+        // command line in base64.
+        feed(&mut t, b"\x1b]133;A\x07");
+        feed(&mut t, b"% ");
+        feed(&mut t, b"ls\r\n\x1b]133;C;bHM=\x07a\r\n");
+        feed(&mut t, b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        feed(&mut t, b"% ");
+        assert_eq!(prompts(&t), [(0, Some(Some(0))), (2, None)]);
+        assert_eq!(t.last_output(), Ok("a".to_string()));
+    }
+
+    #[test]
     fn full_screen_programs_and_unmarked_output_are_left_alone() {
         let (mut t, _) = terminal();
         assert_eq!(t.last_output(), Err(NoOutput::NoCommand));
