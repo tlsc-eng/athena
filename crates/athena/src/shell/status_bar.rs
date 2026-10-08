@@ -5,7 +5,6 @@ use gpui::{
 };
 
 use super::Shell;
-use super::drawer::DrawerTab;
 use super::lsp::LspStatus;
 
 const HEIGHT: f32 = 22.;
@@ -94,9 +93,8 @@ impl Shell {
         };
 
         let left = branch.map(|branch| {
-            button("status-branch", branch.into(), "Source control changes").on_click(
-                cx.listener(|this, _, _, cx| this.toggle_drawer_tab(DrawerTab::Changes, cx)),
-            )
+            button("status-branch", branch.into(), "Switch branch")
+                .on_click(cx.listener(|this, _, window, cx| this.open_branches(window, cx)))
         });
         let right = status.zip(editor).map(|(status, editor)| {
             let position = position_label(status.line, status.column, status.selected);
