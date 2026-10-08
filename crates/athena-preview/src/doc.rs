@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use athena_ui::{ActiveTheme, Theme};
@@ -8,7 +8,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::markdown::{self, Rendered};
+use crate::markdown::{self, ImageCache, Rendered};
 use crate::web::{Mode, Web, WebEvent};
 
 const MERMAID: &str = include_str!("../assets/mermaid.min.js");
@@ -66,6 +66,8 @@ pub struct DocView {
     shown: Option<Rendered>,
     error: Option<String>,
     pending_text: Option<Task<()>>,
+    rendering: Option<Task<()>>,
+    images: Arc<Mutex<ImageCache>>,
     _events: Task<()>,
 }
 
@@ -103,6 +105,8 @@ impl DocView {
             shown: None,
             error: None,
             pending_text: None,
+            rendering: None,
+            images: Arc::default(),
             _events,
         }
     }
@@ -138,8 +142,9 @@ impl DocView {
         }
         self.mtime = mtime;
         match read_document(&self.path) {
-            Ok(text) => self.render_text(&text, cx),
+            Ok(text) => self.render_text(text, cx),
             Err(error) => {
+                self.rendering = None;
                 self.error = Some(error);
                 self.sync_hidden();
                 cx.notify();
@@ -153,16 +158,34 @@ impl DocView {
             cx.background_executor().timer(FOLLOW_DELAY).await;
             this.update(cx, |this, cx| {
                 this.pending_text = None;
-                this.render_text(&text, cx);
+                this.render_text(text, cx);
             })
             .ok();
         }));
     }
 
-    fn render_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// Renders off the UI thread, since local images are read and encoded into the page.
+    fn render_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.web.is_none() {
+            return;
+        }
+        let (path, images) = (self.path.clone(), self.images.clone());
+        self.rendering = Some(cx.spawn(async move |this, cx| {
+            let next = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut images = images.lock().unwrap_or_else(PoisonError::into_inner);
+                    markdown::render_file(&path, &text, &mut images)
+                })
+                .await;
+            this.update(cx, |this, cx| this.show(next, cx)).ok();
+        }));
+    }
+
+    fn show(&mut self, next: Rendered, cx: &mut Context<Self>) {
+        self.rendering = None;
         let Some(web) = &self.web else { return };
         self.error = None;
-        let next = markdown::render_file(&self.path, text);
         match &self.shown {
             // Swapping the body in place keeps the scroll position; a page still loading, or one
             // that now needs Mermaid, is loaded afresh.
@@ -448,12 +471,19 @@ mod tests {
     #[test]
     fn pages_carry_mermaid_only_when_needed() {
         let theme = Theme::dark(false);
-        let plain = page(&markdown::render("# x", Path::new("/")), &theme);
+        let plain = page(
+            &markdown::render("# x", Path::new("/"), &mut ImageCache::default()),
+            &theme,
+        );
         assert!(!plain.contains("mermaid.initialize"));
         assert!(plain.contains("<h1 id=\"x\">x</h1>"));
         assert!(plain.contains("background:#0b0807"));
         let diagram = page(
-            &markdown::render_file(Path::new("/a.mmd"), "graph TD\nA-->B"),
+            &markdown::render_file(
+                Path::new("/a.mmd"),
+                "graph TD\nA-->B",
+                &mut ImageCache::default(),
+            ),
             &theme,
         );
         assert!(diagram.contains("mermaid.initialize"));

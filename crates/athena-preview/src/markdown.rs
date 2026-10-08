@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 
@@ -14,8 +15,20 @@ pub(crate) struct Rendered {
     pub mermaid: bool,
 }
 
+/// Encoded local images by path, reused while a file keeps its modification time and length.
+#[derive(Default)]
+pub(crate) struct ImageCache(HashMap<PathBuf, CachedImage>);
+
+struct CachedImage {
+    mtime: Option<SystemTime>,
+    len: u64,
+    uri: String,
+    /// Shown by the render in progress; the rest are dropped when it ends.
+    used: bool,
+}
+
 /// Mermaid sources (`.mmd`, `.mermaid`) are one diagram; everything else is Markdown.
-pub(crate) fn render_file(path: &Path, text: &str) -> Rendered {
+pub(crate) fn render_file(path: &Path, text: &str, images: &mut ImageCache) -> Rendered {
     let is_mermaid = path
         .extension()
         .and_then(|e| e.to_str())
@@ -26,11 +39,11 @@ pub(crate) fn render_file(path: &Path, text: &str) -> Rendered {
             mermaid: true,
         };
     }
-    render(text, path.parent().unwrap_or(Path::new("/")))
+    render(text, path.parent().unwrap_or(Path::new("/")), images)
 }
 
 /// GitHub-flavoured Markdown with mermaid fences, local images inlined and local links rewritten.
-pub(crate) fn render(text: &str, base: &Path) -> Rendered {
+pub(crate) fn render(text: &str, base: &Path, images: &mut ImageCache) -> Rendered {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -74,13 +87,14 @@ pub(crate) fn render(text: &str, base: &Path) -> Rendered {
                 id,
             }) => events.push(Event::Start(Tag::Image {
                 link_type,
-                dest_url: inline_image(&dest_url, base).map_or(dest_url, CowStr::from),
+                dest_url: inline_image(&dest_url, base, images).map_or(dest_url, CowStr::from),
                 title,
                 id,
             })),
             other => events.push(other),
         }
     }
+    images.0.retain(|_, image| std::mem::take(&mut image.used));
     add_heading_ids(&mut events);
     let mut body = String::new();
     html::push_html(&mut body, events.into_iter());
@@ -185,7 +199,7 @@ pub(crate) fn local_path(url: &str) -> Option<PathBuf> {
 }
 
 /// The page has no base URL, so relative images travel inside it as data: URIs.
-fn inline_image(url: &str, base: &Path) -> Option<String> {
+fn inline_image(url: &str, base: &Path, images: &mut ImageCache) -> Option<String> {
     if url.is_empty() || url.starts_with("//") || has_scheme(url) {
         return None;
     }
@@ -200,11 +214,30 @@ fn inline_image(url: &str, base: &Path) -> Option<String> {
         "ico" => "image/x-icon",
         _ => return None,
     };
-    if std::fs::metadata(&path).ok()?.len() > MAX_INLINE_IMAGE {
+    let meta = std::fs::metadata(&path).ok()?;
+    if meta.len() > MAX_INLINE_IMAGE {
         return None;
     }
+    let (mtime, len) = (meta.modified().ok(), meta.len());
+    if let Some(cached) = images.0.get_mut(&path)
+        && cached.mtime == mtime
+        && cached.len == len
+    {
+        cached.used = true;
+        return Some(cached.uri.clone());
+    }
     let bytes = std::fs::read(&path).ok()?;
-    Some(format!("data:{mime};base64,{}", base64(&bytes)))
+    let uri = format!("data:{mime};base64,{}", base64(&bytes));
+    images.0.insert(
+        path,
+        CachedImage {
+            mtime,
+            len,
+            uri: uri.clone(),
+            used: true,
+        },
+    );
+    Some(uri)
 }
 
 pub(crate) fn escape(text: &str) -> String {
@@ -281,7 +314,11 @@ mod tests {
 
     #[test]
     fn headings_get_github_anchor_ids() {
-        let out = render("# Hello World\n\n## Hello World\n", Path::new("/x"));
+        let out = render(
+            "# Hello World\n\n## Hello World\n",
+            Path::new("/x"),
+            &mut ImageCache::default(),
+        );
         assert!(out.body.contains("<h1 id=\"hello-world\">Hello World</h1>"));
         assert!(out.body.contains("<h2 id=\"hello-world-1\">"));
         assert!(!out.mermaid);
@@ -292,6 +329,7 @@ mod tests {
         let out = render(
             "```mermaid\ngraph TD\n  A-->B\n```\n\n```rust\nfn x() {}\n```\n",
             Path::new("/x"),
+            &mut ImageCache::default(),
         );
         assert!(
             out.body
@@ -299,7 +337,11 @@ mod tests {
         );
         assert!(out.body.contains("<code class=\"language-rust\">"));
         assert!(out.mermaid);
-        let mmd = render_file(Path::new("/x/flow.mmd"), "graph LR\nA-->B");
+        let mmd = render_file(
+            Path::new("/x/flow.mmd"),
+            "graph LR\nA-->B",
+            &mut ImageCache::default(),
+        );
         assert_eq!(mmd.body, "<pre class=\"mermaid\">graph LR\nA--&gt;B</pre>");
     }
 
@@ -308,6 +350,7 @@ mod tests {
         let out = render(
             "| a | b |\n|---|---|\n| 1 | 2 |\n\n- [x] done\n",
             Path::new("/x"),
+            &mut ImageCache::default(),
         );
         assert!(out.body.contains("<table>"));
         assert!(out.body.contains("type=\"checkbox\""));
@@ -318,6 +361,7 @@ mod tests {
         let out = render(
             "[a](docs/My%20File.md#usage) [b](https://tlsc.io) [c](#top) [d](mailto:x@y)",
             Path::new("/repo"),
+            &mut ImageCache::default(),
         );
         assert!(
             out.body
@@ -340,6 +384,7 @@ mod tests {
         let out = render(
             "[a](../other/x.md#s) [b](./y.md) [c](/repo/a/../b.md) [d](../../../../up.md)",
             Path::new("/repo/docs"),
+            &mut ImageCache::default(),
         );
         for href in [
             "athena-doc:///repo/other/x.md#s",
@@ -360,11 +405,47 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("athena-md-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("dot.png"), [1u8, 2, 3, 4]).unwrap();
-        let out = render("![dot](dot.png) ![web](https://x/y.png)", &dir);
+        let out = render(
+            "![dot](dot.png) ![web](https://x/y.png)",
+            &dir,
+            &mut ImageCache::default(),
+        );
         assert!(out.body.contains("src=\"data:image/png;base64,AQIDBA==\""));
         assert!(out.body.contains("src=\"https://x/y.png\""));
-        let up = render("![dot](missing/../dot.png)", &dir);
+        let up = render(
+            "![dot](missing/../dot.png)",
+            &dir,
+            &mut ImageCache::default(),
+        );
         assert!(up.body.contains("src=\"data:image/png;base64,AQIDBA==\""));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn images_are_encoded_again_only_when_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("athena-md-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dot.png");
+        let at = SystemTime::now() - std::time::Duration::from_secs(60);
+        let write = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(at).unwrap();
+        };
+        let mut images = ImageCache::default();
+        write(&[1, 2, 3, 4]);
+        let src = |out: Rendered| out.body.contains("src=\"data:image/png;base64,AQIDBA==\"");
+        assert!(src(render("![a](dot.png)", &dir, &mut images)));
+        write(&[5, 6, 7, 8]);
+        assert!(
+            src(render("![a](dot.png)", &dir, &mut images)),
+            "same time and length: served from the cache"
+        );
+        write(&[5, 6, 7]);
+        let out = render("![a](dot.png)", &dir, &mut images);
+        assert!(out.body.contains("base64,BQYH\""), "{}", out.body);
+        render("no images", &dir, &mut images);
+        assert!(images.0.is_empty(), "images no longer shown are dropped");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
