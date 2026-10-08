@@ -46,6 +46,8 @@ pub struct Server {
     socket: PathBuf,
     zdotdir: Option<PathBuf>,
     notify_after: Duration,
+    /// A pane no client attaches to within this long was orphaned by a window that went away.
+    unattached_grace: Duration,
     state: Mutex<State>,
 }
 
@@ -61,7 +63,12 @@ struct State {
 }
 
 impl Server {
-    pub fn new(socket: PathBuf, zdotdir: Option<PathBuf>, notify_after: Duration) -> Self {
+    pub fn new(
+        socket: PathBuf,
+        zdotdir: Option<PathBuf>,
+        notify_after: Duration,
+        unattached_grace: Duration,
+    ) -> Self {
         // Ids start from the clock so a pane id saved by the GUI never matches a later daemon's pane.
         let epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -71,6 +78,7 @@ impl Server {
             socket,
             zdotdir,
             notify_after,
+            unattached_grace,
             state: Mutex::new(State {
                 panes: HashMap::new(),
                 clients: HashMap::new(),
@@ -94,6 +102,14 @@ impl Server {
                 loop {
                     thread::sleep(REAPER_TICK);
                     let mut st = self.lock();
+                    st.panes.retain(|id, p| {
+                        let orphan =
+                            !p.ever_attached && p.spawned_at.elapsed() >= self.unattached_grace;
+                        if orphan {
+                            tracing::info!("pane {id} was never attached; ending it");
+                        }
+                        !orphan
+                    });
                     if !st.panes.is_empty() || !st.clients.is_empty() {
                         st.idle_since = None;
                         continue;
@@ -322,6 +338,7 @@ impl Server {
                 if !p.attached.contains(&client) {
                     p.attached.push(client);
                 }
+                p.ever_attached = true;
                 // Queued under the lock so no live output slips in ahead of the history, but
                 // without blocking: a client with no room for it is not reading.
                 let head = ServerMsg::Attached {

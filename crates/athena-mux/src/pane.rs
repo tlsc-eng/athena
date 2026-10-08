@@ -25,6 +25,9 @@ pub struct Pane {
     pub attached: Vec<u64>,
     pub exit: Option<Option<i32>>,
     pub foreground: Option<Process>,
+    pub spawned_at: Instant,
+    /// Whether any client ever attached; a pane nobody attached to has no tab to come back to.
+    pub ever_attached: bool,
     /// Device number of the pane's terminal; `None` once it has been hung up.
     tty: Option<u32>,
     master: Box<dyn MasterPty + Send>,
@@ -126,6 +129,8 @@ impl Pane {
             attached: Vec::new(),
             exit: None,
             foreground: None,
+            spawned_at: Instant::now(),
+            ever_attached: false,
             tty: Some(tty),
             master: pair.master,
             input,

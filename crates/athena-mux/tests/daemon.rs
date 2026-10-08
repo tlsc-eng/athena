@@ -14,6 +14,10 @@ struct Daemon {
 
 impl Daemon {
     fn start(tag: &str) -> Self {
+        Self::start_with(tag, &[])
+    }
+
+    fn start_with(tag: &str, env: &[(&str, &str)]) -> Self {
         let home = PathBuf::from(format!("/tmp/athena-t{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -22,6 +26,7 @@ impl Daemon {
             .env("ATHENA_TEST_SECRET", "leaked")
             .env("ATHENA_NOTIFY_AFTER_SECS", "0")
             .env("SHELL", "/bin/zsh")
+            .envs(env.iter().copied())
             .spawn()
             .unwrap();
         let daemon = Self { home, child };
@@ -535,4 +540,38 @@ fn killing_a_pane_also_ends_programs_that_ignore_the_hangup() {
         }
     };
     assert!(panes.is_empty());
+}
+
+fn list_panes(conn: &Connection, reader: &mut UnixStream) -> Vec<u64> {
+    conn.send(&ClientMsg::ListPanes).unwrap();
+    loop {
+        if let ServerMsg::Panes { panes } = next(reader) {
+            return panes.into_iter().map(|p| p.id).collect();
+        }
+    }
+}
+
+#[test]
+fn a_pane_no_client_ever_attached_to_is_ended_but_a_detached_one_is_kept() {
+    let daemon = Daemon::start_with("orphan", &[("ATHENA_UNATTACHED_SECS", "1")]);
+    let (conn, mut reader) = daemon.connect();
+    let orphan = spawn_pane(&conn, &mut reader);
+    let kept = spawn_pane(&conn, &mut reader);
+    conn.send(&ClientMsg::Attach { pane: kept }).unwrap();
+    drop((conn, reader));
+
+    let (conn, mut reader) = daemon.connect();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let panes = list_panes(&conn, &mut reader);
+        assert!(panes.contains(&kept), "the detached pane was ended");
+        if !panes.contains(&orphan) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the orphaned pane is still there"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
 }

@@ -149,6 +149,8 @@ pub struct TerminalView {
     cwd: PathBuf,
     pane: Option<PaneId>,
     conn: Option<Arc<Connection>>,
+    /// Closed by the user; a shell still being started for it is ended as soon as it arrives.
+    closed: bool,
     session_lost: bool,
     last_reconnect: Option<Instant>,
     pub(crate) focus: FocusHandle,
@@ -194,6 +196,7 @@ impl TerminalView {
             cwd,
             pane,
             conn: None,
+            closed: false,
             session_lost: false,
             last_reconnect: None,
             focus: cx.focus_handle(),
@@ -367,6 +370,7 @@ impl TerminalView {
 
     /// Ends the shell for good, as when its project is closed.
     pub fn kill(&mut self) {
+        self.closed = true;
         if let (Some(conn), Some(pane)) = (&self.conn, self.pane.take()) {
             let _ = conn.send(&ClientMsg::Kill { pane });
         }
@@ -616,6 +620,9 @@ impl TerminalView {
     fn on_message(&mut self, msg: ServerMsg, cx: &mut Context<Self>) {
         let palette = cx.theme().terminal.clone();
         match msg {
+            ServerMsg::Spawned { pane } if self.closed => {
+                self.send(ClientMsg::Kill { pane });
+            }
             ServerMsg::Spawned { pane } => {
                 self.pane = Some(pane);
                 self.send(ClientMsg::Attach { pane });
@@ -694,11 +701,14 @@ impl TerminalView {
             }
             ServerMsg::Error {
                 kind: ErrorKind::NoSuchPane(_),
-            } => {
+            } if !self.closed => {
                 self.pane = None;
                 self.session_lost = true;
                 self.send(self.spawn_msg());
             }
+            ServerMsg::Error {
+                kind: ErrorKind::NoSuchPane(_),
+            } => {}
             ServerMsg::Error { kind } => {
                 tracing::warn!(pane = ?self.pane, "session daemon error: {kind}");
                 self.error = Some(kind.to_string());
@@ -715,6 +725,7 @@ impl TerminalView {
 
     fn restart(&mut self, cx: &mut Context<Self>) {
         self.kill();
+        self.closed = false;
         self.terminal = None;
         if self.conn.is_some() {
             self.send(self.spawn_msg());
@@ -1643,6 +1654,28 @@ pub fn open_connection() -> anyhow::Result<(Connection, UnixStream)> {
     let socket = athena_proto::socket_path()?;
     let log = athena_proto::log_path()?;
     athena_proto::connect_or_spawn(&socket, &daemon, &log).map_err(|e| anyhow!(e))
+}
+
+/// Ends daemon shells whose tabs are gone, such as those of projects whose folder was deleted.
+pub fn kill_sessions(panes: Vec<PaneId>) {
+    if panes.is_empty() {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("mux-kill".into())
+        .spawn(move || {
+            // No daemon running means the shells are already gone; don't start one to kill them.
+            let Ok((conn, _)) = athena_proto::socket_path()
+                .map_err(|e| anyhow!(e))
+                .and_then(|socket| athena_proto::connect(&socket).map_err(|e| anyhow!(e)))
+            else {
+                return;
+            };
+            for pane in panes {
+                let _ = conn.send(&ClientMsg::Kill { pane });
+            }
+            conn.close();
+        });
 }
 
 /// Whether the daemon with this pid still answers on the socket.

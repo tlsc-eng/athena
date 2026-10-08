@@ -68,6 +68,7 @@ fn run() -> Result<()> {
         socket,
         install_zsh_integration(),
         notify_after(),
+        seconds_from_env("ATHENA_UNATTACHED_SECS", 60),
     ));
     server.clone().start_idle_reaper();
     server.clone().start_foreground_poller();
@@ -95,9 +96,13 @@ fn install_zsh_integration() -> Option<std::path::PathBuf> {
 
 /// Commands shorter than this finish silently.
 fn notify_after() -> std::time::Duration {
-    let secs = std::env::var("ATHENA_NOTIFY_AFTER_SECS")
+    seconds_from_env("ATHENA_NOTIFY_AFTER_SECS", 10)
+}
+
+fn seconds_from_env(name: &str, default: u64) -> std::time::Duration {
+    let secs = std::env::var(name)
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+        .unwrap_or(default);
     std::time::Duration::from_secs(secs)
 }
