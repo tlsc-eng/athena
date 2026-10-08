@@ -1,3 +1,5 @@
+mod bridge;
+mod claude;
 mod fuzzy;
 mod item;
 mod notices;
@@ -21,9 +23,10 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddProject, CloseProject, CloseTab, CommandPalette, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, Minimize, NewTerminal, NextProject, NextTab, PrevProject, PrevTab,
-    QuickOpen, SelectProject, SelectTab, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
+    AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
+    EnableClaudeHooks, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, Minimize,
+    NewClaudeSession, NewTerminal, NextProject, NextTab, PrevProject, PrevTab, QuickOpen,
+    SelectProject, SelectTab, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
     ToggleNotifications, TogglePaneZoom, Zoom,
 };
 
@@ -106,15 +109,15 @@ impl Shell {
                 }
             }
         });
-        let folders = crate::app_socket::listen();
+        let requests = crate::app_socket::listen();
         let app_socket = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(folder) = folders.recv().await {
-                let opened = this.update_in(cx, |this, window, cx| {
-                    this.open_folder(folder, cx);
-                    window.activate_window();
-                    cx.activate(true);
+            while let Ok(request) = requests.recv().await {
+                let answered = this.update_in(cx, |this, window, cx| {
+                    let caller = this.verify_caller(request.claimed, &request.lineage, cx);
+                    let reply = this.handle_app(request.msg, caller, window, cx);
+                    let _ = request.reply.send(reply);
                 });
-                if opened.is_err() {
+                if answered.is_err() {
                     return;
                 }
             }
@@ -534,11 +537,29 @@ impl Render for Shell {
             .font_family(t.typography.ui.clone())
             .text_size(t.typography.body)
             .text_color(t.color.content)
-            .on_action(cx.listener(|this, _: &QuickOpen, w, cx| this.open_palette(true, w, cx)))
-            .on_action(
-                cx.listener(|this, _: &CommandPalette, w, cx| this.open_palette(false, w, cx)),
-            )
+            .on_action(cx.listener(|this, _: &QuickOpen, w, cx| {
+                this.open_palette(palette::Mode::Files, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CommandPalette, w, cx| {
+                this.open_palette(palette::Mode::Commands, w, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleNotifications, _, cx| this.toggle_drawer(cx)))
+            .on_action(
+                cx.listener(|this, _: &NewClaudeSession, w, cx| this.new_claude_session(w, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ChangeClaudeCommand, w, cx| {
+                    this.change_claude_command(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &EnableClaudeHooks, w, cx| {
+                    this.set_claude_hooks(true, w, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &DisableClaudeHooks, w, cx| {
+                this.set_claude_hooks(false, w, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| {
                 this.tree_visible = !this.tree_visible;
                 cx.notify();

@@ -47,7 +47,12 @@ impl Shell {
     }
 
     /// The view for an item, created (and for terminals attached to their session) on first use.
-    fn item_view(&mut self, root: &Path, item: &Item, cx: &mut Context<Self>) -> Option<ItemView> {
+    pub(super) fn item_view(
+        &mut self,
+        root: &Path,
+        item: &Item,
+        cx: &mut Context<Self>,
+    ) -> Option<ItemView> {
         let key = (root.to_path_buf(), item.id);
         if let Some(view) = self.items.get(&key) {
             return Some(view.clone());

@@ -16,7 +16,19 @@ const MAX_ROWS: usize = 50;
 pub(super) enum Target {
     File(PathBuf),
     Command(Box<dyn Action>),
+    /// A command that starts Claude Code in this project.
+    Claude(String),
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mode {
+    Files,
+    Commands,
+    Claude,
+}
+
+/// Commands offered for starting Claude; typing anything else offers that too.
+const CLAUDE_COMMANDS: &[&str] = &["claude", "claude-tlsc", "claude-ai"];
 
 pub(super) struct Entry {
     label: String,
@@ -27,6 +39,7 @@ pub(super) struct Entry {
 }
 
 pub(super) struct Palette {
+    mode: Mode,
     input: Entity<TextInput>,
     placeholder_hint: &'static str,
     entries: Vec<Entry>,
@@ -46,6 +59,19 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Next tab", Box::new(actions::NextTab)),
         ("Previous tab", Box::new(actions::PrevTab)),
         ("Go to file", Box::new(actions::QuickOpen)),
+        ("New Claude session", Box::new(actions::NewClaudeSession)),
+        (
+            "Change the command that starts Claude",
+            Box::new(actions::ChangeClaudeCommand),
+        ),
+        (
+            "Enable Claude Code hooks for this project",
+            Box::new(actions::EnableClaudeHooks),
+        ),
+        (
+            "Disable Claude Code hooks for this project",
+            Box::new(actions::DisableClaudeHooks),
+        ),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
         ("Notifications", Box::new(actions::ToggleNotifications)),
         ("Open project", Box::new(actions::AddProject)),
@@ -78,22 +104,13 @@ fn project_files(root: &Path) -> Vec<String> {
 }
 
 impl Shell {
-    pub(super) fn open_palette(
-        &mut self,
-        files: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = cx.new(|cx| {
-            TextInput::new(
-                if files {
-                    "Go to file…"
-                } else {
-                    "Run a command…"
-                },
-                cx,
-            )
-        });
+    pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = match mode {
+            Mode::Files => "Go to file…",
+            Mode::Commands => "Run a command…",
+            Mode::Claude => "Command that starts Claude Code here…",
+        };
+        let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
             &input,
             window,
@@ -105,11 +122,19 @@ impl Shell {
                 InputEvent::Cancel => this.close_palette(window, cx),
             },
         );
-        let entries = if files {
-            Vec::new()
-        } else {
-            commands()
+        let entries = match mode {
+            Mode::Files => Vec::new(),
+            Mode::Claude => claude_entries(""),
+            Mode::Commands => commands()
                 .into_iter()
+                .filter(|(label, _)| {
+                    let hooks_on = self
+                        .workspace
+                        .active_project()
+                        .is_some_and(|p| crate::claude_hooks::enabled(&p.root));
+                    !(label.starts_with("Enable Claude Code hooks") && hooks_on
+                        || label.starts_with("Disable Claude Code hooks") && !hooks_on)
+                })
                 .map(|(label, action)| Entry {
                     detail: window
                         .highest_precedence_binding_for_action(action.as_ref())
@@ -118,15 +143,16 @@ impl Shell {
                     label: label.to_string(),
                     target: Target::Command(action),
                 })
-                .collect()
+                .collect(),
         };
+        let files = mode == Mode::Files;
         window.focus(&input.focus_handle(cx));
         self.palette = Some(Palette {
+            mode,
             input,
-            placeholder_hint: if files {
-                "No matching files"
-            } else {
-                "No matching commands"
+            placeholder_hint: match mode {
+                Mode::Files => "No matching files",
+                _ => "No matching commands",
             },
             entries,
             hits: Vec::new(),
@@ -174,6 +200,9 @@ impl Shell {
             return;
         };
         let query = palette.input.read(cx).text().to_string();
+        if palette.mode == Mode::Claude {
+            palette.entries = claude_entries(&query);
+        }
         let mut hits: Vec<(i32, usize, Vec<usize>)> = palette
             .entries
             .iter()
@@ -220,6 +249,7 @@ impl Shell {
         match entry.map(|e| e.target) {
             Some(Target::File(path)) => self.open_file(path, window, cx),
             Some(Target::Command(action)) => window.dispatch_action(action, cx),
+            Some(Target::Claude(command)) => self.start_claude_with(command, window, cx),
             None => {}
         }
         cx.notify();
@@ -413,4 +443,21 @@ fn keystrokes(binding: &gpui::KeyBinding) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn claude_entries(query: &str) -> Vec<Entry> {
+    let typed = query.trim();
+    let mut names: Vec<String> = CLAUDE_COMMANDS.iter().map(|c| c.to_string()).collect();
+    if !typed.is_empty() && !names.iter().any(|n| n == typed) {
+        names.insert(0, typed.to_string());
+    }
+    names
+        .into_iter()
+        .map(|name| Entry {
+            label: name.clone(),
+            detail: None,
+            key: name.clone(),
+            target: Target::Claude(name),
+        })
+        .collect()
 }

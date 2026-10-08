@@ -1,6 +1,9 @@
 mod actions;
 mod app_socket;
+mod claude_hooks;
 mod cli;
+mod mcp;
+mod procinfo;
 mod shell;
 mod system_notify;
 
@@ -32,6 +35,8 @@ fn main() {
             });
             workspace.prune_missing();
 
+            // For automation: run the window's logic without showing it or taking focus.
+            let hidden = std::env::var_os("ATHENA_HIDDEN").is_some();
             let window_bounds = restore_bounds(workspace.window, cx);
             cx.open_window(
                 WindowOptions {
@@ -42,6 +47,8 @@ fn main() {
                         traffic_light_position: Some(point(px(12.), px(12.))),
                     }),
                     window_min_size: Some(size(px(640.), px(400.))),
+                    show: !hidden,
+                    focus: !hidden,
                     ..Default::default()
                 },
                 |window, cx| {
@@ -56,7 +63,9 @@ fn main() {
             )
             .expect("open main window");
             cx.on_window_closed(|cx| cx.quit()).detach();
-            cx.activate(true);
+            if !hidden {
+                cx.activate(true);
+            }
         });
 }
 

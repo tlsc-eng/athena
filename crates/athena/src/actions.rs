@@ -29,6 +29,10 @@ actions!(
         CommandPalette,
         ToggleFileTree,
         ToggleNotifications,
+        NewClaudeSession,
+        ChangeClaudeCommand,
+        EnableClaudeHooks,
+        DisableClaudeHooks,
     ]
 );
 
@@ -71,6 +75,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-p", CommandPalette, None),
         KeyBinding::new("cmd-b", ToggleFileTree, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
+        KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -99,6 +104,7 @@ pub fn init(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("New Terminal", NewTerminal),
+                MenuItem::action("New Claude Session", NewClaudeSession),
                 MenuItem::action("Open Project…", AddProject),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),

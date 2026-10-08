@@ -251,6 +251,27 @@ impl Shell {
             .map(|n| n.to_string_lossy().into_owned())
     }
 
+    /// A notice raised by Athena itself (not a terminal), shown as a toast and kept in the list.
+    pub(super) fn local_notice(
+        &mut self,
+        kind: NoticeKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.next_notice += 1;
+        let id = self.next_notice;
+        self.notifications.push(Notification {
+            id,
+            project: None,
+            item: None,
+            kind,
+            at: now_ms(),
+            read: true,
+        });
+        self.show_toast(id, window, cx);
+        self.notices_changed(cx);
+    }
+
     pub(super) fn unread(&self) -> usize {
         self.notifications.iter().filter(|n| !n.read).count()
     }
