@@ -101,7 +101,8 @@ pub struct Shell {
     zoomed: Option<PaneId>,
     entering: Option<PaneId>,
     pane_opening: Option<(PaneId, motion::Opening)>,
-    leaving: Option<(PaneId, motion::Closing)>,
+    /// Panes fading out before they close, by project.
+    leaving: HashMap<(PathBuf, PaneId), motion::Closing>,
     tab_born: Option<(ItemId, motion::Opening)>,
     /// A tab fading out before it is closed, with its project.
     tab_leaving: Option<(PathBuf, ItemId, motion::Closing)>,
@@ -229,7 +230,7 @@ impl Shell {
             zoomed: None,
             entering: None,
             pane_opening: None,
-            leaving: None,
+            leaving: HashMap::new(),
             tab_born: None,
             tab_leaving: None,
             content_switches: panes::ContentSwitches::default(),

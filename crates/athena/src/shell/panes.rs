@@ -657,23 +657,24 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self
-            .workspace
-            .active_project()
-            .and_then(|p| p.layout.as_ref())
-            .and_then(|l| l.pane(pane))
-            .cloned()
-        else {
-            return;
-        };
-        let panes = self
-            .workspace
-            .active_project()
-            .and_then(|p| p.layout.as_ref())
-            .map_or(0, |l| l.panes().len());
         let Some(root) = self.active_root() else {
             return;
         };
+        let Some(layout) = self
+            .workspace
+            .active_project()
+            .and_then(|p| p.layout.as_ref())
+        else {
+            return;
+        };
+        let Some(pane) = layout.pane(pane).cloned() else {
+            return;
+        };
+        let staying = layout
+            .panes()
+            .iter()
+            .filter(|p| !self.leaving.contains_key(&(root.clone(), p.id)))
+            .count();
         if self
             .tab_leaving
             .as_ref()
@@ -681,23 +682,26 @@ impl Shell {
         {
             return;
         }
-        if self.leaving.is_some_and(|(p, _)| p == pane.id) {
+        if self.leaving.contains_key(&(root.clone(), pane.id)) {
             return;
         }
-        if pane.items.len() == 1 && panes > 1 && !cx.theme().motion.reduced {
+        if pane.items.len() == 1 && staying > 1 && !cx.theme().motion.reduced {
             // Fade the pane out first; its sibling takes the space once it is gone.
             let generation = self.next_generation();
-            self.leaving = Some((pane.id, motion::Closing::new(generation)));
+            let key = (root.clone(), pane.id);
+            self.leaving
+                .insert(key.clone(), motion::Closing::new(generation));
+            self.focus_successor_pane(pane.id, window, cx);
             let delay = cx.theme().motion.fast;
-            cx.notify();
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     if this
                         .leaving
-                        .is_some_and(|(_, c)| c.generation == generation)
+                        .get(&key)
+                        .is_some_and(|c| c.generation == generation)
                     {
-                        this.leaving = None;
+                        this.leaving.remove(&key);
                     }
                     this.remove_item_from(&root, item, window, cx);
                 });
@@ -714,6 +718,15 @@ impl Shell {
         }
         let generation = self.next_generation();
         self.tab_leaving = Some((root.clone(), item, motion::Closing::new(generation)));
+        // The neighbour shows and takes the keyboard now, so a second Cmd+W closes it.
+        let stepped = self
+            .active_layout()
+            .and_then(|l| l.pane_mut(pane.id))
+            .is_some_and(|p| step_off(p, item));
+        if stepped {
+            self.note_content_switch(pane.id);
+            self.after_layout_change(window, cx);
+        }
         let delay = cx.theme().motion.fast;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -730,6 +743,31 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Moves focus off a pane that is fading out, to the neighbour that will take its space.
+    fn focus_successor_pane(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let area = self.pane_area();
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let leaving = &self.leaving;
+        let Some(layout) = self
+            .workspace
+            .active
+            .and_then(|i| self.workspace.projects.get_mut(i))
+            .and_then(|p| p.layout.as_mut())
+        else {
+            return;
+        };
+        if layout.focused != pane {
+            return;
+        }
+        let gone = |p: PaneId| p == pane || leaving.contains_key(&(root.clone(), p));
+        if let Some(next) = successor_pane(layout, area, pane, gone) {
+            layout.focused = next;
+            self.after_layout_change(window, cx);
+        }
     }
 
     fn remove_item(&mut self, item: ItemId, window: &mut Window, cx: &mut Context<Self>) {
@@ -761,7 +799,7 @@ impl Shell {
             (l.pane(pane)?.active == at).then_some(pane)
         });
         if let Some(layout) = project.layout.as_mut()
-            && !layout.close_item(item)
+            && !close_keeping_active(layout, item)
         {
             project.layout = None;
             // A fresh layout numbers its tabs from the start again.
@@ -1483,10 +1521,11 @@ impl Shell {
             .child(strip)
             .child(content);
 
-        if let Some((_, closing)) = self.leaving.filter(|(p, _)| *p == pane_id) {
+        if let Some(closing) = self.leaving.get(&(root.to_path_buf(), pane_id)) {
             return motion::animate_exit(
                 t.motion.reduced,
-                body,
+                // A pane on its way out no longer takes clicks, which would focus it again.
+                body.capture_any_mouse_down(|_, _, cx| cx.stop_propagation()),
                 ("pane-leave", closing.generation),
                 t.motion.fast,
                 |el, d| el.opacity(1. - d),
@@ -1936,6 +1975,61 @@ impl Shell {
     }
 }
 
+/// Shows the tab next to `item` (as closing it would) if `item` is the one showing.
+fn step_off(pane: &mut Pane, item: ItemId) -> bool {
+    let Some(at) = pane.items.iter().position(|i| i.id == item) else {
+        return false;
+    };
+    if pane.active != at || pane.items.len() < 2 {
+        return false;
+    }
+    pane.active = if at + 1 < pane.items.len() {
+        at + 1
+    } else {
+        at - 1
+    };
+    true
+}
+
+/// Closes `item` while its pane keeps showing the tab it showed before, unless that was `item`.
+fn close_keeping_active(layout: &mut Layout, item: ItemId) -> bool {
+    let shown = layout
+        .find_item(item)
+        .and_then(|(p, _)| layout.pane(p)?.active_item())
+        .map(|i| i.id)
+        .filter(|&id| id != item);
+    if !layout.close_item(item) {
+        return false;
+    }
+    if let Some(shown) = shown
+        && let Some((pane, at)) = layout.find_item(shown)
+        && let Some(pane) = layout.pane_mut(pane)
+    {
+        pane.active = at;
+    }
+    true
+}
+
+/// The pane that takes over from a closing one: its neighbour in the order `close_pane` tries,
+/// else any pane that is not `gone`.
+fn successor_pane(
+    layout: &Layout,
+    area: Rect,
+    pane: PaneId,
+    gone: impl Fn(PaneId) -> bool,
+) -> Option<PaneId> {
+    [
+        Direction::Left,
+        Direction::Up,
+        Direction::Right,
+        Direction::Down,
+    ]
+    .into_iter()
+    .filter_map(|dir| layout.neighbor(area, pane, dir))
+    .chain(layout.panes().into_iter().map(|p| p.id))
+    .find(|&p| !gone(p))
+}
+
 /// The same kind of tab as `kind`, showing `path` instead.
 pub(super) fn file_kind_like(kind: &ItemKind, path: PathBuf) -> ItemKind {
     match kind {
@@ -1971,6 +2065,79 @@ mod tests {
         assert!(!switches.fade(a, PaneId(1), std::time::Duration::ZERO).1);
         switches.retain(|(r, _)| r != a);
         assert_eq!(switches.fade(a, PaneId(1), long), (0, false));
+    }
+
+    fn term() -> ItemKind {
+        ItemKind::Terminal { session: None }
+    }
+
+    /// One pane holding four tabs, the second one showing.
+    fn four_tabs() -> (Layout, PaneId, Vec<ItemId>) {
+        let mut layout = Layout::new(term());
+        let pane = layout.focused;
+        for _ in 0..3 {
+            layout.add_item(pane, term());
+        }
+        let pane_ref = layout.pane_mut(pane).unwrap();
+        pane_ref.active = 1;
+        let ids = pane_ref.items.iter().map(|i| i.id).collect();
+        (layout, pane, ids)
+    }
+
+    fn shown(layout: &Layout, pane: PaneId) -> ItemId {
+        layout.pane(pane).unwrap().active_item().unwrap().id
+    }
+
+    #[test]
+    fn closing_the_shown_tab_shows_its_neighbour_at_once_and_keeps_it_after() {
+        let (mut layout, pane, ids) = four_tabs();
+        assert!(step_off(layout.pane_mut(pane).unwrap(), ids[1]));
+        assert_eq!(shown(&layout, pane), ids[2]);
+        // The fade ends: the dying tab goes and the neighbour stays shown.
+        assert!(close_keeping_active(&mut layout, ids[1]));
+        assert_eq!(shown(&layout, pane), ids[2]);
+        // A second close during the next fade moves on again.
+        assert!(step_off(layout.pane_mut(pane).unwrap(), ids[2]));
+        assert_eq!(shown(&layout, pane), ids[3]);
+    }
+
+    #[test]
+    fn the_last_tab_steps_back_and_a_background_tab_steps_nowhere() {
+        let (mut layout, pane, ids) = four_tabs();
+        assert!(!step_off(layout.pane_mut(pane).unwrap(), ids[3]));
+        layout.pane_mut(pane).unwrap().active = 3;
+        assert!(step_off(layout.pane_mut(pane).unwrap(), ids[3]));
+        assert_eq!(shown(&layout, pane), ids[2]);
+    }
+
+    #[test]
+    fn closing_a_tab_left_of_the_shown_one_keeps_showing_it() {
+        let (mut layout, pane, ids) = four_tabs();
+        layout.pane_mut(pane).unwrap().active = 2;
+        assert!(close_keeping_active(&mut layout, ids[0]));
+        assert_eq!(shown(&layout, pane), ids[2]);
+    }
+
+    #[test]
+    fn a_closing_pane_hands_over_to_a_pane_that_is_not_closing_too() {
+        let mut layout = Layout::new(term());
+        let left = layout.focused;
+        let middle = layout.split(left, Axis::Horizontal, term()).unwrap();
+        let right = layout.split(middle, Axis::Horizontal, term()).unwrap();
+        let area = Rect {
+            x: 0.,
+            y: 0.,
+            w: 900.,
+            h: 600.,
+        };
+        assert_eq!(
+            successor_pane(&layout, area, middle, |p| p == middle),
+            Some(left)
+        );
+        let gone = |p: PaneId| p == middle || p == left;
+        assert_eq!(successor_pane(&layout, area, middle, gone), Some(right));
+        let all = |_: PaneId| true;
+        assert_eq!(successor_pane(&layout, area, middle, all), None);
     }
 
     #[test]
