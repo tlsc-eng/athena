@@ -1,5 +1,6 @@
 mod buffer;
 mod completion;
+pub mod diff;
 mod display;
 mod element;
 mod format;
