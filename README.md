@@ -3,9 +3,10 @@
 Athena is a macOS IDE built around terminals that outlive the window and around Claude Code.
 Shells run in a separate session daemon (`athena-mux`), so quitting or updating the app does not
 kill them; the window reattaches on the next launch. Projects get split panes of terminals, an
-editor with language-server support and git decorations, a browser preview, and read-only views
-of Playwright results and Docker containers. Claude Code sessions show their state on the tab,
-and an MCP server lets Claude read the editor and terminals.
+editor with language-server support, a git diff viewer with hunk staging and a commit box, a
+browser preview, and read-only views of Playwright results and Docker containers. Claude Code
+sessions show their state on the tab, each file Claude edits can be reviewed as one diff against
+the version from before the session, and an MCP server lets Claude read the editor and terminals.
 
 It is written in Rust on [GPUI](https://crates.io/crates/gpui) and runs only on Apple silicon.
 
@@ -53,6 +54,13 @@ its shells running.
   hold Shift to select text instead, Cmd still opens links.
 - `cmd-k` clears scrollback; under a running program (a dev server, `tail -f`) it also clears the
   screen above the cursor line instead of sending ^L to that program.
+- File references in the output are links: hold Cmd to underline one, Cmd+click to open the file
+  in the editor at that line and column. This covers `go build`/`vet`/`test`, `tsc` (plain and
+  `--pretty`), eslint headers, cargo and rustc arrows, Rust panics, Python tracebacks and Claude
+  Code's own `path:line` mentions, plus OSC 8 `file://` hyperlinks to regular files. Paths resolve
+  against the shell's current folder, then the project; a bare relative name (Go test output is
+  relative to the package) is looked up in the project, and Go to file opens when several files
+  match.
 
 **Editor**
 
@@ -60,16 +68,53 @@ its shells running.
 
 - Syntax highlighting for 16 languages (see [Languages](#languages)), each token class in its own
   colour, and the bracket matching the one at the cursor highlighted.
-- Find in file, toggle comment, undo/redo, go to line (`line`, `line:column` or `line,column`).
+- Find and replace in file (`cmd-f`, `cmd-alt-f` for the replace row): Enter in the replace field
+  replaces the current match and moves on, `cmd-enter` or **Replace All** replaces every match,
+  each as one undo step. Toggle comment, undo/redo, go to line (`line`, `line:column` or
+  `line,column`).
+- Indenting: Tab on a selection spanning lines indents them, Shift+Tab, `cmd-]` and `cmd-[`
+  indent and outdent to the next tab stop in the file's style, skipping empty lines. Tab on a
+  selection inside one line still replaces it, as in VS Code.
+- Brackets and the language's quotes close themselves before blanks and closers, but not after a
+  word (apostrophes) or inside strings and comments. Typing the closer steps over one that was
+  inserted for you, Backspace right after an inserted pair removes both halves, and typing an
+  opener with a selection surrounds it. Enter between a bracket pair opens an indented line.
+- Line operations: move lines up or down, copy them up or down, delete them, insert a line below
+  (keys under [Keyboard shortcuts](#keyboard-shortcuts)); Insert line above is in the palette
+  only.
+- Indentation guides, one per indent step (blank lines continue the block's guides; offside for
+  Python and YAML), with the guide of the cursor's block drawn brighter. Spaces and tabs inside the
+  selection are shown as dots and arrows.
+- Zoom editor and terminal text together with `cmd-=` / `cmd--` / `cmd-0` (1 px steps, 6 to 40 px,
+  default 13 px; also in the View menu). The zoom is saved with the workspace. The rest of the
+  interface keeps its size.
+- A status bar under the panes shows the project's branch (click: switch branch) and, for the
+  focused editor, `Ln N, Col M` with the selected character count (click: go to line), the
+  indentation (click: indent with 2, 4 or 8 spaces or tabs, or convert the file's indentation),
+  `UTF-8`, `LF` or `CRLF`, the language (click: highlight as another language) and a dot for its
+  language server (starting, running or failed; hover for the program).
 - Code folding by brackets, falling back to indentation: chevrons in the gutter on hover, fold
   and unfold at the cursor or everywhere with the `cmd-k` chords below.
 - With a language server: diagnostics, go to definition, find references (listed in a drawer
   tab; clicking a row opens the file at that line), hover docs (rest the pointer on a word for
   half a second), completion as you type (Up/Down to move, Enter or Tab to accept, Escape to
   close; accepting can also add an import) and signature help while typing call arguments.
+- Also with a language server: rename symbol (`f2` opens a field over the symbol with the old name
+  selected; Enter renames it in every file, open files as one undo step each and closed files saved
+  to disk), quick fixes and refactorings (`cmd-.` lists them in a menu at the cursor, preferred
+  fixes first), go to implementation (`cmd-f12`) and go to type definition (editor menu and
+  palette). A dot in the gutter marks the cursor's line when a diagnostic there has a quick fix;
+  clicking it opens the same menu. Several implementations are listed in the References tab.
+- Go to symbol in the file (`cmd-shift-o`, or `@` in Go to file), previewing each one as the
+  selection moves and going back on Escape, and in the workspace (`cmd-alt-o`, or `#`). `>` in Go
+  to file switches to commands.
+- A **Problems** drawer tab lists the project's errors, warnings and infos grouped by file, errors
+  first, with a count on the tab; clicking a row opens the file there. `f8` / `shift-f8` in an
+  editor step to the next or previous problem across files, and `cmd-shift-m` or the
+  error/warning counter in the title bar toggles the tab.
 - Format on save: `cmd-s` asks the language server to format the file first, by default in Go
-  files only. "Toggle format on save" (palette, File menu) turns it on or off for every language
-  with a server. Auto save does not format.
+  files only; for Go it also organizes imports. "Toggle format on save" (palette, File menu) turns
+  it on or off for every language with a server. Auto save does not format.
 - Go to file (fuzzy) and a command palette. A file opens in the editor pane used last, or in a
   new pane beside the focused one with Cmd+click in the tree or Cmd+Enter in Go to file.
 - Two tabs on the same file share one buffer: edits, undo and the unsaved marker are the file's;
@@ -96,9 +141,28 @@ information rather than triggering the install dialog).
 - Inline blame (`cmd-alt-shift-g`, off by default): "author · 3 days ago · summary" after the
   cursor's line, "Not committed yet" for edited lines.
 - A **Changes** drawer tab lists Staged Changes, Changes and Untracked, with Stage / Unstage on
-  each row and group; clicking a row opens the file.
+  each row and group (Stage All and Discard All leave conflicted files alone). Hovering a row also
+  offers Open File and Discard.
+- Clicking a row opens its diff in a tab: a staged row compares `HEAD` with the index ("main.go
+  (Index)"), an unstaged or untracked one the index with the file on disk ("main.go (Working
+  Tree)"); a conflicted file opens in the editor instead. Diffs are read-only, side by side or
+  inline (toolbar switch), syntax highlighted, with changed words marked inside changed lines.
+  `alt-f5` / `shift-alt-f5` step through the changes. Above each change, **Stage**, **Unstage** or
+  **Revert** acts on that change alone; a staging action is refused if the index changed since
+  the diff was made, and Revert refuses a file that changed since. Open diffs reload when git
+  status is re-read. Binary, non-UTF-8 and files over 20 MB show why there is no diff.
+- A commit box above the list: type a one-line message and press `cmd-enter` or **Commit**.
+  **Amend** fills in the last commit's subject, keeps its body, and refuses to commit if `HEAD`
+  moved since. With nothing staged it offers to stage everything and commit. **Discard** asks
+  first: tracked files go back to their staged or committed version, untracked ones move to the
+  Trash. Discard and Revert keep a copy of the replaced file in
+  `~/Library/Application Support/athena/discarded` for 30 days.
+- **Switch branch…** (palette, the branch button by the commit box, or the branch in the status
+  bar) lists local then remote branches with their age and last subject. Typing a new name offers
+  to create it; a remote branch without a local one is checked out tracking it. Switching is never
+  forced, so git's refusal over local changes is shown as is.
 - Status is re-read every 5 seconds while the window is in front and shortly after a save, a file
-  operation or a change on disk. The title bar shows the branch.
+  operation or a change on disk. The title bar and the status bar show the branch.
 
 **Workspace**
 
@@ -109,9 +173,9 @@ information rather than triggering the install dialog).
 - Right-click menus. Tree: New File, New Folder, Rename, Delete (to the Trash), Reveal in Finder,
   Copy Path, Copy Relative Path, Open to the Side. Tabs: Close, Close Others, Close to the Right,
   Close All, Reveal in Finder, Copy Path, Copy Relative Path, Reveal in File Tree, Split Right /
-  Down with that tab. Editor: Go to
-  Definition, Find References, Cut, Copy, Paste, Toggle Line Comment. Terminal: Copy, Paste,
-  Select All, Find, Clear.
+  Down with that tab. Editor: Go to Definition, Find References, Go to Implementations, Go to Type
+  Definition, Rename Symbol, Quick Fix…, Cut, Copy, Paste, Toggle Line Comment. Terminal: Copy,
+  Paste, Select All, Find, Clear.
 - Drag a tab onto another tab or strip to move it, onto the middle of a pane to join it, or onto
   an edge of a pane to split it there; the terminal or editor keeps running. Drop a folder from
   Finder to open it as a project, a file to open it in a tab.
@@ -130,6 +194,9 @@ information rather than triggering the install dialog).
 - Tabs show whether Claude is working or waiting for input. With the project's hooks enabled,
   Athena also posts a notification when a session finishes or needs you.
 - An MCP server, `athena mcp-stdio`, answers from the running window (see below).
+- With the project's hooks enabled, each file Claude edits posts a toast ("Claude edited main.go")
+  whose **Review diff** opens the file's changes since before the session's first edit to it (see
+  [Reviewing Claude's edits](#reviewing-claudes-edits)).
 - Optional title-bar indicator for Claude plan usage (5-hour and weekly windows).
 
 **Also**
@@ -188,14 +255,45 @@ process tree which pane the calling Claude session runs in.
 | `run_in_terminal` | Types a command into a terminal; runs only if you approve it within 60 seconds. |
 | `list_project_files` | A project's files, honouring `.gitignore`; secrets such as `.env` and keys are left out. |
 | `get_diagnostics` | Errors and warnings from the language servers. |
+| `open_diff` | Shows the user a file's uncommitted changes in the diff viewer (unstaged by default, `staged` for the index). |
 
 ### Hooks
 
-The command palette entry **Enable Claude Code hooks for this project** adds three hooks to the
-project's `.claude/settings.local.json` (which Claude Code keeps out of version control):
-`UserPromptSubmit`, `Stop`, and `Notification` for permission and idle prompts. Each calls
-`athena notify --event …`, which makes the tab state exact. **Disable Claude Code hooks for this
-project** removes only Athena's entries.
+The command palette entry **Enable Claude Code hooks for this project** adds these hooks to the
+project's `.claude/settings.local.json` (which Claude Code keeps out of version control), after
+any of your own on the same events:
+
+- `UserPromptSubmit`, `Stop`, and `Notification` for permission and idle prompts, which make the
+  tab state exact;
+- `PreToolUse` and `PostToolUse` on `Edit|MultiEdit|Write`, for reviewing Claude's edits (below).
+
+Each calls `athena notify --event …`. **Disable Claude Code hooks for this project** removes only
+Athena's commands, keeping your own even when they share an entry with ours. A settings file whose
+shape is not what Claude Code expects is left untouched and the command reports an error; a
+symlinked settings file stays a symlink and keeps its permissions.
+
+Projects whose hooks were enabled by Athena 0.3 or earlier have only the first three. The palette
+offers **Enable Claude Code hooks for this project** again for them; run it once to add the edit
+hooks.
+
+### Reviewing Claude's edits
+
+Before Claude's first edit to a file in a session, the `PreToolUse` hook copies the file into
+`~/Library/Application Support/athena/snapshots/<session>/` (or notes that the session is creating
+it). The hook always exits 0, so it never blocks an edit. After each edit, the `PostToolUse` hook
+tells the window, which reloads open diffs of that file and shows "Claude edited main.go" with a
+**Review diff** action (one toast per file, kept for 15 seconds). When no copy was kept for that
+session, Review diff opens the file's unstaged changes instead.
+
+Review diff opens "main.go (Claude's Edits)": "Before Claude" on the left, the file on disk on the
+right, with **Revert** on each change. Edits made by you or anyone else after Claude's first edit
+are in the diff too, since it compares with the file as it was then. If no copy was kept because
+the file was over 20 MB or not a regular file, the review compares with the index instead,
+labels that side "Index" and says why. A review tab whose copy no longer exists (for example
+after pruning) says no copy was kept.
+
+Snapshots older than 7 days are deleted, then the oldest sessions until the folder is under
+200 MB. `athena notify --edited <file>` reports an edit by hand.
 
 ### Playwright MCP
 
@@ -242,6 +340,12 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |
 | `cmd-shift-f` | Find in project |
 | `cmd-alt-shift-g` | Toggle inline blame |
+| `cmd-=` (or `cmd-+`) / `cmd--` | Zoom editor and terminal text in / out |
+| `cmd-0` | Reset zoom |
+| `cmd-shift-m` | Problems tab |
+| `cmd-shift-o` | Go to symbol in file |
+| `cmd-alt-o` | Go to symbol in workspace |
+| `f8` / `shift-f8` | Next / previous problem (in an editor only) |
 | `ctrl--` | Go back |
 | `ctrl-shift--` | Go forward (also bound as `ctrl-_`, which is what macOS reports for it) |
 | `cmd-j` | Notifications |
@@ -252,11 +356,20 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-q` | Quit |
 
 Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
-commands without a key: Toggle auto save, Toggle format on save, Source control changes, Reveal
-active file in tree, Open Markdown preview, New browser preview and the Claude Code and Playwright
-commands; with an editor focused it also offers Go to line.
+commands without a key: Toggle auto save, Toggle format on save, Source control changes, Switch
+branch…, Reveal active file in tree, Open file to the side, Open Markdown preview, New browser
+preview and the Claude Code and Playwright commands. With an editor focused it also offers Go to
+line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has no key, since
+`cmd-shift-enter` is Zoom pane), Insert line below, Rename symbol, Quick fix, Go to
+implementations and Go to type definition. In Go to file, `@` lists the file's symbols, `#`
+searches workspace symbols and `>` lists commands.
 
-### Editor (`crates/athena-editor/src/view.rs`)
+On a Mac keyboard the `f`-keys need Fn unless "Use F1, F2, etc. keys as standard function keys" is
+on in System Settings. A system or app shortcut set on the same keys (`cmd-.` is a common one) can
+take them before Athena sees them; Quick Fix… in the editor's right-click menu does the same as
+`cmd-.`.
+
+### Editor (`crates/athena-editor/src/view.rs`, `lsp_ui.rs`)
 
 | Keys | Action |
 |---|---|
@@ -290,12 +403,35 @@ commands; with an editor focused it also offers Go to line.
 | `cmd-k cmd-]` | Unfold at the cursor |
 | `cmd-k cmd-0` | Fold all |
 | `cmd-k cmd-j` | Unfold all |
+| `tab` (selection over several or whole lines) | Indent lines |
+| `shift-tab`, `cmd-[` | Outdent lines |
+| `cmd-]` | Indent lines |
+| `alt-up` / `alt-down` | Move lines up / down |
+| `alt-shift-up` / `alt-shift-down` | Copy lines up / down |
+| `cmd-shift-k` | Delete lines |
+| `cmd-enter` | Insert line below |
+| `cmd-alt-f` | Find and replace |
+| `f2` | Rename symbol |
+| `cmd-.` | Quick fix |
+| `cmd-f12` | Go to implementations |
 
 While the suggestion list is open, Up / Down move through it and Enter or Tab accepts. Clicking a
-chevron in the gutter folds or unfolds that block.
+chevron in the gutter folds or unfolds that block. In the find bar's replace field, `enter`
+replaces the current match and `cmd-enter` replaces all. In the rename field, `enter` renames and
+`escape` or a click elsewhere cancels.
 
 Image viewer (`crates/athena-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd--` zoom in / out,
-`cmd-0` fit to the pane, `cmd`-scroll zooms at the pointer.
+`cmd-0` fit to the pane, `cmd`-scroll zooms at the pointer. These take over from the text zoom
+keys while the image viewer has focus.
+
+### Diff view (`crates/athena-editor/src/diff_view.rs`)
+
+| Keys | Action |
+|---|---|
+| `alt-f5` / `shift-alt-f5` | Next / previous change (wraps round) |
+| `up` / `down` | Scroll a line |
+| `pageup` / `pagedown` | Scroll a page |
+| `cmd-up` / `cmd-down` | Top / bottom |
 
 ### File tree, palette and Search tab (text field keys: `crates/athena-ui/src/input.rs`)
 
@@ -307,6 +443,8 @@ Image viewer (`crates/athena-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd-
 | `up` / `down`, `enter` in the Search tab | Walk the matches, open the selected one |
 | `escape` in the Search tab | Close it |
 | `enter` / `escape` in a tree name field | Create or rename / cancel |
+| `cmd-enter` in the Changes tab's message field | Commit |
+| `cmd-a` in any text field | Select all |
 
 ### Terminal (`crates/athena-term/src/view.rs`)
 
@@ -319,6 +457,7 @@ Image viewer (`crates/athena-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd-
 | `cmd-f` | Find |
 | `cmd-g` | Find next (older) |
 | `cmd-shift-g` | Find previous (newer) |
+| `cmd`-click | Open a link, or a `file:line:col` reference in the editor |
 
 In the terminal's find bar, `enter` and `up` go to the next older match, `shift-enter` and
 `down` to the next newer one, `alt-c` toggles match case, `alt-r` toggles regex and `escape`
@@ -331,7 +470,8 @@ athena [<folder>]             open a folder in the running window, or start Athe
 athena --version
 athena mux status             list the daemon's sessions
 athena mux stop               stop the daemon; its shells are hung up
-athena notify --event <claude-stop|claude-needs-input|claude-running>
+athena notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited>
+athena notify --edited <file> [--session <id>]
 athena notify --title <t> [--body <b>]
 athena mcp-stdio              MCP server for Claude Code
 ```
@@ -339,7 +479,9 @@ athena mcp-stdio              MCP server for Claude Code
 ## Files and logs
 
 Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
-panel sizes and the `autosave_delay_ms` and `format_on_save` settings), `notifications.json`, the daemon and app sockets, `app.log` (the window's log) and
+panel sizes, the text zoom and the `autosave_delay_ms` and `format_on_save` settings),
+`notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
+edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.
 
