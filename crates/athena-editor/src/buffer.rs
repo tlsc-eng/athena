@@ -277,6 +277,9 @@ impl Buffer {
                 anchor: map(selection.anchor),
                 head: map(selection.head),
             };
+        } else if self.last_edit.is_some_and(|(k, _)| k != EditKind::Reload) {
+            // The next keystroke must start a new undo step, or it would fold into the saved one.
+            self.last_edit = None;
         }
         self.saved_at = Some(self.undo.len());
     }
@@ -1377,6 +1380,20 @@ mod tests {
             "three éx\n",
             "an edit between reloads splits them"
         );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn typing_after_reloading_identical_text_is_unsaved() {
+        let path = temp_file("reload-same", "one\n");
+        let mut b = Buffer::open(&path).unwrap();
+        let mut c = Cursor::at(3);
+        b.insert(&mut c, "!");
+        write_elsewhere(&path, "one!\n");
+        b.reload_from_disk(&mut c).unwrap();
+        assert!(!b.is_dirty());
+        b.insert(&mut c, "?");
+        assert!(b.is_dirty(), "the keystroke is its own undo step");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
