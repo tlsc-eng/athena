@@ -4,6 +4,7 @@ mod glyphs;
 mod keys;
 mod links;
 mod mouse;
+mod search;
 mod terminal;
 mod view;
 

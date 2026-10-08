@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::colors;
 use crate::glyphs;
+use crate::search::Span;
 use crate::terminal::{Damage, GridSize, Link, Terminal};
 use crate::view::TerminalView;
 
@@ -50,6 +51,8 @@ impl TerminalElement {
 pub struct Frame {
     origin: gpui::Point<Pixels>,
     rows: Vec<Rc<CachedRow>>,
+    /// Search highlights, positioned like row quads.
+    matches: Vec<PaintQuad>,
     link: Option<PaintQuad>,
     cursor: Option<PaintQuad>,
     cursor_glyph: Option<(gpui::Point<Pixels>, ShapedLine)>,
@@ -110,6 +113,34 @@ impl RowCache {
             .filter(|&row| self.rows[row].is_none())
             .collect()
     }
+}
+
+/// Search highlights for one frame; drawn over the cached rows, so they never invalidate them.
+fn match_quads(
+    spans: &[Span],
+    cell_width: Pixels,
+    line_height: Pixels,
+    color: Hsla,
+) -> Vec<PaintQuad> {
+    spans
+        .iter()
+        .map(|span| {
+            let bounds = Bounds::new(
+                point(
+                    cell_width * span.start as f32,
+                    line_height * span.row as f32,
+                ),
+                size(cell_width * (span.end - span.start) as f32, line_height),
+            );
+            if span.current {
+                fill(bounds, color.opacity(0.55))
+                    .border_widths(px(1.))
+                    .border_color(color)
+            } else {
+                fill(bounds, color.opacity(0.25))
+            }
+        })
+        .collect()
 }
 
 fn palette_key(p: &TerminalColors) -> [Hsla; 23] {
@@ -353,6 +384,7 @@ impl Element for TerminalElement {
         };
         let theme = cx.theme();
         let palette = theme.terminal.clone();
+        let match_color = theme.color.warning;
         let font_size = theme.typography.code;
         let font = Font {
             family: theme.typography.mono.clone(),
@@ -387,8 +419,8 @@ impl Element for TerminalElement {
             cell_height: line_height.into(),
         };
         // Damage is read after the resize, which damages everything itself.
-        let (damage, mut cache) = self.view.update(cx, |view, _| {
-            view.resize(grid);
+        let (damage, mut cache) = self.view.update(cx, |view, cx| {
+            view.resize(grid, cx);
             let damage = view.terminal_mut().map(Terminal::take_damage);
             (damage, std::mem::take(&mut view.rows))
         });
@@ -397,6 +429,7 @@ impl Element for TerminalElement {
         let mut frame = Frame {
             origin: bounds.origin,
             rows: Vec::new(),
+            matches: Vec::new(),
             link: None,
             cursor: None,
             cursor_glyph: None,
@@ -466,6 +499,8 @@ impl Element for TerminalElement {
             cache.rows[row] = Some(Rc::new(builder.build(row)));
         }
         frame.rows = cache.rows.iter().flatten().cloned().collect();
+        let spans = view.search_spans(content.display_offset, term.screen_lines(), term.columns());
+        frame.matches = match_quads(&spans, cell_width, line_height, match_color);
 
         if let Some(link) = &view.hovered_link {
             let at = origin(link.start, link.row);
@@ -570,6 +605,9 @@ impl Element for TerminalElement {
                 for quad in &row.backgrounds {
                     window.paint_quad(shifted(quad));
                 }
+            }
+            for quad in &frame.matches {
+                window.paint_quad(shifted(quad));
             }
             if let Some(link) = frame.link.take() {
                 window.paint_quad(link);
@@ -759,6 +797,40 @@ mod tests {
                 "{what} changed back"
             );
         }
+    }
+
+    #[test]
+    fn search_highlights_draw_over_cached_rows_without_rebuilding_them() {
+        let mut cache = warm(key());
+        let spans = [
+            Span {
+                row: 1,
+                start: 2,
+                end: 5,
+                current: false,
+            },
+            Span {
+                row: 3,
+                start: 0,
+                end: 1,
+                current: true,
+            },
+        ];
+        let color = Theme::dark(false).color.warning;
+        let quads = match_quads(&spans, px(8.), px(18.), color);
+        assert_eq!(
+            quads[0].bounds,
+            Bounds::new(point(px(16.), px(18.)), size(px(24.), px(18.)))
+        );
+        assert_eq!(quads[0].border_widths, Default::default());
+        assert_eq!(
+            quads[1].border_color, color,
+            "the current match is outlined"
+        );
+        assert!(
+            rebuilt(&mut cache, key(), Damage::Rows(vec![])).is_empty(),
+            "highlights are not part of the row key"
+        );
     }
 
     #[test]

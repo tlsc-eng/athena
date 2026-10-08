@@ -8,21 +8,36 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::term::TermMode;
 use anyhow::anyhow;
 use athena_proto::{ClientMsg, ConnectError, Connection, ErrorKind, PaneId, Process, ServerMsg};
-use athena_ui::{ActiveTheme, ButtonKind, empty_state};
+use athena_ui::motion::{self, Closing, Opening};
+use athena_ui::{ActiveTheme, ButtonKind, InputEvent, TextInput, Tooltip, empty_state};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle, Focusable,
-    IntoElement, KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, Task,
-    UTF16Selection, Window, actions, div, prelude::*, px,
+    Animation, App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent,
+    SharedString, Subscription, Task, UTF16Selection, Window, actions, div, prelude::*, px,
 };
 
 use crate::element::{RowCache, TerminalElement};
 use crate::keys;
 use crate::links;
 use crate::mouse::{self, MouseEvent};
+use crate::search::{Search, Span};
 use crate::terminal::{GridSize, Link, PaneEvent, Terminal, Transport};
 
-actions!(terminal, [Copy, Paste, ClearScrollback, SelectAll]);
+actions!(
+    terminal,
+    [
+        Copy,
+        Paste,
+        ClearScrollback,
+        SelectAll,
+        Find,
+        FindNext,
+        FindPrevious,
+        ToggleMatchCase,
+        ToggleRegex
+    ]
+);
 
 const BATCH_BYTES: usize = 2 * 1024 * 1024;
 
@@ -43,12 +58,22 @@ const STALE_POLL: Duration = Duration::from_secs(1);
 
 const SESSION_LOST: &[u8] = b"\x1b[2m[previous session ended; started a new shell]\x1b[0m\r\n";
 
+/// New output re-runs an open search at most this often; a full scrollback scan takes ~10 ms.
+const SEARCH_RERUN: Duration = Duration::from_millis(150);
+
 pub fn init(cx: &mut App) {
+    let find = Some("TerminalFind");
     cx.bind_keys([
         KeyBinding::new("cmd-c", Copy, Some("Terminal")),
         KeyBinding::new("cmd-v", Paste, Some("Terminal")),
         KeyBinding::new("cmd-k", ClearScrollback, Some("Terminal")),
         KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
+        KeyBinding::new("cmd-f", Find, Some("Terminal")),
+        KeyBinding::new("cmd-g", FindNext, Some("Terminal")),
+        KeyBinding::new("cmd-shift-g", FindPrevious, Some("Terminal")),
+        KeyBinding::new("shift-enter", FindPrevious, find),
+        KeyBinding::new("alt-c", ToggleMatchCase, find),
+        KeyBinding::new("alt-r", ToggleRegex, find),
     ]);
 }
 
@@ -74,6 +99,15 @@ enum Stale {
 pub enum ClaudeState {
     Running,
     Waiting,
+}
+
+/// The find bar: its input and the search it drives.
+struct FindBar {
+    input: Entity<TextInput>,
+    search: Search,
+    /// A re-run for new output is already scheduled.
+    rerun_pending: bool,
+    _subscription: Subscription,
 }
 
 struct MuxTransport {
@@ -125,6 +159,13 @@ pub struct TerminalView {
     pending_input: Option<Vec<u8>>,
     grid: GridSize,
     scroll_remainder: f32,
+    find: Option<FindBar>,
+    find_opening: Option<Opening>,
+    /// A dismissed find bar, still drawn while it fades out.
+    find_closing: Option<(FindBar, Closing)>,
+    find_generation: u64,
+    /// Query and toggles of the last closed find bar, restored when it reopens.
+    last_find: Option<(String, bool, bool)>,
     /// The button whose press went to the program, so its release does too.
     mouse_press: Option<mouse::Button>,
     /// The cell of the last report, so motion is sent once per cell.
@@ -165,6 +206,11 @@ impl TerminalView {
             claude_hook: None,
             pending_input: None,
             scroll_remainder: 0.,
+            find: None,
+            find_opening: None,
+            find_closing: None,
+            find_generation: 0,
+            last_find: None,
             mouse_press: None,
             mouse_cell: None,
             _claude_timer: None,
@@ -325,12 +371,16 @@ impl TerminalView {
         self.terminal.as_mut()
     }
 
-    pub(crate) fn resize(&mut self, grid: GridSize) {
+    pub(crate) fn resize(&mut self, grid: GridSize, cx: &mut Context<Self>) {
+        let reflow = (grid.cols, grid.rows) != (self.grid.cols, self.grid.rows);
         self.grid = grid;
         if let Some(terminal) = self.terminal.as_mut()
             && !terminal.replaying
         {
             terminal.resize(grid);
+            if reflow {
+                self.schedule_search(cx);
+            }
         }
     }
 
@@ -592,6 +642,7 @@ impl TerminalView {
                 if !terminal.replaying {
                     self.refresh_claude(cx);
                 }
+                self.search_after_output(cx);
             }
             ServerMsg::Foreground { process, .. } => {
                 let was = self.foreground.as_ref().map(|p| p.pid);
@@ -664,7 +715,11 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Keys typed into the find bar bubble up here too; they are not for the shell.
+        if !self.focus.is_focused(window) {
+            return;
+        }
         let Some(terminal) = self.terminal.as_mut() else {
             return;
         };
@@ -986,6 +1041,7 @@ impl TerminalView {
         let at_prompt = self.foreground.as_ref().is_none_or(|p| is_shell(&p.name));
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.clear_scrollback(at_prompt);
+            self.run_search(false);
             cx.notify();
         }
     }
@@ -998,6 +1054,338 @@ impl TerminalView {
             terminal.select_all();
             cx.notify();
         }
+    }
+
+    /// Opens the find bar, or focuses it if open, seeded with a one-line selection.
+    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seed = self
+            .terminal
+            .as_ref()
+            .and_then(Terminal::selection_text)
+            .filter(|s| !s.contains('\n'));
+        let input = match &self.find {
+            Some(find) => find.input.clone(),
+            None => {
+                let input = cx.new(|cx| TextInput::new("Find", cx));
+                let subscription =
+                    cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                        match event {
+                            InputEvent::Changed => this.search_changed(cx),
+                            // Newest output is at the bottom, so "next" walks up as in VS Code.
+                            InputEvent::Submit | InputEvent::SubmitBeside | InputEvent::Up => {
+                                this.step_search(true, cx)
+                            }
+                            InputEvent::Down => this.step_search(false, cx),
+                            InputEvent::Cancel => {
+                                this.close_search(cx);
+                                window.focus(&this.focus);
+                            }
+                        }
+                        cx.notify();
+                    });
+                let mut search = Search::default();
+                let restored = self.last_find.take().map(|(query, case, regex)| {
+                    search.case_sensitive = case;
+                    search.regex = regex;
+                    query
+                });
+                self.find = Some(FindBar {
+                    input: input.clone(),
+                    search,
+                    rerun_pending: false,
+                    _subscription: subscription,
+                });
+                self.find_closing = None;
+                self.find_opening = Some(Opening::now());
+                if seed.is_none()
+                    && let Some(query) = restored
+                {
+                    input.update(cx, |i, cx| i.set_text(query, cx));
+                }
+                input
+            }
+        };
+        if let Some(seed) = seed {
+            input.update(cx, |i, cx| i.set_text(seed, cx));
+        }
+        window.focus(&input.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Starts the find bar's fade-out; its highlights go at once.
+    fn close_search(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.take() else {
+            return;
+        };
+        self.last_find = Some((
+            find.search.query().to_string(),
+            find.search.case_sensitive,
+            find.search.regex,
+        ));
+        self.find_generation += 1;
+        let generation = self.find_generation;
+        self.find_closing = Some((find, Closing::new(generation)));
+        let t = cx.theme();
+        let delay = motion::exit_delay(t.motion.reduced, t.motion.fast);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .find_closing
+                    .as_ref()
+                    .is_some_and(|(_, c)| c.generation == generation)
+                {
+                    this.find_closing = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn search_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let query = find.input.read(cx).text().to_string();
+        find.search.set_query(&query);
+        self.run_search(true);
+    }
+
+    /// Re-runs the search around the current match, or the viewport bottom without one.
+    fn run_search(&mut self, reveal: bool) {
+        let (Some(find), Some(terminal)) = (self.find.as_mut(), self.terminal.as_mut()) else {
+            return;
+        };
+        let anchor = find.search.current_match().map(|m| *m.start());
+        find.search.run(terminal.term(), anchor);
+        if reveal && let Some(m) = find.search.current_match() {
+            terminal.reveal(m.start().line);
+        }
+    }
+
+    fn step_search(&mut self, up: bool, cx: &mut Context<Self>) {
+        let (Some(find), Some(terminal)) = (self.find.as_mut(), self.terminal.as_mut()) else {
+            return;
+        };
+        find.search.step(up);
+        if let Some(m) = find.search.current_match() {
+            terminal.reveal(m.start().line);
+        }
+        cx.notify();
+    }
+
+    fn toggle_search(&mut self, toggle: impl FnOnce(&mut Search), cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        toggle(&mut find.search);
+        let query = find.search.query().to_string();
+        find.search.set_query(&query);
+        self.run_search(true);
+        cx.notify();
+    }
+
+    /// Keeps highlights on their text as output scrolls, then re-runs the search shortly after.
+    fn search_after_output(&mut self, cx: &mut Context<Self>) {
+        let (Some(find), Some(terminal)) = (self.find.as_mut(), self.terminal.as_ref()) else {
+            return;
+        };
+        if find.search.query().is_empty() {
+            return;
+        }
+        find.search.follow_scroll(terminal.term());
+        self.schedule_search(cx);
+    }
+
+    fn schedule_search(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        if std::mem::replace(&mut find.rerun_pending, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_RERUN).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(find) = this.find.as_mut() {
+                    find.rerun_pending = false;
+                }
+                this.run_search(false);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Visible pieces of the open search's matches.
+    pub(crate) fn search_spans(
+        &self,
+        display_offset: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Vec<Span> {
+        self.find
+            .as_ref()
+            .map_or(Vec::new(), |f| f.search.spans(display_offset, rows, cols))
+    }
+
+    fn render_find(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (find, closing) = match (&self.find, &self.find_closing) {
+            (Some(find), _) => (find, None),
+            (None, Some((find, closing))) => (find, Some(*closing)),
+            (None, None) => return None,
+        };
+        let t = cx.theme();
+        let search = &find.search;
+        let count = if search.query().is_empty() {
+            String::new()
+        } else if search.invalid {
+            "Invalid pattern".to_string()
+        } else {
+            let more = if search.truncated { "+" } else { "" };
+            match (search.current, search.matches.len()) {
+                (_, 0) => "No results".to_string(),
+                (Some(i), n) => format!("{} of {n}{more}", i + 1),
+                (None, n) => format!("{n}{more}"),
+            }
+        };
+        let button = |id: &'static str, label: &'static str, tip: &'static str, on: bool| {
+            div()
+                .id(id)
+                .size(px(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(t.shape.radius_control)
+                .border_1()
+                .border_color(if on {
+                    t.color.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .when(on, |d| d.bg(t.color.surface_accent))
+                .text_color(if on {
+                    t.color.content
+                } else {
+                    t.color.content_muted
+                })
+                .cursor_pointer()
+                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                .active(|s| s.bg(t.color.surface_active))
+                .tooltip(move |_, cx| Tooltip::view(SharedString::from(tip), cx))
+                .child(label)
+        };
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .p(px(4.))
+            .bg(t.color.surface)
+            .border_1()
+            .border_color(t.color.border)
+            .rounded(t.shape.radius_control)
+            .shadow_md()
+            .text_size(t.typography.caption)
+            .child(
+                div()
+                    .w(px(220.))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .bg(t.color.surface_sunken)
+                    .border_1()
+                    .border_color(if search.invalid {
+                        t.color.danger
+                    } else {
+                        t.color.accent
+                    })
+                    .rounded(t.shape.radius_control)
+                    .child(find.input.clone()),
+            )
+            .child(
+                button("find-case", "Aa", "Match Case  ⌥C", search.case_sensitive).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.toggle_search(|s| s.case_sensitive = !s.case_sensitive, cx)
+                    }),
+                ),
+            )
+            .child(
+                button(
+                    "find-regex",
+                    ".*",
+                    "Use Regular Expression  ⌥R",
+                    search.regex,
+                )
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.toggle_search(|s| s.regex = !s.regex, cx)),
+                ),
+            )
+            .child(
+                div()
+                    .min_w(px(72.))
+                    .px(px(4.))
+                    .text_color(if search.invalid {
+                        t.color.danger
+                    } else {
+                        t.color.content_muted
+                    })
+                    .child(count),
+            )
+            .child(
+                button("find-prev", "↑", "Older Match  Enter", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_search(true, cx))),
+            )
+            .child(
+                button("find-next", "↓", "Newer Match  ⇧Enter", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.step_search(false, cx))),
+            )
+            .child(
+                button("find-close", "×", "Close  Esc", false).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.close_search(cx);
+                        window.focus(&this.focus);
+                    },
+                )),
+            );
+        // Floats over the grid so opening it never resizes the PTY.
+        let row = match closing {
+            Some(closing) => motion::animate_exit(
+                t.motion.reduced,
+                row,
+                ("terminal-find-close", closing.generation),
+                t.motion.fast,
+                |el, d| el.opacity(1. - d).mt(px(-8. * d)),
+            ),
+            None => motion::animate_enter(
+                t.motion.reduced,
+                self.find_opening.is_some_and(|o| o.running(t.motion.fast)),
+                row,
+                "terminal-find-open",
+                Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+                |el, d| el.opacity(d).mt(px(-8. * (1. - d))),
+            ),
+        };
+        Some(
+            div()
+                .id("terminal-find")
+                .key_context("TerminalFind")
+                .absolute()
+                .top(px(8.))
+                .right(px(16.))
+                .occlude()
+                .cursor(CursorStyle::Arrow)
+                .on_action(cx.listener(|this, _: &FindPrevious, _, cx| this.step_search(false, cx)))
+                .on_action(cx.listener(|this, _: &ToggleMatchCase, _, cx| {
+                    this.toggle_search(|s| s.case_sensitive = !s.case_sensitive, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
+                    this.toggle_search(|s| s.regex = !s.regex, cx)
+                }))
+                .child(row),
+        )
     }
 
     fn render_status(&self, cx: &App) -> Option<impl IntoElement> {
@@ -1054,6 +1442,21 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::clear_scrollback))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(|this, _: &Find, window, cx| this.open_search(window, cx)))
+            .on_action(cx.listener(|this, _: &FindNext, window, cx| {
+                if this.find.is_some() {
+                    this.step_search(true, cx)
+                } else {
+                    this.open_search(window, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
+                if this.find.is_some() {
+                    this.step_search(false, cx)
+                } else {
+                    this.open_search(window, cx)
+                }
+            }))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -1106,6 +1509,7 @@ impl Render for TerminalView {
         )
         .children(self.render_clipboard_notice(cx))
         .children(self.render_status(cx))
+        .children(self.render_find(cx))
     }
 }
 

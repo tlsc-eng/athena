@@ -12,7 +12,7 @@ use alacritty_terminal::term::{self, Osc52, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Handler, Processor, StdSyncHandler};
 use athena_ui::TerminalColors;
 
-use crate::{colors, links};
+use crate::{colors, links, search};
 
 const SCROLLBACK_LINES: usize = 10_000;
 const MAX_TITLE: usize = 256;
@@ -350,6 +350,14 @@ impl Terminal {
         let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
         selection.update(end, Side::Right);
         self.term.selection = Some(selection);
+    }
+
+    /// Scrolls the display so a grid line is in view.
+    pub fn reveal(&mut self, line: Line) {
+        let delta = search::reveal_delta(&self.term, line);
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
     }
 
     /// Nudges the PTY size so a full-screen program repaints; replayed bytes alone can leave it stale.
