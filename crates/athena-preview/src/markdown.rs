@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 
@@ -135,10 +135,26 @@ fn has_scheme(url: &str) -> bool {
 
 fn resolve(url: &str, base: &Path) -> PathBuf {
     let path = percent_decode(url);
-    match path.strip_prefix('/') {
+    let joined = match path.strip_prefix('/') {
         Some(_) => PathBuf::from(&path),
         None => base.join(&path),
+    };
+    normalize(&joined)
+}
+
+/// Folds `.` and `..` without touching the disk, so links to missing files still resolve.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
     }
+    out
 }
 
 /// Local links open in Athena: they become `athena-doc:` URLs the page hands back to the app.
@@ -320,6 +336,26 @@ mod tests {
     }
 
     #[test]
+    fn dot_segments_in_links_are_folded() {
+        let out = render(
+            "[a](../other/x.md#s) [b](./y.md) [c](/repo/a/../b.md) [d](../../../../up.md)",
+            Path::new("/repo/docs"),
+        );
+        for href in [
+            "athena-doc:///repo/other/x.md#s",
+            "athena-doc:///repo/docs/y.md",
+            "athena-doc:///repo/b.md",
+            "athena-doc:///up.md",
+        ] {
+            assert!(
+                out.body.contains(&format!("href=\"{href}\"")),
+                "{}",
+                out.body
+            );
+        }
+    }
+
+    #[test]
     fn relative_images_are_inlined() {
         let dir = std::env::temp_dir().join(format!("athena-md-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -327,6 +363,8 @@ mod tests {
         let out = render("![dot](dot.png) ![web](https://x/y.png)", &dir);
         assert!(out.body.contains("src=\"data:image/png;base64,AQIDBA==\""));
         assert!(out.body.contains("src=\"https://x/y.png\""));
+        let up = render("![dot](missing/../dot.png)", &dir);
+        assert!(up.body.contains("src=\"data:image/png;base64,AQIDBA==\""));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
