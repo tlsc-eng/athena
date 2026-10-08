@@ -295,6 +295,15 @@ impl Shell {
 
     /// Diffs the open files whose status or saved text changed, then pushes every editor's marks.
     fn sync_gutters(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let open: std::collections::HashSet<PathBuf> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                ItemView::Editor(e) => Some(e.read(cx).path().to_path_buf()),
+                _ => None,
+            })
+            .collect();
+        self.git.marks.retain(|path, _| open.contains(path));
         let editors = self.editors_under(root);
         let mut stale = Vec::new();
         for editor in &editors {
