@@ -1,6 +1,7 @@
 mod buffer;
 mod display;
 mod element;
+mod lines;
 mod syntax;
 mod view;
 

@@ -93,11 +93,12 @@ pub struct Buffer {
 impl Buffer {
     pub fn new(text: &str, path: Option<PathBuf>) -> Self {
         let rope = Rope::from_str(text);
-        let syntax = path
+        let lang = path
             .as_deref()
             .and_then(Lang::for_path)
-            .map(|lang| Syntax::new(lang, &rope));
-        let indent = detect_indent(text, path.as_deref());
+            .or_else(|| Lang::for_shebang(text.lines().next().unwrap_or_default()));
+        let syntax = lang.map(|lang| Syntax::new(lang, &rope));
+        let indent = detect_indent(text, lang);
         Self {
             rope,
             path,
@@ -444,7 +445,7 @@ impl Buffer {
 
     /// Comments or uncomments every line the selection touches.
     pub fn toggle_comment(&mut self) {
-        let Some(prefix) = self.lang().map(Lang::comment_prefix) else {
+        let Some(prefix) = self.lang().and_then(Lang::comment_prefix) else {
             return;
         };
         let range = self.selection.range();
@@ -683,8 +684,8 @@ fn is_word(c: char) -> bool {
 }
 
 /// Tabs if any line starts with one (Go's gofmt style), else the smallest space step in use.
-fn detect_indent(text: &str, path: Option<&Path>) -> Indent {
-    if path.and_then(|p| p.extension()).is_some_and(|e| e == "go") {
+fn detect_indent(text: &str, lang: Option<Lang>) -> Indent {
+    if lang == Some(Lang::Go) {
         return Indent::Tab;
     }
     let mut smallest = usize::MAX;
@@ -815,7 +816,7 @@ mod tests {
             Indent::Spaces(4)
         );
         assert_eq!(detect_indent("a\n\tb\n", None), Indent::Tab);
-        assert_eq!(detect_indent("", Some(Path::new("x.go"))), Indent::Tab);
+        assert_eq!(detect_indent("", Some(Lang::Go)), Indent::Tab);
     }
 
     #[test]
