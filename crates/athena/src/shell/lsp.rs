@@ -592,10 +592,18 @@ impl Shell {
         let asked = self.lsp.references_asked;
         tracing::debug!(path = %doc.display(), line = at.line, character = at.character, "references");
         cx.spawn(async move |this, cx| {
-            let found = client.references(&doc, at).await;
-            match &found {
-                Ok(list) => tracing::debug!("references → {} locations", list.len()),
-                Err(why) => tracing::warn!("references failed: {why}"),
+            // gopls answers a lookup on whitespace or a keyword with an error; that is the user's miss.
+            let found = client.references(&doc, at).await.map_err(|why| {
+                if why.contains("no identifier found") {
+                    tracing::debug!("references: {why}");
+                    "No symbol at cursor".to_string()
+                } else {
+                    tracing::warn!("references failed: {why}");
+                    why
+                }
+            });
+            if let Ok(list) = &found {
+                tracing::debug!("references → {} locations", list.len());
             }
             let found = match found {
                 Ok(list) => Ok(cx
