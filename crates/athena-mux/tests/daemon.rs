@@ -26,7 +26,8 @@ impl Daemon {
             .unwrap();
         let daemon = Self { home, child };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !daemon.socket().exists() {
+        // The file appears at bind, before listen and chmod; restricting it is the last setup step.
+        while !daemon.ready() {
             assert!(Instant::now() < deadline, "daemon did not start");
             thread::sleep(Duration::from_millis(20));
         }
@@ -36,6 +37,11 @@ impl Daemon {
     fn socket(&self) -> PathBuf {
         self.home
             .join("Library/Application Support/athena/mux.sock")
+    }
+
+    fn ready(&self) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(self.socket()).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o600)
     }
 
     fn connect(&self) -> (Connection, UnixStream) {
