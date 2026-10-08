@@ -43,6 +43,28 @@ its shells running.
   notification when it finishes. `ATHENA_NOTIFY_AFTER_SECS` changes the threshold and
   `ATHENA_SHELL_INTEGRATION=0` turns the integration off; set them in the environment the daemon
   starts from, e.g. `open -a Athena --env ATHENA_NOTIFY_AFTER_SECS=30`.
+- With those marks each prompt gets a dot in the left margin (the success colour, red after a
+  non-zero exit, an outline while the command runs); `cmd-up` and `cmd-down` scroll the previous
+  or next prompt to the top, and **Copy Last Command Output** (right-click menu or command
+  palette) copies what the last command printed. Other shells can send the same marks; for bash,
+  add this to `~/.bashrc` (VS Code's OSC 633 spelling works too):
+
+  ```bash
+  if [[ "$TERM_PROGRAM" == "athena" ]]; then
+    __athena_preexec() {
+      [[ $__athena_quiet == 1 || $BASH_COMMAND == __athena_* ]] && return
+      __athena_quiet=1 __athena_ran=1
+      printf '\e]133;C\a'
+    }
+    __athena_precmd() {
+      [[ $__athena_ran == 1 ]] && printf '\e]133;D;%d\a' "$__athena_status"
+      __athena_quiet=0 __athena_ran=0
+      printf '\e]133;A\a'
+    }
+    PROMPT_COMMAND="__athena_status=\$?;__athena_quiet=1;${PROMPT_COMMAND:+$PROMPT_COMMAND;}__athena_precmd"
+    trap '__athena_preexec' DEBUG
+  fi
+  ```
 - If a new version cannot attach to the shells of an older session daemon, their tabs are marked
   **stale**: **Restart sessions** ends those shells and starts new ones, **Keep** leaves them
   running and reconnects once the old daemon exits.
@@ -205,7 +227,14 @@ information rather than triggering the install dialog).
   optionally add the Playwright MCP server for Claude.
 - Containers: a read-only view of the local Docker engine (Docker Desktop or Rancher Desktop):
   list, stats and logs. Athena never starts, stops or removes containers.
-- Workspace layout, open projects and tabs are restored on launch.
+- Workspace layout, open projects and tabs are restored on launch, with each editor's cursor
+  where it was left.
+- Open Recent (`ctrl-r` outside a terminal, or File > Open Recent) lists the last 20 project
+  folders you closed.
+- Light and dark themes. By default Athena follows the macOS appearance and switches with it;
+  View > Theme or the palette's **Theme:** commands pin light or dark. Both themes cover the
+  interface, code, the terminal's 16 colours (tuned so Claude Code stays readable) and Markdown
+  previews.
 
 ## Languages
 
@@ -378,6 +407,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `ctrl-cmd-f` | Toggle full screen |
 | `cmd-m` | Minimize |
 | `cmd-h` | Hide Athena |
+| `ctrl-r` | Open recent folder (not in a terminal, where it is the shell's history search) |
 | `cmd-alt-h` | Hide others |
 | `cmd-q` | Quit |
 
@@ -484,11 +514,39 @@ keys while the image viewer has focus.
 | `cmd-f` | Find |
 | `cmd-g` | Find next (older) |
 | `cmd-shift-g` | Find previous (newer) |
+| `cmd-up` | Scroll to the previous command's prompt |
+| `cmd-down` | Scroll to the next command's prompt, or back to the live screen |
 | `cmd`-click | Open a link, or a `file:line:col` reference in the editor |
 
 In the terminal's find bar, `enter` and `up` go to the next older match, `shift-enter` and
 `down` to the next newer one, `alt-c` toggles match case, `alt-r` toggles regex and `escape`
 closes it.
+
+### Your own shortcuts
+
+**Open Keyboard Shortcuts File** (palette, or File > Keyboard Shortcuts) opens
+`~/Library/Application Support/athena/keymap.json`, creating it with examples. It takes the same
+shape as VS Code's `keybindings.json`, and Athena applies it as soon as you save:
+
+```jsonc
+[
+  // A new chord for an existing command (athena:: may be left out of Athena's own commands).
+  {"key": "cmd-k cmd-t", "command": "athena::NewTerminal"},
+  // VS Code's key spelling works too.
+  {"key": "cmd+shift+e", "command": "athena::RevealInTree"},
+  // Only while an editor has focus.
+  {"key": "f5", "command": "athena::ShowProblems", "when": "Editor"},
+  // A leading - removes a default binding (here cmd-d, Split right).
+  {"key": "cmd-d", "command": "-athena::SplitRight"}
+]
+```
+
+Command names are the action names in the source: `athena::…` (`crates/athena/src/actions.rs`),
+`editor::…`, `terminal::…` and so on. `when` takes the key contexts `Shell`, `Editor`,
+`Terminal`, `DiffView`, `ImageView`, `DocView` and `TextInput`, combined with `&&`, `||` and `!`.
+Your entries come after Athena's, so on the same key in the same context yours win. Comments and
+trailing commas are allowed. Entries Athena cannot use (an unknown command, a key it cannot
+parse, a broken `when`) are listed in a toast and in `app.log`; the rest still apply.
 
 ## Command line
 
@@ -506,8 +564,10 @@ athena mcp-stdio              MCP server for Claude Code
 ## Files and logs
 
 Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
-panel sizes, the text zoom and the `autosave_delay_ms`, `format_on_save` and `ide_integration`
-settings), `ide.env` (the Claude Code integration port that new terminals get),
+editor cursors, recently closed folders, panel sizes, the text zoom, the theme (`System`, `Light`
+or `Dark`) and the `autosave_delay_ms`, `format_on_save` and `ide_integration` settings),
+`ide.env` (the Claude Code integration port that new terminals get), `keymap.json` (your
+shortcuts),
 `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
