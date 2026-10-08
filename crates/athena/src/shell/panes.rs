@@ -819,6 +819,11 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_tab(pane_id, index, window, cx)
                     }))
+                    .children(
+                        item.kind
+                            .file()
+                            .map(|path| athena_ui::file_icon(path, false, cx)),
+                    )
                     .child(self.item_label(root, item, cx))
                     .children(self.item_badge(root, item, &t, cx))
                     .child(

@@ -147,7 +147,7 @@ impl Shell {
                             .pr(px(8.))
                             .flex()
                             .items_center()
-                            .gap(px(4.))
+                            .gap(px(6.))
                             .cursor_pointer()
                             .text_size(t.typography.caption)
                             .text_color(if selected {
@@ -176,6 +176,7 @@ impl Shell {
                                     .text_color(t.color.content_muted)
                                     .child(marker),
                             )
+                            .child(athena_ui::file_icon(&row.entry.path, is_dir, cx))
                             .child(
                                 div()
                                     .overflow_hidden()
