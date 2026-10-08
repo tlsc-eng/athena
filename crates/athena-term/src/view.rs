@@ -31,6 +31,9 @@ const INPUT_CHUNK: usize = 256 * 1024;
 /// A daemon that dies again this soon after a reconnect is not retried automatically.
 const RECONNECT_COOLDOWN: Duration = Duration::from_secs(10);
 
+/// Pause before reattaching after the daemon dropped a terminal that fell behind.
+const LAG_RETRY: Duration = Duration::from_millis(250);
+
 /// Waits between connection attempts before a terminal reports the daemon unavailable.
 const CONNECT_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
 
@@ -371,6 +374,7 @@ impl TerminalView {
                 }
             };
             let conn = Arc::new(conn);
+            let daemon_pid = conn.daemon_pid;
             if this
                 .update(cx, |this, _| this.conn = Some(conn.clone()))
                 .is_err()
@@ -399,6 +403,21 @@ impl TerminalView {
                 if alive.is_err() {
                     return;
                 }
+            }
+            // The same daemon still answering means it hung up on us for falling behind, and
+            // the shell is still there to reattach to; that is no crash to back off from.
+            let dropped = cx
+                .background_executor()
+                .spawn(async move { daemon_running(daemon_pid) })
+                .await;
+            if dropped {
+                cx.background_executor().timer(LAG_RETRY).await;
+                let _ = this.update(cx, |this, cx| {
+                    tracing::info!(pane = ?this.pane, "session daemon dropped a lagging terminal; reattaching");
+                    this.connect(cx);
+                    cx.notify();
+                });
+                return;
             }
             let _ = this.update(cx, |this, cx| {
                 this.conn = None;
@@ -1022,6 +1041,14 @@ pub fn open_connection() -> anyhow::Result<(Connection, UnixStream)> {
     let socket = athena_proto::socket_path()?;
     let log = athena_proto::log_path()?;
     athena_proto::connect_or_spawn(&socket, &daemon, &log).map_err(|e| anyhow!(e))
+}
+
+/// Whether the daemon with this pid still answers on the socket.
+fn daemon_running(pid: u32) -> bool {
+    athena_proto::socket_path()
+        .ok()
+        .and_then(|socket| athena_proto::connect(&socket).ok())
+        .is_some_and(|(conn, _)| conn.daemon_pid == pid)
 }
 
 /// An older daemon still running shells: offer a restart rather than report a failure.

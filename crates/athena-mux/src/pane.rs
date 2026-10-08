@@ -9,7 +9,7 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_s
 
 use crate::ring::Ring;
 
-const SCROLLBACK_BYTES: usize = 8 * 1024 * 1024;
+pub const SCROLLBACK_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct Pane {
     pub cwd: PathBuf,

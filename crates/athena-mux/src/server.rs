@@ -3,7 +3,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,17 +14,31 @@ use athena_proto::{
 };
 
 use crate::notices::{PaneWatcher, clean};
-use crate::pane::{Pane, PaneOutput, READ_CHUNK};
+use crate::pane::{Pane, PaneOutput, READ_CHUNK, SCROLLBACK_BYTES};
 use crate::process;
 
 const CLIENT_QUEUE: usize = 256;
+/// How long a full client queue may stay full before the daemon hangs up on that client.
+const LAG_GRACE: Duration = Duration::from_secs(2);
+const LAG_POLL: Duration = Duration::from_millis(5);
 const IDLE_EXIT: Duration = Duration::from_secs(60);
 const REAPER_TICK: Duration = Duration::from_secs(5);
 const FOREGROUND_TICK: Duration = Duration::from_millis(500);
 const MAX_DIM: u16 = 1000;
 const BACKLOG: usize = 50;
 
+// A replay is queued whole under the lock, so it must fit an empty queue with room to spare.
+const _: () = assert!(SCROLLBACK_BYTES / MAX_OUTPUT_CHUNK + 8 <= CLIENT_QUEUE);
+
 type ClientId = u64;
+
+struct Client {
+    tx: SyncSender<ServerMsg>,
+    /// A handle on the connection for hanging up on a client that stopped reading.
+    stream: UnixStream,
+}
+
+type Targets = Vec<(ClientId, SyncSender<ServerMsg>)>;
 
 pub struct Server {
     socket: PathBuf,
@@ -35,7 +49,7 @@ pub struct Server {
 
 struct State {
     panes: HashMap<PaneId, Pane>,
-    clients: HashMap<ClientId, SyncSender<ServerMsg>>,
+    clients: HashMap<ClientId, Client>,
     subscribers: Vec<ClientId>,
     /// Notices raised while no window was listening, delivered on the next `Subscribe`.
     backlog: VecDeque<Notice>,
@@ -123,13 +137,8 @@ impl Server {
                                     return None;
                                 }
                                 p.foreground = now.clone();
-                                let targets: Vec<_> = p
-                                    .attached
-                                    .iter()
-                                    .filter_map(|c| clients.get(c).cloned())
-                                    .collect();
                                 Some((
-                                    targets,
+                                    targets(&p.attached, clients),
                                     ServerMsg::Foreground {
                                         pane: id,
                                         process: now,
@@ -139,9 +148,7 @@ impl Server {
                             .collect()
                     };
                     for (targets, msg) in updates {
-                        for tx in targets {
-                            let _ = tx.send(msg.clone());
-                        }
+                        self.deliver(targets, &msg);
                     }
                 }
             })
@@ -174,7 +181,7 @@ impl Server {
             _ => return,
         }
 
-        let Ok(mut writer) = stream.try_clone() else {
+        let (Ok(mut writer), Ok(handle)) = (stream.try_clone(), stream.try_clone()) else {
             return;
         };
         let (tx, rx) = sync_channel::<ServerMsg>(CLIENT_QUEUE);
@@ -182,7 +189,13 @@ impl Server {
             let mut st = self.lock();
             st.next_client += 1;
             let id = st.next_client;
-            st.clients.insert(id, tx.clone());
+            st.clients.insert(
+                id,
+                Client {
+                    tx: tx.clone(),
+                    stream: handle,
+                },
+            );
             id
         };
         let writer_thread = thread::Builder::new()
@@ -196,7 +209,7 @@ impl Server {
                 let _ = writer.shutdown(std::net::Shutdown::Both);
             });
         if writer_thread.is_err() {
-            self.lock().clients.remove(&id);
+            self.forget(id);
             return;
         }
 
@@ -206,11 +219,46 @@ impl Server {
             }
         }
 
+        self.forget(id);
+    }
+
+    /// Detaches a client from everything; returns it so the caller may also hang up.
+    fn forget(&self, id: ClientId) -> Option<Client> {
         let mut st = self.lock();
-        st.clients.remove(&id);
         st.subscribers.retain(|c| *c != id);
         for pane in st.panes.values_mut() {
             pane.attached.retain(|c| *c != id);
+        }
+        st.clients.remove(&id)
+    }
+
+    /// Disconnects a client that stopped reading, so it cannot hold up output for anyone else.
+    /// It reattaches and replays the scrollback, as after any lost connection.
+    fn hang_up(&self, id: ClientId) {
+        if let Some(client) = self.forget(id) {
+            tracing::warn!("client {id} stopped reading; disconnecting it");
+            let _ = client.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// Queues `msg` for each target, waiting up to `LAG_GRACE` for a full queue to drain.
+    fn deliver(&self, targets: Targets, msg: &ServerMsg) {
+        for (id, tx) in targets {
+            let deadline = Instant::now() + LAG_GRACE;
+            let mut msg = msg.clone();
+            loop {
+                match tx.try_send(msg) {
+                    Ok(()) | Err(TrySendError::Disconnected(_)) => break,
+                    Err(TrySendError::Full(back)) if Instant::now() < deadline => {
+                        msg = back;
+                        thread::sleep(LAG_POLL);
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        self.hang_up(id);
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -263,25 +311,36 @@ impl Server {
                 if !p.attached.contains(&client) {
                     p.attached.push(client);
                 }
-                // Replay under the lock so no live output can slip in ahead of the history.
-                let _ = tx.send(ServerMsg::Attached {
+                // Queued under the lock so no live output slips in ahead of the history, but
+                // without blocking: a client with no room for it is not reading.
+                let head = ServerMsg::Attached {
                     pane,
                     rows: p.rows,
                     cols: p.cols,
-                });
-                for chunk in p.ring.chunks(MAX_OUTPUT_CHUNK) {
-                    let _ = tx.send(ServerMsg::Output {
+                };
+                let history = p
+                    .ring
+                    .chunks(MAX_OUTPUT_CHUNK)
+                    .map(|chunk| ServerMsg::Output {
                         pane,
                         data: chunk.to_vec(),
                     });
-                }
-                let _ = tx.send(ServerMsg::ReplayDone { pane });
-                let _ = tx.send(ServerMsg::Foreground {
-                    pane,
-                    process: p.foreground.clone(),
-                });
-                if let Some(code) = p.exit {
-                    let _ = tx.send(ServerMsg::Exited { pane, code });
+                let tail = [
+                    Some(ServerMsg::ReplayDone { pane }),
+                    Some(ServerMsg::Foreground {
+                        pane,
+                        process: p.foreground.clone(),
+                    }),
+                    p.exit.map(|code| ServerMsg::Exited { pane, code }),
+                ];
+                let mut replay = std::iter::once(head)
+                    .chain(history)
+                    .chain(tail.into_iter().flatten());
+                let full = replay.any(|msg| tx.try_send(msg).is_err());
+                drop(replay);
+                drop(st);
+                if full {
+                    self.hang_up(client);
                 }
             }
             ClientMsg::Input { pane, data } => {
@@ -302,8 +361,13 @@ impl Server {
                 if !st.subscribers.contains(&client) {
                     st.subscribers.push(client);
                 }
-                for notice in st.backlog.drain(..) {
-                    let _ = tx.send(ServerMsg::Notice(notice));
+                let backlog: Vec<_> = st.backlog.drain(..).collect();
+                let full = backlog
+                    .into_iter()
+                    .any(|notice| tx.try_send(ServerMsg::Notice(notice)).is_err());
+                drop(st);
+                if full {
+                    self.hang_up(client);
                 }
             }
             ClientMsg::Notify { pane, kind } => self.notify(pane, sanitize(kind)),
@@ -351,20 +415,17 @@ impl Server {
                 let _ = output.child.wait();
                 return;
             };
-            for tx in targets {
-                let _ = tx.send(ServerMsg::Output {
-                    pane: id,
-                    data: buf[..n].to_vec(),
-                });
-            }
+            let msg = ServerMsg::Output {
+                pane: id,
+                data: buf[..n].to_vec(),
+            };
+            self.deliver(targets, &msg);
         }
         let code = output.child.wait().ok().map(|s| s.exit_code() as i32);
         let Some(targets) = self.record(id, |p| p.exit = Some(code)) else {
             return;
         };
-        for tx in targets {
-            let _ = tx.send(ServerMsg::Exited { pane: id, code });
-        }
+        self.deliver(targets, &ServerMsg::Exited { pane: id, code });
     }
 
     /// Sends a notice to every subscribed window, or keeps it until one subscribes.
@@ -373,7 +434,7 @@ impl Server {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
         let notice = Notice { pane, kind, at };
-        let targets: Vec<_> = {
+        let targets: Targets = {
             let mut st = self.lock();
             if st.subscribers.is_empty() {
                 st.backlog.push_back(notice);
@@ -382,29 +443,25 @@ impl Server {
                 }
                 return;
             }
-            st.subscribers
-                .iter()
-                .filter_map(|c| st.clients.get(c).cloned())
-                .collect()
+            targets(&st.subscribers, &st.clients)
         };
-        for tx in targets {
-            let _ = tx.send(ServerMsg::Notice(notice.clone()));
-        }
+        self.deliver(targets, &ServerMsg::Notice(notice));
     }
 
     /// Applies `f` to the pane and returns its attached clients' queues; `None` once the pane is gone.
-    fn record(&self, id: PaneId, f: impl FnOnce(&mut Pane)) -> Option<Vec<SyncSender<ServerMsg>>> {
+    fn record(&self, id: PaneId, f: impl FnOnce(&mut Pane)) -> Option<Targets> {
         let mut st = self.lock();
         let State { panes, clients, .. } = &mut *st;
         let pane = panes.get_mut(&id)?;
         f(pane);
-        Some(
-            pane.attached
-                .iter()
-                .filter_map(|c| clients.get(c).cloned())
-                .collect(),
-        )
+        Some(targets(&pane.attached, clients))
     }
+}
+
+fn targets(ids: &[ClientId], clients: &HashMap<ClientId, Client>) -> Targets {
+    ids.iter()
+        .filter_map(|id| clients.get(id).map(|c| (*id, c.tx.clone())))
+        .collect()
 }
 
 fn clamp(n: u16) -> u16 {

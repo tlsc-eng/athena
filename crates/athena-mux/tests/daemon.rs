@@ -77,6 +77,19 @@ fn read_until(reader: &mut UnixStream, needle: &str) -> String {
     seen
 }
 
+fn spawn_pane(conn: &Connection, reader: &mut UnixStream) -> u64 {
+    conn.send(&ClientMsg::Spawn {
+        cwd: "/tmp".into(),
+        rows: 24,
+        cols: 80,
+    })
+    .unwrap();
+    let ServerMsg::Spawned { pane } = next(reader) else {
+        panic!("expected Spawned")
+    };
+    pane
+}
+
 #[test]
 fn session_survives_client_disconnect_and_replays() {
     let daemon = Daemon::start("replay");
@@ -326,5 +339,94 @@ fn notices_wait_for_a_subscriber() {
             title: "t".into(),
             body: "b".into()
         }
+    );
+}
+
+#[test]
+fn a_client_that_stops_reading_does_not_stall_other_clients() {
+    use std::sync::{Arc, Mutex};
+
+    let daemon = Daemon::start("lag");
+    let (stalled, mut stalled_reader) = daemon.connect();
+    let flood = spawn_pane(&stalled, &mut stalled_reader);
+    let shared = spawn_pane(&stalled, &mut stalled_reader);
+    stalled.send(&ClientMsg::Subscribe).unwrap();
+    stalled.send(&ClientMsg::Attach { pane: flood }).unwrap();
+    stalled.send(&ClientMsg::Attach { pane: shared }).unwrap();
+    // macOS refuses setsockopt once the daemon has shut the socket down, so set it now.
+    stalled_reader
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    let (healthy, mut healthy_reader) = daemon.connect();
+    let own = spawn_pane(&healthy, &mut healthy_reader);
+    healthy.send(&ClientMsg::Attach { pane: shared }).unwrap();
+    healthy.send(&ClientMsg::Attach { pane: own }).unwrap();
+    healthy_reader
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let ticks = Arc::new(Mutex::new(String::new()));
+    let foreground = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (seen_ticks, seen_foreground) = (ticks.clone(), foreground.clone());
+    thread::spawn(move || {
+        loop {
+            match read_frame::<_, ServerMsg>(&mut healthy_reader) {
+                Ok(Some(ServerMsg::Output { pane, data })) if pane == shared => {
+                    seen_ticks
+                        .lock()
+                        .unwrap()
+                        .push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Some(ServerMsg::Foreground {
+                    pane,
+                    process: Some(p),
+                })) if pane == own => seen_foreground.lock().unwrap().push(p.name),
+                Ok(Some(_)) => {}
+                Ok(None) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+        }
+    });
+
+    let input = |conn: &Connection, pane, text: &str| {
+        conn.send(&ClientMsg::Input {
+            pane,
+            data: text.as_bytes().to_vec(),
+        })
+        .unwrap();
+    };
+    input(&healthy, flood, "yes athena-flood\r");
+    input(
+        &healthy,
+        shared,
+        "i=0; while :; do i=$((i+1)); echo tick-$i; sleep 0.02; done\r",
+    );
+    // Long enough for the flood to fill the stalled client's socket and queue.
+    thread::sleep(Duration::from_secs(3));
+    input(&healthy, own, "sleep 30\r");
+    let before = ticks.lock().unwrap().matches("tick-").count();
+    thread::sleep(Duration::from_secs(3));
+    let after = ticks.lock().unwrap().matches("tick-").count();
+    assert!(
+        after > before + 20,
+        "the shared pane stalled: {before} ticks, then {after}"
+    );
+    assert!(
+        foreground.lock().unwrap().iter().any(|n| n == "sleep"),
+        "foreground updates stalled: {:?}",
+        foreground.lock().unwrap()
+    );
+
+    // The daemon hung up on the client that stopped reading: what it had buffered, then EOF.
+    let end = loop {
+        match read_frame::<_, ServerMsg>(&mut stalled_reader) {
+            Ok(Some(_)) => {}
+            other => break other,
+        }
+    };
+    assert!(
+        !matches!(&end, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the stalled client is still connected"
     );
 }
