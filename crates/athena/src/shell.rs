@@ -822,6 +822,16 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NextProblem, _, cx| this.go_to_problem(true, cx)))
             .on_action(cx.listener(|this, _: &PrevProblem, _, cx| this.go_to_problem(false, cx)))
             .on_action(
+                cx.listener(|this, _: &athena_editor::GoToImplementation, _, cx| {
+                    this.lsp_implementation(false, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &athena_editor::GoToTypeDefinition, _, cx| {
+                    this.lsp_implementation(true, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &athena_editor::ShowCodeActions, w, cx| {
                     this.show_code_actions(w, cx)
                 }),

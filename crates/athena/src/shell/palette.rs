@@ -83,6 +83,10 @@ const EDITOR_COMMANDS: &[(&str, &str)] = &[
     ("Toggle replace", "editor::FindReplace"),
     ("Insert line above", "editor::InsertLineAbove"),
     ("Insert line below", "editor::InsertLineBelow"),
+    ("Rename symbol", "editor::RenameSymbol"),
+    ("Quick fix", "editor::ShowCodeActions"),
+    ("Go to implementations", "editor::GoToImplementation"),
+    ("Go to type definition", "editor::GoToTypeDefinition"),
 ];
 
 /// Commands offered for starting Claude; typing anything else offers that too.

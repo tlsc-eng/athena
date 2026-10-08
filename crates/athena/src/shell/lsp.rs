@@ -68,6 +68,8 @@ pub(super) struct LspState {
     /// Bumped per lookup so a slow answer cannot replace a newer one.
     references_asked: u64,
     reference_opened: Option<usize>,
+    /// What the References tab lists: `reference` or `implementation`.
+    references_noun: &'static str,
 }
 
 #[derive(Default)]
@@ -559,6 +561,66 @@ impl Shell {
         .detach();
     }
 
+    /// Cmd+F12 (`implementation`) or Go to Type Definition: one result opens, several are listed
+    /// in the References tab.
+    pub(super) fn lsp_implementation(&mut self, type_definition: bool, cx: &mut Context<Self>) {
+        let Some(editor) = self.focused_editor() else {
+            return;
+        };
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, &editor, cx);
+        let (noun, title) = match type_definition {
+            true => ("type definition", "No type definition found"),
+            false => ("implementation", "No implementation found"),
+        };
+        let Some(client) = self.document_client(&doc) else {
+            return self.lsp_failed(title, NO_SERVER.into(), cx);
+        };
+        let Some((line, character)) = editor.read(cx).cursor_utf16() else {
+            return;
+        };
+        let at = Position { line, character };
+        tracing::debug!(path = %doc.display(), line, character, "{noun}");
+        let root = self.workspace.active_project().map(|p| p.root.clone());
+        cx.spawn(async move |this, cx| {
+            let found = match type_definition {
+                true => client.type_definition(&doc, at).await,
+                false => client.implementation(&doc, at).await,
+            };
+            let found = match found {
+                Ok(list) if list.len() > 1 => Ok(cx
+                    .background_executor()
+                    .spawn(async move { with_snippets(list) })
+                    .await),
+                Ok(list) => Err(list.into_iter().next()),
+                Err(why) => {
+                    tracing::debug!("{noun} failed: {why}");
+                    Err(None)
+                }
+            };
+            let _ = this.update(cx, |this, cx| match found {
+                Ok(list) => {
+                    this.lsp.references_asked += 1;
+                    this.lsp.reference_opened = None;
+                    this.lsp.references_noun = noun;
+                    this.lsp.references_root = root;
+                    this.lsp.references = References::Found(Rc::new(list));
+                    this.show_drawer_tab(DrawerTab::References, cx);
+                }
+                Err(Some(target)) => {
+                    this.lsp.jump = Some((target.path, target.range.start));
+                    cx.notify();
+                }
+                Err(None) => this.lsp_failed(
+                    title,
+                    format!("No {noun} was found for the symbol under the cursor."),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
     /// Asks the server about the symbol at `at`; an empty answer shows nothing, as in VS Code.
     pub(super) fn lsp_hover(
         &mut self,
@@ -757,6 +819,7 @@ impl Shell {
         self.flush_change(&doc, editor, cx);
         self.lsp.references_asked += 1;
         self.lsp.reference_opened = None;
+        self.lsp.references_noun = "reference";
         self.lsp.references_root = self.workspace.active_project().map(|p| p.root.clone());
         self.show_drawer_tab(DrawerTab::References, cx);
         let Some(client) = self
@@ -819,8 +882,8 @@ impl Shell {
         };
         let t = cx.theme();
         let count = match list.len() {
-            1 => "1 reference".to_string(),
-            n => format!("{n} references"),
+            1 => format!("1 {}", self.lsp.references_noun),
+            n => format!("{n} {}s", self.lsp.references_noun),
         };
         Some(
             div()
@@ -853,7 +916,7 @@ impl Shell {
             References::Loading => return message("Finding references…".into()),
             References::Failed(why) => return message(why.clone()),
             References::Found(list) if list.is_empty() => {
-                return message("No references found.".into());
+                return message(format!("No {}s found.", self.lsp.references_noun));
             }
             References::Found(list) => list.clone(),
         };

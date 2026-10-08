@@ -228,6 +228,22 @@ mod tests {
     }
 
     #[test]
+    fn navigation_and_lsp_keystrokes_parse() {
+        for (source, key) in [
+            ("f8", "f8"),
+            ("shift-f8", "f8"),
+            ("f2", "f2"),
+            ("cmd-f12", "f12"),
+            ("cmd-.", "."),
+            ("cmd-shift-m", "m"),
+            ("cmd-shift-o", "o"),
+            ("cmd-alt-o", "o"),
+        ] {
+            assert_eq!(Keystroke::parse(source).unwrap().key, key, "{source}");
+        }
+    }
+
+    #[test]
     fn font_zoom_keystrokes_parse() {
         for (source, key) in [
             ("cmd-=", "="),
