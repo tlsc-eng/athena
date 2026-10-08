@@ -179,6 +179,24 @@ impl EditorView {
         &self.path
     }
 
+    /// 1-based cursor line and column, and the selected text if any.
+    pub fn cursor(&self) -> Option<(u32, u32, Option<String>)> {
+        let b = self.buffer.as_ref()?;
+        let head = b.selection.head;
+        let line = b.line_of(head);
+        let selection = (!b.selection.is_empty()).then(|| b.selected_text());
+        Some((line as u32 + 1, b.column_of(head) as u32 + 1, selection))
+    }
+
+    /// Moves the cursor to the start of a 1-based line and scrolls it into view.
+    pub fn go_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+        self.with_buffer(cx, |b| {
+            let line = (line.max(1) as usize - 1).min(b.len_lines().saturating_sub(1));
+            let at = b.line_start(line);
+            b.move_to(at, false);
+        });
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.buffer.as_ref().is_some_and(Buffer::is_dirty)
     }

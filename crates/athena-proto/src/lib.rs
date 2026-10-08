@@ -20,10 +20,73 @@ pub const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 
 pub type PaneId = u64;
 
-/// Messages to the running Athena window over `app.sock`, from the `athena` command line.
+/// Requests to the running Athena window over `app.sock`, from the command line and the MCP
+/// bridge. Each gets one `AppReply`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum AppMsg {
-    OpenProject { path: PathBuf },
+    OpenProject {
+        path: PathBuf,
+    },
+    ListProjects,
+    ActiveFile,
+    OpenFile {
+        path: PathBuf,
+        line: Option<u32>,
+    },
+    ListTerminals,
+    ReadTerminal {
+        session: PaneId,
+        lines: u32,
+    },
+    /// Which pane and project the connecting process runs in, as the window determined it.
+    WhoAmI,
+    /// Sent first by clients running in an Athena terminal (`ATHENA_PANE_ID`). The window only
+    /// believes it if that pane's foreground program is an ancestor of the client.
+    Identify {
+        session: PaneId,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum AppReply {
+    Ok,
+    Error(String),
+    Projects(Vec<ProjectInfo>),
+    ActiveFile(Option<ActiveFile>),
+    Terminals(Vec<TerminalInfo>),
+    Lines(Vec<String>),
+    Caller {
+        session: Option<PaneId>,
+        project: Option<PathBuf>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProjectInfo {
+    pub root: PathBuf,
+    pub name: String,
+    pub active: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ActiveFile {
+    pub path: PathBuf,
+    /// 1-based, as editors show them.
+    pub line: u32,
+    pub column: u32,
+    pub selection: Option<String>,
+    pub modified: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TerminalInfo {
+    pub session: Option<PaneId>,
+    pub project: PathBuf,
+    pub title: String,
+    pub cwd: Option<PathBuf>,
+    pub program: Option<String>,
+    /// `running` or `waiting_input` for a Claude Code session.
+    pub claude: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

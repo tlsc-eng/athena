@@ -100,6 +100,8 @@ pub struct TerminalView {
     claude_state: Option<ClaudeState>,
     /// What Claude Code's own hooks last reported; trusted over the output-silence guess.
     claude_hook: Option<ClaudeState>,
+    /// Typed into the shell once it is ready, for tabs opened to run a command.
+    pending_input: Option<Vec<u8>>,
     grid: GridSize,
     scroll_remainder: f32,
     _claude_timer: Option<Task<()>>,
@@ -134,6 +136,7 @@ impl TerminalView {
             selecting: false,
             claude_state: None,
             claude_hook: None,
+            pending_input: None,
             scroll_remainder: 0.,
             _claude_timer: None,
             _io: None,
@@ -182,9 +185,32 @@ impl TerminalView {
         self.terminal.as_ref().is_some_and(|t| t.bell)
     }
 
+    pub fn text_lines(&self, count: usize) -> Vec<String> {
+        self.terminal
+            .as_ref()
+            .map(|t| t.text_lines(count))
+            .unwrap_or_default()
+    }
+
+    /// The foreground program's name and working directory, as the daemon last reported them.
+    pub fn foreground(&self) -> Option<(String, Option<PathBuf>)> {
+        self.foreground
+            .as_ref()
+            .map(|p| (p.name.clone(), p.cwd.clone()))
+    }
+
+    pub fn foreground_pid(&self) -> Option<i32> {
+        self.foreground.as_ref().map(|p| p.pid)
+    }
+
     /// The daemon pane this view shows, once attached.
     pub fn session(&self) -> Option<PaneId> {
         self.pane
+    }
+
+    /// Types `text` into the shell as soon as it is attached.
+    pub fn run_on_start(&mut self, text: impl Into<String>) {
+        self.pending_input = Some(text.into().into_bytes());
     }
 
     /// Records Claude Code's state as reported by its hooks.
@@ -395,6 +421,9 @@ impl TerminalView {
             ServerMsg::ReplayDone { .. } => {
                 if let Some(terminal) = self.terminal.as_mut() {
                     terminal.replaying = false;
+                    if let Some(bytes) = self.pending_input.take() {
+                        terminal.input(bytes);
+                    }
                     if std::mem::take(&mut self.session_lost) {
                         terminal.handle(PaneEvent::Output(SESSION_LOST.to_vec()), &palette);
                     }

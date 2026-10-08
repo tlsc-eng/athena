@@ -11,6 +11,9 @@ pub struct Project {
     /// `None` once every pane has been closed; a file without the key gets one terminal.
     #[serde(default = "default_layout")]
     pub layout: Option<Layout>,
+    /// The command that starts Claude Code here (e.g. a profile wrapper like `claude-tlsc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_command: Option<String>,
     /// Phase 3 stored a single shell here; read only to migrate it into `layout`.
     #[serde(default, skip_serializing)]
     terminal: Option<u64>,
@@ -25,6 +28,7 @@ impl Project {
         Self {
             root,
             layout: default_layout(),
+            claude_command: None,
             terminal: None,
         }
     }

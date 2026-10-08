@@ -6,6 +6,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Handler, Processor, StdSyncHandler};
@@ -247,6 +248,34 @@ impl Terminal {
         })
     }
 
+    /// The last `count` lines of scrollback and screen as plain text, trailing blank lines dropped.
+    pub fn text_lines(&self, count: usize) -> Vec<String> {
+        let grid = self.term.grid();
+        let top = -(grid.history_size() as i32);
+        let bottom = self.term.screen_lines() as i32;
+        let cols = self.term.columns();
+        let mut lines: Vec<String> = (top..bottom)
+            .map(|l| {
+                let row = &grid[Line(l)];
+                let text: String = (0..cols)
+                    .map(|c| &row[Column(c)])
+                    .filter(|cell| {
+                        !cell
+                            .flags
+                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    })
+                    .map(|cell| cell.c)
+                    .collect();
+                text.trim_end().to_string()
+            })
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        let skip = lines.len().saturating_sub(count);
+        lines.split_off(skip)
+    }
+
     pub fn paste(&mut self, text: &str) {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if self.mode().contains(TermMode::BRACKETED_PASTE) {
@@ -390,6 +419,16 @@ mod tests {
         let (word, side) = t.point_at(7., 0.);
         t.start_selection(2, word, side);
         assert_eq!(t.selection_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn reads_back_scrollback_text() {
+        let (mut t, _) = terminal();
+        for i in 0..12 {
+            feed(&mut t, format!("line {i}\r\n").as_bytes());
+        }
+        assert_eq!(t.text_lines(3), vec!["line 9", "line 10", "line 11"]);
+        assert_eq!(t.text_lines(100).len(), 12, "history included");
     }
 
     #[test]

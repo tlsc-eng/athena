@@ -1,6 +1,7 @@
 mod layout;
 mod persist;
 mod project;
+mod scope;
 
 pub use layout::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath, Pane,
@@ -8,6 +9,7 @@ pub use layout::{
 };
 pub use persist::{load, save};
 pub use project::{Project, git_branch};
+pub use scope::{denied, resolve_in_roots};
 
 use std::path::{Path, PathBuf};
 
