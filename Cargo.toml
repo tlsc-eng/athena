@@ -48,6 +48,7 @@ athena-editor = { path = "crates/athena-editor" }
 athena-workspace = { path = "crates/athena-workspace" }
 athena-ui = { path = "crates/athena-ui" }
 athena-containers = { path = "crates/athena-containers" }
+athena-playwright = { path = "crates/athena-playwright" }
 
 [profile.release]
 lto = "thin"

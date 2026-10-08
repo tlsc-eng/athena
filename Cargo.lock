@@ -508,6 +508,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "athena-playwright"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "athena-proto"
 version = "0.1.0"
 dependencies = [
