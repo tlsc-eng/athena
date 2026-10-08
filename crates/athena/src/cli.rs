@@ -6,7 +6,7 @@ use std::process::Command;
 
 use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
 
-const USAGE: &str = "usage: athena [<folder> | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running> | notify --title <t> [--body <b>]]";
+const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running> | notify --title <t> [--body <b>]]";
 
 /// Hook input larger than this is ignored; Claude Code sends a small JSON object.
 const MAX_HOOK_INPUT: u64 = 64 * 1024;
@@ -16,6 +16,10 @@ pub fn run(args: Vec<String>) -> Option<i32> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
         [] => return None,
+        ["--version" | "-V"] => {
+            println!("athena {}", env!("CARGO_PKG_VERSION"));
+            return Some(0);
+        }
         ["mux", "status"] => mux_status(),
         ["mux", "stop"] => mux_stop(),
         ["notify", rest @ ..] => notify(rest),
