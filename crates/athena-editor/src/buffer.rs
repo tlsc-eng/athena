@@ -116,6 +116,7 @@ impl Indent {
 enum EditKind {
     Insert,
     Delete,
+    Reload,
     Other,
 }
 
@@ -250,38 +251,34 @@ impl Buffer {
         self.path = Some(path);
     }
 
-    /// Takes the file's current text as one undoable edit and marks it saved.
+    /// Takes the file's current text as an undoable edit and marks it saved.
     pub fn reload_from_disk(&mut self, c: &mut Cursor) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
-        let (text, mtime) = read_text(&path)?;
-        self.disk_mtime = mtime;
-        let old: Vec<char> = self.rope.chars().collect();
-        let new: Vec<char> = text.chars().collect();
-        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..]
-            .iter()
-            .rev()
-            .zip(new[prefix..].iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count();
-        if prefix + suffix < old.len() || old.len() != new.len() {
-            let inserted: String = new[prefix..new.len() - suffix].iter().collect();
-            let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
+        let disk = read_disk_text(&path, &self.rope)?;
+        self.take_disk_text(c, disk);
+        Ok(())
+    }
+
+    /// Applies a file read by [`read_disk_text`] against this buffer's current text and marks it
+    /// saved; reloads with no edit between them undo as one step.
+    pub(crate) fn take_disk_text(&mut self, c: &mut Cursor, disk: DiskText) {
+        self.disk_mtime = disk.mtime;
+        if let Some((range, inserted)) = disk.change {
+            let (prefix, old_end) = (range.start, range.end);
+            let new_end = prefix + inserted.chars().count();
             let map = |at: usize| match at {
                 at if at <= prefix => at,
                 at if at >= old_end => at - old_end + new_end,
                 _ => new_end,
             };
             let selection = c.selection;
-            self.replace(c, prefix..old_end, &inserted, EditKind::Other);
+            self.replace(c, range, &inserted, EditKind::Reload);
             c.selection = Selection {
                 anchor: map(selection.anchor),
                 head: map(selection.head),
             };
         }
         self.saved_at = Some(self.undo.len());
-        self.last_edit = None;
-        Ok(())
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -456,11 +453,15 @@ impl Buffer {
         self.redo.clear();
 
         let now = Instant::now();
-        let joins = kind != EditKind::Other
-            && self
-                .last_edit
-                .is_some_and(|(k, t)| k == kind && now - t < UNDO_GROUP)
-            && self.undo.last().is_some_and(|t| t.after == before);
+        let joins = match kind {
+            EditKind::Other => false,
+            EditKind::Reload => self.last_edit.is_some_and(|(k, _)| k == kind),
+            _ => {
+                self.last_edit
+                    .is_some_and(|(k, t)| k == kind && now - t < UNDO_GROUP)
+                    && self.undo.last().is_some_and(|t| t.after == before)
+            }
+        };
         self.last_edit = Some((kind, now));
         if joins && let Some(last) = self.undo.last_mut() {
             last.changes.push(change);
@@ -1046,6 +1047,59 @@ fn read_text(path: &Path) -> Result<(String, Option<SystemTime>)> {
     Ok((text, meta.modified().ok()))
 }
 
+/// A file's text as read from disk, as the one edit that turns a buffer's text into it.
+pub(crate) struct DiskText {
+    mtime: Option<SystemTime>,
+    /// The chars replaced and their replacement; `None` when the text is the same.
+    change: Option<(Range<usize>, String)>,
+}
+
+/// Reads `path` and compares it with `rope`; it leaves the buffer alone, so it can run off the UI thread.
+pub(crate) fn read_disk_text(path: &Path, rope: &Rope) -> Result<DiskText> {
+    let (text, mtime) = read_text(path)?;
+    Ok(DiskText {
+        mtime,
+        change: differing_span(rope, &text),
+    })
+}
+
+/// The chars of `rope` between its common prefix and suffix with `text`, and what replaces them.
+fn differing_span(rope: &Rope, text: &str) -> Option<(Range<usize>, String)> {
+    let new = text.as_bytes();
+    let old_len = rope.len_bytes();
+    let mut prefix = 0;
+    for chunk in rope.chunks() {
+        let same = chunk
+            .bytes()
+            .zip(&new[prefix..])
+            .take_while(|(a, b)| a == *b)
+            .count();
+        prefix += same;
+        if same < chunk.len() {
+            break;
+        }
+    }
+    if prefix == old_len && prefix == new.len() {
+        return None;
+    }
+    // Equal bytes split chars at the same places, so a boundary in `text` is one in `rope` too.
+    while !text.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let mut suffix = rope
+        .bytes_at(old_len)
+        .reversed()
+        .zip(new.iter().rev())
+        .take(old_len.min(new.len()) - prefix)
+        .take_while(|(a, b)| a == *b)
+        .count();
+    while !text.is_char_boundary(new.len() - suffix) {
+        suffix -= 1;
+    }
+    let range = rope.byte_to_char(prefix)..rope.byte_to_char(old_len - suffix);
+    Some((range, text[prefix..new.len() - suffix].to_string()))
+}
+
 pub(crate) fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -1270,6 +1324,59 @@ mod tests {
         b.undo(&mut c);
         assert_eq!(b.full_text(), "one\ntwo\nthree\n");
         assert!(b.is_dirty());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn reload_diffs_on_char_boundaries() {
+        let cases = [
+            ("aé\n", "aè\n"),
+            ("aéb", "a©b"),
+            ("aaa", "aaaa"),
+            ("aaaa", "aaa"),
+            ("日本語", "日本人語"),
+            ("ab€cd", "ab€€cd"),
+            ("", "x"),
+            ("x", ""),
+        ];
+        for (old, new) in cases {
+            let mut rope = Rope::from_str(old);
+            let (range, inserted) = differing_span(&rope, new).unwrap();
+            rope.remove(range.clone());
+            rope.insert(range.start, &inserted);
+            assert_eq!(rope.to_string(), new, "{old:?} -> {new:?}");
+        }
+        assert_eq!(
+            differing_span(&Rope::from_str("aé\n"), "aè\n"),
+            Some((1..2, "è".to_string()))
+        );
+        assert_eq!(differing_span(&Rope::from_str("héllo"), "héllo"), None);
+    }
+
+    #[test]
+    fn consecutive_reloads_undo_as_one_step() {
+        let path = temp_file("reload-twice", "one\n");
+        let mut b = Buffer::open(&path).unwrap();
+        let mut c = Cursor::default();
+        write_elsewhere(&path, "two\n");
+        b.reload_from_disk(&mut c).unwrap();
+        write_elsewhere(&path, "three é\n");
+        b.reload_from_disk(&mut c).unwrap();
+        assert_eq!(b.full_text(), "three é\n");
+        assert!(!b.is_dirty());
+        assert!(b.undo(&mut c));
+        assert_eq!(b.full_text(), "one\n");
+        assert!(!b.undo(&mut c), "both reloads were one step");
+        b.redo(&mut c);
+        b.insert(&mut c, "x");
+        write_elsewhere(&path, "four\n");
+        b.reload_from_disk(&mut c).unwrap();
+        b.undo(&mut c);
+        assert_eq!(
+            b.full_text(),
+            "three éx\n",
+            "an edit between reloads splits them"
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

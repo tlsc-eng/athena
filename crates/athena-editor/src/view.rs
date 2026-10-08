@@ -16,7 +16,7 @@ use gpui::{
     UTF16Selection, Window, actions, div, prelude::*, px,
 };
 
-use crate::buffer::{Buffer, Cursor, Edit, SaveError, UNDO_GROUP};
+use crate::buffer::{Buffer, Cursor, DiskText, Edit, SaveError, UNDO_GROUP, read_disk_text};
 use crate::completion::Completing;
 use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
@@ -244,6 +244,9 @@ struct FindBar {
     _subscription: Subscription,
 }
 
+/// Files larger than this are reloaded from disk off the UI thread.
+const BACKGROUND_RELOAD: u64 = 1024 * 1024;
+
 pub struct EditorView {
     /// Shared with every other tab on the same file; the cursor and folds stay per view.
     pub(crate) buffer: Option<Rc<SharedBuffer>>,
@@ -287,6 +290,7 @@ pub struct EditorView {
     pub(crate) gutter_hover: bool,
     autosave: Option<Duration>,
     autosave_task: Option<Task<()>>,
+    reloading: Option<Task<()>>,
     /// The file changed on disk while this buffer had unsaved edits; the bar asks what to keep.
     conflict: bool,
     pub(crate) gutter_marks: Vec<GutterMark>,
@@ -348,6 +352,7 @@ impl EditorView {
             gutter_hover: false,
             autosave: None,
             autosave_task: None,
+            reloading: None,
             conflict: false,
             gutter_marks: Vec::new(),
             blame: None,
@@ -1434,10 +1439,47 @@ impl EditorView {
         self.changed(cx);
     }
 
-    /// Replaces the buffer with the file on disk, as one step that undo can take back.
+    /// Replaces the buffer with the file on disk, as a step that undo can take back; a large file
+    /// is read and compared off the UI thread.
     fn reload(&mut self, cx: &mut Context<Self>) {
+        let Some((path, rope, version)) = self
+            .buf()
+            .and_then(|b| Some((b.path.clone()?, b.rope().clone(), b.version())))
+        else {
+            return;
+        };
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() <= BACKGROUND_RELOAD) {
+            let disk = read_disk_text(&path, &rope);
+            self.finish_reload(version, disk, cx);
+            return;
+        }
+        self.reloading = Some(cx.spawn(async move |this, cx| {
+            let disk = cx
+                .background_executor()
+                .spawn(async move { read_disk_text(&path, &rope) })
+                .await;
+            this.update(cx, |this, cx| this.finish_reload(version, disk, cx))
+                .ok();
+        }));
+    }
+
+    fn finish_reload(
+        &mut self,
+        version: u64,
+        disk: anyhow::Result<DiskText>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reloading = None;
+        if self.version() != Some(version) {
+            // The text the file was compared with has changed since, so look again.
+            self.check_disk(cx);
+            return;
+        }
         let mut result = Ok(());
-        self.with_buffer(cx, |b, c| result = b.reload_from_disk(c));
+        self.with_buffer(cx, |b, c| match disk {
+            Ok(disk) => b.take_disk_text(c, disk),
+            Err(e) => result = Err(e),
+        });
         self.conflict &= result.is_err();
         self.save_error = result.err().map(|e| format!("{e:#}"));
         if let Some(shared) = &self.buffer {
