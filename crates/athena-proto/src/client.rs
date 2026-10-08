@@ -105,11 +105,16 @@ pub fn connect_or_spawn(
         }
         Err(e) => return Err(e),
     }
+    tracing::info!("spawning athena-mux at {}", daemon.display());
     spawn_daemon(daemon, log)?;
     let deadline = Instant::now() + SPAWN_WAIT;
     loop {
         match connect(socket) {
             Err(ConnectError::NotRunning) if Instant::now() < deadline => thread::sleep(SPAWN_POLL),
+            Err(ConnectError::NotRunning) => {
+                tracing::warn!("athena-mux did not listen within {SPAWN_WAIT:?}");
+                return Err(ConnectError::NotRunning);
+            }
             other => return other,
         }
     }

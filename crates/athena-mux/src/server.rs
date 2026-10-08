@@ -84,7 +84,7 @@ impl Server {
                     }
                     let since = *st.idle_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= IDLE_EXIT {
-                        eprintln!("athena-mux: idle, exiting");
+                        tracing::info!("idle, exiting");
                         self.exit(st);
                     }
                 }
@@ -144,7 +144,7 @@ impl Server {
 
     pub fn serve(self: Arc<Self>, mut stream: UnixStream) {
         if !same_user(&stream) {
-            eprintln!("athena-mux: rejected connection from another user");
+            tracing::warn!("rejected connection from another user");
             return;
         }
         match read_frame::<_, ClientMsg>(&mut stream) {
@@ -296,7 +296,7 @@ impl Server {
             }
             ClientMsg::Notify { pane, kind } => self.notify(pane, sanitize(kind)),
             ClientMsg::Shutdown => {
-                eprintln!("athena-mux: shutdown requested");
+                tracing::info!("shutdown requested");
                 self.exit(self.lock());
             }
         }

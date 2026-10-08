@@ -29,6 +29,10 @@ pub fn log_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("mux.log"))
 }
 
+pub fn app_log_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("app.log"))
+}
+
 /// Where the Athena window listens for `athena <folder>`.
 pub fn app_socket_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("app.sock"))

@@ -20,6 +20,15 @@ fn main() {
     if let Some(code) = cli::run(std::env::args().skip(1).collect()) {
         std::process::exit(code);
     }
+    match athena_proto::app_log_path() {
+        Ok(log) => {
+            if let Err(err) = athena_proto::logging::init(&log, "ATHENA_LOG") {
+                eprintln!("athena: logging to {}: {err}", log.display());
+            }
+        }
+        Err(err) => eprintln!("athena: {err:#}"),
+    }
+    tracing::info!("athena {} starting", env!("CARGO_PKG_VERSION"));
     Application::new()
         .with_assets(athena_ui::Assets)
         .run(|cx: &mut App| {
@@ -30,7 +39,7 @@ fn main() {
 
             let path = workspace_path();
             let mut workspace = athena_workspace::load(&path).unwrap_or_else(|err| {
-                eprintln!("athena: {err:#}; starting with an empty workspace");
+                tracing::error!("{err:#}; starting with an empty workspace");
                 let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
                 Workspace::default()
             });

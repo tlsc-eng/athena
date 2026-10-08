@@ -318,6 +318,7 @@ impl TerminalView {
             let (conn, reader) = match connected {
                 Ok(pair) => pair,
                 Err(err) => {
+                    tracing::warn!("terminal could not connect to the session daemon: {err:#}");
                     let _ = this.update(cx, |this, cx| {
                         this.error = Some(format!("{err:#}"));
                         cx.notify();
@@ -360,6 +361,7 @@ impl TerminalView {
                 let recent = this
                     .last_reconnect
                     .is_some_and(|t| t.elapsed() < RECONNECT_COOLDOWN);
+                tracing::warn!(pane = ?this.pane, reconnect = !recent, "lost the session daemon");
                 if recent {
                     this.error = Some("Lost the connection to the session daemon.".into());
                 } else {
@@ -455,7 +457,10 @@ impl TerminalView {
                 self.session_lost = true;
                 self.send(self.spawn_msg());
             }
-            ServerMsg::Error { kind } => self.error = Some(kind.to_string()),
+            ServerMsg::Error { kind } => {
+                tracing::warn!(pane = ?self.pane, "session daemon error: {kind}");
+                self.error = Some(kind.to_string());
+            }
             ServerMsg::Hello { .. } | ServerMsg::Panes { .. } | ServerMsg::Notice(_) => {}
         }
     }

@@ -18,7 +18,11 @@ use anyhow::{Context, Result, bail};
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("athena-mux: {err:#}");
+        if tracing::dispatcher::has_been_set() {
+            tracing::error!("{err:#}");
+        } else {
+            eprintln!("athena-mux: {err:#}");
+        }
         std::process::exit(1);
     }
 }
@@ -32,6 +36,7 @@ fn run() -> Result<()> {
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
         libc::signal(libc::SIGINT, libc::SIG_DFL);
     }
+    athena_proto::logging::init(&athena_proto::log_path()?, "ATHENA_LOG")?;
 
     let lock = OpenOptions::new()
         .create(true)
@@ -50,8 +55,8 @@ fn run() -> Result<()> {
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-    eprintln!(
-        "athena-mux: pid {} listening on {}",
+    tracing::info!(
+        "pid {} listening on {}",
         std::process::id(),
         socket.display()
     );

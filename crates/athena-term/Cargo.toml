@@ -13,3 +13,4 @@ athena-proto.workspace = true
 async-channel.workspace = true
 anyhow.workspace = true
 athena-ui.workspace = true
+tracing.workspace = true
