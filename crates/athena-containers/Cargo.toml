@@ -1,0 +1,13 @@
+[package]
+name = "athena-containers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bollard.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-channel.workspace = true

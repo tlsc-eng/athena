@@ -33,10 +33,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationResponse", "UNNotification", "UNNotificationTrigger"] }
 block2 = "0.6"
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
-tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "time", "sync", "net"] }
 schemars = "1"
 sha2 = "0.11"
 futures = "0.3"
+bollard = { version = "=0.21.1", default-features = false, features = ["pipe"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -46,6 +47,7 @@ athena-term = { path = "crates/athena-term" }
 athena-editor = { path = "crates/athena-editor" }
 athena-workspace = { path = "crates/athena-workspace" }
 athena-ui = { path = "crates/athena-ui" }
+athena-containers = { path = "crates/athena-containers" }
 
 [profile.release]
 lto = "thin"
