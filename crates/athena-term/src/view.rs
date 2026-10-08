@@ -87,6 +87,13 @@ pub enum TerminalEvent {
     Changed,
     /// The right-click menu opened or closed; it is drawn in-window, under native web views.
     ContextMenu { open: bool },
+    /// Cmd+click on a file named in the output, with its one-based line and column if given;
+    /// `path` stays relative when neither the shell's folder nor the project has it.
+    OpenFile {
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
 }
 
 /// How long a Claude Code session may stay silent before it counts as waiting for the user.
@@ -825,14 +832,35 @@ impl TerminalView {
         let Some(terminal) = self.terminal.as_mut() else {
             return;
         };
+        let cell = (row.max(0.) as usize, col.max(0.) as usize);
         if event.modifiers.platform
-            && let Some(link) = terminal.link_at(row.max(0.) as usize, col.max(0.) as usize)
+            && let Some(link) = terminal.link_at(cell.0, cell.1)
         {
             if links::openable(&link.uri) {
                 cx.open_url(&link.uri);
+            } else if let Some(path) = links::file_uri_path(&link.uri) {
+                cx.emit(TerminalEvent::OpenFile {
+                    path,
+                    line: None,
+                    column: None,
+                });
             }
             return;
         }
+        if event.modifiers.platform
+            && let Some((_, file)) = terminal.file_at(cell.0, cell.1)
+            && let Some(path) = self.file_target(&file)
+        {
+            cx.emit(TerminalEvent::OpenFile {
+                path,
+                line: file.line,
+                column: file.column,
+            });
+            return;
+        }
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
         let (point, side) = terminal.point_at(col, row);
         terminal.start_selection(event.click_count, point, side);
         self.selecting = true;
@@ -906,13 +934,36 @@ impl TerminalView {
         let Some(terminal) = self.terminal.as_ref() else {
             return;
         };
-        let link = (cmd && col >= 0. && row >= 0.)
-            .then(|| terminal.link_at(row as usize, col as usize))
-            .flatten();
+        let cell = (cmd && col >= 0. && row >= 0.).then_some((row as usize, col as usize));
+        let link = match cell.and_then(|(r, c)| terminal.link_at(r, c)) {
+            Some(link) => Some(link),
+            None => match cell.and_then(|(r, c)| terminal.file_at(r, c)) {
+                // Checking the disk once per link, not on every mouse move over it.
+                Some((link, _)) if Some(&link) == self.hovered_link.as_ref() => Some(link),
+                Some((link, file)) => self.file_target(&file).map(|_| link),
+                None => None,
+            },
+        };
         if link != self.hovered_link {
             self.hovered_link = link;
             cx.notify();
         }
+    }
+
+    /// The file a reference names, from the shell's current folder or the project; one that is
+    /// in neither but has a line number stays relative, for the project search to find.
+    fn file_target(&self, file: &links::FileRef) -> Option<PathBuf> {
+        let current = self.foreground.as_ref().and_then(|p| p.cwd.clone());
+        let dirs: Vec<&std::path::Path> = current
+            .iter()
+            .map(PathBuf::as_path)
+            .chain([self.cwd.as_path()])
+            .collect();
+        file.resolve(&dirs).or_else(|| {
+            let relative = std::path::Path::new(&file.path);
+            (file.line.is_some() && relative.is_relative() && !file.path.starts_with('~'))
+                .then(|| relative.to_path_buf())
+        })
     }
 
     fn modifiers_changed(

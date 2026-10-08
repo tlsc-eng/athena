@@ -582,6 +582,7 @@ dependencies = [
  "athena-proto",
  "athena-ui",
  "gpui",
+ "regex",
  "tracing",
 ]
 

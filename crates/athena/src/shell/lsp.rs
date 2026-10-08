@@ -57,6 +57,8 @@ pub(super) struct LspState {
     crashes: HashMap<ServerKey, Vec<Instant>>,
     restarts: HashMap<ServerKey, Task<()>>,
     pub(super) jump: Option<(PathBuf, Position)>,
+    /// A file name a terminal link gave that matched several files, for Go to File to narrow.
+    find_file: Option<String>,
     references: References,
     /// The project the references were asked from; other projects show the drawer tab empty.
     references_root: Option<PathBuf>,
@@ -104,6 +106,18 @@ fn with_snippets(mut found: Vec<Location>) -> Vec<Reference> {
                 snippet,
             }
         })
+        .collect()
+}
+
+/// Files under `root` whose path ends with `tail`, skipping ignored ones; at most a few.
+fn files_ending_with(root: &Path, tail: &Path) -> Vec<PathBuf> {
+    ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .build()
+        .flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()) && e.path().ends_with(tail))
+        .map(ignore::DirEntry::into_path)
+        .take(20)
         .collect()
 }
 
@@ -842,8 +856,59 @@ impl Shell {
         self.transient_notice(title, body, cx);
     }
 
+    /// Cmd+click on `path:line:col` in a terminal; a relative path no folder had is looked for
+    /// in the project, as Go test output names files relative to their package.
+    pub(super) fn open_file_link(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let at = line.map(|line| Position {
+            line: line.saturating_sub(1),
+            character: column.unwrap_or(1).saturating_sub(1),
+        });
+        let open = move |this: &mut Self, path: PathBuf, cx: &mut Context<Self>| {
+            match at {
+                Some(at) => this.lsp.jump = Some((path, at)),
+                None => this.pending_open = Some(path),
+            }
+            cx.notify();
+        };
+        if path.is_absolute() {
+            return open(self, path, cx);
+        }
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let walk = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { files_ending_with(&root, &path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let found = walk.await;
+            let _ = this.update(cx, |this, cx| match found.as_slice() {
+                [only] => open(this, only.clone(), cx),
+                [] => this.transient_notice(
+                    "File not found",
+                    format!("No {} in this project.", path.display()),
+                    cx,
+                ),
+                _ => {
+                    this.lsp.find_file = Some(path.display().to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Opens a definition found since the last frame; opening a tab needs the window.
     pub(super) fn take_lsp_jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(query) = self.lsp.find_file.take() {
+            self.open_palette_with(super::palette::Mode::Files, &query, window, cx);
+        }
         let Some((path, at)) = self.lsp.jump.take() else {
             return;
         };

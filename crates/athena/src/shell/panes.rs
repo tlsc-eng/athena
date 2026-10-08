@@ -186,6 +186,9 @@ impl Shell {
                             this.notify_coalesced(cx);
                             return;
                         }
+                        TerminalEvent::OpenFile { path, line, column } => {
+                            return this.open_file_link(path.clone(), *line, *column, cx);
+                        }
                     };
                     let item = this
                         .workspace

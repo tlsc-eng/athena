@@ -261,6 +261,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// Opens the palette with `query` already typed.
+    pub(super) fn open_palette_with(
+        &mut self,
+        mode: Mode,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(mode, window, cx);
+        if let Some(palette) = &self.palette {
+            palette.input.update(cx, |i, cx| i.set_text(query, cx));
+        }
+    }
+
     fn filter_palette(&mut self, cx: &mut Context<Self>) {
         let Some(palette) = self.palette.as_mut() else {
             return;

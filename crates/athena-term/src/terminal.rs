@@ -284,6 +284,27 @@ impl Terminal {
         })
     }
 
+    /// A file named in plain output at a viewport cell, such as `src/main.go:12:5`.
+    pub fn file_at(&self, row: usize, col: usize) -> Option<(Link, links::FileRef)> {
+        let line = Line(row as i32 - self.term.grid().display_offset() as i32);
+        let cols = self.term.columns();
+        if col >= cols || row >= self.term.screen_lines() {
+            return None;
+        }
+        let grid = self.term.grid();
+        let chars: Vec<char> = (0..cols)
+            .map(|c| grid[Point::new(line, Column(c))].c)
+            .collect();
+        let (start, end, file) = links::file_at(&chars, col)?;
+        let link = Link {
+            row,
+            start,
+            end,
+            uri: chars[start..end].iter().collect(),
+        };
+        Some((link, file))
+    }
+
     /// The last `count` lines of scrollback and screen as plain text, trailing blank lines dropped.
     pub fn text_lines(&self, count: usize) -> Vec<String> {
         let grid = self.term.grid();
