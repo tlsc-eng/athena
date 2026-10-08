@@ -3,9 +3,9 @@
 Athena is a macOS IDE built around terminals that outlive the window and around Claude Code.
 Shells run in a separate session daemon (`athena-mux`), so quitting or updating the app does not
 kill them; the window reattaches on the next launch. Projects get split panes of terminals, an
-editor with language-server support, a browser preview, and read-only views of Playwright results
-and Docker containers. Claude Code sessions show their state on the tab, and an MCP server lets
-Claude read the editor and terminals.
+editor with language-server support and git decorations, a browser preview, and read-only views
+of Playwright results and Docker containers. Claude Code sessions show their state on the tab,
+and an MCP server lets Claude read the editor and terminals.
 
 It is written in Rust on [GPUI](https://crates.io/crates/gpui) and runs only on Apple silicon.
 
@@ -45,25 +45,83 @@ its shells running.
 - If a new version cannot attach to the shells of an older session daemon, their tabs are marked
   **stale**: **Restart sessions** ends those shells and starts new ones, **Keep** leaves them
   running and reconnects once the old daemon exits.
+- Tabs take the title programs set (OSC 0/2), so a Claude Code tab shows its session name; the
+  window title follows the active tab.
+- Find in the terminal (`cmd-f`): searches scrollback and screen, highlights every visible match,
+  shows "3 of 17", with match-case and regex toggles (both off by default).
+- Programs that ask for the mouse (vim, htop, lazygit, tmux) get clicks, drags and the wheel;
+  hold Shift to select text instead, Cmd still opens links.
+- `cmd-k` clears scrollback; under a running program (a dev server, `tail -f`) it also clears the
+  screen above the cursor line instead of sending ^L to that program.
 
 **Editor**
 
 ![The editor with a diagnostic and the References drawer](docs/screenshots/editor.png)
 
-- Syntax highlighting (tree-sitter) for Go, TypeScript, TSX and JavaScript.
-- Find in file, toggle comment, undo/redo.
-- Diagnostics, go-to-definition and find references from `gopls` and
-  `typescript-language-server` when they are installed; Athena starts them for open files.
-  References are listed in a drawer tab; clicking a row opens the file at that line.
+- Syntax highlighting for 16 languages (see [Languages](#languages)), each token class in its own
+  colour, and the bracket matching the one at the cursor highlighted.
+- Find in file, toggle comment, undo/redo, go to line (`line`, `line:column` or `line,column`).
+- Code folding by brackets, falling back to indentation: chevrons in the gutter on hover, fold
+  and unfold at the cursor or everywhere with the `cmd-k` chords below.
+- With a language server: diagnostics, go to definition, find references (listed in a drawer
+  tab; clicking a row opens the file at that line), hover docs (rest the pointer on a word for
+  half a second), completion as you type (Up/Down to move, Enter or Tab to accept, Escape to
+  close; accepting can also add an import) and signature help while typing call arguments.
+- Format on save: `cmd-s` asks the language server to format the file first, by default in Go
+  files only. "Toggle format on save" (palette, File menu) turns it on or off for every language
+  with a server. Auto save does not format.
 - Go to file (fuzzy) and a command palette. A file opens in the editor pane used last, or in a
   new pane beside the focused one with Cmd+click in the tree or Cmd+Enter in Go to file.
+- Two tabs on the same file share one buffer: edits, undo and the unsaved marker are the file's;
+  each tab keeps its own cursor, scroll and folds.
 - Auto save one second after you stop typing (palette: "Toggle auto save"), unsaved markers on
   tabs, tree rows and the window title, Save As, and a Reload / Overwrite bar when a file changes
-  on disk while you have unsaved edits (unchanged files just reload).
-- Markdown and Mermaid preview (`cmd-shift-v`): tables, task lists, local images and links,
-  ```` ```mermaid ```` blocks and `.mmd` files, re-rendered on save.
+  on disk while you have unsaved edits (unchanged files just reload). Project folders are
+  watched, so changes made outside Athena show up without switching windows.
+- Markdown and Mermaid preview (`cmd-shift-v`) for `.md`, `.markdown`, `.mdx`, `.mmd` and
+  `.mermaid`: tables, task lists, local images and links, ```` ```mermaid ```` blocks. It follows
+  unsaved edits as you type and re-renders on save.
 - Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, SVG) open in a viewer that fits and zooms.
 - File-type icons from [seti-ui](https://github.com/jesseweed/seti-ui) in the tree and on tabs.
+
+**Git**
+
+Needs the Xcode command line tools (Athena runs `/usr/bin/git`; without the tools it shows no git
+information rather than triggering the install dialog).
+
+- Tree rows and tab labels take the file's status colour (modified, added, untracked, deleted,
+  conflicted, ignored), tree rows also show the status letter, and folders take the most severe
+  status inside them.
+- The editor gutter marks added, modified and removed lines against `HEAD` (from the saved file).
+- Inline blame (`cmd-alt-shift-g`, off by default): "author · 3 days ago · summary" after the
+  cursor's line, "Not committed yet" for edited lines.
+- A **Changes** drawer tab lists Staged Changes, Changes and Untracked, with Stage / Unstage on
+  each row and group; clicking a row opens the file.
+- Status is re-read every 5 seconds while the window is in front and shortly after a save, a file
+  operation or a change on disk. The title bar shows the branch.
+
+**Workspace**
+
+- Find and replace in project (`cmd-shift-f`): a Search drawer tab with a literal, smart-case
+  search (case matters once the query has a capital), honouring `.gitignore` and skipping binary
+  files and files over 1 MB; up to 2000 matches. Up/Down walk the matches, Enter opens one.
+  **Replace All** asks first, then replaces in open editors (one undo step each) and on disk.
+- Right-click menus. Tree: New File, New Folder, Rename, Delete (to the Trash), Reveal in Finder,
+  Copy Path, Copy Relative Path, Open to the Side. Tabs: Close, Close Others, Close to the Right,
+  Close All, Reveal in Finder, Copy Path, Copy Relative Path, Reveal in File Tree, Split Right /
+  Down with that tab. Editor: Go to
+  Definition, Find References, Cut, Copy, Paste, Toggle Line Comment. Terminal: Copy, Paste,
+  Select All, Find, Clear.
+- Drag a tab onto another tab or strip to move it, onto the middle of a pane to join it, or onto
+  an edge of a pane to split it there; the terminal or editor keeps running. Drop a folder from
+  Finder to open it as a project, a file to open it in a tab.
+- Back and forward through visited tabs and cursor positions (mouse buttons 4 and 5, `ctrl--` /
+  `ctrl-shift--`, View menu); in a browser preview they walk the page's history.
+- The tab strip scrolls sideways when tabs overflow; a middle click closes a tab.
+- Drag the file tree's right edge or the drawer's top edge to resize them (double-click restores
+  240 px); double-click a divider between panes to split the space evenly. Sizes are saved.
+- Panels, tabs, panes, the palette, menus, toasts and find bars fade in and out; with Reduce
+  Motion on they appear at once.
 
 **Claude Code**
 
@@ -81,6 +139,31 @@ its shells running.
 - Containers: a read-only view of the local Docker engine (Docker Desktop or Rancher Desktop):
   list, stats and logs. Athena never starts, stops or removes containers.
 - Workspace layout, open projects and tabs are restored on launch.
+
+## Languages
+
+| Language | Files | Language server |
+|---|---|---|
+| Go | `.go` | `gopls` |
+| TypeScript, TSX | `.ts`, `.mts`, `.cts`, `.tsx` | `typescript-language-server` |
+| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | `typescript-language-server` |
+| YAML | `.yaml`, `.yml` | |
+| JSON | `.json`, `.jsonc`, `.json5`, `.prettierrc`, `.eslintrc`, `.babelrc` | |
+| TOML | `.toml`, `Cargo.lock`, `uv.lock`, `poetry.lock` | |
+| Shell | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.bashrc`, `.profile`, `.envrc` and similar, `#!` scripts | |
+| Rust | `.rs` | |
+| Python | `.py`, `.pyi` | |
+| CSS | `.css` | |
+| HTML | `.html`, `.htm` | |
+| Markdown | `.md`, `.markdown` | |
+| Swift | `.swift` | |
+| Dockerfile | `Dockerfile*`, `Containerfile*`, `.dockerfile`, `.containerfile` | |
+| Environment files | `.env`, `.env.*` | |
+
+Highlighting uses tree-sitter grammars, except Dockerfile and `.env`, which use a line scanner.
+Language servers are started only for Go and TypeScript/JavaScript, when `gopls` or
+`typescript-language-server` is on your login shell's `PATH`; other languages get highlighting,
+folding and bracket matching without one.
 
 ## Claude Code integration
 
@@ -157,12 +240,21 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-b` | Toggle file tree |
 | `cmd-shift-s` | Save as |
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |
+| `cmd-shift-f` | Find in project |
+| `cmd-alt-shift-g` | Toggle inline blame |
+| `ctrl--` | Go back |
+| `ctrl-shift--` | Go forward (also bound as `ctrl-_`, which is what macOS reports for it) |
 | `cmd-j` | Notifications |
 | `ctrl-cmd-f` | Toggle full screen |
 | `cmd-m` | Minimize |
 | `cmd-h` | Hide Athena |
 | `cmd-alt-h` | Hide others |
 | `cmd-q` | Quit |
+
+Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
+commands without a key: Toggle auto save, Toggle format on save, Source control changes, Reveal
+active file in tree, Open Markdown preview, New browser preview and the Claude Code and Playwright
+commands; with an editor focused it also offers Go to line.
 
 ### Editor (`crates/athena-editor/src/view.rs`)
 
@@ -190,18 +282,31 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-shift-up` / `cmd-shift-down` | Extend selection to document start / end |
 | `alt-backspace` | Delete word back |
 | `cmd-backspace` | Delete to line start |
-| `escape` | Close find / clear selection |
+| `escape` | Close find, suggestions, hover or signature help / clear selection |
+| `ctrl-g`, `cmd-l` | Go to line |
+| `ctrl-space` | Show completions |
+| `cmd-k cmd-i` | Show hover docs at the cursor |
+| `cmd-k cmd-[` | Fold at the cursor |
+| `cmd-k cmd-]` | Unfold at the cursor |
+| `cmd-k cmd-0` | Fold all |
+| `cmd-k cmd-j` | Unfold all |
 
-Image viewer: `cmd-=` / `cmd--` zoom in / out, `cmd-0` fit to the pane, `cmd`-scroll zooms at the
-pointer.
+While the suggestion list is open, Up / Down move through it and Enter or Tab accepts. Clicking a
+chevron in the gutter folds or unfolds that block.
 
-### File tree and palette
+Image viewer (`crates/athena-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd--` zoom in / out,
+`cmd-0` fit to the pane, `cmd`-scroll zooms at the pointer.
+
+### File tree, palette and Search tab (text field keys: `crates/athena-ui/src/input.rs`)
 
 | Keys | Action |
 |---|---|
 | `cmd`-click a file in the tree | Open it in a new pane beside the focused one |
 | `enter` in Go to file | Open the file |
 | `cmd-enter` in Go to file | Open the file in a new pane beside the focused one |
+| `up` / `down`, `enter` in the Search tab | Walk the matches, open the selected one |
+| `escape` in the Search tab | Close it |
+| `enter` / `escape` in a tree name field | Create or rename / cancel |
 
 ### Terminal (`crates/athena-term/src/view.rs`)
 
@@ -210,6 +315,14 @@ pointer.
 | `cmd-c` | Copy selection |
 | `cmd-v` | Paste |
 | `cmd-k` | Clear scrollback |
+| `cmd-a` | Select all |
+| `cmd-f` | Find |
+| `cmd-g` | Find next (older) |
+| `cmd-shift-g` | Find previous (newer) |
+
+In the terminal's find bar, `enter` and `up` go to the next older match, `shift-enter` and
+`down` to the next newer one, `alt-c` toggles match case, `alt-r` toggles regex and `escape`
+closes it.
 
 ## Command line
 
@@ -225,8 +338,8 @@ athena mcp-stdio              MCP server for Claude Code
 
 ## Files and logs
 
-Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects and
-layout), `notifications.json`, the daemon and app sockets, `app.log` (the window's log) and
+Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
+panel sizes and the `autosave_delay_ms` and `format_on_save` settings), `notifications.json`, the daemon and app sockets, `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.
 
