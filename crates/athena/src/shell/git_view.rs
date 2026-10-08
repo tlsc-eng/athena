@@ -77,6 +77,8 @@ enum Row {
         status: FileStatus,
         /// Paths relative to the project for `git add` / `git restore --staged`.
         targets: Vec<PathBuf>,
+        /// An untracked folder listed whole, which is shown in the tree rather than opened.
+        is_dir: bool,
     },
 }
 
@@ -509,52 +511,7 @@ impl Shell {
     fn change_rows(&self) -> Option<Vec<Row>> {
         let root = &self.workspace.active_project()?.root;
         let repo = self.git.repos.get(root)?;
-        repo.prefix.as_ref()?;
-        let mut groups: [(Group, Vec<Row>); 3] = [
-            (Group::Staged, Vec::new()),
-            (Group::Changes, Vec::new()),
-            (Group::Untracked, Vec::new()),
-        ];
-        let prefix = repo.prefix.as_deref().unwrap_or_default();
-        for (path, entry) in repo.entries.iter() {
-            let rel = rel_to(root, path);
-            let mut staged_targets = vec![rel.clone()];
-            // Unstaging a rename has to put the old path back in the index too.
-            if let Some(orig) = entry.orig.as_ref().and_then(|o| o.strip_prefix(prefix)) {
-                staged_targets.push(PathBuf::from(orig));
-            }
-            let mut row = |group: Group, status: FileStatus, targets: Vec<PathBuf>| {
-                let slot = &mut groups.iter_mut().find(|(g, _)| *g == group).unwrap().1;
-                slot.push(Row::File {
-                    group,
-                    path: path.clone(),
-                    status,
-                    targets,
-                });
-            };
-            match entry.unstaged {
-                Some(FileStatus::Ignored) => continue,
-                Some(FileStatus::Untracked) => {
-                    row(Group::Untracked, FileStatus::Untracked, vec![rel])
-                }
-                Some(FileStatus::Conflict) => row(Group::Changes, FileStatus::Conflict, vec![rel]),
-                Some(status) => {
-                    if let Some(staged) = entry.staged {
-                        row(Group::Staged, staged, staged_targets);
-                    }
-                    row(Group::Changes, status, vec![rel]);
-                }
-                None => row(Group::Staged, entry.status(), staged_targets),
-            }
-        }
-        let mut rows = Vec::new();
-        for (group, files) in groups {
-            if !files.is_empty() {
-                rows.push(Row::Header(group, files.len()));
-                rows.extend(files);
-            }
-        }
-        Some(rows)
+        Some(change_rows(root, repo.prefix.as_deref()?, &repo.entries))
     }
 
     pub(super) fn render_changes_count(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -667,6 +624,7 @@ impl Shell {
                             path,
                             status,
                             targets,
+                            is_dir,
                         } => {
                             let rel = root
                                 .as_ref()
@@ -683,6 +641,7 @@ impl Shell {
                             let deleted = *status == FileStatus::Deleted;
                             let stage = *group != Group::Staged;
                             let open = path.clone();
+                            let is_dir = *is_dir;
                             let targets = targets.clone();
                             let hover = format!("changes-row-{i}");
                             div()
@@ -699,12 +658,14 @@ impl Shell {
                                 .when(!deleted, |el| el.cursor_pointer())
                                 .hover(|s| s.bg(t.color.surface_hover))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !deleted {
+                                    if is_dir {
+                                        this.reveal_in_tree(&open, cx);
+                                    } else if !deleted {
                                         this.pending_open = Some(open.clone());
                                         cx.notify();
                                     }
                                 }))
-                                .child(athena_ui::file_icon(path, false, cx))
+                                .child(athena_ui::file_icon(path, is_dir, cx))
                                 .child(
                                     div()
                                         .flex_none()
@@ -749,6 +710,52 @@ impl Shell {
     }
 }
 
+fn change_rows(root: &Path, prefix: &str, entries: &[(PathBuf, Entry)]) -> Vec<Row> {
+    let mut groups: [(Group, Vec<Row>); 3] = [
+        (Group::Staged, Vec::new()),
+        (Group::Changes, Vec::new()),
+        (Group::Untracked, Vec::new()),
+    ];
+    for (path, entry) in entries {
+        let rel = rel_to(root, path);
+        let mut staged_targets = vec![rel.clone()];
+        // Unstaging a rename has to put the old path back in the index too.
+        if let Some(orig) = entry.orig.as_ref().and_then(|o| o.strip_prefix(prefix)) {
+            staged_targets.push(PathBuf::from(orig));
+        }
+        let mut row = |group: Group, status: FileStatus, targets: Vec<PathBuf>| {
+            let slot = &mut groups.iter_mut().find(|(g, _)| *g == group).unwrap().1;
+            slot.push(Row::File {
+                group,
+                path: path.clone(),
+                status,
+                targets,
+                is_dir: entry.is_dir(),
+            });
+        };
+        match entry.unstaged {
+            Some(FileStatus::Ignored) => continue,
+            Some(FileStatus::Untracked) => row(Group::Untracked, FileStatus::Untracked, vec![rel]),
+            Some(FileStatus::Conflict) => row(Group::Changes, FileStatus::Conflict, vec![rel]),
+            Some(status) => {
+                if let Some(staged) = entry.staged {
+                    row(Group::Staged, staged, staged_targets);
+                }
+                row(Group::Changes, status, vec![rel]);
+            }
+            None => row(Group::Staged, entry.status(), staged_targets),
+        }
+    }
+    let mut rows = Vec::new();
+    for (group, files) in groups {
+        if !files.is_empty() {
+            rows.push(Row::Header(group, files.len()));
+            rows.extend(files);
+        }
+    }
+    rows
+}
+
 /// A small text button shown while its row is hovered.
 fn row_button(
     id: (&'static str, usize),
@@ -768,4 +775,39 @@ fn row_button(
         .hover(|s| s.bg(t.color.surface_active).text_color(t.color.content))
         .on_click(on_click)
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_untracked_folder_row_is_marked_as_a_folder() {
+        let root = Path::new("/p");
+        let entry = |path: &str| Entry {
+            path: path.into(),
+            orig: None,
+            staged: None,
+            unstaged: Some(FileStatus::Untracked),
+        };
+        let rows = change_rows(
+            root,
+            "",
+            &[
+                (root.join("notes"), entry("notes/")),
+                (root.join("todo.md"), entry("todo.md")),
+            ],
+        );
+        let dirs: Vec<(PathBuf, bool)> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::File { path, is_dir, .. } => Some((path.clone(), *is_dir)),
+                Row::Header(..) => None,
+            })
+            .collect();
+        assert_eq!(
+            dirs,
+            vec![(root.join("notes"), true), (root.join("todo.md"), false)]
+        );
+    }
 }
