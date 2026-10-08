@@ -1,5 +1,6 @@
 mod fuzzy;
 mod item;
+mod notices;
 mod palette;
 mod panes;
 mod tree;
@@ -23,7 +24,7 @@ use crate::actions::{
     AddProject, CloseProject, CloseTab, CommandPalette, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, Minimize, NewTerminal, NextProject, NextTab, PrevProject, PrevTab,
     QuickOpen, SelectProject, SelectTab, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
-    TogglePaneZoom, Zoom,
+    ToggleNotifications, TogglePaneZoom, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -43,6 +44,14 @@ pub struct Shell {
     palette: Option<palette::Palette>,
     tree: tree::FileTree,
     tree_visible: bool,
+    notifications: Vec<notices::Notification>,
+    notices_path: PathBuf,
+    next_notice: u64,
+    toasts: Vec<notices::Toast>,
+    drawer_open: bool,
+    _notices: Option<Task<()>>,
+    _clicks: Task<()>,
+    _app_socket: Task<()>,
     zoomed: Option<PaneId>,
     entering: Option<PaneId>,
     leaving: Option<PaneId>,
@@ -82,7 +91,35 @@ impl Shell {
                 async {}
             }),
         ];
-        Self {
+        let notices_path = path.with_file_name("notifications.json");
+        let notifications = notices::load(&notices_path);
+        let (clicks, banner_clicks) = async_channel::unbounded::<u64>();
+        crate::system_notify::init(clicks);
+        let clicks_task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(id) = banner_clicks.recv().await {
+                let opened = this.update_in(cx, |this, window, cx| {
+                    cx.activate(true);
+                    this.open_notification(id, window, cx);
+                });
+                if opened.is_err() {
+                    return;
+                }
+            }
+        });
+        let folders = crate::app_socket::listen();
+        let app_socket = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(folder) = folders.recv().await {
+                let opened = this.update_in(cx, |this, window, cx| {
+                    this.open_folder(folder, cx);
+                    window.activate_window();
+                    cx.activate(true);
+                });
+                if opened.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut shell = Self {
             rail_from: workspace.active.unwrap_or(0),
             workspace,
             path,
@@ -93,6 +130,14 @@ impl Shell {
             palette: None,
             tree: tree::FileTree::default(),
             tree_visible: true,
+            next_notice: notifications.iter().map(|n| n.id()).max().unwrap_or(0),
+            notifications,
+            notices_path,
+            toasts: Vec::new(),
+            drawer_open: false,
+            _notices: None,
+            _clicks: clicks_task,
+            _app_socket: app_socket,
             zoomed: None,
             entering: None,
             leaving: None,
@@ -101,7 +146,10 @@ impl Shell {
             switch_count: 0,
             focus_pending: true,
             _subscriptions: subscriptions,
-        }
+        };
+        shell.start_notices(window, cx);
+        crate::system_notify::set_badge(shell.unread());
+        shell
     }
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
@@ -114,6 +162,9 @@ impl Shell {
     fn save_now(&mut self) {
         self.save_task = None;
         if let Err(err) = athena_workspace::save(&self.path, &self.workspace) {
+            eprintln!("athena: {err:#}");
+        }
+        if let Err(err) = notices::save(&self.notices_path, &self.notifications) {
             eprintln!("athena: {err:#}");
         }
     }
@@ -145,15 +196,17 @@ impl Shell {
             let Some(root) = paths.into_iter().next() else {
                 return;
             };
-            this.update(cx, |this, cx| {
-                let previous = this.workspace.active;
-                let index = this.workspace.add_project(root);
-                this.workspace.active = previous;
-                this.switch_to(index, cx);
-            })
-            .ok();
+            this.update(cx, |this, cx| this.open_folder(root, cx)).ok();
         })
         .detach();
+    }
+
+    /// Opens a folder as a project, or switches to it if it is already open.
+    pub fn open_folder(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let previous = self.workspace.active;
+        let index = self.workspace.add_project(root);
+        self.workspace.active = previous;
+        self.switch_to(index, cx);
     }
 
     fn close_project(&mut self, _: &CloseProject, _: &mut Window, cx: &mut Context<Self>) {
@@ -212,6 +265,39 @@ impl Shell {
                             .child(format!("· {branch}"))
                     }))
             }))
+            .child(div().flex_1())
+            .child(self.render_notice_button(cx))
+    }
+
+    fn render_notice_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let unread = self.unread();
+        div()
+            .id("notices-button")
+            .mr(px(8.))
+            .h(px(24.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(t.shape.radius_control)
+            .cursor_pointer()
+            .text_color(if self.drawer_open {
+                t.color.content
+            } else {
+                t.color.content_muted
+            })
+            .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_drawer(cx)))
+            .child("Notifications")
+            .when(unread > 0, |el| {
+                el.child(
+                    div()
+                        .text_color(t.color.accent)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(unread.to_string()),
+                )
+            })
     }
 
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -325,14 +411,22 @@ impl Shell {
             Some(_) => div()
                 .size_full()
                 .flex()
-                .children(self.render_tree(cx))
+                .flex_col()
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .child(self.render_panes(window, cx)),
+                        .min_h_0()
+                        .flex()
+                        .children(self.render_tree(cx))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .child(self.render_panes(window, cx)),
+                        ),
                 )
+                .children(self.render_drawer(cx))
                 .into_any_element(),
             None => div()
                 .flex()
@@ -444,6 +538,7 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &CommandPalette, w, cx| this.open_palette(false, w, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleNotifications, _, cx| this.toggle_drawer(cx)))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| {
                 this.tree_visible = !this.tree_visible;
                 cx.notify();
@@ -451,6 +546,7 @@ impl Render for Shell {
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)
+            .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
     }
 }

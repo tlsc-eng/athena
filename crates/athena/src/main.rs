@@ -1,6 +1,8 @@
 mod actions;
+mod app_socket;
 mod cli;
 mod shell;
+mod system_notify;
 
 use std::path::PathBuf;
 
@@ -42,7 +44,15 @@ fn main() {
                     window_min_size: Some(size(px(640.), px(400.))),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| shell::Shell::new(workspace, path, window, cx)),
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut shell = shell::Shell::new(workspace, path, window, cx);
+                        if let Some(folder) = cli::startup_folder() {
+                            shell.open_folder(folder, cx);
+                        }
+                        shell
+                    })
+                },
             )
             .expect("open main window");
             cx.on_window_closed(|cx| cx.quit()).detach();

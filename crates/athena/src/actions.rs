@@ -28,6 +28,7 @@ actions!(
         QuickOpen,
         CommandPalette,
         ToggleFileTree,
+        ToggleNotifications,
     ]
 );
 
@@ -69,6 +70,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-p", QuickOpen, None),
         KeyBinding::new("cmd-shift-p", CommandPalette, None),
         KeyBinding::new("cmd-b", ToggleFileTree, None),
+        KeyBinding::new("cmd-j", ToggleNotifications, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -109,6 +111,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Command Palette", CommandPalette),
                 MenuItem::action("Go to File…", QuickOpen),
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
+                MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),

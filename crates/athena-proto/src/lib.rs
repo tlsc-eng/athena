@@ -6,7 +6,7 @@ mod paths;
 
 pub use client::{ConnectError, Connection, connect, connect_or_spawn};
 pub use codec::{MAX_FRAME, read_frame, write_frame};
-pub use paths::{data_dir, lock_path, log_path, socket_path};
+pub use paths::{app_socket_path, data_dir, lock_path, log_path, socket_path};
 
 use std::path::PathBuf;
 
@@ -19,6 +19,12 @@ pub const PROTO_VERSION: u32 = 3;
 pub const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 
 pub type PaneId = u64;
+
+/// Messages to the running Athena window over `app.sock`, from the `athena` command line.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum AppMsg {
+    OpenProject { path: PathBuf },
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ClientMsg {

@@ -47,6 +47,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Previous tab", Box::new(actions::PrevTab)),
         ("Go to file", Box::new(actions::QuickOpen)),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
+        ("Notifications", Box::new(actions::ToggleNotifications)),
         ("Open project", Box::new(actions::AddProject)),
         ("Close project", Box::new(actions::CloseProject)),
         ("Next project", Box::new(actions::NextProject)),

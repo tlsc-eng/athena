@@ -1,8 +1,12 @@
 use std::io::{IsTerminal, Read};
 
-use athena_proto::{ClientMsg, ConnectError, NoticeKind, ServerMsg};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-const USAGE: &str = "usage: athena [mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running> | notify --title <t> [--body <b>]]";
+use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
+
+const USAGE: &str = "usage: athena [<folder> | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running> | notify --title <t> [--body <b>]]";
 
 /// Hook input larger than this is ignored; Claude Code sends a small JSON object.
 const MAX_HOOK_INPUT: u64 = 64 * 1024;
@@ -15,6 +19,9 @@ pub fn run(args: Vec<String>) -> Option<i32> {
         ["mux", "status"] => mux_status(),
         ["mux", "stop"] => mux_stop(),
         ["notify", rest @ ..] => notify(rest),
+        // Started by LaunchServices (`open --args`): the window itself reads the folder.
+        _ if launched_by_launchd() => return None,
+        [path] if !path.starts_with('-') => return open_folder(Path::new(path)),
         _ => {
             eprintln!("{USAGE}");
             return Some(2);
@@ -125,4 +132,51 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
         conn.send(&ClientMsg::Notify { pane, kind })?;
     }
     Ok(())
+}
+
+/// `athena <folder>`: hands the folder to a running Athena, else starts the installed app with it.
+/// Returns `None` to start the window in this process (a development build with no app installed).
+fn open_folder(path: &Path) -> Option<i32> {
+    let Ok(path) = path
+        .canonicalize()
+        .map_err(|e| eprintln!("athena: {}: {e}", path.display()))
+    else {
+        return Some(1);
+    };
+    if !path.is_dir() {
+        eprintln!("athena: {} is not a folder", path.display());
+        return Some(2);
+    }
+    if send_to_window(&path).is_ok() {
+        return Some(0);
+    }
+    let launched = Command::new("/usr/bin/open")
+        .args(["-b", "io.tlsc.athena", "--args"])
+        .arg(&path)
+        .status()
+        .is_ok_and(|s| s.success());
+    if launched { Some(0) } else { None }
+}
+
+fn send_to_window(path: &Path) -> anyhow::Result<()> {
+    let mut stream = UnixStream::connect(athena_proto::app_socket_path()?)?;
+    athena_proto::write_frame(
+        &mut stream,
+        &AppMsg::OpenProject {
+            path: path.to_path_buf(),
+        },
+    )?;
+    Ok(())
+}
+
+/// A folder given on the command line when this process is the window itself.
+pub fn startup_folder() -> Option<PathBuf> {
+    let arg = std::env::args().nth(1)?;
+    let path = PathBuf::from(arg).canonicalize().ok()?;
+    path.is_dir().then_some(path)
+}
+
+fn launched_by_launchd() -> bool {
+    // SAFETY: getppid has no preconditions.
+    unsafe { libc::getppid() == 1 }
 }
