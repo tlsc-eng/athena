@@ -128,7 +128,7 @@ pub fn parse_status(out: &[u8]) -> Status {
                     (None, Some(FileStatus::Conflict))
                 } else {
                     (
-                        FileStatus::from_code(xy[0]),
+                        FileStatus::from_code(*xy.first().unwrap_or(&b'.')),
                         FileStatus::from_code(*xy.get(1).unwrap_or(&b'.')),
                     )
                 };
@@ -200,7 +200,7 @@ pub fn parse_hunks(diff: &str) -> Vec<Hunk> {
             Some(match (old_len, new_len) {
                 (_, 0) => Hunk::Removed { before: new_start },
                 (0, len) => Hunk::Added {
-                    start: new_start - 1,
+                    start: new_start.saturating_sub(1),
                     len,
                 },
                 (_, len) => Hunk::Modified {
@@ -582,6 +582,16 @@ mod tests {
                 Hunk::Modified { start: 8, len: 2 },
             ]
         );
+    }
+
+    #[test]
+    fn malformed_status_and_hunk_headers_do_not_panic() {
+        assert_eq!(
+            parse_hunks("@@ -0,0 +0,2 @@\n+a\n+b\n"),
+            vec![Hunk::Added { start: 0, len: 2 }]
+        );
+        let status = parse_status(b"1  N... 100644 100644 100644 a b x.rs\0");
+        assert!(status.entries.len() <= 1);
     }
 
     #[test]
