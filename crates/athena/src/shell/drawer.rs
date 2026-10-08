@@ -17,6 +17,7 @@ pub(super) enum DrawerTab {
     References,
     Changes,
     Search,
+    Problems,
 }
 
 impl DrawerTab {
@@ -28,6 +29,7 @@ impl DrawerTab {
             Self::References => "References",
             Self::Changes => "Changes",
             Self::Search => "Search",
+            Self::Problems => "Problems",
         }
     }
 }
@@ -114,6 +116,7 @@ impl Shell {
         };
         let t = cx.theme().clone();
         let tabs = [
+            DrawerTab::Problems,
             DrawerTab::Containers,
             DrawerTab::Playwright,
             DrawerTab::Notifications,
@@ -145,6 +148,9 @@ impl Shell {
                     this.drawer_changed(cx);
                 }))
                 .child(candidate.label())
+                .when(candidate == DrawerTab::Problems, |el| {
+                    el.children(self.render_problems_badge(cx))
+                })
                 .when(active, |el| {
                     el.child(
                         div()
@@ -168,6 +174,7 @@ impl Shell {
             DrawerTab::References => self.render_references_count(cx),
             DrawerTab::Changes => self.render_changes_count(cx),
             DrawerTab::Search => self.render_search_status(cx),
+            DrawerTab::Problems => None,
         };
         let content = match tab {
             DrawerTab::Notifications => self.render_notifications(cx),
@@ -176,6 +183,7 @@ impl Shell {
             DrawerTab::References => self.render_references(cx),
             DrawerTab::Changes => self.render_changes(cx),
             DrawerTab::Search => self.render_search(cx),
+            DrawerTab::Problems => self.render_problems(cx),
         };
         // The search field is the drawer's only input; once it is hidden its focus has nowhere to go.
         if self.drawer_focus.contains_focused(window, cx)

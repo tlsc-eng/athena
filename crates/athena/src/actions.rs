@@ -54,6 +54,9 @@ actions!(
         FontZoomIn,
         FontZoomOut,
         FontZoomReset,
+        ShowProblems,
+        NextProblem,
+        PrevProblem,
     ]
 );
 
@@ -110,6 +113,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-+", FontZoomIn, None),
         KeyBinding::new("cmd--", FontZoomOut, None),
         KeyBinding::new("cmd-0", FontZoomReset, None),
+        KeyBinding::new("cmd-shift-m", ShowProblems, None),
+        // Only in the editor: in a terminal F8 belongs to the program running there.
+        KeyBinding::new("f8", NextProblem, Some("Editor")),
+        KeyBinding::new("shift-f8", PrevProblem, Some("Editor")),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -159,6 +166,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Find in Project…", FindInProject),
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
                 MenuItem::action("Reveal Active File in Tree", RevealInTree),
+                MenuItem::action("Problems", ShowProblems),
                 MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::action("Containers", ShowContainers),
                 MenuItem::action("Playwright", ShowPlaywright),

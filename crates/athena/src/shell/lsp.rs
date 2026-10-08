@@ -49,7 +49,7 @@ pub(super) struct LspState {
     /// Servers that failed to start, not retried until Athena restarts.
     failed: HashMap<ServerKey, String>,
     /// Each file's diagnostics and the server that published them.
-    diagnostics: HashMap<PathBuf, (ServerKey, Vec<Diagnostic>)>,
+    pub(super) diagnostics: HashMap<PathBuf, (ServerKey, Vec<Diagnostic>)>,
     /// Documents the servers have open, and which server has each.
     documents: HashMap<PathBuf, ServerKey>,
     changes: HashMap<PathBuf, Task<()>>,
@@ -291,6 +291,8 @@ impl Shell {
                 for editor in self.editors_showing(&doc, cx) {
                     self.push_markers(&editor, &doc, cx);
                 }
+                // The title bar counter and the Problems tab follow every report.
+                cx.notify();
             }
             Event::Stopped(why) => {
                 let Some(server) = self.lsp.servers.remove(&key) else {
@@ -941,6 +943,25 @@ impl Shell {
         self.lsp.diagnostics.retain(|_, ((r, _), _)| r != root);
         let under = document_key(root);
         self.lsp.changes.retain(|doc, _| !doc.starts_with(&under));
+    }
+
+    /// Each file's diagnostics from the servers of the project at `root`, by canonical path.
+    pub(super) fn lsp_diagnostics_of(&self, root: &Path) -> Vec<(&Path, &[Diagnostic])> {
+        self.lsp
+            .diagnostics
+            .iter()
+            .filter(|(_, ((r, _), _))| r == root)
+            .map(|(doc, (_, list))| (doc.as_path(), list.as_slice()))
+            .collect()
+    }
+
+    /// Whether a language server has started for the active project.
+    pub(super) fn lsp_running_for_active(&self) -> bool {
+        let root = self.active_root();
+        self.lsp
+            .servers
+            .keys()
+            .any(|(r, _)| Some(r) == root.as_ref())
     }
 
     /// Diagnostics for `path`, or for every file under `roots`, 1-based for people and Claude.

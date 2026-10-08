@@ -15,6 +15,7 @@ mod notices;
 mod palette;
 mod panes;
 mod playwright_view;
+mod problems;
 mod quit;
 mod review;
 mod search;
@@ -51,7 +52,7 @@ use crate::actions::{
 };
 use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, NavigateBack, NavigateForward,
-    RevealInTree, ShowChanges, SwitchBranch, ToggleBlame,
+    NextProblem, PrevProblem, RevealInTree, ShowChanges, ShowProblems, SwitchBranch, ToggleBlame,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -92,6 +93,7 @@ pub struct Shell {
     containers: containers_view::ContainersState,
     playwright: playwright_view::PlaywrightState,
     lsp: lsp::LspState,
+    problems: problems::ProblemsState,
     git: git_view::GitState,
     review: review::ReviewState,
     search: search::SearchState,
@@ -230,6 +232,7 @@ impl Shell {
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
             lsp: lsp::LspState::default(),
+            problems: problems::ProblemsState::default(),
             git: git_view::GitState::default(),
             review: review::ReviewState::default(),
             search: search::SearchState::default(),
@@ -427,6 +430,7 @@ impl Shell {
                     }))
             }))
             .child(div().flex_1())
+            .child(self.render_problems_button(cx))
             .child(self.render_usage_button(cx))
             .child(
                 self.drawer_button("containers-button", drawer::DrawerTab::Containers, cx)
@@ -808,6 +812,9 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ShowProblems, _, cx| this.toggle_problems(cx)))
+            .on_action(cx.listener(|this, _: &NextProblem, _, cx| this.go_to_problem(true, cx)))
+            .on_action(cx.listener(|this, _: &PrevProblem, _, cx| this.go_to_problem(false, cx)))
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)
