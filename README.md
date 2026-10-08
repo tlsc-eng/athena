@@ -39,9 +39,9 @@ its shells running.
   tabs reattach to the same shells with their scrollback.
 - Split panes right and down, zoom a pane, move focus between panes with the keyboard.
 - zsh shell integration (OSC 133) marks commands; one that runs longer than 10 seconds posts a
-  notification when it finishes. `ATHENA_NOTIFY_AFTER_SECS` changes the threshold when Athena
-  (and so its daemon) is started from a shell; `ATHENA_SHELL_INTEGRATION=0` turns the
-  integration off.
+  notification when it finishes. `ATHENA_NOTIFY_AFTER_SECS` changes the threshold and
+  `ATHENA_SHELL_INTEGRATION=0` turns the integration off; set them in the environment the daemon
+  starts from, e.g. `open -a Athena --env ATHENA_NOTIFY_AFTER_SECS=30`.
 - If a new version cannot attach to the shells of an older session daemon, their tabs are marked
   **stale**: **Restart sessions** ends those shells and starts new ones, **Keep** leaves them
   running and reconnects once the old daemon exits.
