@@ -15,6 +15,7 @@ mod pairs;
 pub mod recovery;
 mod shared;
 mod signature;
+mod sticky;
 mod syntax;
 mod view;
 mod wrap;

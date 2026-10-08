@@ -50,6 +50,9 @@ pub(crate) struct Hovering {
 impl EditorView {
     /// The identifier under a window position, from last frame's layout; none past a line's end.
     fn word_at_position(&self, position: Point<Pixels>) -> Option<Range<usize>> {
+        if self.sticky_at(position).is_some() {
+            return None;
+        }
         let layout = self.layout.as_ref()?;
         let b = self.buf()?;
         let y = position.y - layout.origin.y + px(self.scroll.y);

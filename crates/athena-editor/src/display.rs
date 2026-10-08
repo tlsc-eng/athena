@@ -356,7 +356,7 @@ impl DisplayMap {
 }
 
 /// The visual column a line's code starts at; `None` for a blank line.
-fn indent_column(s: &str) -> Option<usize> {
+pub(crate) fn indent_column(s: &str) -> Option<usize> {
     if s.trim().is_empty() {
         return None;
     }

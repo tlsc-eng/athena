@@ -32,6 +32,35 @@ impl TokenStyle {
     }
 }
 
+/// The style of each char of `line`, `n` chars long, from highlights covering it.
+fn line_styles(
+    rope: &ropey::Rope,
+    tokens: &[(std::ops::Range<usize>, Token)],
+    line: usize,
+    n: usize,
+    syntax: &SyntaxColors,
+) -> Vec<TokenStyle> {
+    let start_char = rope.line_to_char(line);
+    let line_bytes = rope.line_to_byte(line)..rope.line_to_byte(line + 1);
+    let mut styles = vec![TokenStyle::plain(syntax.text); n];
+    for (bytes, token) in tokens {
+        if bytes.end <= line_bytes.start || bytes.start >= line_bytes.end {
+            continue;
+        }
+        let a = rope.byte_to_char(bytes.start).max(start_char);
+        let b = rope.byte_to_char(bytes.end).min(start_char + n);
+        let style = style_for(*token, syntax);
+        for s in styles
+            .iter_mut()
+            .take(b.saturating_sub(start_char))
+            .skip(a.saturating_sub(start_char))
+        {
+            *s = style;
+        }
+    }
+    styles
+}
+
 fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
     let color = match token {
         Token::Keyword => syntax.keyword,
@@ -88,6 +117,10 @@ pub struct Frame {
     text_bounds: Bounds<Pixels>,
     overlay: Vec<PaintQuad>,
     marked: Option<(PaintQuad, Point<Pixels>, ShapedLine)>,
+    /// Sticky scroll's pinned headers: their backdrop, text and numbers.
+    sticky: Vec<PaintQuad>,
+    sticky_text: Vec<(Point<Pixels>, ShapedLine)>,
+    sticky_gutter: Vec<(Point<Pixels>, ShapedLine)>,
     line_height: Pixels,
     gutter_bg: Hsla,
 }
@@ -203,6 +236,9 @@ impl Element for EditorElement {
             text_bounds: bounds,
             overlay: Vec::new(),
             marked: None,
+            sticky: Vec::new(),
+            sticky_text: Vec::new(),
+            sticky_gutter: Vec::new(),
             line_height: lh,
             gutter_bg: theme.color.surface_sunken,
         };
@@ -290,24 +326,8 @@ impl Element for EditorElement {
             let raw = buffer.line(line);
             let display = Rc::new(DisplayLine::new(&raw));
             let start_char = buffer.line_start(line);
-            let line_bytes = rope.line_to_byte(line)..rope.line_to_byte(line + 1);
             let n = raw.chars().count();
-            let mut styles = vec![TokenStyle::plain(syntax.text); n];
-            for (bytes, token) in &tokens {
-                if bytes.end <= line_bytes.start || bytes.start >= line_bytes.end {
-                    continue;
-                }
-                let a = rope.byte_to_char(bytes.start).max(start_char);
-                let b = rope.byte_to_char(bytes.end).min(start_char + n);
-                let style = style_for(*token, &syntax);
-                for s in styles
-                    .iter_mut()
-                    .take(b.saturating_sub(start_char))
-                    .skip(a.saturating_sub(start_char))
-                {
-                    *s = style;
-                }
-            }
+            let styles = line_styles(rope, &tokens, line, n, &syntax);
             let (breaks, indent) = match wrap {
                 Some(cols) => (
                     wrap_breaks(&raw, cols),
@@ -641,6 +661,58 @@ impl Element for EditorElement {
             }
         }
 
+        // At most a third of the view, so pinned headers never crowd out the text.
+        let max = (visible / 3).min(5);
+        let row_count = view.display.row_count(total);
+        let mut sticky = view.sticky_lines(view.display.line_of(first), max);
+        if !sticky.is_empty() {
+            let under = (first + sticky.len()).min(row_count.saturating_sub(1));
+            sticky = view.sticky_lines(view.display.line_of(under), max);
+        }
+        for (i, &line) in sticky.iter().enumerate() {
+            let y = bounds.top() + lh * i as f32;
+            frame.sticky.push(fill(
+                Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh)),
+                theme.color.surface_sunken,
+            ));
+            let raw = buffer.line(line);
+            let display = DisplayLine::new(&raw);
+            let n = raw.chars().count();
+            let styles = line_styles(rope, &buffer.highlights(line..line + 1), line, n, &syntax);
+            let mut runs: Vec<(TextRun, TokenStyle)> = Vec::new();
+            for (i, style) in styles.iter().enumerate() {
+                let len = display.char_to_byte[i + 1] - display.char_to_byte[i];
+                match runs.last_mut() {
+                    Some((r, s)) if s == style => r.len += len,
+                    _ => runs.push((styled(len, *style), *style)),
+                }
+            }
+            let runs: Vec<TextRun> = runs.into_iter().map(|(r, _)| r).collect();
+            let shaped =
+                text_system.shape_line(SharedString::from(display.text), font_size, &runs, None);
+            frame.sticky_text.push((point(x0, y), shaped));
+            let number = (line + 1).to_string();
+            let label = text_system.shape_line(
+                number.clone().into(),
+                font_size,
+                &[run(number.len(), syntax.line_number)],
+                None,
+            );
+            frame
+                .sticky_gutter
+                .push((point(numbers_right - label.width, y), label));
+        }
+        if !sticky.is_empty() {
+            let y = bounds.top() + lh * sticky.len() as f32;
+            frame.sticky.push(fill(
+                Bounds::new(
+                    point(bounds.left(), y - px(1.)),
+                    size(bounds.size.width, px(1.)),
+                ),
+                theme.color.border,
+            ));
+        }
+
         let stored = rows.into_iter().map(|(_, _, r)| r).collect();
         self.view.update(cx, |view, _| {
             view.scroll.x = scroll_x;
@@ -651,6 +723,7 @@ impl Element for EditorElement {
                 line_height: lh,
                 cell,
                 rows: stored,
+                sticky,
                 fold_column,
             });
         });
@@ -700,6 +773,22 @@ impl Element for EditorElement {
                 window.paint_quad(quad);
             }
             for (origin, line) in &frame.gutter {
+                let _ = line.paint(*origin, lh, window, cx);
+            }
+            for quad in frame.sticky.drain(..) {
+                window.paint_quad(quad);
+            }
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: frame.text_bounds,
+                }),
+                |window| {
+                    for (origin, line) in &frame.sticky_text {
+                        let _ = line.paint(*origin, lh, window, cx);
+                    }
+                },
+            );
+            for (origin, line) in &frame.sticky_gutter {
                 let _ = line.paint(*origin, lh, window, cx);
             }
         });

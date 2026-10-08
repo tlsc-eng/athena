@@ -279,6 +279,8 @@ pub(crate) struct EditorLayout {
     /// Width of one column of the monospace font.
     pub cell: Pixels,
     pub rows: Vec<LayoutRow>,
+    /// Scope headers pinned over the top rows by sticky scroll, outermost first.
+    pub sticky: Vec<usize>,
     /// Left and right edge of the gutter column holding fold chevrons.
     pub fold_column: (Pixels, Pixels),
 }
@@ -867,6 +869,9 @@ impl EditorView {
         window.focus(&self.focus);
         self.hide_hover(cx);
         self.dismiss_completion(cx);
+        if self.click_sticky(event.position, cx) {
+            return;
+        }
         if self.click_lightbulb(event.position, window, cx) {
             return;
         }
