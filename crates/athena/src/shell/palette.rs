@@ -75,6 +75,12 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Next tab", Box::new(actions::NextTab)),
         ("Previous tab", Box::new(actions::PrevTab)),
         ("Go to file", Box::new(actions::QuickOpen)),
+        ("Go back", Box::new(actions::NavigateBack)),
+        ("Go forward", Box::new(actions::NavigateForward)),
+        (
+            "Reveal active file in tree",
+            Box::new(actions::RevealInTree),
+        ),
         ("Find in project", Box::new(actions::FindInProject)),
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),

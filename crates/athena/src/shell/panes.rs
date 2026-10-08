@@ -682,6 +682,7 @@ impl Shell {
         let Some(i) = self.workspace.active else {
             return;
         };
+        self.record_location(cx);
         let last = self
             .last_editor_pane
             .get(&self.workspace.projects[i].root)
@@ -744,6 +745,7 @@ impl Shell {
         let Some(i) = self.workspace.active else {
             return;
         };
+        self.record_location(cx);
         let kind = file_kind(path);
         let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
             self.workspace.projects[i].layout = Some(Layout::new(kind));
@@ -801,6 +803,7 @@ impl Shell {
     }
 
     pub(super) fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.record_location(cx);
         let Some(layout) = self.active_layout() else {
             return;
         };
@@ -821,6 +824,14 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let moving = self
+            .workspace
+            .active_project()
+            .and_then(|p| p.layout.as_ref())
+            .is_some_and(|l| l.focused != pane || l.pane(pane).is_some_and(|p| p.active != index));
+        if moving {
+            self.record_location(cx);
+        }
         let Some(layout) = self.active_layout() else {
             return;
         };

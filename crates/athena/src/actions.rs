@@ -46,6 +46,9 @@ actions!(
         FindInProject,
         ShowChanges,
         ToggleBlame,
+        NavigateBack,
+        NavigateForward,
+        RevealInTree,
     ]
 );
 
@@ -93,6 +96,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-s", SaveAs, None),
         KeyBinding::new("cmd-shift-f", FindInProject, None),
         KeyBinding::new("cmd-alt-shift-g", ToggleBlame, None),
+        KeyBinding::new("ctrl--", NavigateBack, None),
+        // macOS reports ⌃⇧- as ⌃_, so that is the binding that matches; the other is for the menu.
+        KeyBinding::new("ctrl-_", NavigateForward, None),
+        KeyBinding::new("ctrl-shift--", NavigateForward, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -136,8 +143,11 @@ pub fn init(cx: &mut App) {
             items: vec![
                 MenuItem::action("Command Palette", CommandPalette),
                 MenuItem::action("Go to File…", QuickOpen),
+                MenuItem::action("Back", NavigateBack),
+                MenuItem::action("Forward", NavigateForward),
                 MenuItem::action("Find in Project…", FindInProject),
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
+                MenuItem::action("Reveal Active File in Tree", RevealInTree),
                 MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::action("Containers", ShowContainers),
                 MenuItem::action("Playwright", ShowPlaywright),
@@ -166,4 +176,19 @@ pub fn init(cx: &mut App) {
             ],
         },
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::Keystroke;
+
+    #[test]
+    fn navigation_keystrokes_parse() {
+        for source in ["ctrl--", "ctrl-_", "ctrl-shift--"] {
+            let k = Keystroke::parse(source).unwrap();
+            assert!(k.modifiers.control, "{source}");
+        }
+        assert_eq!(Keystroke::parse("ctrl--").unwrap().key, "-");
+        assert_eq!(Keystroke::parse("ctrl-_").unwrap().key, "_");
+    }
 }

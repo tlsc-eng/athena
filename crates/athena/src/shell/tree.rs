@@ -183,7 +183,7 @@ fn read_dir(dir: &Path) -> Vec<DirEntry> {
 }
 
 impl Shell {
-    fn open_editor_path(&self) -> Option<PathBuf> {
+    pub(super) fn open_editor_path(&self) -> Option<PathBuf> {
         let pane = self
             .workspace
             .active_project()?

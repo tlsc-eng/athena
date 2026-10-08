@@ -160,6 +160,19 @@ impl PreviewView {
         cx.notify();
     }
 
+    /// Goes back in the page's own history.
+    pub fn back(&self) {
+        if let Some(web) = &self.web {
+            web.back();
+        }
+    }
+
+    pub fn forward(&self) {
+        if let Some(web) = &self.web {
+            web.forward();
+        }
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) {
         if self.error.is_some() {
             return self.navigate(self.url.clone(), cx);
@@ -276,22 +289,12 @@ impl Render for PreviewView {
                     .border_color(t.color.border)
                     .text_size(t.typography.caption)
                     .child(
-                        Button::new("preview-back", "Back", ButtonKind::Ghost).on_click(
-                            cx.listener(|this, _, _, _| {
-                                if let Some(web) = &this.web {
-                                    web.back();
-                                }
-                            }),
-                        ),
+                        Button::new("preview-back", "Back", ButtonKind::Ghost)
+                            .on_click(cx.listener(|this, _, _, _| this.back())),
                     )
                     .child(
-                        Button::new("preview-forward", "Forward", ButtonKind::Ghost).on_click(
-                            cx.listener(|this, _, _, _| {
-                                if let Some(web) = &this.web {
-                                    web.forward();
-                                }
-                            }),
-                        ),
+                        Button::new("preview-forward", "Forward", ButtonKind::Ghost)
+                            .on_click(cx.listener(|this, _, _, _| this.forward())),
                     )
                     .child(
                         Button::new("preview-reload", "Reload", ButtonKind::Ghost)

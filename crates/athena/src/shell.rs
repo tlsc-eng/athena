@@ -6,6 +6,7 @@ mod drawer;
 mod fileops;
 mod fuzzy;
 mod git_view;
+mod history;
 mod item;
 mod lsp;
 mod menus;
@@ -30,8 +31,8 @@ use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, m
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
 use gpui::{
     Animation, AnyElement, Bounds, Context, ExternalPaths, FocusHandle, FontWeight, IntoElement,
-    MouseButton, PathPromptOptions, Pixels, Render, Subscription, Task, Window, WindowBounds, div,
-    prelude::*, px,
+    MouseButton, NavigationDirection, PathPromptOptions, Pixels, Render, Subscription, Task,
+    Window, WindowBounds, div, prelude::*, px,
 };
 
 use crate::actions::{
@@ -43,7 +44,9 @@ use crate::actions::{
     ToggleAutoSave, ToggleFileTree, ToggleFullScreen, ToggleNotifications, TogglePaneZoom,
     TogglePreview, Zoom,
 };
-use crate::actions::{FindInProject, ShowChanges, ToggleBlame};
+use crate::actions::{
+    FindInProject, NavigateBack, NavigateForward, RevealInTree, ShowChanges, ToggleBlame,
+};
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
 const RAIL_WIDTH: f32 = 48.;
@@ -82,6 +85,7 @@ pub struct Shell {
     lsp: lsp::LspState,
     git: git_view::GitState,
     search: search::SearchState,
+    history: history::History,
     /// Per project, the pane a file opened from a terminal goes to.
     last_editor_pane: HashMap<PathBuf, PaneId>,
     window_title: String,
@@ -210,6 +214,7 @@ impl Shell {
             lsp: lsp::LspState::default(),
             git: git_view::GitState::default(),
             search: search::SearchState::default(),
+            history: history::History::default(),
             last_editor_pane: HashMap::new(),
             window_title: String::new(),
             pending_open: None,
@@ -636,6 +641,9 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_previews(cx);
+        if self.lsp.jump.is_some() {
+            self.record_location(cx);
+        }
         self.take_lsp_jump(window, cx);
         self.take_pending_open(window, cx);
         self.sync_window_title(window, cx);
@@ -702,6 +710,21 @@ impl Render for Shell {
             )
             .capture_any_mouse_down(|_, window, _| athena_preview::restore_key_focus(window))
             .on_mouse_move(cx.listener(Self::drag_move))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| this.navigate(false, window, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, window, cx| this.navigate(true, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &RevealInTree, _, cx| {
+                if let Some(path) = this.open_editor_path() {
+                    this.reveal_in_tree(&path, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NavigateBack, w, cx| this.navigate(false, w, cx)))
+            .on_action(cx.listener(|this, _: &NavigateForward, w, cx| this.navigate(true, w, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_dropped(paths.paths(), window, cx)
             }))
