@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -338,13 +338,15 @@ fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<
         std::thread::spawn(move || pipe.write_all(text.as_bytes()));
     }
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut out = Vec::new();
             if let Some(mut pipe) = pipe {
                 let _ = pipe.read_to_end(&mut out);
             }
-            out
-        })
+            let _ = tx.send(out);
+        });
+        rx
     };
     let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
     let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
@@ -360,9 +362,14 @@ fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<
         }
         std::thread::sleep(Duration::from_millis(5));
     };
-    let stdout = stdout.join().unwrap_or_default();
+    // A process git started (a hook, a credential helper) can hold the pipes open after git exits.
+    let collect = |pipe: mpsc::Receiver<Vec<u8>>| {
+        pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| TimedOut)
+    };
+    let stdout = collect(stdout)?;
     if !status.success() {
-        let stderr = stderr.join().unwrap_or_default();
+        let stderr = collect(stderr)?;
         bail!("{}", String::from_utf8_lossy(&stderr).trim());
     }
     Ok(stdout)
@@ -458,17 +465,18 @@ pub fn stage(root: &Path, paths: &[PathBuf]) -> Result<()> {
 
 /// Takes the given paths out of the index again, keeping the worktree.
 pub fn unstage(root: &Path, paths: &[PathBuf]) -> Result<()> {
+    let mut head = git(root);
+    head.args(["rev-parse", "-q", "--verify", "HEAD"]);
     let mut cmd = git(root);
-    cmd.args(["restore", "--staged", "--"]).args(paths);
-    match run(cmd, None) {
-        // Before the first commit there is no HEAD to restore from.
-        Err(_) => {
-            let mut cmd = git(root);
-            cmd.args(["rm", "--cached", "-q", "--"]).args(paths);
-            run(cmd, None).map(drop)
-        }
-        ok => ok.map(drop),
-    }
+    match run(head, None) {
+        Ok(_) => cmd.args(["restore", "--staged", "--"]),
+        Err(e) if e.is::<TimedOut>() => return Err(e),
+        // Before the first commit there is no HEAD to restore from; on a born branch this would
+        // stage the files' deletion instead.
+        Err(_) => cmd.args(["rm", "--cached", "-q", "--"]),
+    };
+    cmd.args(paths);
+    run(cmd, None).map(drop)
 }
 
 /// Per-file statuses plus every folder's most severe one, for colouring a file tree.
@@ -688,6 +696,16 @@ mod tests {
     }
 
     #[test]
+    fn output_held_open_by_a_leftover_process_hits_the_time_limit() {
+        let started = Instant::now();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "/bin/sleep 5 & echo started"]);
+        let err = run_within(cmd, None, Duration::from_millis(300)).unwrap_err();
+        assert!(err.is::<TimedOut>());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
     fn a_hung_command_is_killed_at_the_time_limit() {
         let started = Instant::now();
         let mut cmd = Command::new("/bin/sleep");
@@ -816,6 +834,42 @@ mod tests {
             .find(|(p, _)| *p == sub.join("u.txt"))
             .unwrap();
         assert_eq!(u.1.status(), FileStatus::Untracked);
+
+        // A failed restore on a born branch is reported, not retried as `rm --cached`.
+        stage(&sub, &[PathBuf::from("f.txt")]).unwrap();
+        let err = unstage(&sub, &[PathBuf::from("f.txt"), PathBuf::from("gone.txt")]).unwrap_err();
+        assert!(err.to_string().contains("known to git"), "{err:#}");
+        let still = status(&sub, &pre, true).unwrap();
+        let f = still
+            .entries
+            .iter()
+            .find(|(p, _)| *p == sub.join("f.txt"))
+            .unwrap();
+        assert_eq!(f.1.staged, Some(FileStatus::Modified));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unstaging_before_the_first_commit_untracks_the_file() {
+        if !available() {
+            eprintln!("git is not installed; skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-git-unborn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        repo_git(&dir, &["init", "-q"]);
+        stage(&dir, &[PathBuf::from("a.txt")]).unwrap();
+        unstage(&dir, &[PathBuf::from("a.txt")]).unwrap();
+        let snap = status(&dir, "", true).unwrap();
+        let (_, a) = snap
+            .entries
+            .iter()
+            .find(|(p, _)| *p == dir.join("a.txt"))
+            .unwrap();
+        assert_eq!(a.status(), FileStatus::Untracked);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
