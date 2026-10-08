@@ -706,29 +706,33 @@ impl Buffer {
             .collect();
         let before_cursor = self.text(self.line_start(line)..range.start);
         let opener = before_cursor.trim_end().chars().next_back();
+        let eol = self.line_ending().as_str();
         if !matches!(opener, Some('{' | '(' | '[')) {
-            return self.replace(c, range, &format!("\n{indent}"), EditKind::Other);
+            return self.replace(c, range, &format!("{eol}{indent}"), EditKind::Other);
         }
         let outer = indent.clone();
         indent.push_str(&self.indent.unit());
         let line_end = self.line_start(line) + self.line_len(line);
         let after_cursor = self.text(range.end.min(line_end)..line_end);
-        let blanks = after_cursor.len() - after_cursor.trim_start().len();
+        let blanks = after_cursor
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .count();
         let closer = opener
             .and_then(|o| bracket_pair(&o.to_string()))
             .map(|(_, close)| close);
         if range.is_empty() && closer.is_some_and(|close| after_cursor[blanks..].starts_with(close))
         {
             // Enter between a bracket pair puts the closer on its own line below the cursor.
-            let at = range.start + 1 + indent.chars().count();
-            let text = format!("\n{indent}\n{outer}");
+            let at = range.start + eol.len() + indent.chars().count();
+            let text = format!("{eol}{indent}{eol}{outer}");
             return self.transact(
                 c,
                 vec![(range.start..range.end + blanks, text)],
                 Selection::cursor(at),
             );
         }
-        self.replace(c, range, &format!("\n{indent}"), EditKind::Other);
+        self.replace(c, range, &format!("{eol}{indent}"), EditKind::Other);
     }
 
     /// Indents the selected lines, or inserts indentation over the cursor or over a selection
@@ -2438,6 +2442,22 @@ mod tests {
         assert_eq!(c.head(), 10);
         assert!(b.undo(&mut c));
         assert_eq!(b.full_text(), "  f({})");
+    }
+
+    #[test]
+    fn enter_keeps_a_closer_behind_non_ascii_blanks_and_the_file_line_break() {
+        let mut b = buf("f(\u{a0})", "/x/a.ts");
+        let mut c = Cursor::at(2);
+        b.newline(&mut c);
+        assert_eq!(b.full_text(), "f(\n  \u{a0})", "the closer is not deleted");
+
+        let mut b = buf("a\r\nf({})\r\n", "/x/a.ts");
+        let mut c = Cursor::at(b.line_start(1) + 3);
+        b.newline(&mut c);
+        assert_eq!(b.full_text(), "a\r\nf({\r\n  \r\n})\r\n");
+        assert_eq!(c.head(), b.line_start(2) + 2);
+        b.newline(&mut c);
+        assert_eq!(b.full_text(), "a\r\nf({\r\n  \r\n  \r\n})\r\n");
     }
 
     fn typed(b: &mut Buffer, c: &mut Cursor, keys: &str) {
