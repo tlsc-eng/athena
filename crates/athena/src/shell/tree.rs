@@ -42,6 +42,8 @@ pub(super) enum EditKind {
 
 /// The inline name field: `target` is the folder a new entry goes in, or the entry being renamed.
 pub(super) struct Edit {
+    /// The project whose tree shows the field.
+    pub root: PathBuf,
     pub target: PathBuf,
     pub kind: EditKind,
     pub input: Entity<TextInput>,
@@ -125,7 +127,7 @@ impl FileTree {
                 edit: false,
             });
         }
-        if let Some(edit) = &self.editing {
+        if let Some(edit) = self.editing.as_ref().filter(|e| e.root == root) {
             splice_edit(&mut rows, root, edit.target.as_path(), edit.kind);
         }
         rows

@@ -161,27 +161,45 @@ impl Shell {
             input
         });
         let focus = input.focus_handle(cx);
-        let subscriptions =
-            vec![
-                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                    match event {
-                        InputEvent::Submit | InputEvent::SubmitBeside => {
-                            this.submit_tree_edit(true, window, cx)
-                        }
-                        InputEvent::Cancel => this.end_tree_edit(true, window, cx),
-                        InputEvent::Changed | InputEvent::Up | InputEvent::Down => {}
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Submit | InputEvent::SubmitBeside => {
+                        this.submit_tree_edit(true, window, cx)
                     }
-                }),
-                // Clicking away keeps what was typed, as in VS Code.
-                cx.on_blur(&focus, window, |this, window, cx| {
-                    this.submit_tree_edit(false, window, cx)
-                }),
-            ];
+                    InputEvent::Cancel => this.end_tree_edit(true, window, cx),
+                    InputEvent::Changed | InputEvent::Up | InputEvent::Down => {}
+                },
+            ),
+            cx.on_blur(&focus, window, {
+                let field = focus.clone();
+                move |this, window, cx| {
+                    let Some(edit) = this.tree.editing.as_ref() else {
+                        return;
+                    };
+                    let same_project = this.active_root().as_ref() == Some(&edit.root);
+                    let outcome = blur_outcome(
+                        window.is_window_active(),
+                        field.is_focused(window),
+                        this.focus.contains_focused(window, cx),
+                        same_project,
+                    );
+                    match outcome {
+                        BlurOutcome::Commit => this.submit_tree_edit(false, window, cx),
+                        BlurOutcome::Cancel { refocus } => this.end_tree_edit(refocus, window, cx),
+                        BlurOutcome::Keep => {}
+                    }
+                }
+            }),
+        ];
         if kind != EditKind::Rename {
             self.tree.expand(&root, &target);
         }
         self.tree.scroll_to(&target);
         self.tree.editing = Some(Edit {
+            root,
             target,
             kind,
             input,
@@ -451,6 +469,34 @@ impl Shell {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum BlurOutcome {
+    Commit,
+    Cancel { refocus: bool },
+    Keep,
+}
+
+/// On losing focus, clicking elsewhere in the project keeps what was typed (as in VS Code), a field
+/// that vanished (scrolled away, tree hidden) or a project switch drops it, and an app switch waits.
+fn blur_outcome(
+    window_active: bool,
+    still_focused: bool,
+    moved_to_drawn: bool,
+    same_project: bool,
+) -> BlurOutcome {
+    if !window_active {
+        BlurOutcome::Keep
+    } else if still_focused {
+        BlurOutcome::Cancel { refocus: true }
+    } else if moved_to_drawn && same_project {
+        BlurOutcome::Commit
+    } else {
+        BlurOutcome::Cancel {
+            refocus: !moved_to_drawn,
+        }
+    }
+}
+
 /// Refuses names the file system would read as a path rather than one entry.
 fn valid_name(name: &str) -> anyhow::Result<()> {
     if name.contains('/') || name == "." || name == ".." || name.contains('\0') {
@@ -462,6 +508,26 @@ fn valid_name(name: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tree_edit_commits_only_when_focus_moves_elsewhere_in_its_project() {
+        assert_eq!(blur_outcome(true, false, true, true), BlurOutcome::Commit);
+        // Scrolled off or hidden: the field is gone but still holds focus.
+        assert_eq!(
+            blur_outcome(true, true, false, true),
+            BlurOutcome::Cancel { refocus: true }
+        );
+        // A project switch moved focus to the other project's tab.
+        assert_eq!(
+            blur_outcome(true, false, true, false),
+            BlurOutcome::Cancel { refocus: false }
+        );
+        assert_eq!(
+            blur_outcome(true, false, false, true),
+            BlurOutcome::Cancel { refocus: true }
+        );
+        assert_eq!(blur_outcome(false, true, false, true), BlurOutcome::Keep);
+    }
 
     #[test]
     fn names_with_a_slash_or_dots_alone_are_refused() {
