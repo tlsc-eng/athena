@@ -1009,6 +1009,9 @@ impl Shell {
             return;
         };
         let len = pane.items.len() as isize;
+        if len == 0 {
+            return;
+        }
         pane.active = (pane.active as isize + step).rem_euclid(len) as usize;
         self.note_content_switch(focused);
         self.after_layout_change(window, cx);

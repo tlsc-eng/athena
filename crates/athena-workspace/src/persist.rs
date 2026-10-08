@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
-use crate::{Project, Workspace};
+use crate::{Layout, Workspace};
 
 /// Missing file is an empty workspace; a corrupt one is an error so the caller can keep a copy.
 pub fn load(path: &Path) -> Result<Workspace> {
@@ -14,7 +14,10 @@ pub fn load(path: &Path) -> Result<Workspace> {
         Ok(bytes) => {
             let mut workspace: Workspace = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse {}", path.display()))?;
-            workspace.projects.iter_mut().for_each(Project::migrate);
+            for project in &mut workspace.projects {
+                project.migrate();
+                project.layout = project.layout.take().and_then(Layout::validated);
+            }
             Ok(workspace)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Workspace::default()),
@@ -73,7 +76,7 @@ pub fn set_aside(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{UiState, WindowMode, WindowState};
+    use crate::{ItemKind, PaneId, UiState, WindowMode, WindowState};
 
     #[test]
     fn round_trip() {
@@ -146,6 +149,45 @@ mod tests {
         assert_eq!(
             left.last().map(String::as_str),
             aside.file_name().unwrap().to_str()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn layouts_with_empty_panes_or_stale_ids_are_repaired_on_load() {
+        let dir = std::env::temp_dir().join(format!("athena-repair-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        let leaf = |id: u64, items: &str, active: usize| {
+            format!(r#"{{"Leaf":{{"id":{id},"items":[{items}],"active":{active}}}}}"#)
+        };
+        let term = |id: u64| format!(r#"{{"id":{id},"kind":{{"Terminal":{{"session":null}}}}}}"#);
+        let split = format!(
+            r#"{{"Split":{{"axis":"Horizontal","ratio":0.5,"first":{},"second":{}}}}}"#,
+            leaf(1, "", 0),
+            leaf(4, &term(9), 3)
+        );
+        let json = format!(
+            r#"{{"projects":[
+                {{"root":"/a","layout":{{"tree":{split},"focused":1,"next_id":2}}}},
+                {{"root":"/b","layout":{{"tree":{},"focused":1,"next_id":3}}}}
+            ],"active":0,"window":null}}"#,
+            leaf(1, "", 0)
+        );
+        fs::write(&path, json).unwrap();
+        let w = load(&path).unwrap();
+        let mut layout = w.projects[0].layout.clone().unwrap();
+        let panes = layout.panes();
+        assert_eq!(panes.len(), 1);
+        assert_eq!((panes[0].id, panes[0].active), (PaneId(4), 0));
+        assert_eq!(layout.focused, PaneId(4));
+        let added = layout
+            .add_item(PaneId(4), ItemKind::Terminal { session: None })
+            .unwrap();
+        assert!(added.0 > 9, "new ids never repeat old ones");
+        assert_eq!(
+            w.projects[1].layout, None,
+            "a layout with only an empty pane is dropped"
         );
         fs::remove_dir_all(&dir).unwrap();
     }

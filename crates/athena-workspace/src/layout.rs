@@ -134,6 +134,38 @@ impl Layout {
         }
     }
 
+    /// Repairs a layout read from disk: empty panes go, active tabs and focus point at something
+    /// that exists, and new ids never repeat old ones; `None` when no pane is left.
+    pub fn validated(mut self) -> Option<Self> {
+        while let Some(empty) = self
+            .panes()
+            .into_iter()
+            .find(|p| p.items.is_empty())
+            .map(|p| p.id)
+        {
+            if !self.close_pane(empty) {
+                return None;
+            }
+        }
+        let ids: Vec<PaneId> = self.panes().into_iter().map(|p| p.id).collect();
+        for id in &ids {
+            if let Some(p) = self.pane_mut(*id) {
+                p.active = p.active.min(p.items.len() - 1);
+            }
+        }
+        if self.pane(self.focused).is_none() {
+            self.focused = ids[0];
+        }
+        let highest = ids
+            .iter()
+            .map(|p| p.0)
+            .chain(self.items().map(|i| i.id.0))
+            .max()
+            .unwrap_or(0);
+        self.next_id = self.next_id.max(highest + 1);
+        Some(self)
+    }
+
     fn next(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id - 1
