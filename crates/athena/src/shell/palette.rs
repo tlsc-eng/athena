@@ -58,6 +58,8 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Split right", Box::new(actions::SplitRight)),
         ("Split down", Box::new(actions::SplitDown)),
         ("Close tab", Box::new(actions::CloseTab)),
+        ("Save as…", Box::new(actions::SaveAs)),
+        ("Toggle auto save", Box::new(actions::ToggleAutoSave)),
         ("Zoom pane", Box::new(actions::TogglePaneZoom)),
         ("Next tab", Box::new(actions::NextTab)),
         ("Previous tab", Box::new(actions::PrevTab)),

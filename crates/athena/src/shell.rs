@@ -33,9 +33,10 @@ use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
     DisablePlaywrightMcp, EnableClaudeHooks, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject,
-    NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SelectProject,
-    SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight, ToggleFileTree,
-    ToggleFullScreen, ToggleNotifications, TogglePaneZoom, TogglePreview, Zoom,
+    NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SaveAs,
+    SelectProject, SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight,
+    ToggleAutoSave, ToggleFileTree, ToggleFullScreen, ToggleNotifications, TogglePaneZoom,
+    TogglePreview, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -289,9 +290,14 @@ impl Shell {
                     .and_then(|l| l.focused_pane())
                     .and_then(|p| p.active_item())
                     .map(|item| self.item_label(&project.root, item, cx));
+                let dirty = if self.items.values().any(|v| v.is_dirty(cx)) {
+                    "• "
+                } else {
+                    ""
+                };
                 match tab {
-                    Some(tab) => format!("{tab} — {}", project.name()),
-                    None => project.name(),
+                    Some(tab) => format!("{dirty}{tab} — {}", project.name()),
+                    None => format!("{dirty}{}", project.name()),
                 }
             }
         };
@@ -613,6 +619,8 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &TogglePaneZoom, _, cx| this.toggle_zoom(cx)))
             .on_action(cx.listener(|this, _: &TogglePreview, w, cx| this.toggle_rendered(w, cx)))
+            .on_action(cx.listener(|this, _: &SaveAs, w, cx| this.save_as(w, cx)))
+            .on_action(cx.listener(|this, _: &ToggleAutoSave, _, cx| this.toggle_autosave(cx)))
             .on_action(cx.listener(|this, _: &NextTab, w, cx| this.cycle_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, w, cx| this.cycle_tab(-1, w, cx)))
             .on_action(

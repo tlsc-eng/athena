@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Workspace {
     pub projects: Vec<Project>,
     pub active: Option<usize>,
@@ -23,6 +23,15 @@ pub struct Workspace {
     /// The user agreed to show Claude plan usage, which reads Claude Code's Keychain sign-in.
     #[serde(default)]
     pub usage_indicator: bool,
+    /// Editors save this long after the last keystroke; 0 turns auto save off.
+    #[serde(default = "default_autosave_delay_ms")]
+    pub autosave_delay_ms: u64,
+}
+
+pub const DEFAULT_AUTOSAVE_DELAY_MS: u64 = 1000;
+
+fn default_autosave_delay_ms() -> u64 {
+    DEFAULT_AUTOSAVE_DELAY_MS
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -39,6 +48,18 @@ pub enum WindowMode {
     Windowed,
     Maximized,
     Fullscreen,
+}
+
+impl Default for Workspace {
+    fn default() -> Self {
+        Self {
+            projects: Vec::new(),
+            active: None,
+            window: None,
+            usage_indicator: false,
+            autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
+        }
+    }
 }
 
 impl Workspace {
@@ -162,6 +183,21 @@ mod tests {
     fn colliding_monograms_split_where_names_differ() {
         let w = ws(&["/n/hephaestus", "/n/hestia", "/n/athena"]);
         assert_eq!(w.monograms(), ["HP", "HS", "AT"]);
+    }
+
+    #[test]
+    fn files_without_autosave_get_the_default() {
+        let old = r#"{"projects":[],"active":null,"window":null}"#;
+        let w: Workspace = serde_json::from_str(old).unwrap();
+        assert_eq!(w.autosave_delay_ms, 1000);
+        assert_eq!(Workspace::default().autosave_delay_ms, 1000);
+        let off = r#"{"projects":[],"active":null,"window":null,"autosave_delay_ms":0}"#;
+        assert_eq!(
+            serde_json::from_str::<Workspace>(off)
+                .unwrap()
+                .autosave_delay_ms,
+            0
+        );
     }
 
     #[test]

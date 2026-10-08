@@ -2,16 +2,17 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use athena_ui::{ActiveTheme, InputEvent, TextInput, empty_state};
+use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput, empty_state};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
-    Render, ScrollWheelEvent, ShapedLine, Size, Subscription, UTF16Selection, Window, actions, div,
-    prelude::*, px,
+    Render, ScrollWheelEvent, ShapedLine, Size, Subscription, Task, UTF16Selection, Window,
+    actions, div, prelude::*, px,
 };
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, SaveError, UNDO_GROUP};
 use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
 
@@ -196,6 +197,10 @@ pub struct EditorView {
     /// Foldable regions by header line, valid for one buffer version.
     fold_cache: RefCell<(u64, HashMap<usize, Option<Fold>>)>,
     pub(crate) gutter_hover: bool,
+    autosave: Option<Duration>,
+    autosave_task: Option<Task<()>>,
+    /// The file changed on disk while this buffer had unsaved edits; the bar asks what to keep.
+    conflict: bool,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -230,6 +235,9 @@ impl EditorView {
             display: DisplayMap::default(),
             fold_cache: RefCell::default(),
             gutter_hover: false,
+            autosave: None,
+            autosave_task: None,
+            conflict: false,
         }
     }
 
@@ -309,7 +317,15 @@ impl EditorView {
         let Some(buffer) = self.buffer.as_mut() else {
             return false;
         };
-        let result = buffer.save();
+        let result = match buffer.save_checked() {
+            Err(SaveError::Conflict) => {
+                self.conflict = true;
+                cx.notify();
+                return false;
+            }
+            Err(SaveError::Io(e)) => Err(e),
+            Ok(()) => Ok(()),
+        };
         self.save_error = result.as_ref().err().map(|e| format!("{e:#}"));
         if result.is_ok() {
             cx.emit(EditorEvent::Saved);
@@ -633,7 +649,8 @@ impl Render for EditorView {
                 cx,
             ));
         }
-        root.children(self.render_find(cx))
+        root.children(self.render_conflict(cx))
+            .children(self.render_find(cx))
             .child(
                 div()
                     .id("editor-body")
@@ -949,6 +966,133 @@ impl EditorView {
         self.cursor_out_of_folds();
         self.autoscroll = true;
         cx.notify();
+    }
+}
+
+impl EditorView {
+    /// Saves this long after the last edit (never sooner than an undo step closes); `None` is off.
+    pub fn set_autosave(&mut self, delay: Option<Duration>, cx: &mut Context<Self>) {
+        self.autosave = delay.map(|d| d.max(UNDO_GROUP));
+        if self.autosave.is_some() {
+            self.schedule_autosave(cx);
+        } else {
+            self.autosave_task = None;
+        }
+    }
+
+    /// Restarts the auto-save countdown; call on every edit.
+    pub fn schedule_autosave(&mut self, cx: &mut Context<Self>) {
+        let Some(delay) = self.autosave else { return };
+        self.autosave_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| this.autosave_now(cx)).ok();
+        }));
+    }
+
+    fn autosave_now(&mut self, cx: &mut Context<Self>) {
+        self.autosave_task = None;
+        // A failed save or a conflict waits for the user rather than retrying on every keystroke.
+        if self.is_dirty() && self.error.is_none() && self.save_error.is_none() && !self.conflict {
+            self.save(cx);
+        }
+    }
+
+    /// Picks up a change made on disk by another program: a clean buffer reloads, a dirty one asks.
+    pub fn check_disk(&mut self, cx: &mut Context<Self>) {
+        let Some(buffer) = &self.buffer else { return };
+        if !buffer.changed_on_disk() {
+            return;
+        }
+        if buffer.is_dirty() {
+            self.conflict = true;
+            cx.notify();
+        } else {
+            self.reload(cx);
+        }
+    }
+
+    /// Replaces the buffer with the file on disk, as one step that undo can take back.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        let mut result = Ok(());
+        self.with_buffer(cx, |b| result = b.reload_from_disk());
+        self.conflict = false;
+        self.save_error = result.err().map(|e| format!("{e:#}"));
+        self.changed(cx);
+    }
+
+    /// Keeps this buffer's text, replacing what another program wrote.
+    fn overwrite(&mut self, cx: &mut Context<Self>) {
+        let Some(buffer) = self.buffer.as_mut() else {
+            return;
+        };
+        let result = buffer.save();
+        self.conflict = false;
+        self.save_error = result.as_ref().err().map(|e| format!("{e:#}"));
+        if result.is_ok() {
+            cx.emit(EditorEvent::Saved);
+        }
+        self.changed(cx);
+    }
+
+    /// Writes the buffer to `path` and keeps editing it there.
+    pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let buffer = self
+            .buffer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("nothing to save"))?;
+        buffer.save_as(path.clone())?;
+        // A new language folds differently, and the fold cache is keyed only on the text version.
+        self.display.clear();
+        *self.fold_cache.borrow_mut() = Default::default();
+        self.path = path;
+        self.conflict = false;
+        self.save_error = None;
+        cx.emit(EditorEvent::Saved);
+        self.changed(cx);
+        Ok(())
+    }
+
+    fn render_conflict(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.conflict {
+            return None;
+        }
+        let t = cx.theme();
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(
+            div()
+                .flex_none()
+                .h(px(36.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .bg(t.color.surface)
+                .border_b_1()
+                .border_color(t.color.border)
+                .text_size(t.typography.caption)
+                .child(div().size(px(6.)).flex_none().bg(t.color.warning))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_color(t.color.content_secondary)
+                        .child(format!("{name} changed on disk while you were editing it.")),
+                )
+                .child(
+                    Button::new("conflict-reload", "Reload", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                )
+                .child(
+                    Button::new("conflict-overwrite", "Overwrite", ButtonKind::Secondary)
+                        .on_click(cx.listener(|this, _, _, cx| this.overwrite(cx))),
+                ),
+        )
     }
 }
 

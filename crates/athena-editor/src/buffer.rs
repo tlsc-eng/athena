@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use ropey::Rope;
@@ -12,7 +12,7 @@ use crate::display::{Fold, indent_fold_at};
 use crate::syntax::{Lang, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
-const UNDO_GROUP: Duration = Duration::from_millis(500);
+pub(crate) const UNDO_GROUP: Duration = Duration::from_millis(500);
 const MAX_FILE: u64 = 50 * 1024 * 1024;
 
 /// A selection in char offsets; `head` is where the cursor is drawn.
@@ -91,6 +91,16 @@ pub struct Buffer {
     goal_column: Option<usize>,
     /// (first line, line breaks removed, line breaks inserted) per change, for folds to follow.
     line_edits: Vec<(usize, usize, usize)>,
+    /// Modification time of the file as last read or written, to notice edits made elsewhere.
+    disk_mtime: Option<SystemTime>,
+}
+
+/// Why a checked save wrote nothing.
+#[derive(Debug)]
+pub enum SaveError {
+    /// The file changed on disk since it was read or last saved.
+    Conflict,
+    Io(anyhow::Error),
 }
 
 impl Buffer {
@@ -115,23 +125,16 @@ impl Buffer {
             last_edit: None,
             goal_column: None,
             line_edits: Vec::new(),
+            disk_mtime: None,
         }
     }
 
     /// Opens a UTF-8 text file; binary and very large files are refused.
     pub fn open(path: &Path) -> Result<Self> {
-        let meta = fs::metadata(path).with_context(|| format!("open {}", path.display()))?;
-        if meta.len() > MAX_FILE {
-            bail!("{} is larger than 50 MB", path.display());
-        }
-        let mut bytes = Vec::new();
-        fs::File::open(path)?.read_to_end(&mut bytes)?;
-        if bytes.iter().take(8192).any(|b| *b == 0) {
-            bail!("{} looks like a binary file", path.display());
-        }
-        let text =
-            String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))?;
-        Ok(Self::new(&text, Some(path.to_path_buf())))
+        let (text, mtime) = read_text(path)?;
+        let mut buffer = Self::new(&text, Some(path.to_path_buf()));
+        buffer.disk_mtime = mtime;
+        Ok(buffer)
     }
 
     /// Writes through a temp file and rename, keeping the file's permissions.
@@ -150,8 +153,66 @@ impl Buffer {
             fs::set_permissions(&tmp, meta.permissions())?;
         }
         fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
+        self.disk_mtime = modified(&path);
         self.saved_at = Some(self.undo.len());
         // The next keystroke must start a new undo step, or it would fold into the saved one.
+        self.last_edit = None;
+        Ok(())
+    }
+
+    /// True when another program wrote the file since this buffer read or saved it.
+    pub fn changed_on_disk(&self) -> bool {
+        let Some(path) = &self.path else {
+            return false;
+        };
+        modified(path).is_some_and(|m| Some(m) != self.disk_mtime)
+    }
+
+    /// Saves unless the file changed on disk, so another program's edit is never overwritten blindly.
+    pub fn save_checked(&mut self) -> Result<(), SaveError> {
+        if self.changed_on_disk() {
+            return Err(SaveError::Conflict);
+        }
+        self.save().map_err(SaveError::Io)
+    }
+
+    /// Writes to `path` and keeps editing it there, highlighting by its new extension.
+    pub fn save_as(&mut self, path: PathBuf) -> Result<()> {
+        self.syntax = Lang::for_path(&path).map(|lang| Syntax::new(lang, &self.rope));
+        self.path = Some(path);
+        self.save()
+    }
+
+    /// Takes the file's current text as one undoable edit and marks it saved.
+    pub fn reload_from_disk(&mut self) -> Result<()> {
+        let path = self.path.clone().context("buffer has no file")?;
+        let (text, mtime) = read_text(&path)?;
+        self.disk_mtime = mtime;
+        let old: Vec<char> = self.rope.chars().collect();
+        let new: Vec<char> = text.chars().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if prefix + suffix < old.len() || old.len() != new.len() {
+            let inserted: String = new[prefix..new.len() - suffix].iter().collect();
+            let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
+            let map = |at: usize| match at {
+                at if at <= prefix => at,
+                at if at >= old_end => at - old_end + new_end,
+                _ => new_end,
+            };
+            let selection = self.selection;
+            self.replace(prefix..old_end, &inserted, EditKind::Other);
+            self.selection = Selection {
+                anchor: map(selection.anchor),
+                head: map(selection.head),
+            };
+        }
+        self.saved_at = Some(self.undo.len());
         self.last_edit = None;
         Ok(())
     }
@@ -786,6 +847,26 @@ impl Buffer {
     }
 }
 
+fn modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// A UTF-8 text file's contents and modification time; binary and very large files are refused.
+fn read_text(path: &Path) -> Result<(String, Option<SystemTime>)> {
+    let meta = fs::metadata(path).with_context(|| format!("open {}", path.display()))?;
+    if meta.len() > MAX_FILE {
+        bail!("{} is larger than 50 MB", path.display());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.read_to_end(&mut bytes)?;
+    if bytes.iter().take(8192).any(|b| *b == 0) {
+        bail!("{} looks like a binary file", path.display());
+    }
+    let text =
+        String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))?;
+    Ok((text, meta.modified().ok()))
+}
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -947,6 +1028,82 @@ mod tests {
         fs::write(dir.join("bin"), [0u8, 1, 2]).unwrap();
         assert!(Buffer::open(&dir.join("bin")).is_err());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn temp_file(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("athena-buf-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.go");
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// Writes as another program would, with a modification time that differs from ours.
+    fn write_elsewhere(path: &Path, text: &str) {
+        fs::write(path, text).unwrap();
+        let later = SystemTime::now() + Duration::from_secs(5);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    #[test]
+    fn save_detects_external_change() {
+        let path = temp_file("conflict", "a\n");
+        let mut b = Buffer::open(&path).unwrap();
+        assert!(!b.changed_on_disk());
+        b.insert("x");
+        b.save_checked().unwrap();
+        assert!(
+            !b.changed_on_disk(),
+            "our own save is not an outside change"
+        );
+        write_elsewhere(&path, "theirs\n");
+        assert!(b.changed_on_disk());
+        b.insert("y");
+        assert!(matches!(b.save_checked(), Err(SaveError::Conflict)));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs\n");
+        b.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "xya\n");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn reload_keeps_the_cursor_and_can_be_undone() {
+        let path = temp_file("reload", "one\ntwo\nthree\n");
+        let mut b = Buffer::open(&path).unwrap();
+        b.move_to(b.line_start(2) + 2, false);
+        write_elsewhere(&path, "one\nTWO!\nthree\n");
+        b.reload_from_disk().unwrap();
+        assert_eq!(b.full_text(), "one\nTWO!\nthree\n");
+        assert_eq!(
+            b.selection.head,
+            b.line_start(2) + 2,
+            "cursor after the change moves with it"
+        );
+        assert!(!b.is_dirty());
+        assert!(!b.changed_on_disk());
+        b.undo();
+        assert_eq!(b.full_text(), "one\ntwo\nthree\n");
+        assert!(b.is_dirty());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn save_as_moves_the_buffer() {
+        let path = temp_file("save-as", "x = 1\n");
+        let mut b = Buffer::new("const x = 1\n", None);
+        assert!(b.lang().is_none());
+        let to = path.with_file_name("x.ts");
+        b.save_as(to.clone()).unwrap();
+        assert_eq!(b.path.as_deref(), Some(to.as_path()));
+        assert_eq!(b.lang(), Some(Lang::TypeScript));
+        assert_eq!(fs::read_to_string(&to).unwrap(), "const x = 1\n");
+        assert!(!b.is_dirty());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

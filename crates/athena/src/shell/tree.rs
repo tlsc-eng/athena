@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use super::Shell;
+use super::item::ItemView;
 
 pub(super) const TREE_WIDTH: f32 = 240.;
 const ROW_HEIGHT: f32 = 24.;
@@ -120,6 +121,15 @@ impl Shell {
         let root = self.workspace.active_project()?.root.clone();
         let rows = self.tree.rows(&root);
         let open = self.open_editor_path();
+        let dirty: HashSet<PathBuf> = self
+            .items
+            .iter()
+            .filter(|((r, _), v)| *r == root && v.is_dirty(cx))
+            .filter_map(|(_, v)| match v {
+                ItemView::Editor(e) => Some(e.read(cx).path().to_path_buf()),
+                _ => None,
+            })
+            .collect();
         let t = cx.theme().clone();
         let count = rows.len();
         let list = uniform_list(
@@ -133,6 +143,7 @@ impl Shell {
                         let is_dir = row.entry.is_dir;
                         let root = root.clone();
                         let selected = open.as_ref() == Some(&row.entry.path);
+                        let unsaved = dirty.contains(&row.entry.path);
                         let marker = match (is_dir, row.expanded) {
                             (true, true) => "▾",
                             (true, false) => "▸",
@@ -179,10 +190,17 @@ impl Shell {
                             .child(athena_ui::file_icon(&row.entry.path, is_dir, cx))
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .child(row.entry.name.clone()),
                             )
+                            .when(unsaved, |el| {
+                                el.child(
+                                    div().size(px(6.)).flex_none().bg(t.color.content_disabled),
+                                )
+                            })
                     })
                     .collect::<Vec<_>>()
             }),

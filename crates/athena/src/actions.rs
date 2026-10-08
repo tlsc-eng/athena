@@ -41,6 +41,8 @@ actions!(
         DisablePlaywrightMcp,
         NewPreview,
         TogglePreview,
+        SaveAs,
+        ToggleAutoSave,
     ]
 );
 
@@ -85,6 +87,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-j", ToggleNotifications, None),
         KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
         KeyBinding::new("cmd-shift-v", TogglePreview, None),
+        KeyBinding::new("cmd-shift-s", SaveAs, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -115,6 +118,9 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("New Terminal", NewTerminal),
                 MenuItem::action("New Claude Session", NewClaudeSession),
                 MenuItem::action("Open Project…", AddProject),
+                MenuItem::separator(),
+                MenuItem::action("Save As…", SaveAs),
+                MenuItem::action("Toggle Auto Save", ToggleAutoSave),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close Project", CloseProject),

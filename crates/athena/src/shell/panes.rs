@@ -8,9 +8,9 @@ use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
 };
 use gpui::{
-    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, FontWeight, MouseButton,
-    MouseMoveEvent, Pixels, PromptLevel, Window, canvas, div, point, prelude::*, px, relative,
-    size,
+    Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, Entity, FontWeight,
+    MouseButton, MouseMoveEvent, Pixels, PromptLevel, Window, canvas, div, point, prelude::*, px,
+    relative, size,
 };
 
 use super::Shell;
@@ -87,14 +87,20 @@ impl Shell {
             }
             ItemKind::Editor { path } => {
                 let view = cx.new(|cx| EditorView::open(path.clone(), cx));
+                let delay = self.autosave_delay();
+                view.update(cx, |v, cx| v.set_autosave(delay, cx));
                 cx.subscribe(&view, |this, view, event: &EditorEvent, cx| {
                     match event {
                         EditorEvent::Changed => {}
-                        EditorEvent::Edited { .. } => this.lsp_edited(&view, cx),
+                        EditorEvent::Edited { .. } => {
+                            this.lsp_edited(&view, cx);
+                            view.update(cx, |v, cx| v.schedule_autosave(cx));
+                        }
                         EditorEvent::Saved => {
                             this.lsp_saved(&view, cx);
                             let path = view.read(cx).path().to_path_buf();
                             this.refresh_docs(&path, cx);
+                            this.sync_siblings(&view, &path, cx);
                         }
                         EditorEvent::GoToDefinition { line, character } => {
                             let at = athena_lsp::Position {
@@ -1007,11 +1013,117 @@ impl Shell {
     pub(super) fn reload_changed_files(&mut self, cx: &mut Context<Self>) {
         for view in self.items.values() {
             match view {
+                ItemView::Editor(editor) => editor.update(cx, |v, cx| v.check_disk(cx)),
                 ItemView::Image(image) => image.update(cx, |v, cx| v.reload_if_changed(cx)),
                 ItemView::Doc(doc) => doc.update(cx, |v, cx| v.refresh(cx)),
                 _ => {}
             }
         }
+    }
+
+    /// Other tabs on the same file pick up a save: clean ones reload, dirty ones show the conflict bar.
+    fn sync_siblings(&self, saved: &Entity<EditorView>, path: &Path, cx: &mut Context<Self>) {
+        for view in self.items.values() {
+            if let ItemView::Editor(editor) = view
+                && editor != saved
+                && editor.read(cx).path() == path
+            {
+                editor.update(cx, |v, cx| v.check_disk(cx));
+            }
+        }
+    }
+
+    pub(super) fn autosave_delay(&self) -> Option<std::time::Duration> {
+        let ms = self.workspace.autosave_delay_ms;
+        (ms > 0).then(|| std::time::Duration::from_millis(ms))
+    }
+
+    /// Turns auto save off, or back on at the default delay, for every open editor.
+    pub(super) fn toggle_autosave(&mut self, cx: &mut Context<Self>) {
+        self.workspace.autosave_delay_ms = match self.workspace.autosave_delay_ms {
+            0 => athena_workspace::DEFAULT_AUTOSAVE_DELAY_MS,
+            _ => 0,
+        };
+        let delay = self.autosave_delay();
+        for view in self.items.values() {
+            if let ItemView::Editor(editor) = view {
+                editor.update(cx, |v, cx| v.set_autosave(delay, cx));
+            }
+        }
+        let (title, body) = match delay {
+            Some(d) => (
+                "Auto save is on",
+                format!("Files save {} ms after you stop typing.", d.as_millis()),
+            ),
+            None => ("Auto save is off", "Save with ⌘S.".to_string()),
+        };
+        self.transient_notice(title, body, cx);
+        self.schedule_save(cx);
+    }
+
+    /// Cmd+Shift+S: writes the focused editor to a new file and keeps editing it there.
+    pub(super) fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let Some(item) = self
+            .workspace
+            .active_project()
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.focused_pane())
+            .and_then(|p| p.active_item())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(ItemView::Editor(editor)) = self.item_view(&root, &item, cx) else {
+            return;
+        };
+        let from = editor.read(cx).path().to_path_buf();
+        let dir = from.parent().unwrap_or(&root).to_path_buf();
+        let name = from.file_name().map(|n| n.to_string_lossy().into_owned());
+        let picked = cx.prompt_for_new_path(&dir, name.as_deref());
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(to))) = picked.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_save_as(&root, item.id, &editor, from, to, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_save_as(
+        &mut self,
+        root: &Path,
+        item: ItemId,
+        editor: &Entity<EditorView>,
+        from: PathBuf,
+        to: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) = editor.update(cx, |e, cx| e.save_as(to.clone(), cx)) {
+            let body = format!("{err:#}");
+            self.transient_notice("Could not save the file", body, cx);
+            return;
+        }
+        let item = self
+            .workspace
+            .projects
+            .iter_mut()
+            .find(|p| p.root == root)
+            .and_then(|p| p.layout.as_mut())
+            .and_then(|l| l.item_mut(item));
+        if let Some(item) = item {
+            item.kind = ItemKind::Editor { path: to };
+        }
+        self.lsp_closed(&from, cx);
+        self.lsp_opened(root, editor, cx);
+        self.tree.invalidate();
+        self.after_layout_change(window, cx);
     }
 
     /// Re-renders previews of `path` after its editor saved it.

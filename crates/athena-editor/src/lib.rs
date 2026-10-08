@@ -6,7 +6,7 @@ mod lines;
 mod syntax;
 mod view;
 
-pub use buffer::{Buffer, Indent, Selection};
+pub use buffer::{Buffer, Indent, SaveError, Selection};
 pub use image::{ImageView, is_image_path};
 pub use syntax::{Lang, Token};
 pub use view::{EditorEvent, EditorView, Marker, MarkerSeverity};
