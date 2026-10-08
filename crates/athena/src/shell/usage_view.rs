@@ -406,6 +406,9 @@ impl Shell {
             .text_size(t.typography.caption)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_usage(cx)))
+            .when(self.usage.closing.is_some(), |el| {
+                el.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            })
             .children(sections)
             .when(empty, |el| {
                 el.child(

@@ -440,6 +440,9 @@ impl Shell {
             .shadow(vec![t.popover_shadow()])
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(closing.is_some(), |el| {
+                el.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            })
             .child(
                 div()
                     .h(px(44.))
@@ -496,10 +499,12 @@ impl Shell {
                 .justify_center()
                 .items_start()
                 .pt(px(96.))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
-                )
+                .when(closing.is_none(), |el| {
+                    el.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+                    )
+                })
                 .child(panel)
                 .into_any_element(),
         )
