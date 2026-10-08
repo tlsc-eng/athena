@@ -18,6 +18,7 @@ mod quit;
 mod search;
 mod tree;
 mod usage_view;
+mod watch;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -86,6 +87,7 @@ pub struct Shell {
     git: git_view::GitState,
     search: search::SearchState,
     history: history::History,
+    watch: watch::WatchState,
     /// Per project, the pane a file opened from a terminal goes to.
     last_editor_pane: HashMap<PathBuf, PaneId>,
     window_title: String,
@@ -215,6 +217,7 @@ impl Shell {
             git: git_view::GitState::default(),
             search: search::SearchState::default(),
             history: history::History::default(),
+            watch: Self::start_watching(window, cx),
             last_editor_pane: HashMap::new(),
             window_title: String::new(),
             pending_open: None,
@@ -644,6 +647,7 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_previews(cx);
+        self.sync_watchers();
         if self.lsp.jump.is_some() {
             self.record_location(cx);
         }

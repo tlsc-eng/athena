@@ -3,6 +3,7 @@ mod layout;
 mod persist;
 mod project;
 mod scope;
+pub mod watch;
 
 pub use layout::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath, Pane,

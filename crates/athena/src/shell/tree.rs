@@ -65,6 +65,14 @@ impl FileTree {
         self.listings.clear();
     }
 
+    /// Drops the listings a change to `path` can make stale: its folder's, and its own if a folder.
+    pub fn forget(&mut self, path: &Path) {
+        self.listings.remove(path);
+        if let Some(parent) = path.parent() {
+            self.listings.remove(parent);
+        }
+    }
+
     /// Opens every folder from `root` down to `path`'s parent and scrolls `path` into view.
     pub fn reveal(&mut self, root: &Path, path: &Path) {
         if let Some(parent) = path.parent() {
