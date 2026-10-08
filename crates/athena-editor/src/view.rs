@@ -17,7 +17,8 @@ use gpui::{
 };
 
 use crate::buffer::{
-    Buffer, Cursor, DiskState, DiskText, Edit, SaveError, UNDO_GROUP, read_disk_text,
+    Buffer, Cursor, Cursors, DiskState, DiskText, Edit, SaveError, Selection, UNDO_GROUP,
+    read_disk_text,
 };
 use crate::completion::Completing;
 use crate::display::{DisplayLine, DisplayMap, Fold};
@@ -89,6 +90,11 @@ actions!(
         InsertLineBelow,
         InsertLineAbove,
         FindReplace,
+        AddNextOccurrence,
+        SkipOccurrence,
+        SelectAllOccurrences,
+        AddCursorAbove,
+        AddCursorBelow,
     ]
 );
 
@@ -161,6 +167,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-enter", InsertLineBelow, ctx),
         // VS Code's cmd-shift-enter (Insert Line Above) stays Athena's Zoom Pane.
         KeyBinding::new("cmd-alt-f", FindReplace, ctx),
+        // These shadow the shell's Split Right and Focus Pane Up/Down while an editor has focus,
+        // as VS Code binds them; pane focus still moves left and right from an editor.
+        KeyBinding::new("cmd-d", AddNextOccurrence, ctx),
+        KeyBinding::new("cmd-alt-up", AddCursorAbove, ctx),
+        KeyBinding::new("cmd-alt-down", AddCursorBelow, ctx),
+        KeyBinding::new("cmd-k cmd-d", SkipOccurrence, ctx),
+        KeyBinding::new("cmd-shift-l", SelectAllOccurrences, ctx),
     ]);
 }
 
@@ -261,6 +274,8 @@ pub(crate) struct EditorLayout {
     pub origin: Point<Pixels>,
     pub text_left: Pixels,
     pub line_height: Pixels,
+    /// Width of one column of the monospace font.
+    pub cell: Pixels,
     pub lines: Vec<(usize, DisplayLine, ShapedLine)>,
     /// Left and right edge of the gutter column holding fold chevrons.
     pub fold_column: (Pixels, Pixels),
@@ -282,7 +297,7 @@ const BACKGROUND_RELOAD: u64 = 1024 * 1024;
 pub struct EditorView {
     /// Shared with every other tab on the same file; the cursor and folds stay per view.
     pub(crate) buffer: Option<Rc<SharedBuffer>>,
-    pub(crate) cursor: Cursor,
+    pub(crate) cursor: Cursors,
     /// The buffer version this view's cursor and folds have followed up to.
     seen: u64,
     _buffer_watch: Option<Subscription>,
@@ -336,6 +351,10 @@ pub struct EditorView {
     pub(crate) lightbulb: Option<usize>,
     /// A restored first line to scroll to once the line height is known.
     pub(crate) pending_top: Option<usize>,
+    /// Where a Shift+Alt drag started, as a line and a column with tabs expanded.
+    pub(crate) column_select: Option<(usize, usize)>,
+    /// The text Cmd+D last added an occurrence of, and whether it matches whole words only.
+    pub(crate) occurrence: Option<(String, bool)>,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -368,7 +387,7 @@ impl EditorView {
         let watch = buffer.as_ref().map(|b| Self::watch(b, cx));
         Self {
             buffer,
-            cursor: Cursor::default(),
+            cursor: Cursors::default(),
             seen,
             _buffer_watch: watch,
             error,
@@ -410,6 +429,8 @@ impl EditorView {
             rename: None,
             lightbulb: None,
             pending_top: None,
+            column_select: None,
+            occurrence: None,
         }
     }
 
@@ -451,7 +472,8 @@ impl EditorView {
         if let Some(shared) = self.buffer.clone() {
             let b = shared.buffer.borrow();
             let at = b.char_at_utf16(state.cursor.0, state.cursor.1);
-            b.move_to(&mut self.cursor, at, false);
+            self.cursor.collapse();
+            b.move_to(self.cursor.primary_mut(), at, false);
         }
         self.cursor_out_of_folds();
         self.pending_top = Some(state.top_line.min(lines.saturating_sub(1)));
@@ -507,7 +529,7 @@ impl EditorView {
             }
             None => {
                 self.display.clear();
-                self.cursor.follow([], b.len_chars());
+                self.cursor.follow(std::iter::empty(), b.len_chars());
             }
         }
         self.seen = b.version();
@@ -550,7 +572,7 @@ impl EditorView {
         self.cursor_line
     }
 
-    fn note_cursor_line(&mut self, edited: bool, cx: &mut Context<Self>) {
+    pub(crate) fn note_cursor_line(&mut self, edited: bool, cx: &mut Context<Self>) {
         let Some(line) = self.buf().map(|b| b.line_of(self.cursor.head())) else {
             return;
         };
@@ -569,7 +591,8 @@ impl EditorView {
     pub fn go_to_position(&mut self, line: u32, character: u32, cx: &mut Context<Self>) {
         self.with_buffer(cx, |b, c| {
             let at = b.char_at_utf16(line, character);
-            b.move_to(c, at, false);
+            c.collapse();
+            b.move_to(c.primary_mut(), at, false);
         });
     }
 
@@ -601,7 +624,8 @@ impl EditorView {
         let b = self.buf()?;
         let head = self.cursor.head().min(b.len_chars());
         let line = b.line_of(head);
-        let selection = (!self.cursor.selection.is_empty()).then(|| b.selected_text(&self.cursor));
+        let selection =
+            (!self.cursor.selection().is_empty()).then(|| b.selected_text(self.cursor.primary()));
         Some((line as u32 + 1, b.column_of(head) as u32 + 1, selection))
     }
 
@@ -640,7 +664,8 @@ impl EditorView {
         self.with_buffer(cx, |b, c| {
             let line = (line.max(1) as usize - 1).min(b.len_lines().saturating_sub(1));
             let at = b.line_start(line);
-            b.move_to(c, at, false);
+            c.collapse();
+            b.move_to(c.primary_mut(), at, false);
         });
     }
 
@@ -691,13 +716,13 @@ impl EditorView {
     pub(crate) fn with_buffer(
         &mut self,
         cx: &mut Context<Self>,
-        f: impl FnOnce(&mut Buffer, &mut Cursor),
+        f: impl FnOnce(&mut Buffer, &mut Cursors),
     ) {
         let Some(shared) = self.buffer.clone() else {
             return;
         };
         self.follow_edits();
-        let mut cursor = self.cursor;
+        let mut cursor = std::mem::take(&mut self.cursor);
         let (before, version) = {
             let mut b = shared.buffer.borrow_mut();
             let before = b.version();
@@ -726,13 +751,23 @@ impl EditorView {
         }
     }
 
+    /// Runs a move at every caret.
+    fn move_each(&mut self, cx: &mut Context<Self>, op: impl FnMut(&Buffer, &mut Cursor)) {
+        self.with_buffer(cx, |b, c| b.move_each(c, op));
+    }
+
+    /// Runs an edit at every caret, as one undo step.
+    fn edit_each(&mut self, cx: &mut Context<Self>, op: impl FnMut(&mut Buffer, &mut Cursor)) {
+        self.with_buffer(cx, |b, c| b.edit_each(c, op));
+    }
+
     fn page_lines(&self) -> isize {
         let lh = self.layout.as_ref().map_or(px(20.), |l| l.line_height);
         ((self.viewport.height / lh) as isize - 2).max(1)
     }
 
     /// Buffer char under a window position, from last frame's layout.
-    fn char_at_position(&self, position: Point<Pixels>) -> Option<usize> {
+    pub(crate) fn char_at_position(&self, position: Point<Pixels>) -> Option<usize> {
         let layout = self.layout.as_ref()?;
         let buffer = self.buf()?;
         let y = position.y - layout.origin.y + px(self.scroll.y);
@@ -765,10 +800,34 @@ impl EditorView {
             return;
         };
         let b = buffer.buffer.borrow();
-        match event.click_count {
-            2 => b.select_word_at(&mut self.cursor, at),
-            n if n >= 3 => b.select_line_at(&mut self.cursor, at),
-            _ => b.move_to(&mut self.cursor, at, event.modifiers.shift),
+        let m = event.modifiers;
+        self.column_select = None;
+        if m.alt && m.shift {
+            if let Some(col) = self.column_at(event.position) {
+                self.column_select = Some((b.line_of(at), col));
+            }
+            self.cursor = Cursors::new(Cursor::at(at));
+        } else {
+            // Alt+click adds a caret, or removes the one clicked, as VS Code does.
+            let adding = m.alt && !m.platform;
+            if !adding {
+                self.cursor.collapse();
+            }
+            let c = &mut self.cursor;
+            match event.click_count {
+                2 => b.select_word_at(c.primary_mut(), at),
+                n if n >= 3 => b.select_line_at(c.primary_mut(), at),
+                _ if adding => match c
+                    .all()
+                    .iter()
+                    .position(|c| c.selection.range().contains(&at) || c.head() == at)
+                {
+                    Some(i) => c.remove(i),
+                    None => c.add(Cursor::at(at)),
+                },
+                _ => b.move_to(c.primary_mut(), at, m.shift),
+            }
+            c.normalize();
         }
         drop(b);
         self.note_cursor_line(false, cx);
@@ -797,10 +856,19 @@ impl EditorView {
             self.selecting = false;
             return;
         }
-        if let Some(at) = self.char_at_position(event.position)
+        if self.column_select.is_some() {
+            self.select_columns(event.position);
+            self.autoscroll = true;
+            self.note_cursor_line(false, cx);
+            cx.notify();
+        } else if let Some(at) = self.char_at_position(event.position)
             && let Some(buffer) = self.buffer.clone()
         {
-            buffer.buffer.borrow().move_to(&mut self.cursor, at, true);
+            buffer
+                .buffer
+                .borrow()
+                .move_to(self.cursor.primary_mut(), at, true);
+            self.cursor.normalize();
             self.autoscroll = true;
             self.note_cursor_line(false, cx);
             cx.notify();
@@ -822,13 +890,20 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Copies every caret's selection, one per line; carets without one copy their whole line.
     fn copy(&mut self, cx: &mut Context<Self>) {
         let text = self.buf().map(|buffer| {
-            if self.cursor.selection.is_empty() {
-                let line = buffer.line_of(self.cursor.head());
-                format!("{}\n", buffer.line(line))
+            let all = self.cursor.all();
+            if all.iter().all(|c| c.selection.is_empty()) {
+                let mut lines: Vec<usize> = all.iter().map(|c| buffer.line_of(c.head())).collect();
+                lines.dedup();
+                lines
+                    .iter()
+                    .map(|&l| format!("{}\n", buffer.line(l)))
+                    .collect()
             } else {
-                buffer.selected_text(&self.cursor)
+                let parts: Vec<String> = all.iter().map(|c| buffer.selected_text(c)).collect();
+                parts.join("\n")
             }
         });
         if let Some(text) = text {
@@ -840,7 +915,7 @@ impl EditorView {
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self
             .buf()
-            .map(|b| b.selected_text(&self.cursor))
+            .map(|b| b.selected_text(self.cursor.primary()))
             .filter(|s| !s.is_empty() && !s.contains('\n'));
         if self.find.is_none() {
             let input = cx.new(|cx| TextInput::new("Find", cx));
@@ -946,17 +1021,20 @@ impl EditorView {
             return;
         };
         find.matches = buffer.buffer.borrow().find_all(&query);
-        let head = self.cursor.selection.range().start;
+        let head = self.cursor.selection().range().start;
         find.current = find
             .matches
             .iter()
             .position(|m| m.start >= head)
             .unwrap_or(0);
         if jump && let Some(m) = find.matches.get(find.current) {
-            self.cursor.selection = crate::Selection {
-                anchor: m.start,
-                head: m.end,
-            };
+            self.cursor = Cursors::new(Cursor {
+                selection: Selection {
+                    anchor: m.start,
+                    head: m.end,
+                },
+                ..Cursor::default()
+            });
             self.autoscroll = true;
             self.reveal_selection();
         }
@@ -972,12 +1050,19 @@ impl EditorView {
         let len = find.matches.len() as isize;
         find.current = (find.current as isize + step).rem_euclid(len) as usize;
         let m = &find.matches[find.current];
-        self.cursor.selection = crate::Selection {
-            anchor: m.start,
-            head: m.end,
-        };
+        self.cursor = Cursors::new(Cursor {
+            selection: Selection {
+                anchor: m.start,
+                head: m.end,
+            },
+            ..Cursor::default()
+        });
         self.autoscroll = true;
         self.reveal_selection();
+    }
+
+    pub(crate) fn find_open(&self) -> bool {
+        self.find.is_some()
     }
 
     pub(crate) fn find_matches(&self) -> &[Range<usize>] {
@@ -1112,13 +1197,15 @@ impl EditorView {
         let Some(current) = find.matches.get(find.current).cloned() else {
             return;
         };
-        if self.cursor.selection.range() != current {
+        if self.cursor.selection().range() != current {
             self.select_current_match();
             cx.notify();
             return;
         }
         let with = find.replace.read(cx).text().to_string();
-        self.with_buffer(cx, |b, c| b.replace_range(c, current, &with));
+        self.with_buffer(cx, |b, c| {
+            b.edit_primary(c, |b, c| b.replace_range(c, current, &with))
+        });
         self.select_current_match();
     }
 
@@ -1134,7 +1221,9 @@ impl EditorView {
             .map(|m| (m.clone(), with.clone()))
             .collect();
         if !edits.is_empty() {
-            self.with_buffer(cx, |b, c| b.apply_edits(c, &edits, None));
+            self.with_buffer(cx, |b, c| {
+                b.edit_primary(c, |b, c| b.apply_edits(c, &edits, None))
+            });
         }
     }
 
@@ -1143,33 +1232,44 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         el.on_action(cx.listener(|this, _: &IndentLines, _, cx| {
-            this.with_buffer(cx, |b, c| b.indent_lines(c, false))
+            this.with_buffer(cx, |b, c| b.indent_lines_all(c, false))
         }))
         .on_action(cx.listener(|this, _: &OutdentLines, _, cx| {
-            this.with_buffer(cx, |b, c| b.indent_lines(c, true))
+            this.with_buffer(cx, |b, c| b.indent_lines_all(c, true))
         }))
         .on_action(cx.listener(|this, _: &MoveLinesUp, _, cx| {
-            this.with_buffer(cx, |b, c| b.move_lines(c, false))
+            this.with_buffer(cx, |b, c| b.move_lines_all(c, false))
         }))
         .on_action(cx.listener(|this, _: &MoveLinesDown, _, cx| {
-            this.with_buffer(cx, |b, c| b.move_lines(c, true))
+            this.with_buffer(cx, |b, c| b.move_lines_all(c, true))
         }))
         .on_action(cx.listener(|this, _: &CopyLinesUp, _, cx| {
-            this.with_buffer(cx, |b, c| b.copy_lines(c, false))
+            this.with_buffer(cx, |b, c| b.copy_lines_all(c, false))
         }))
         .on_action(cx.listener(|this, _: &CopyLinesDown, _, cx| {
-            this.with_buffer(cx, |b, c| b.copy_lines(c, true))
+            this.with_buffer(cx, |b, c| b.copy_lines_all(c, true))
         }))
         .on_action(cx.listener(|this, _: &DeleteLines, _, cx| {
-            this.with_buffer(cx, |b, c| b.delete_lines(c))
+            this.with_buffer(cx, |b, c| b.delete_lines_all(c))
         }))
         .on_action(cx.listener(|this, _: &InsertLineBelow, _, cx| {
-            this.with_buffer(cx, |b, c| b.insert_line(c, true))
+            this.edit_each(cx, |b, c| b.insert_line(c, true))
         }))
         .on_action(cx.listener(|this, _: &InsertLineAbove, _, cx| {
-            this.with_buffer(cx, |b, c| b.insert_line(c, false))
+            this.edit_each(cx, |b, c| b.insert_line(c, false))
         }))
         .on_action(cx.listener(|this, _: &FindReplace, w, cx| this.open_find(true, w, cx)))
+        .on_action(
+            cx.listener(|this, _: &AddNextOccurrence, _, cx| this.add_next_occurrence(false, cx)),
+        )
+        .on_action(
+            cx.listener(|this, _: &SkipOccurrence, _, cx| this.add_next_occurrence(true, cx)),
+        )
+        .on_action(
+            cx.listener(|this, _: &SelectAllOccurrences, _, cx| this.select_all_occurrences(cx)),
+        )
+        .on_action(cx.listener(|this, _: &AddCursorAbove, _, cx| this.add_caret_vertically(-1, cx)))
+        .on_action(cx.listener(|this, _: &AddCursorBelow, _, cx| this.add_caret_vertically(1, cx)))
     }
 }
 
@@ -1225,8 +1325,8 @@ fn retry_open<T>(
     }
 }
 
-/// Replaces `b`'s text with `text` through one edit covering only the changed span, keeping the selection.
-fn replace_differing(b: &mut Buffer, c: &mut Cursor, text: &str) {
+/// Replaces `b`'s text with `text` through one edit covering only the changed span, keeping the selections.
+fn replace_differing(b: &mut Buffer, c: &mut Cursors, text: &str) {
     let old: Vec<char> = b.rope().chars().collect();
     let new: Vec<char> = text.chars().collect();
     if old == new {
@@ -1246,16 +1346,17 @@ fn replace_differing(b: &mut Buffer, c: &mut Cursor, text: &str) {
         // Inside the changed span, keep the offset; replacements rarely change lengths much.
         at => at.min(new_end),
     };
-    let selection = c.selection;
-    b.replace_range(
-        c,
-        prefix..old_end,
-        &new[prefix..new_end].iter().collect::<String>(),
-    );
-    c.selection = crate::Selection {
-        anchor: map(selection.anchor),
-        head: map(selection.head),
-    };
+    let before: Vec<Selection> = c.all().iter().map(|c| c.selection).collect();
+    let text: String = new[prefix..new_end].iter().collect();
+    b.edit_primary(c, |b, c| b.replace_range(c, prefix..old_end, &text));
+    let all = before.into_iter().map(|s| Cursor {
+        selection: Selection {
+            anchor: map(s.anchor),
+            head: map(s.head),
+        },
+        ..Cursor::default()
+    });
+    c.set(all.collect(), c.primary_index());
 }
 
 pub(crate) fn marker_color(severity: MarkerSeverity, t: &athena_ui::Theme) -> gpui::Hsla {
@@ -1322,10 +1423,10 @@ impl Render for EditorView {
                     }))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                     .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_left(c, false))
+                        this.move_each(cx, |b, c| b.move_left(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_right(c, false))
+                        this.move_each(cx, |b, c| b.move_right(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
                         if this.completion_open() {
@@ -1340,10 +1441,10 @@ impl Render for EditorView {
                         this.move_rows(1, false, cx)
                     }))
                     .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_left(c, true))
+                        this.move_each(cx, |b, c| b.move_left(c, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_right(c, true))
+                        this.move_each(cx, |b, c| b.move_right(c, true))
                     }))
                     .on_action(
                         cx.listener(|this, _: &SelectUp, _, cx| this.move_rows(-1, true, cx)),
@@ -1352,40 +1453,40 @@ impl Render for EditorView {
                         cx.listener(|this, _: &SelectDown, _, cx| this.move_rows(1, true, cx)),
                     )
                     .on_action(cx.listener(|this, _: &MoveWordLeft, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_word(c, false, false))
+                        this.move_each(cx, |b, c| b.move_word(c, false, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveWordRight, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_word(c, true, false))
+                        this.move_each(cx, |b, c| b.move_word(c, true, false))
                     }))
                     .on_action(cx.listener(|this, _: &SelectWordLeft, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_word(c, false, true))
+                        this.move_each(cx, |b, c| b.move_word(c, false, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectWordRight, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_word(c, true, true))
+                        this.move_each(cx, |b, c| b.move_word(c, true, true))
                     }))
                     .on_action(cx.listener(|this, _: &MoveLineStart, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_line_start(c, false))
+                        this.move_each(cx, |b, c| b.move_line_start(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveLineEnd, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_line_end(c, false))
+                        this.move_each(cx, |b, c| b.move_line_end(c, false))
                     }))
                     .on_action(cx.listener(|this, _: &SelectLineStart, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_line_start(c, true))
+                        this.move_each(cx, |b, c| b.move_line_start(c, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectLineEnd, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_line_end(c, true))
+                        this.move_each(cx, |b, c| b.move_line_end(c, true))
                     }))
                     .on_action(cx.listener(|this, _: &MoveDocStart, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_to(c, 0, false))
+                        this.move_each(cx, |b, c| b.move_to(c, 0, false))
                     }))
                     .on_action(cx.listener(|this, _: &MoveDocEnd, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_to(c, usize::MAX, false))
+                        this.move_each(cx, |b, c| b.move_to(c, usize::MAX, false))
                     }))
                     .on_action(cx.listener(|this, _: &SelectDocStart, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_to(c, 0, true))
+                        this.move_each(cx, |b, c| b.move_to(c, 0, true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectDocEnd, _, cx| {
-                        this.with_buffer(cx, |b, c| b.move_to(c, usize::MAX, true))
+                        this.move_each(cx, |b, c| b.move_to(c, usize::MAX, true))
                     }))
                     .on_action(cx.listener(|this, _: &PageUp, _, cx| {
                         let n = this.page_lines();
@@ -1399,7 +1500,7 @@ impl Render for EditorView {
                         let open = this.completion_open();
                         let signing = this.signing_shown();
                         this.typing = open || signing;
-                        this.with_buffer(cx, |b, c| b.backspace(c));
+                        this.edit_each(cx, |b, c| b.backspace(c));
                         if open {
                             this.refilter_completion(cx);
                         }
@@ -1408,56 +1509,61 @@ impl Render for EditorView {
                         }
                     }))
                     .on_action(cx.listener(|this, _: &Delete, _, cx| {
-                        this.with_buffer(cx, |b, c| b.delete_forward(c))
+                        this.edit_each(cx, |b, c| b.delete_forward(c))
                     }))
                     .on_action(cx.listener(|this, _: &DeleteWordBack, _, cx| {
-                        this.with_buffer(cx, |b, c| b.delete_word_back(c))
+                        this.edit_each(cx, |b, c| b.delete_word_back(c))
                     }))
                     .on_action(cx.listener(|this, _: &DeleteToLineStart, _, cx| {
-                        this.with_buffer(cx, |b, c| b.delete_to_line_start(c))
+                        this.edit_each(cx, |b, c| b.delete_to_line_start(c))
                     }))
                     .on_action(cx.listener(|this, _: &Newline, _, cx| {
                         if this.completion_open() {
                             return this.accept_completion(None, cx);
                         }
-                        this.with_buffer(cx, |b, c| b.newline(c))
+                        this.edit_each(cx, |b, c| b.newline(c))
                     }))
                     .on_action(cx.listener(|this, _: &Tab, _, cx| {
                         if this.completion_open() {
                             return this.accept_completion(None, cx);
                         }
-                        this.with_buffer(cx, |b, c| b.tab(c))
+                        this.with_buffer(cx, |b, c| b.tab_all(c))
                     }))
                     .on_action(
                         cx.listener(|this, _: &ShowCompletions, _, cx| this.complete_now(cx)),
                     )
                     .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.hover_at_cursor(cx)))
                     .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                        this.with_buffer(cx, |b, c| b.select_all(c))
+                        this.with_buffer(cx, |b, c| {
+                            c.collapse();
+                            b.select_all(c.primary_mut())
+                        })
                     }))
                     .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
                     .on_action(cx.listener(|this, _: &Cut, _, cx| {
                         this.copy(cx);
                         this.with_buffer(cx, |b, c| {
-                            if c.selection.is_empty() {
-                                b.select_line_at(c, c.head());
-                            }
-                            b.backspace(c);
+                            b.move_each(c, |b, c| {
+                                if c.selection.is_empty() {
+                                    b.select_line_at(c, c.head());
+                                }
+                            });
+                            b.edit_each(c, Buffer::backspace);
                         })
                     }))
                     .on_action(cx.listener(|this, _: &Paste, _, cx| {
                         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                            this.with_buffer(cx, |b, c| b.insert(c, &text));
+                            this.with_buffer(cx, |b, c| b.paste_all(c, &text));
                         }
                     }))
                     .on_action(cx.listener(|this, _: &Undo, _, cx| {
                         this.with_buffer(cx, |b, c| {
-                            b.undo(c);
+                            b.undo_all(c);
                         })
                     }))
                     .on_action(cx.listener(|this, _: &Redo, _, cx| {
                         this.with_buffer(cx, |b, c| {
-                            b.redo(c);
+                            b.redo_all(c);
                         })
                     }))
                     .on_action(cx.listener(|this, _: &Save, _, cx| this.save_formatted(cx)))
@@ -1471,7 +1577,7 @@ impl Render for EditorView {
                         cx.notify();
                     }))
                     .on_action(cx.listener(|this, _: &ToggleComment, _, cx| {
-                        this.with_buffer(cx, |b, c| b.toggle_comment(c))
+                        this.with_buffer(cx, |b, c| b.toggle_comment_all(c))
                     }))
                     .on_action(cx.listener(|this, _: &Escape, _, cx| {
                         if this.dismiss_completion(cx)
@@ -1480,9 +1586,14 @@ impl Render for EditorView {
                         {
                             return;
                         }
-                        if !this.close_find(cx) {
+                        if this.close_find(cx) {
+                            return;
+                        }
+                        if this.cursor.is_multi() {
+                            this.with_buffer(cx, |_, c| c.collapse());
+                        } else {
                             let head = this.cursor.head();
-                            this.with_buffer(cx, |b, c| b.move_to(c, head, false));
+                            this.move_each(cx, |b, c| b.move_to(c, head, false));
                         }
                     }))
                     .on_action(cx.listener(|this, _: &FoldAtCursor, _, cx| this.fold_at_cursor(cx)))
@@ -1536,39 +1647,45 @@ impl EditorView {
         *cache.1.entry(line).or_insert_with(|| buffer.fold_at(line))
     }
 
-    /// Unfolds whatever hides the selection's ends, as a cursor never sits inside a fold.
-    fn reveal_selection(&mut self) {
+    /// Unfolds whatever hides a selection's ends, as a caret never sits inside a fold.
+    pub(crate) fn reveal_selection(&mut self) {
         if self.display.is_empty() {
             return;
         }
-        let selection = self.cursor.selection;
-        let Some((anchor, head)) = self
-            .buf()
-            .map(|b| (b.line_of(selection.anchor), b.line_of(selection.head)))
-        else {
+        let Some(shared) = self.buffer.clone() else {
             return;
         };
-        self.display.reveal(anchor);
-        self.display.reveal(head);
+        let b = shared.buffer.borrow();
+        for c in self.cursor.all() {
+            self.display.reveal(b.line_of(c.selection.anchor));
+            self.display.reveal(b.line_of(c.selection.head));
+        }
     }
 
     /// Vertical moves count visual rows, so folded blocks are stepped over.
     fn move_rows(&mut self, rows: isize, extend: bool, cx: &mut Context<Self>) {
-        let Some((line, lines)) = self
-            .buf()
-            .map(|b| (b.line_of(self.cursor.head()), b.len_lines()))
-        else {
+        self.follow_edits();
+        let Some(targets) = self.buf().map(|b| {
+            let count = self.display.row_count(b.len_lines()) as isize;
+            let all = self.cursor.all();
+            all.iter()
+                .map(|c| {
+                    let row = self.display.row_of(b.line_of(c.head())) as isize + rows;
+                    (0..count)
+                        .contains(&row)
+                        .then(|| self.display.line_of(row as usize))
+                })
+                .collect::<Vec<_>>()
+        }) else {
             return;
         };
-        let row = self.display.row_of(line) as isize + rows;
-        let count = self.display.row_count(lines) as isize;
-        let target = (0..count)
-            .contains(&row)
-            .then(|| self.display.line_of(row as usize));
-        let len = lines as isize;
-        self.with_buffer(cx, |b, c| match target {
+        let mut targets = targets.into_iter();
+        self.move_each(cx, |b, c| match targets.next().flatten() {
             Some(line) => b.move_to_line(c, line, extend),
-            None => b.move_vertical(c, if row < 0 { -len } else { len }, extend),
+            None => {
+                let len = b.len_lines() as isize;
+                b.move_vertical(c, if rows < 0 { -len } else { len }, extend)
+            }
         });
     }
 
@@ -1596,17 +1713,20 @@ impl EditorView {
         true
     }
 
-    /// Moves a cursor that a new fold swallowed up to that fold's header.
+    /// Moves carets that a new fold swallowed up to that fold's header.
     fn cursor_out_of_folds(&mut self) {
         let Some(shared) = self.buffer.clone() else {
             return;
         };
         let b = shared.buffer.borrow();
-        let line = b.line_of(self.cursor.head());
-        if let Some(fold) = self.display.fold_containing(line) {
-            let col = b.column_of(self.cursor.head());
-            b.move_to(&mut self.cursor, b.char_at(fold.header(), col), false);
-        }
+        let display = &self.display;
+        b.move_each(&mut self.cursor, |b, c| {
+            let line = b.line_of(c.head());
+            if let Some(fold) = display.fold_containing(line) {
+                let col = b.column_of(c.head());
+                b.move_to(c, b.char_at(fold.header(), col), false);
+            }
+        });
     }
 
     fn fold_at_cursor(&mut self, cx: &mut Context<Self>) {
@@ -1714,7 +1834,7 @@ impl EditorView {
         };
         self.seen = shared.buffer.borrow().version();
         self._buffer_watch = Some(Self::watch(&shared, cx));
-        self.cursor = Cursor::default();
+        self.cursor = Cursors::default();
         self.buffer = Some(shared);
         self.changed(cx);
         cx.emit(EditorEvent::Opened);
@@ -1805,7 +1925,8 @@ impl EditorView {
             let fork = shared::adopt(fork, &path, cx);
             self.seen = fork.buffer.borrow().version();
             self._buffer_watch = Some(Self::watch(&fork, cx));
-            self.cursor.follow([], fork.buffer.borrow().len_chars());
+            self.cursor
+                .follow(std::iter::empty(), fork.buffer.borrow().len_chars());
             self.buffer = Some(fork);
         } else {
             shared.buffer.borrow_mut().save_as(path.clone())?;
@@ -1950,8 +2071,8 @@ impl EntityInputHandler for EditorView {
             self.typing = true;
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
-                (Some(ch), None) => self.with_buffer(cx, |b, c| b.type_char(c, ch)),
-                _ => self.with_buffer(cx, |b, c| b.insert(c, &text)),
+                (Some(ch), None) => self.edit_each(cx, |b, c| b.type_char(c, ch)),
+                _ => self.edit_each(cx, |b, c| b.insert(c, &text)),
             }
             self.completion_after_typing(&text, cx);
             self.signature_after_typing(&text, cx);
@@ -2019,9 +2140,17 @@ impl EditorView {
         // As in VS Code, a right-click outside the selection moves the cursor there first.
         if let Some(at) = self.char_at_position(event.position)
             && let Some(buffer) = self.buffer.clone()
-            && !self.cursor.selection.range().contains(&at)
+            && !self
+                .cursor
+                .all()
+                .iter()
+                .any(|c| c.selection.range().contains(&at))
         {
-            buffer.buffer.borrow().move_to(&mut self.cursor, at, false);
+            self.cursor.collapse();
+            buffer
+                .buffer
+                .borrow()
+                .move_to(self.cursor.primary_mut(), at, false);
             self.note_cursor_line(false, cx);
             cx.notify();
         }
@@ -2075,8 +2204,10 @@ pub struct EditorStatus {
     pub line: usize,
     /// 1-based cursor column with tabs expanded, as VS Code counts it.
     pub column: usize,
-    /// Characters selected.
+    /// Characters selected, over every caret.
     pub selected: usize,
+    /// How many carets there are.
+    pub carets: usize,
     pub lang: Option<crate::Lang>,
     pub indent: crate::Indent,
     pub line_ending: crate::LineEnding,
@@ -2095,7 +2226,13 @@ impl EditorView {
         Some(EditorStatus {
             line: line + 1,
             column: column + 1,
-            selected: self.cursor.selection.range().len(),
+            selected: self
+                .cursor
+                .all()
+                .iter()
+                .map(|c| c.selection.range().len())
+                .sum(),
+            carets: self.cursor.len(),
             lang: b.lang(),
             indent: b.indent,
             line_ending: b.line_ending(),
@@ -2125,7 +2262,7 @@ impl EditorView {
 
     /// Rewrites every line's indentation as `indent` and keeps using it; one undo step.
     pub fn convert_indentation(&mut self, indent: crate::Indent, cx: &mut Context<Self>) {
-        self.with_buffer(cx, |b, c| b.convert_indentation(c, indent));
+        self.with_buffer(cx, |b, c| b.convert_indentation_all(c, indent));
     }
 }
 
@@ -2165,14 +2302,14 @@ mod tests {
     #[test]
     fn replacing_text_is_one_undo_step_that_keeps_the_cursor() {
         let mut b = Buffer::new("let old = 1;\nkeep\nold();\n", None);
-        let mut c = Cursor::at(b.line_start(1) + 2);
+        let mut c = Cursors::new(Cursor::at(b.line_start(1) + 2));
         replace_differing(&mut b, &mut c, "let new = 1;\nkeep\nnew();\n");
         assert_eq!(b.full_text(), "let new = 1;\nkeep\nnew();\n");
         assert_eq!(c.head(), b.line_start(1) + 2);
-        b.undo(&mut c);
+        b.undo_all(&mut c);
         assert_eq!(b.full_text(), "let old = 1;\nkeep\nold();\n");
         replace_differing(&mut b, &mut c, "let old = 1;\nkeep\nold();\n");
-        assert!(!b.undo(&mut c), "an unchanged text adds no undo step");
+        assert!(!b.undo_all(&mut c), "an unchanged text adds no undo step");
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod image;
 mod line_jump;
 mod lines;
 mod lsp_ui;
+mod multi;
 mod pairs;
 pub mod recovery;
 mod shared;
@@ -17,7 +18,9 @@ mod signature;
 mod syntax;
 mod view;
 
-pub use buffer::{Buffer, Cursor, DiskState, Edit, Indent, LineEnding, SaveError, Selection};
+pub use buffer::{
+    Buffer, Cursor, Cursors, DiskState, Edit, Indent, LineEnding, SaveError, Selection,
+};
 pub use completion::{Completion, ServerEdit};
 pub use diff_view::{DiffEvent, DiffView, HunkActions};
 pub use hover::HoverBlock;

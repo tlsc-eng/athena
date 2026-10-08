@@ -360,12 +360,25 @@ impl EditorView {
                 }
                 None => start..head,
             };
+            // Other carets replace as many chars before them as the primary's word, as VS Code does.
+            let typed = head.saturating_sub(main.start);
             let mut edits = vec![(main, item.text.clone())];
             edits.extend(item.additional_edits.iter().map(|e| {
                 let from = b.char_at_utf16(e.start.0, e.start.1);
                 (from..b.char_at_utf16(e.end.0, e.end.1), e.text.clone())
             }));
-            b.apply_edits(c, &edits, item.select.clone());
+            let primary = c.primary_index();
+            b.edit_carets(c, false, |b, c, i| {
+                if i == primary {
+                    b.apply_edits(c, &edits, item.select.clone());
+                } else if c.selection.is_empty() {
+                    let at = c.head();
+                    let from = at - typed.min(b.column_of(at));
+                    b.replace_range(c, from..at, &item.text);
+                } else {
+                    b.insert(c, &item.text);
+                }
+            });
         });
         // A function just completed into its parentheses shows its parameters, as in VS Code.
         let head = self.cursor.head();

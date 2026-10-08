@@ -5,14 +5,14 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::buffer::Cursor;
+use crate::buffer::Cursors;
 use crate::view::EditorView;
 
 /// The Ctrl+G box: moves the cursor as a line number is typed, and back on Escape.
 pub(crate) struct LineJump {
     input: Entity<TextInput>,
     /// Where the cursor and scroll were, for Escape to return to.
-    origin: (Cursor, Point<f32>),
+    origin: (Cursors, Point<f32>),
     opened: Opening,
     _subscriptions: [Subscription; 2],
 }
@@ -71,7 +71,7 @@ impl EditorView {
         window.focus(&input.focus_handle(cx));
         self.line_jump = Some(LineJump {
             input,
-            origin: (self.cursor, self.scroll),
+            origin: (self.cursor.clone(), self.scroll),
             opened: Opening::now(),
             _subscriptions: [events, blur],
         });
@@ -83,7 +83,8 @@ impl EditorView {
         self.with_buffer(cx, |b, c| {
             let line = (line.max(1) as usize - 1).min(b.len_lines().saturating_sub(1));
             let column = column.map_or(0, |c| c.max(1) as usize - 1);
-            b.move_to(c, b.char_at(line, column), false);
+            c.collapse();
+            b.move_to(c.primary_mut(), b.char_at(line, column), false);
         });
         self.center_cursor = true;
     }

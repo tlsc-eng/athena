@@ -44,11 +44,11 @@ impl Selection {
     }
 }
 
-/// One view's selection and the column its vertical moves aim for; a buffer has none of its own.
+/// One caret's selection and the column its vertical moves aim for; a buffer has none of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Cursor {
     pub selection: Selection,
-    goal_column: Option<usize>,
+    pub(crate) goal_column: Option<usize>,
     pub(crate) closed: AutoClosed,
 }
 
@@ -75,6 +75,203 @@ impl Cursor {
         }
         self.selection.anchor = self.selection.anchor.min(len);
         self.selection.head = self.selection.head.min(len);
+    }
+
+    /// Follows an edit this view made at another caret, keeping the column goal and closers.
+    fn map_edit(&mut self, edit: &Edit) {
+        self.selection.anchor = edit.map(self.selection.anchor);
+        self.selection.head = edit.map(self.selection.head);
+        self.closed.retain_map(|at| Some(edit.map(at)));
+    }
+
+    fn shift(&mut self, by: isize) {
+        let at = |p: usize| p.saturating_add_signed(by);
+        self.selection.anchor = at(self.selection.anchor);
+        self.selection.head = at(self.selection.head);
+        self.closed.retain_map(|p| Some(at(p)));
+    }
+}
+
+/// Every caret of a view, in text order and never overlapping, one of them primary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cursors {
+    all: Vec<Cursor>,
+    primary: usize,
+}
+
+impl Default for Cursors {
+    fn default() -> Self {
+        Self::new(Cursor::default())
+    }
+}
+
+impl From<Cursor> for Cursors {
+    fn from(c: Cursor) -> Self {
+        Self::new(c)
+    }
+}
+
+impl Cursors {
+    pub fn new(c: Cursor) -> Self {
+        Self {
+            all: vec![c],
+            primary: 0,
+        }
+    }
+
+    /// The caret that scrolling, the status bar and language features follow.
+    pub fn primary(&self) -> &Cursor {
+        &self.all[self.primary]
+    }
+
+    pub fn primary_mut(&mut self) -> &mut Cursor {
+        &mut self.all[self.primary]
+    }
+
+    pub fn primary_index(&self) -> usize {
+        self.primary
+    }
+
+    pub fn head(&self) -> usize {
+        self.primary().head()
+    }
+
+    pub fn selection(&self) -> Selection {
+        self.primary().selection
+    }
+
+    pub fn all(&self) -> &[Cursor] {
+        &self.all
+    }
+
+    pub fn len(&self) -> usize {
+        self.all.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.all.is_empty()
+    }
+
+    pub fn is_multi(&self) -> bool {
+        self.all.len() > 1
+    }
+
+    /// Drops every caret but the primary.
+    pub fn collapse(&mut self) {
+        let primary = *self.primary();
+        *self = Self::new(primary);
+    }
+
+    /// Adds a caret, which becomes the primary, merging any it overlaps.
+    pub fn add(&mut self, c: Cursor) {
+        self.all.push(c);
+        self.primary = self.all.len() - 1;
+        self.normalize();
+    }
+
+    /// Removes the caret at `index` unless it is the last one.
+    pub fn remove(&mut self, index: usize) {
+        if self.all.len() < 2 || index >= self.all.len() {
+            return;
+        }
+        self.all.remove(index);
+        if self.primary > index || self.primary == self.all.len() {
+            self.primary = self.primary.saturating_sub(1);
+        }
+    }
+
+    /// Replaces every caret, `primary` indexing into `all`.
+    pub fn set(&mut self, all: Vec<Cursor>, primary: usize) {
+        if all.is_empty() {
+            return;
+        }
+        self.primary = primary.min(all.len() - 1);
+        self.all = all;
+        self.normalize();
+    }
+
+    /// Restores carets saved as selections, as undo does.
+    fn restore(&mut self, carets: &Carets) {
+        let all = carets.selections.iter().map(|&selection| Cursor {
+            selection,
+            ..Cursor::default()
+        });
+        self.set(all.collect(), carets.primary);
+    }
+
+    fn carets(&self) -> Carets {
+        Carets {
+            selections: self.all.iter().map(|c| c.selection).collect(),
+            primary: self.primary,
+        }
+    }
+
+    /// Follows edits made through another view, and clamps to a text of `len` chars.
+    pub fn follow<'a>(&mut self, edits: impl IntoIterator<Item = &'a Edit> + Clone, len: usize) {
+        for c in &mut self.all {
+            c.follow(edits.clone(), len);
+        }
+        self.normalize();
+    }
+
+    /// Sorts the carets and merges those that overlap, as VS Code does; touching selections stay
+    /// apart but an empty caret joins a selection it touches.
+    pub fn normalize(&mut self) {
+        if self.all.len() < 2 {
+            return;
+        }
+        let key = |c: &Cursor| (c.selection.range().start, c.selection.range().end);
+        if !self.all.windows(2).all(|w| key(&w[0]) <= key(&w[1])) {
+            let primary = self.all[self.primary];
+            self.all.sort_by_key(key);
+            self.primary = self.all.iter().position(|c| *c == primary).unwrap_or(0);
+        }
+        let mut merged: Vec<Cursor> = Vec::with_capacity(self.all.len());
+        let mut primary = 0;
+        for (i, c) in self.all.iter().enumerate() {
+            if let Some(last) = merged.last_mut() {
+                let (a, b) = (last.selection.range(), c.selection.range());
+                let touch = b.start == a.end && (a.is_empty() || b.is_empty());
+                if b.start < a.end || touch {
+                    let end = a.end.max(b.end);
+                    if last.selection.head < last.selection.anchor {
+                        last.selection.anchor = end;
+                    } else {
+                        last.selection.head = end;
+                    }
+                    if i == self.primary {
+                        primary = merged.len() - 1;
+                    }
+                    continue;
+                }
+            }
+            if i == self.primary {
+                primary = merged.len();
+            }
+            merged.push(*c);
+        }
+        self.all = merged;
+        self.primary = primary;
+    }
+}
+
+/// The selections of every caret, saved with an undo step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Carets {
+    selections: Vec<Selection>,
+    primary: usize,
+}
+
+impl Carets {
+    fn one(selection: Selection) -> Self {
+        Self {
+            selections: vec![selection],
+            primary: 0,
+        }
+    }
+
+    fn is(&self, selection: Selection) -> bool {
+        self.selections.len() == 1 && self.selections[0] == selection
     }
 }
 
@@ -172,6 +369,20 @@ enum EditKind {
     Other,
 }
 
+impl EditKind {
+    /// The kind of a step made of edits of both kinds.
+    fn and(self, other: Self) -> Self {
+        if self == other { self } else { Self::Other }
+    }
+}
+
+/// Changes made at several carets, gathered into one undo step.
+#[derive(Default)]
+struct Batch {
+    changes: Vec<Change>,
+    kind: Option<EditKind>,
+}
+
 #[derive(Clone, Debug)]
 struct Change {
     start: usize,
@@ -182,8 +393,8 @@ struct Change {
 #[derive(Clone, Debug)]
 struct Transaction {
     changes: Vec<Change>,
-    before: Selection,
-    after: Selection,
+    before: Carets,
+    after: Carets,
 }
 
 pub struct Buffer {
@@ -201,6 +412,11 @@ pub struct Buffer {
     edits: VecDeque<Edit>,
     /// The file as last read or written, to notice edits made elsewhere; `None` before it existed.
     disk: Option<Stamp>,
+    /// Set while edits at several carets gather into one undo step.
+    batch: Option<Batch>,
+    /// Set while several changes share one parse, which is owed once they are all applied.
+    defer_parse: bool,
+    parse_owed: bool,
 }
 
 /// What a file looked like on disk; tools that keep the modification time still change its size.
@@ -259,6 +475,9 @@ impl Buffer {
             last_edit: None,
             edits: VecDeque::new(),
             disk: None,
+            batch: None,
+            defer_parse: false,
+            parse_owed: false,
         }
     }
 
@@ -375,13 +594,15 @@ impl Buffer {
     pub fn reload_from_disk(&mut self, c: &mut Cursor) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
         let disk = read_disk_text(&path, &self.rope)?;
-        self.take_disk_text(c, disk);
+        let mut cs = Cursors::new(*c);
+        self.take_disk_text(&mut cs, disk);
+        *c = *cs.primary();
         Ok(())
     }
 
     /// Applies a file read by [`read_disk_text`] against this buffer's current text and marks it
     /// saved; reloads with no edit between them undo as one step.
-    pub(crate) fn take_disk_text(&mut self, c: &mut Cursor, disk: DiskText) {
+    pub(crate) fn take_disk_text(&mut self, cs: &mut Cursors, disk: DiskText) {
         self.disk = Some(disk.stamp);
         if let Some((range, inserted)) = disk.change {
             let (prefix, old_end) = (range.start, range.end);
@@ -391,12 +612,16 @@ impl Buffer {
                 at if at >= old_end => at - old_end + new_end,
                 _ => new_end,
             };
-            let selection = c.selection;
-            self.replace(c, range, &inserted, EditKind::Reload);
-            c.selection = Selection {
-                anchor: map(selection.anchor),
-                head: map(selection.head),
-            };
+            let before: Vec<Selection> = cs.all().iter().map(|c| c.selection).collect();
+            self.edit_primary(cs, |b, c| b.replace(c, range, &inserted, EditKind::Reload));
+            let all = before.into_iter().map(|s| Cursor {
+                selection: Selection {
+                    anchor: map(s.anchor),
+                    head: map(s.head),
+                },
+                ..Cursor::default()
+            });
+            cs.set(all.collect(), cs.primary_index());
         } else if self.last_edit.is_some_and(|(k, _)| k != EditKind::Reload) {
             // The next keystroke must start a new undo step, or it would fold into the saved one.
             self.last_edit = None;
@@ -555,9 +780,64 @@ impl Buffer {
 
     fn reparse(&mut self, edit: &InputEdit) {
         if let Some(syntax) = self.syntax.as_mut() {
-            syntax.edit(edit, &self.rope);
+            if self.defer_parse {
+                syntax.edit_tree(edit);
+                self.parse_owed = true;
+            } else {
+                syntax.edit(edit, &self.rope);
+            }
         }
         self.version += 1;
+    }
+
+    /// Runs `f` with parsing put off until it returns, so its changes cost one parse.
+    fn parse_once<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let nested = std::mem::replace(&mut self.defer_parse, true);
+        let out = f(self);
+        if !nested {
+            self.defer_parse = false;
+            if std::mem::take(&mut self.parse_owed)
+                && let Some(syntax) = self.syntax.as_mut()
+            {
+                syntax.reparse(&self.rope);
+            }
+        }
+        out
+    }
+
+    /// Files `changes` as an undo step, or into the open batch; typing and deleting within
+    /// [`UNDO_GROUP`] of the same kind join the step before when it ended where they start.
+    fn commit(&mut self, changes: Vec<Change>, before: Carets, after: Carets, kind: EditKind) {
+        self.redo.clear();
+        if let Some(batch) = self.batch.as_mut() {
+            batch.changes.extend(changes);
+            batch.kind = Some(batch.kind.map_or(kind, |k| k.and(kind)));
+            return;
+        }
+        let now = Instant::now();
+        let joins = match kind {
+            EditKind::Other => false,
+            EditKind::Reload => self.last_edit.is_some_and(|(k, _)| k == kind),
+            _ => {
+                self.last_edit
+                    .is_some_and(|(k, t)| k == kind && now - t < UNDO_GROUP)
+                    && self.undo.last().is_some_and(|t| t.after == before)
+            }
+        };
+        self.last_edit = Some((kind, now));
+        if joins && let Some(last) = self.undo.last_mut() {
+            last.changes.extend(changes);
+            last.after = after;
+            return;
+        }
+        if self.saved_at.is_some_and(|at| at > self.undo.len()) {
+            self.saved_at = None;
+        }
+        self.undo.push(Transaction {
+            changes,
+            before,
+            after,
+        });
     }
 
     /// Replaces `range` with `text` and leaves the cursor after it, as one undo step.
@@ -579,32 +859,12 @@ impl Buffer {
             p if p >= end => Some(p - (end - range.start) + inserted),
             _ => None,
         });
-        self.redo.clear();
-
-        let now = Instant::now();
-        let joins = match kind {
-            EditKind::Other => false,
-            EditKind::Reload => self.last_edit.is_some_and(|(k, _)| k == kind),
-            _ => {
-                self.last_edit
-                    .is_some_and(|(k, t)| k == kind && now - t < UNDO_GROUP)
-                    && self.undo.last().is_some_and(|t| t.after == before)
-            }
-        };
-        self.last_edit = Some((kind, now));
-        if joins && let Some(last) = self.undo.last_mut() {
-            last.changes.push(change);
-            last.after = c.selection;
-            return;
-        }
-        if self.saved_at.is_some_and(|at| at > self.undo.len()) {
-            self.saved_at = None;
-        }
-        self.undo.push(Transaction {
-            changes: vec![change],
-            before,
-            after: c.selection,
-        });
+        self.commit(
+            vec![change],
+            Carets::one(before),
+            Carets::one(c.selection),
+            kind,
+        );
     }
 
     pub fn insert(&mut self, c: &mut Cursor, text: &str) {
@@ -661,17 +921,20 @@ impl Buffer {
             .map(|(r, t)| t.chars().count() as isize - r.len() as isize)
             .sum();
         let before = c.selection;
-        let mut changes = Vec::new();
-        for (range, text) in order {
-            let change = Change {
-                start: range.start,
-                deleted: self.rope.slice(range).to_string(),
-                inserted: text.to_string(),
-            };
-            let edit = self.apply(&change);
-            self.reparse(&edit);
-            changes.push(change);
-        }
+        let changes = self.parse_once(|b| {
+            let mut changes = Vec::new();
+            for (range, text) in order {
+                let change = Change {
+                    start: range.start,
+                    deleted: b.rope.slice(range).to_string(),
+                    inserted: text.to_string(),
+                };
+                let edit = b.apply(&change);
+                b.reparse(&edit);
+                changes.push(change);
+            }
+            changes
+        });
         let start = (main.start as isize + shift) as usize;
         let select = select.unwrap_or_else(|| {
             let end = main_text.chars().count();
@@ -684,16 +947,12 @@ impl Buffer {
             },
             ..Cursor::default()
         };
-        self.redo.clear();
-        self.last_edit = None;
-        if self.saved_at.is_some_and(|at| at > self.undo.len()) {
-            self.saved_at = None;
-        }
-        self.undo.push(Transaction {
+        self.commit(
             changes,
-            before,
-            after: c.selection,
-        });
+            Carets::one(before),
+            Carets::one(c.selection),
+            EditKind::Other,
+        );
     }
 
     pub fn newline(&mut self, c: &mut Cursor) {
@@ -739,18 +998,34 @@ impl Buffer {
     /// within one line, as VS Code does.
     pub fn tab(&mut self, c: &mut Cursor) {
         let range = c.selection.range();
-        if !range.is_empty() {
-            let (first, last) = (self.line_of(range.start), self.line_of(range.end));
-            let line_end = self.line_start(first) + self.line_len(first);
-            if first != last || (range.start == self.line_start(first) && range.end == line_end) {
-                return self.indent_lines(c, false);
-            }
+        if self.tab_indents(c.selection) {
+            return self.indent_lines(c, false);
         }
         let unit = match self.indent {
             Indent::Tab => "\t".to_string(),
             Indent::Spaces(n) => " ".repeat(n - self.column_of(range.start) % n),
         };
         self.replace(c, range, &unit, EditKind::Insert);
+    }
+
+    /// Whether Tab over `selection` indents its lines: it spans lines or one whole line.
+    fn tab_indents(&self, selection: Selection) -> bool {
+        let range = selection.range();
+        if range.is_empty() {
+            return false;
+        }
+        let (first, last) = (self.line_of(range.start), self.line_of(range.end));
+        let line_end = self.line_start(first) + self.line_len(first);
+        first != last || (range.start == self.line_start(first) && range.end == line_end)
+    }
+
+    /// Tab at every caret: indents all their lines if any caret would, else inserts at each.
+    pub fn tab_all(&mut self, cs: &mut Cursors) {
+        if cs.all().iter().any(|c| self.tab_indents(c.selection)) {
+            self.indent_lines_all(cs, false);
+        } else {
+            self.edit_each(cs, |b, c| b.tab(c));
+        }
     }
 
     pub fn backspace(&mut self, c: &mut Cursor) {
@@ -808,39 +1083,52 @@ impl Buffer {
 
     /// Takes back the last change, whichever view made it, and puts `c` where it was before.
     pub fn undo(&mut self, c: &mut Cursor) -> bool {
+        let mut cs = Cursors::new(*c);
+        let undone = self.undo_all(&mut cs);
+        *c = *cs.primary();
+        undone
+    }
+
+    pub fn redo(&mut self, c: &mut Cursor) -> bool {
+        let mut cs = Cursors::new(*c);
+        let redone = self.redo_all(&mut cs);
+        *c = *cs.primary();
+        redone
+    }
+
+    /// Takes back the last change, whichever view made it, and puts every caret where it was.
+    pub fn undo_all(&mut self, cs: &mut Cursors) -> bool {
         let Some(tx) = self.undo.pop() else {
             return false;
         };
-        for change in tx.changes.iter().rev() {
-            let inverse = Change {
-                start: change.start,
-                deleted: change.inserted.clone(),
-                inserted: change.deleted.clone(),
-            };
-            let edit = self.apply(&inverse);
-            self.reparse(&edit);
-        }
-        *c = Cursor {
-            selection: tx.before,
-            ..Cursor::default()
-        };
+        self.parse_once(|b| {
+            for change in tx.changes.iter().rev() {
+                let inverse = Change {
+                    start: change.start,
+                    deleted: change.inserted.clone(),
+                    inserted: change.deleted.clone(),
+                };
+                let edit = b.apply(&inverse);
+                b.reparse(&edit);
+            }
+        });
+        cs.restore(&tx.before);
         self.redo.push(tx);
         self.last_edit = None;
         true
     }
 
-    pub fn redo(&mut self, c: &mut Cursor) -> bool {
+    pub fn redo_all(&mut self, cs: &mut Cursors) -> bool {
         let Some(tx) = self.redo.pop() else {
             return false;
         };
-        for change in &tx.changes {
-            let edit = self.apply(change);
-            self.reparse(&edit);
-        }
-        *c = Cursor {
-            selection: tx.after,
-            ..Cursor::default()
-        };
+        self.parse_once(|b| {
+            for change in &tx.changes {
+                let edit = b.apply(change);
+                b.reparse(&edit);
+            }
+        });
+        cs.restore(&tx.after);
         self.undo.push(tx);
         self.last_edit = None;
         true
@@ -848,106 +1136,130 @@ impl Buffer {
 
     /// Comments or uncomments every line the selection touches.
     pub fn toggle_comment(&mut self, c: &mut Cursor) {
+        self.with_one(c, Self::toggle_comment_all);
+    }
+
+    /// Comments or uncomments the lines every caret touches, each block of lines on its own;
+    /// one caret ends selecting its lines, several keep their places in the text.
+    pub fn toggle_comment_all(&mut self, cs: &mut Cursors) {
         let Some(prefix) = self.lang().and_then(Lang::comment_prefix) else {
             return;
         };
-        let range = c.selection.range();
-        let first = self.line_of(range.start);
-        let mut last = self.line_of(range.end);
-        if last > first && range.end == self.line_start(last) {
-            last -= 1;
-        }
-        let lines: Vec<String> = (first..=last).map(|l| self.line(l)).collect();
         let code = |l: &String| !l.trim().is_empty();
-        // Only ASCII blanks count as indent, so slicing by it never lands inside a wider char.
+        // Only ASCII blanks count as indent, so their byte length is their char count.
         let blank = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
-        let all_commented = lines
-            .iter()
-            .filter(|l| code(l))
-            .all(|l| l[blank(l)..].starts_with(prefix.trim_end()));
-        let indent = lines
-            .iter()
-            .filter(|l| code(l))
-            .map(|l| blank(l))
-            .min()
-            .unwrap_or(0);
-        let rewritten: Vec<String> = lines
-            .iter()
-            .map(|l| {
-                if !code(l) {
-                    l.clone()
-                } else if all_commented {
-                    let at = blank(l);
-                    let rest = &l[at..];
-                    let rest = rest
-                        .strip_prefix(prefix)
-                        .or_else(|| rest.strip_prefix(prefix.trim_end()))
-                        .unwrap_or(rest);
-                    format!("{}{rest}", &l[..at])
-                } else {
-                    format!("{}{prefix}{}", &l[..indent], &l[indent..])
+        let mut changes = Vec::new();
+        let mut span = 0..0;
+        for (first, last, _) in self.line_blocks(cs, false) {
+            let lines: Vec<String> = (first..=last).map(|l| self.line(l)).collect();
+            let all_commented = lines
+                .iter()
+                .filter(|l| code(l))
+                .all(|l| l[blank(l)..].starts_with(prefix.trim_end()));
+            let indent = lines
+                .iter()
+                .filter(|l| code(l))
+                .map(|l| blank(l))
+                .min()
+                .unwrap_or(0);
+            for (line, text) in (first..=last).zip(&lines) {
+                if !code(text) {
+                    continue;
                 }
-            })
-            .collect();
-        let start = self.line_start(first);
-        let end = self.line_start(last) + self.line_len(last);
-        // Each line keeps the break it had, so CRLF files stay CRLF.
-        let mut text = String::new();
-        for (l, line) in (first..=last).zip(&rewritten) {
-            text.push_str(line);
-            if l < last {
-                text.push_str(
-                    &self.text(self.line_start(l) + self.line_len(l)..self.line_start(l + 1)),
-                );
+                let start = self.line_start(line);
+                if all_commented {
+                    let at = start + blank(text);
+                    let rest = &text[blank(text)..];
+                    let strip = if rest.starts_with(prefix) {
+                        prefix
+                    } else {
+                        prefix.trim_end()
+                    };
+                    changes.push((at..at + strip.chars().count(), String::new()));
+                } else {
+                    changes.push((start + indent..start + indent, prefix.to_string()));
+                }
             }
+            span = self.line_start(first)..self.line_start(last) + self.line_len(last);
         }
-        self.replace(c, start..end, &text, EditKind::Other);
-        let new_end = start + text.chars().count();
-        c.selection = Selection {
-            anchor: start,
-            head: new_end,
+        let after = if cs.is_multi() {
+            let at = |p: usize| through_indents(&changes, p, false);
+            cs.all()
+                .iter()
+                .map(|c| Selection {
+                    anchor: at(c.selection.anchor),
+                    head: at(c.selection.head),
+                })
+                .collect()
+        } else {
+            let grown: isize = changes
+                .iter()
+                .map(|(r, t)| t.chars().count() as isize - r.len() as isize)
+                .sum();
+            vec![Selection {
+                anchor: span.start,
+                head: span.end.saturating_add_signed(grown),
+            }]
         };
+        self.transact_all(cs, changes, after);
     }
 
     /// Applies non-overlapping `changes`, in offsets of the current text, as one undo step that
     /// leaves `after` selected.
-    fn transact(
-        &mut self,
-        c: &mut Cursor,
-        mut changes: Vec<(Range<usize>, String)>,
-        after: Selection,
-    ) {
+    fn transact(&mut self, c: &mut Cursor, changes: Vec<(Range<usize>, String)>, after: Selection) {
         let before = c.selection;
         *c = Cursor {
             selection: after,
             ..Cursor::default()
         };
+        self.transact_carets(changes, Carets::one(before), Carets::one(after));
+    }
+
+    /// As [`Self::transact`], leaving each caret at the selection `after` lists for it.
+    fn transact_all(
+        &mut self,
+        cs: &mut Cursors,
+        changes: Vec<(Range<usize>, String)>,
+        after: Vec<Selection>,
+    ) {
+        let before = cs.carets();
+        let all = after
+            .into_iter()
+            .map(|selection| Cursor {
+                selection,
+                ..Cursor::default()
+            })
+            .collect();
+        cs.set(all, cs.primary_index());
+        self.transact_carets(changes, before, cs.carets());
+    }
+
+    fn transact_carets(
+        &mut self,
+        mut changes: Vec<(Range<usize>, String)>,
+        before: Carets,
+        after: Carets,
+    ) {
         if changes.is_empty() {
             return;
         }
         // Later changes first, so each one's offsets still hold when it is applied.
         changes.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
-        let mut applied = Vec::with_capacity(changes.len());
-        for (range, inserted) in changes {
-            let change = Change {
-                start: range.start,
-                deleted: self.rope.slice(range).to_string(),
-                inserted,
-            };
-            let edit = self.apply(&change);
-            self.reparse(&edit);
-            applied.push(change);
-        }
-        self.redo.clear();
-        self.last_edit = None;
-        if self.saved_at.is_some_and(|at| at > self.undo.len()) {
-            self.saved_at = None;
-        }
-        self.undo.push(Transaction {
-            changes: applied,
-            before,
-            after,
+        let applied = self.parse_once(|b| {
+            let mut applied = Vec::with_capacity(changes.len());
+            for (range, inserted) in changes {
+                let change = Change {
+                    start: range.start,
+                    deleted: b.rope.slice(range).to_string(),
+                    inserted,
+                };
+                let edit = b.apply(&change);
+                b.reparse(&edit);
+                applied.push(change);
+            }
+            applied
         });
+        self.commit(applied, before, after, EditKind::Other);
     }
 
     /// The lines a selection covers; one ending at the start of a line leaves that line out.
@@ -982,41 +1294,58 @@ impl Buffer {
     /// Moves every selected line to the next indentation stop, or the previous one with
     /// `outdent`, rewriting its indentation in the buffer's style; one undo step.
     pub fn indent_lines(&mut self, c: &mut Cursor, outdent: bool) {
-        let (first, last) = self.selected_lines(c.selection);
+        self.with_one(c, |b, cs| b.indent_lines_all(cs, outdent));
+    }
+
+    /// As [`Self::indent_lines`] for every caret, each line moving once however many share it.
+    pub fn indent_lines_all(&mut self, cs: &mut Cursors, outdent: bool) {
         let size = self.indent.size().max(1);
         let mut changes = Vec::new();
-        for line in first..=last {
-            let text = self.line(line);
-            if text.is_empty() && (first != last || outdent) {
-                continue;
-            }
-            let (col, chars) = indent_width(&text, TAB_WIDTH);
-            let target = match (outdent, col) {
-                (true, 0) => continue,
-                (true, _) => (col - 1) / size * size,
-                (false, _) => (col / size + 1) * size,
-            };
-            let fill = self.indent.fill(target, TAB_WIDTH);
-            // Indentation is ASCII, so its char count is its byte length.
-            if fill != text[..chars] {
-                let start = self.line_start(line);
-                changes.push((start..start + chars, fill));
+        for (first, last, _) in self.line_blocks(cs, false) {
+            for line in first..=last {
+                let text = self.line(line);
+                if text.is_empty() && (first != last || outdent) {
+                    continue;
+                }
+                let (col, chars) = indent_width(&text, TAB_WIDTH);
+                let target = match (outdent, col) {
+                    (true, 0) => continue,
+                    (true, _) => (col - 1) / size * size,
+                    (false, _) => (col / size + 1) * size,
+                };
+                let fill = self.indent.fill(target, TAB_WIDTH);
+                // Indentation is ASCII, so its char count is its byte length.
+                if fill != text[..chars] {
+                    let start = self.line_start(line);
+                    changes.push((start..start + chars, fill));
+                }
             }
         }
-        let s = c.selection;
-        let after = if s.is_empty() {
-            Selection::cursor(through_indents(&changes, s.head, false))
-        } else {
-            Selection {
-                anchor: through_indents(&changes, s.anchor, s.anchor < s.head),
-                head: through_indents(&changes, s.head, s.head < s.anchor),
-            }
-        };
-        self.transact(c, changes, after);
+        let after = cs
+            .all()
+            .iter()
+            .map(|c| {
+                let s = c.selection;
+                if s.is_empty() {
+                    Selection::cursor(through_indents(&changes, s.head, false))
+                } else {
+                    Selection {
+                        anchor: through_indents(&changes, s.anchor, s.anchor < s.head),
+                        head: through_indents(&changes, s.head, s.head < s.anchor),
+                    }
+                }
+            })
+            .collect();
+        self.transact_all(cs, changes, after);
     }
 
     /// Rewrites every line's indentation in `to`'s style and keeps using it; one undo step.
     pub fn convert_indentation(&mut self, c: &mut Cursor, to: Indent) {
+        self.with_one(c, |b, cs| b.convert_indentation_all(cs, to));
+    }
+
+    /// As [`Self::convert_indentation`], every caret keeping its place.
+    pub fn convert_indentation_all(&mut self, cs: &mut Cursors, to: Indent) {
         // As in VS Code, a tab is as wide as one level of the file's current indentation.
         let tab = self.indent.size().max(1);
         let mut changes = Vec::new();
@@ -1029,82 +1358,244 @@ impl Buffer {
                 changes.push((start..start + chars, fill));
             }
         }
-        let s = c.selection;
-        let after = Selection {
-            anchor: through_indents(&changes, s.anchor, false),
-            head: through_indents(&changes, s.head, false),
-        };
+        let after = cs
+            .all()
+            .iter()
+            .map(|c| Selection {
+                anchor: through_indents(&changes, c.selection.anchor, false),
+                head: through_indents(&changes, c.selection.head, false),
+            })
+            .collect();
         self.indent = to;
-        self.transact(c, changes, after);
+        self.transact_all(cs, changes, after);
     }
 
     /// Swaps the selected lines with the line above or below; the selection moves with them.
     pub fn move_lines(&mut self, c: &mut Cursor, down: bool) {
-        let (first, last) = self.selected_lines(c.selection);
-        if (!down && first == 0) || (down && last + 1 >= self.len_lines()) {
-            return;
-        }
+        self.with_one(c, |b, cs| b.move_lines_all(cs, down));
+    }
+
+    /// As [`Self::move_lines`] for every caret; carets on neighbouring lines move as one block.
+    pub fn move_lines_all(&mut self, cs: &mut Cursors, down: bool) {
         let eol = self.line_ending().as_str();
-        let (top, bottom, other) = if down {
-            (first, last + 1, last + 1)
-        } else {
-            (first - 1, last, first - 1)
-        };
-        let other_text = self.line(other);
-        let mut rows: Vec<String> = (first..=last).map(|l| self.line(l)).collect();
-        if down {
-            rows.insert(0, other_text.clone());
-        } else {
-            rows.push(other_text.clone());
+        let mut changes = Vec::new();
+        let mut after: Vec<Selection> = cs.all().iter().map(|c| c.selection).collect();
+        for (first, last, carets) in self.line_blocks(cs, true) {
+            if (!down && first == 0) || (down && last + 1 >= self.len_lines()) {
+                continue;
+            }
+            let (top, bottom, other) = if down {
+                (first, last + 1, last + 1)
+            } else {
+                (first - 1, last, first - 1)
+            };
+            let other_text = self.line(other);
+            let mut rows: Vec<String> = (first..=last).map(|l| self.line(l)).collect();
+            if down {
+                rows.insert(0, other_text.clone());
+            } else {
+                rows.push(other_text.clone());
+            }
+            let start = self.line_start(top);
+            let end = self.line_start(bottom) + self.line_len(bottom);
+            let step = other_text.chars().count() + eol.len();
+            let shift = |at: usize| if down { at + step } else { at - step };
+            for s in &mut after[carets] {
+                *s = Selection {
+                    anchor: shift(s.anchor),
+                    head: shift(s.head),
+                };
+            }
+            changes.push((start..end, rows.join(eol)));
         }
-        let start = self.line_start(top);
-        let end = self.line_start(bottom) + self.line_len(bottom);
-        let step = other_text.chars().count() + eol.len();
-        let shift = |at: usize| if down { at + step } else { at - step };
-        let after = Selection {
-            anchor: shift(c.selection.anchor),
-            head: shift(c.selection.head),
-        };
-        self.transact(c, vec![(start..end, rows.join(eol))], after);
+        if !changes.is_empty() {
+            self.transact_all(cs, changes, after);
+        }
     }
 
     /// Duplicates the selected lines; the selection follows the copy below, or stays on the one above.
     pub fn copy_lines(&mut self, c: &mut Cursor, down: bool) {
-        let (first, last) = self.selected_lines(c.selection);
+        self.with_one(c, |b, cs| b.copy_lines_all(cs, down));
+    }
+
+    /// As [`Self::copy_lines`] for every caret, lines shared by carets copied once.
+    pub fn copy_lines_all(&mut self, cs: &mut Cursors, down: bool) {
         let eol = self.line_ending().as_str();
-        let block = (first..=last)
-            .map(|l| self.line(l))
-            .collect::<Vec<_>>()
-            .join(eol);
-        let end = self.line_start(last) + self.line_len(last);
-        let step = if down {
-            block.chars().count() + eol.len()
-        } else {
-            0
-        };
-        let after = Selection {
-            anchor: c.selection.anchor + step,
-            head: c.selection.head + step,
-        };
-        self.transact(c, vec![(end..end, format!("{eol}{block}"))], after);
+        let mut changes = Vec::new();
+        let mut after: Vec<Selection> = cs.all().iter().map(|c| c.selection).collect();
+        let mut below = 0;
+        for (first, last, carets) in self.line_blocks(cs, false) {
+            let block = (first..=last)
+                .map(|l| self.line(l))
+                .collect::<Vec<_>>()
+                .join(eol);
+            let end = self.line_start(last) + self.line_len(last);
+            let inserted = format!("{eol}{block}");
+            let len = inserted.chars().count();
+            let step = below + if down { len } else { 0 };
+            for s in &mut after[carets] {
+                *s = Selection {
+                    anchor: s.anchor + step,
+                    head: s.head + step,
+                };
+            }
+            below += len;
+            changes.push((end..end, inserted));
+        }
+        self.transact_all(cs, changes, after);
     }
 
     /// Deletes the selected lines, leaving the cursor in the same column of the line that follows.
     pub fn delete_lines(&mut self, c: &mut Cursor) {
-        let (first, last) = self.selected_lines(c.selection);
-        let col = self.column_of(c.selection.head);
-        let (range, landing) = if last + 1 < self.len_lines() {
-            let start = self.line_start(first);
-            let next = self.line_len(last + 1);
-            (start..self.line_start(last + 1), start + col.min(next))
-        } else if first > 0 {
-            let above = self.line_start(first - 1);
-            let len = self.line_len(first - 1);
-            (above + len..self.len_chars(), above + col.min(len))
+        self.with_one(c, Self::delete_lines_all);
+    }
+
+    /// As [`Self::delete_lines`] for every caret; carets whose lines go together merge.
+    pub fn delete_lines_all(&mut self, cs: &mut Cursors) {
+        let mut changes = Vec::new();
+        let mut after: Vec<Selection> = cs.all().iter().map(|c| c.selection).collect();
+        let mut removed = 0;
+        for (first, last, carets) in self.line_blocks(cs, true) {
+            let col = self.column_of(cs.all()[carets.start].selection.head);
+            let (range, landing) = if last + 1 < self.len_lines() {
+                let start = self.line_start(first);
+                let next = self.line_len(last + 1);
+                (start..self.line_start(last + 1), start + col.min(next))
+            } else if first > 0 {
+                let above = self.line_start(first - 1);
+                let len = self.line_len(first - 1);
+                (above + len..self.len_chars(), above + col.min(len))
+            } else {
+                (0..self.len_chars(), 0)
+            };
+            for s in &mut after[carets] {
+                *s = Selection::cursor(landing - removed);
+            }
+            removed += range.len();
+            changes.push((range, String::new()));
+        }
+        self.transact_all(cs, changes, after);
+    }
+
+    /// The runs of lines the carets touch, in order, with the indexes of the carets in each; runs
+    /// sharing a line merge, and with `adjacent` so do runs on neighbouring lines.
+    fn line_blocks(&self, cs: &Cursors, adjacent: bool) -> Vec<(usize, usize, Range<usize>)> {
+        let mut blocks: Vec<(usize, usize, Range<usize>)> = Vec::new();
+        for (i, c) in cs.all().iter().enumerate() {
+            let (first, last) = self.selected_lines(c.selection);
+            match blocks.last_mut() {
+                Some((_, end, carets)) if first <= *end + usize::from(adjacent) => {
+                    *end = (*end).max(last);
+                    carets.end = i + 1;
+                }
+                _ => blocks.push((first, last, i..i + 1)),
+            }
+        }
+        blocks
+    }
+
+    /// Runs a many-caret operation for one caret.
+    fn with_one(&mut self, c: &mut Cursor, f: impl FnOnce(&mut Self, &mut Cursors)) {
+        let mut cs = Cursors::new(*c);
+        f(self, &mut cs);
+        *c = *cs.primary();
+    }
+
+    /// Runs `op` at every caret, the last in the text first, as one undo step; carets the edits
+    /// pass over follow them and carets that end up overlapping merge.
+    pub fn edit_each(&mut self, cs: &mut Cursors, mut op: impl FnMut(&mut Self, &mut Cursor)) {
+        self.edit_carets(cs, false, |b, c, _| op(b, c));
+    }
+
+    /// Pastes `text` at every caret; with as many lines as carets each caret takes one line, as
+    /// VS Code spreads a multi-caret copy.
+    pub fn paste_all(&mut self, cs: &mut Cursors, text: &str) {
+        let lines: Vec<&str> = text
+            .strip_suffix('\n')
+            .unwrap_or(text)
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .collect();
+        if cs.is_multi() && lines.len() == cs.len() {
+            self.edit_carets(cs, false, |b, c, i| b.insert(c, lines[i]));
         } else {
-            (0..self.len_chars(), 0)
-        };
-        self.transact(c, vec![(range, String::new())], Selection::cursor(landing));
+            self.edit_each(cs, |b, c| b.insert(c, text));
+        }
+    }
+
+    /// Runs `op` at the primary caret alone, as one undo step the other carets follow.
+    pub fn edit_primary(&mut self, cs: &mut Cursors, op: impl FnOnce(&mut Self, &mut Cursor)) {
+        let mut op = Some(op);
+        self.edit_carets(cs, true, |b, c, _| {
+            if let Some(op) = op.take() {
+                op(b, c);
+            }
+        });
+    }
+
+    /// Runs `op` at each caret (or the primary alone), handing it the caret's index; see
+    /// [`Self::edit_each`].
+    pub(crate) fn edit_carets(
+        &mut self,
+        cs: &mut Cursors,
+        only_primary: bool,
+        mut op: impl FnMut(&mut Self, &mut Cursor, usize),
+    ) {
+        if !cs.is_multi() {
+            return op(self, &mut cs.all[0], 0);
+        }
+        let before = cs.carets();
+        self.batch = Some(Batch::default());
+        let mut edits: Vec<Edit> = Vec::new();
+        // How many of `edits` each caret has followed.
+        let mut seen = vec![0; cs.len()];
+        let mut lowest = usize::MAX;
+        self.parse_once(|b| {
+            for i in (0..cs.all.len()).rev() {
+                if only_primary && i != cs.primary {
+                    continue;
+                }
+                let c = &mut cs.all[i];
+                // Edits so far were made after this caret, unless one reached back to it.
+                if c.selection.range().end > lowest {
+                    for e in &edits {
+                        c.map_edit(e);
+                    }
+                }
+                let version = b.version;
+                op(b, c, i);
+                if let Some(new) = b.edits_since(version) {
+                    for e in new {
+                        lowest = lowest.min(e.at);
+                        edits.push(*e);
+                    }
+                }
+                seen[i] = edits.len();
+            }
+        });
+        follow_later_edits(&mut cs.all, &seen, &edits);
+        cs.normalize();
+        let batch = self.batch.take().unwrap_or_default();
+        let after = cs.carets();
+        match batch.kind {
+            Some(kind) => self.commit(batch.changes, before, after, kind),
+            // Carets that typed over closers without editing still let the next keystroke join.
+            None => {
+                if let Some(last) = self.undo.last_mut()
+                    && last.after == before
+                {
+                    last.after = after;
+                }
+            }
+        }
+    }
+
+    /// Runs a move at every caret, merging carets that meet.
+    pub fn move_each(&self, cs: &mut Cursors, mut op: impl FnMut(&Self, &mut Cursor)) {
+        for c in &mut cs.all {
+            op(self, c);
+        }
+        cs.normalize();
     }
 
     /// Opens an indented line below the cursor's line, or above it, without splitting it.
@@ -1173,10 +1664,11 @@ impl Buffer {
 
     /// Lets the next keystroke join the undo step that ended at `was`, now that the cursor moved.
     fn extend_last_step(&mut self, was: usize, now: Selection) {
-        if let Some(last) = self.undo.last_mut()
-            && last.after == Selection::cursor(was)
+        if self.batch.is_none()
+            && let Some(last) = self.undo.last_mut()
+            && last.after.is(Selection::cursor(was))
         {
-            last.after = now;
+            last.after = Carets::one(now);
         }
     }
 
@@ -1520,26 +2012,58 @@ impl Buffer {
 
     /// Case-insensitive occurrences of `query`, as char ranges.
     pub fn find_all(&self, query: &str) -> Vec<Range<usize>> {
-        if query.is_empty() {
+        self.find(query, false, false)
+    }
+
+    /// Occurrences of `query` as char ranges, matching case only with `case` and only whole
+    /// identifiers with `word`; a match never starts or ends inside a char that lowercases to several.
+    pub fn find(&self, query: &str, case: bool, word: bool) -> Vec<Range<usize>> {
+        // Each folded char with the index of the char it came from.
+        let fold = |chars: &mut dyn Iterator<Item = char>| {
+            let mut out = Vec::new();
+            for (i, c) in chars.enumerate() {
+                if case {
+                    out.push((c, i));
+                } else {
+                    out.extend(c.to_lowercase().map(|f| (f, i)));
+                }
+            }
+            out
+        };
+        let needle: Vec<char> = fold(&mut query.chars())
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        if needle.is_empty() {
             return Vec::new();
         }
-        let needle: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
-        let hay: Vec<char> = self.rope.chars().flat_map(char::to_lowercase).collect();
-        // Lowercasing can change length for a few scripts; such text simply won't match here.
-        if hay.len() != self.len_chars() {
-            return Vec::new();
-        }
+        let hay = fold(&mut self.rope.chars());
+        let from = |k: usize| hay.get(k).map_or(self.len_chars(), |&(_, i)| i);
         let mut out = Vec::new();
-        let mut i = 0;
-        while i + needle.len() <= hay.len() {
-            if hay[i..i + needle.len()] == needle[..] {
-                out.push(i..i + needle.len());
-                i += needle.len();
+        let mut k = 0;
+        while k + needle.len() <= hay.len() {
+            let end = k + needle.len();
+            let found = hay[k..end].iter().map(|(c, _)| c).eq(needle.iter())
+                && (k == 0 || from(k - 1) != from(k))
+                && from(end) != from(end - 1);
+            let range = from(k)..from(end - 1) + 1;
+            let whole = !word
+                || ((range.start == 0 || !is_word(self.rope.char(range.start - 1)))
+                    && (range.end == self.len_chars() || !is_word(self.rope.char(range.end))));
+            if found && whole {
+                out.push(range);
+                k = end;
             } else {
-                i += 1;
+                k += 1;
             }
         }
         out
+    }
+
+    /// The identifier at `at` or ending there, as a cursor touching a word picks it.
+    pub fn word_around(&self, at: usize) -> Option<Range<usize>> {
+        self.word_at(at)
+            .or_else(|| at.checked_sub(1).and_then(|a| self.word_at(a)))
     }
 }
 
@@ -1647,6 +2171,34 @@ fn differing_span(rope: &Rope, text: &str) -> Option<(Range<usize>, String)> {
     }
     let range = rope.byte_to_char(prefix)..rope.byte_to_char(old_len - suffix);
     Some((range, text[prefix..new.len() - suffix].to_string()))
+}
+
+/// Moves each caret past the edits made after its own, `seen[i]` being how many caret `i` has
+/// followed; edits that all lie below a caret, last first, only shift it.
+fn follow_later_edits(carets: &mut [Cursor], seen: &[usize], edits: &[Edit]) {
+    let n = edits.len();
+    let mut shift = vec![0isize; n + 1];
+    let mut downward = vec![true; n + 1];
+    for k in (0..n).rev() {
+        let e = &edits[k];
+        shift[k] = shift[k + 1] + e.inserted as isize - e.removed as isize;
+        downward[k] = downward[k + 1]
+            && edits
+                .get(k + 1)
+                .is_none_or(|next| next.at + next.removed <= e.at);
+    }
+    for (c, &k) in carets.iter_mut().zip(seen) {
+        if k == n {
+            continue;
+        }
+        if downward[k] && edits[k].at + edits[k].removed < c.selection.range().start {
+            c.shift(shift[k]);
+        } else {
+            for e in &edits[k..] {
+                c.map_edit(e);
+            }
+        }
+    }
 }
 
 /// Where `at` lands after indentation `changes` (ascending, one per line); with `stay`, a point in
@@ -2634,5 +3186,226 @@ mod tests {
         let mut c = Cursor::at(0);
         one_step(&mut b, &mut c, |b, c| b.convert_indentation(c, Indent::Tab));
         assert_eq!(b.full_text(), "a\n\tb\n\t\t c\n");
+    }
+
+    fn carets(at: &[(usize, usize)]) -> Cursors {
+        let mut cs = Cursors::default();
+        let all = at
+            .iter()
+            .map(|&(anchor, head)| Cursor {
+                selection: Selection { anchor, head },
+                ..Cursor::default()
+            })
+            .collect();
+        cs.set(all, 0);
+        cs
+    }
+
+    fn spots(cs: &Cursors) -> Vec<(usize, usize)> {
+        cs.all()
+            .iter()
+            .map(|c| (c.selection.anchor, c.selection.head))
+            .collect()
+    }
+
+    #[test]
+    fn typing_at_every_caret_undoes_as_one_step() {
+        let mut b = buf("ab\nab\nab", "/x/a.txt");
+        let mut cs = carets(&[(2, 2), (5, 5), (8, 8)]);
+        for ch in "xy".chars() {
+            b.edit_each(&mut cs, |b, c| b.type_char(c, ch));
+        }
+        assert_eq!(b.full_text(), "abxy\nabxy\nabxy");
+        assert_eq!(spots(&cs), [(4, 4), (9, 9), (14, 14)]);
+        assert!(b.undo_all(&mut cs));
+        assert_eq!(b.full_text(), "ab\nab\nab");
+        assert_eq!(spots(&cs), [(2, 2), (5, 5), (8, 8)]);
+        assert!(!b.undo_all(&mut cs), "the keystrokes joined one step");
+        assert!(b.redo_all(&mut cs));
+        assert_eq!(b.full_text(), "abxy\nabxy\nabxy");
+        assert_eq!(spots(&cs), [(4, 4), (9, 9), (14, 14)]);
+    }
+
+    #[test]
+    fn deleting_at_every_caret_merges_carets_that_meet() {
+        let mut b = buf("abc abc", "/x/a.txt");
+        let mut cs = carets(&[(1, 1), (2, 2), (5, 5)]);
+        b.edit_each(&mut cs, Buffer::backspace);
+        assert_eq!(b.full_text(), "c bc");
+        assert_eq!(spots(&cs), [(0, 0), (2, 2)], "the first two carets met");
+        b.edit_each(&mut cs, Buffer::delete_forward);
+        assert_eq!(b.full_text(), " c");
+        let mut cs = carets(&[(0, 1), (2, 2)]);
+        b.edit_each(&mut cs, Buffer::backspace);
+        assert_eq!(b.full_text(), "");
+        assert_eq!(spots(&cs), [(0, 0)]);
+    }
+
+    #[test]
+    fn newline_at_every_caret_keeps_each_line_indent() {
+        let mut b = buf("  a\n\tb {", "/x/a.ts");
+        let mut cs = carets(&[(3, 3), (b.len_chars(), b.len_chars())]);
+        b.edit_each(&mut cs, Buffer::newline);
+        assert_eq!(b.full_text(), "  a\n  \n\tb {\n\t\t");
+        let ends: Vec<usize> = cs.all().iter().map(Cursor::head).collect();
+        assert_eq!(ends, [6, b.len_chars()]);
+        assert!(b.undo_all(&mut cs));
+        assert_eq!(b.full_text(), "  a\n\tb {");
+    }
+
+    #[test]
+    fn pasting_as_many_lines_as_carets_spreads_them() {
+        let mut b = buf("a\nb\nc", "/x/a.txt");
+        let mut cs = carets(&[(1, 1), (3, 3), (5, 5)]);
+        b.paste_all(&mut cs, "1\r\n2\r\n3\r\n");
+        assert_eq!(b.full_text(), "a1\nb2\nc3");
+        assert_eq!(spots(&cs), [(2, 2), (5, 5), (8, 8)]);
+        b.paste_all(&mut cs, "-+");
+        assert_eq!(
+            b.full_text(),
+            "a1-+\nb2-+\nc3-+",
+            "other text goes to every caret"
+        );
+        assert!(b.undo_all(&mut cs) && b.undo_all(&mut cs));
+        assert_eq!(b.full_text(), "a\nb\nc");
+    }
+
+    #[test]
+    fn pairs_close_and_type_over_at_every_caret() {
+        let mut b = buf("f\ng", "/x/a.ts");
+        let mut cs = carets(&[(1, 1), (3, 3)]);
+        b.edit_each(&mut cs, |b, c| b.type_char(c, '('));
+        assert_eq!(b.full_text(), "f()\ng()");
+        assert_eq!(spots(&cs), [(2, 2), (6, 6)]);
+        b.edit_each(&mut cs, |b, c| b.type_char(c, ')'));
+        assert_eq!(b.full_text(), "f()\ng()", "typed over the closers");
+        assert_eq!(spots(&cs), [(3, 3), (7, 7)]);
+        let mut cs = carets(&[(0, 1), (4, 5)]);
+        b.edit_each(&mut cs, |b, c| b.type_char(c, '['));
+        assert_eq!(b.full_text(), "[f]()\n[g]()", "selections are wrapped");
+        assert_eq!(spots(&cs), [(1, 2), (7, 8)]);
+    }
+
+    #[test]
+    fn line_operations_touch_a_shared_line_once() {
+        let mut b = buf("a\nb\nc\n", "/x/a.ts");
+        let mut cs = carets(&[(0, 0), (1, 1), (4, 4)]);
+        b.indent_lines_all(&mut cs, false);
+        assert_eq!(b.full_text(), "  a\nb\n  c\n");
+        assert_eq!(spots(&cs), [(2, 2), (3, 3), (8, 8)]);
+        b.toggle_comment_all(&mut cs);
+        assert_eq!(b.full_text(), "  // a\nb\n  // c\n");
+        assert_eq!(
+            spots(&cs),
+            [(5, 5), (6, 6)]
+                .into_iter()
+                .chain([(14, 14)])
+                .collect::<Vec<_>>()
+        );
+        b.toggle_comment_all(&mut cs);
+        assert_eq!(b.full_text(), "  a\nb\n  c\n");
+        b.copy_lines_all(&mut cs, true);
+        assert_eq!(b.full_text(), "  a\n  a\nb\n  c\n  c\n");
+        assert_eq!(spots(&cs), [(6, 6), (7, 7), (16, 16)]);
+        b.delete_lines_all(&mut cs);
+        assert_eq!(b.full_text(), "  a\nb\n  c\n");
+        assert!(b.undo_all(&mut cs));
+        assert_eq!(b.full_text(), "  a\n  a\nb\n  c\n  c\n");
+    }
+
+    #[test]
+    fn moving_lines_carries_neighbouring_carets_as_one_block() {
+        let mut b = buf("a\nb\nc\nd\ne", "/x/a.txt");
+        let mut cs = carets(&[(0, 0), (2, 2), (6, 6)]);
+        b.move_lines_all(&mut cs, true);
+        assert_eq!(
+            b.full_text(),
+            "c\na\nb\nd\ne".replace("d\ne", "e\nd").as_str()
+        );
+        assert_eq!(spots(&cs), [(2, 2), (4, 4), (8, 8)]);
+        b.move_lines_all(&mut cs, false);
+        assert_eq!(b.full_text(), "a\nb\nc\nd\ne");
+        assert_eq!(spots(&cs), [(0, 0), (2, 2), (6, 6)]);
+        let mut top = carets(&[(0, 0), (6, 6)]);
+        b.move_lines_all(&mut top, false);
+        assert_eq!(b.full_text(), "a\nb\nd\nc\ne", "a block at the top stays");
+        assert_eq!(spots(&top), [(0, 0), (4, 4)]);
+    }
+
+    #[test]
+    fn an_edit_at_the_primary_moves_the_other_carets() {
+        let mut b = buf("x\nfoo\nfoo", "/x/a.ts");
+        let mut cs = carets(&[(5, 5), (9, 9)]);
+        let edits = vec![(5..5, "d".to_string()), (0..0, "use y;\n".to_string())];
+        b.edit_primary(&mut cs, |b, c| b.apply_edits(c, &edits, None));
+        assert_eq!(b.full_text(), "use y;\nx\nfood\nfoo");
+        assert_eq!(spots(&cs), [(13, 13), (17, 17)]);
+        assert!(b.undo_all(&mut cs));
+        assert_eq!(spots(&cs), [(5, 5), (9, 9)]);
+    }
+
+    #[test]
+    fn overlapping_carets_merge_and_keep_the_primary() {
+        let mut cs = carets(&[(4, 8), (0, 2), (6, 10), (2, 2), (12, 12)]);
+        assert_eq!(spots(&cs), [(0, 2), (4, 10), (12, 12)]);
+        assert_eq!(cs.primary_index(), 1, "the merged caret holds the primary");
+        cs.add(Cursor::at(3));
+        assert_eq!(spots(&cs), [(0, 2), (3, 3), (4, 10), (12, 12)]);
+        assert_eq!(cs.primary().head(), 3);
+        cs.add(Cursor {
+            selection: Selection { anchor: 3, head: 2 },
+            ..Cursor::default()
+        });
+        assert_eq!(
+            spots(&cs),
+            [(0, 2), (3, 2), (4, 10), (12, 12)],
+            "an empty caret joins the selection it touches, touching selections stay apart"
+        );
+        cs.collapse();
+        assert_eq!(spots(&cs), [(3, 2)]);
+    }
+
+    #[test]
+    fn many_carets_cost_one_parse() {
+        let text = "fn f() { let a = 1; }\n".repeat(200);
+        let mut b = buf(&text, "/x/a.rs");
+        let mut cs = carets(
+            &(0..200)
+                .map(|l| (l * 22 + 9, l * 22 + 9))
+                .collect::<Vec<_>>(),
+        );
+        let version = b.version();
+        b.edit_each(&mut cs, |b, c| b.type_char(c, 'x'));
+        assert_eq!(b.version(), version + 200, "one version per edit");
+        assert!(b.full_text().starts_with("fn f() { xlet a"));
+        assert_eq!(
+            b.highlights(199..200).len(),
+            b.highlights(0..1).len(),
+            "the tree was parsed after the last edit"
+        );
+        assert_eq!(cs.len(), 200);
+    }
+
+    #[test]
+    fn occurrences_respect_case_words_and_unicode_folding() {
+        let b = buf("İstanbul istanbul ISTANBUL", "/x/a.txt");
+        assert_eq!(b.find_all("istanbul"), [9..17, 18..26]);
+        assert_eq!(b.find("istanbul", true, false), vec![9..17]);
+        assert_eq!(b.find_all("İ"), vec![0..1]);
+        assert_eq!(
+            b.find_all("i̇stanbul"),
+            vec![0..8],
+            "a folded İ matches as a whole"
+        );
+        let b = buf("foo foobar _foo foo(Foo)", "/x/a.txt");
+        assert_eq!(b.find("foo", true, true), [0..3, 16..19]);
+        assert_eq!(b.find("foo", false, true), [0..3, 16..19, 20..23]);
+        assert_eq!(b.find("foo", true, false).len(), 4);
+        assert_eq!(
+            b.word_around(3),
+            Some(0..3),
+            "a caret just after a word picks it"
+        );
+        assert_eq!(b.word_around(20), Some(20..23));
     }
 }

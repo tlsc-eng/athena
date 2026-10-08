@@ -79,10 +79,10 @@ impl EditorView {
             return;
         }
         self.with_buffer(cx, |b, c| {
-            let before = *c;
+            let before = c.clone();
             let version = b.version();
             let list = server_edit_ranges(b, edits);
-            b.apply_edits(c, &list, None);
+            b.edit_primary(c, |b, c| b.apply_edits(c, &list, None));
             let mut kept = before;
             if let Some(applied) = b.edits_since(version) {
                 let applied: Vec<Edit> = applied.copied().collect();

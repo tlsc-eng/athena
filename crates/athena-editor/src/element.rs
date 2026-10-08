@@ -256,7 +256,8 @@ impl Element for EditorElement {
             tokens.extend(buffer.highlights(run[0]..run[run.len() - 1] + 1));
         }
         let rope = buffer.rope();
-        let selection = view.cursor.selection.range();
+        let carets = view.cursor.all();
+        let selection = view.cursor.selection().range();
         let head = view.cursor.head();
         let head_line = buffer.line_of(head);
 
@@ -338,7 +339,13 @@ impl Element for EditorElement {
             let y = bounds.top() + lh * (first + row) as f32 - px(view.scroll.y);
             let end = start + n;
             let folded = view.display.folded_at(*line);
-            if *line == head_line && selection.is_empty() && self.focused {
+            // Carets are sorted and apart, so the ones touching this line are a run.
+            let from = carets.partition_point(|c| c.selection.range().end < *start);
+            let here = carets[from..]
+                .iter()
+                .take_while(|c| c.selection.range().start <= end);
+            let heads_here = || here.clone().filter(|c| (*start..=end).contains(&c.head()));
+            if self.focused && heads_here().any(|c| c.selection.is_empty()) {
                 frame.backgrounds.push(fill(
                     Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh)),
                     syntax.current_line,
@@ -377,39 +384,43 @@ impl Element for EditorElement {
                     frame.backgrounds.push(fill(b, syntax.bracket_match));
                 }
             }
-            if !selection.is_empty()
-                && let Some(b) = span(&selection)
-            {
-                frame.backgrounds.push(fill(b, theme.color.surface_accent));
+            for selection in here.clone().map(|c| c.selection.range()) {
+                if !selection.is_empty()
+                    && let Some(b) = span(&selection)
+                {
+                    frame.backgrounds.push(fill(b, theme.color.surface_accent));
+                }
             }
             frame.text.push((point(x0, y), shaped.clone()));
             // As VS Code's default `renderWhitespace: selection`: blanks show only where selected.
-            let (a, b) = (selection.start.max(*start), selection.end.min(end));
-            for (i, ch) in rope.slice(a.min(b)..b).chars().enumerate() {
-                let x = x0 + shaped.x_for_index(display.char_to_byte[a + i - start]);
-                match ch {
-                    ' ' => frame.overlay.push(
-                        fill(
-                            Bounds::new(
-                                point(x + cell / 2. - px(1.), y + lh / 2. - px(1.)),
-                                size(px(2.), px(2.)),
-                            ),
-                            syntax.whitespace,
-                        )
-                        .corner_radii(px(1.)),
-                    ),
-                    '\t' => {
-                        let mark = tab_mark.get_or_insert_with(|| {
-                            text_system.shape_line(
-                                "→".into(),
-                                font_size,
-                                &[run("→".len(), syntax.whitespace)],
-                                None,
+            for selection in here.clone().map(|c| c.selection.range()) {
+                let (a, b) = (selection.start.max(*start), selection.end.min(end));
+                for (i, ch) in rope.slice(a.min(b)..b).chars().enumerate() {
+                    let x = x0 + shaped.x_for_index(display.char_to_byte[a + i - start]);
+                    match ch {
+                        ' ' => frame.overlay.push(
+                            fill(
+                                Bounds::new(
+                                    point(x + cell / 2. - px(1.), y + lh / 2. - px(1.)),
+                                    size(px(2.), px(2.)),
+                                ),
+                                syntax.whitespace,
                             )
-                        });
-                        frame.text.push((point(x, y), mark.clone()));
+                            .corner_radii(px(1.)),
+                        ),
+                        '\t' => {
+                            let mark = tab_mark.get_or_insert_with(|| {
+                                text_system.shape_line(
+                                    "→".into(),
+                                    font_size,
+                                    &[run("→".len(), syntax.whitespace)],
+                                    None,
+                                )
+                            });
+                            frame.text.push((point(x, y), mark.clone()));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             if folded.is_some() {
@@ -458,7 +469,7 @@ impl Element for EditorElement {
                 Some(
                     severity @ (crate::MarkerSeverity::Error | crate::MarkerSeverity::Warning),
                 ) => crate::view::marker_color(severity, &theme),
-                _ if *line == head_line => syntax.line_number_active,
+                _ if heads_here().next().is_some() => syntax.line_number_active,
                 _ => syntax.line_number,
             };
             let label = text_system.shape_line(
@@ -540,9 +551,12 @@ impl Element for EditorElement {
                     .push((point(x0 + shaped.width + cell * 3., y), text));
             }
 
-            if *line == head_line {
-                let x = x0 + shaped.x_for_index(display.char_to_byte[head - start]);
-                if let Some(marked) = &view.marked {
+            for caret in heads_here() {
+                let at = caret.head();
+                let x = x0 + shaped.x_for_index(display.char_to_byte[at - start]);
+                if at == head
+                    && let Some(marked) = &view.marked
+                {
                     let underline = UnderlineStyle {
                         thickness: px(1.),
                         color: Some(syntax.text),
@@ -579,6 +593,7 @@ impl Element for EditorElement {
                 origin: bounds.origin,
                 text_left,
                 line_height: lh,
+                cell,
                 lines: stored,
                 fold_column,
             });

@@ -39,6 +39,23 @@ impl DisplayLine {
     }
 }
 
+/// The char of `line` whose start is nearest column `col` (tabs expanded), or its end past it.
+pub fn char_at_column(line: &str, col: usize) -> usize {
+    let mut at = 0;
+    for (i, c) in line.chars().enumerate() {
+        let width = if c == '\t' {
+            TAB_WIDTH - at % TAB_WIDTH
+        } else {
+            1
+        };
+        if col < at + width {
+            return if col - at <= width / 2 { i } else { i + 1 };
+        }
+        at += width;
+    }
+    line.chars().count()
+}
+
 /// Lines hidden under a folded header; the header is the line before `start`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fold {
@@ -412,5 +429,14 @@ mod tests {
         assert_eq!(d.char_for_byte(2), 0);
         assert_eq!(d.char_for_byte(4), 1);
         assert_eq!(d.char_for_byte(9), 4);
+    }
+
+    #[test]
+    fn columns_land_on_the_nearest_char_and_clamp_to_the_end() {
+        assert_eq!(char_at_column("\tab", 1), 0);
+        assert_eq!(char_at_column("\tab", 3), 1);
+        assert_eq!(char_at_column("\tab", 5), 2);
+        assert_eq!(char_at_column("\tab", 40), 3);
+        assert_eq!(char_at_column("", 4), 0);
     }
 }

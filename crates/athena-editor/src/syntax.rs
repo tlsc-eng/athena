@@ -446,16 +446,21 @@ impl Syntax {
     }
 
     pub fn edit(&mut self, edit: &InputEdit, rope: &Rope) {
+        self.edit_tree(edit);
+        self.reparse(rope);
+    }
+
+    /// Moves the tree past an edit without parsing; several edits can share one [`Self::reparse`].
+    pub fn edit_tree(&mut self, edit: &InputEdit) {
         if let Backend::Tree {
             tree: Some(tree), ..
         } = &mut self.backend
         {
             tree.edit(edit);
         }
-        self.reparse(rope);
     }
 
-    fn reparse(&mut self, rope: &Rope) {
+    pub fn reparse(&mut self, rope: &Rope) {
         let Backend::Tree { parser, tree } = &mut self.backend else {
             return;
         };
