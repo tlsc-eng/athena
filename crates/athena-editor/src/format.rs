@@ -90,6 +90,15 @@ pub(crate) fn apply_server_edits(b: &Buffer, edits: &[ServerEdit]) -> String {
         })
         .collect();
     ranges.sort_by_key(|(i, r, _)| (Reverse(r.start), Reverse(*i)));
+    // Overlapping edits break the protocol; one reaching into an applied edit is dropped.
+    let mut floor = usize::MAX;
+    ranges.retain(|(_, r, _)| {
+        let fits = r.end <= floor;
+        if fits {
+            floor = r.start;
+        }
+        fits
+    });
     let mut rope = b.rope().clone();
     for (_, range, text) in ranges {
         rope.remove(range.clone());
@@ -126,6 +135,20 @@ mod tests {
         let b = Buffer::new("xy", None);
         let same_place = [edit((0, 1), (0, 1), "A"), edit((0, 1), (0, 1), "B")];
         assert_eq!(apply_server_edits(&b, &same_place), "xABy");
+    }
+
+    #[test]
+    fn overlapping_server_edits_are_dropped_instead_of_panicking() {
+        let b = Buffer::new("abcdefghij", None);
+        let out = apply_server_edits(
+            &b,
+            &[
+                edit((0, 6), (0, 10), ""),
+                edit((0, 2), (0, 8), "X"),
+                edit((0, 0), (0, 1), "Y"),
+            ],
+        );
+        assert_eq!(out, "Ybcdef");
     }
 
     #[test]

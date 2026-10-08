@@ -523,6 +523,15 @@ impl Buffer {
         }
         // Later edits first, so each one's offsets still hold when it is applied.
         order.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+        // An edit reaching into one applied after it would remove text that is no longer there.
+        let mut floor = usize::MAX;
+        order.retain(|(r, _)| {
+            let fits = r.end <= floor || *r == main;
+            if fits {
+                floor = r.start;
+            }
+            fits
+        });
         let shift: isize = order
             .iter()
             .filter(|(r, _)| r.start < main.start)
@@ -1634,6 +1643,25 @@ mod tests {
         assert_eq!(c.head(), pri + 3);
         assert!(b.redo(&mut c));
         assert_eq!(b.full_text(), want);
+    }
+
+    #[test]
+    fn overlapping_extra_edits_are_dropped_instead_of_panicking() {
+        let mut b = buf("abcdefghij", "/x/a.txt");
+        let mut c = Cursor::at(10);
+        b.apply_edits(
+            &mut c,
+            &[
+                (9..10, "J".into()),
+                (5..8, "".into()),
+                (2..7, "X".into()),
+                (0..1, "A".into()),
+                (40..50, "end".into()),
+            ],
+            None,
+        );
+        assert_eq!(b.full_text(), "AbcdeiJend");
+        assert_eq!(c.head(), 7, "after the main edit's text");
     }
 
     #[test]
