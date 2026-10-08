@@ -335,20 +335,8 @@ impl Shell {
         }
     }
 
-    fn close_project(&mut self, _: &CloseProject, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = self.workspace.active {
-            let root = self.workspace.projects[index].root.clone();
-            self.drop_project_items(&root, cx);
-            self.history.forget_root(&root);
-            self.lsp_project_closed(&root);
-            self.zoomed = None;
-            self.focus_pending = true;
-            self.workspace.close_project(index);
-            self.rail_from = self.workspace.active.unwrap_or(0);
-            self.switch_count += 1;
-            self.schedule_save(cx);
-            cx.notify();
-        }
+    fn close_project(&mut self, _: &CloseProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_active_project(window, cx);
     }
 
     fn cycle(&mut self, step: isize, cx: &mut Context<Self>) {
