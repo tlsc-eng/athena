@@ -9,6 +9,7 @@ use athena_ui::MenuItem;
 use gpui::{Context, Entity, EntityId, Subscription, Task, WeakEntity, Window};
 
 use super::Shell;
+use super::edits::AskedAt;
 use super::lsp::{NO_SERVER, document_key};
 use crate::actions::ApplyCodeAction;
 
@@ -20,8 +21,9 @@ pub(super) struct CodeActionState {
     /// One subscription per editor, for the cursor moves that move the lightbulb.
     watched: HashMap<EntityId, (WeakEntity<EditorView>, Subscription)>,
     lightbulb_task: Option<Task<()>>,
-    /// The actions the open Cmd+. menu offers, with the server and file they came from.
-    menu: Option<(Rc<Client>, PathBuf, Vec<CodeAction>)>,
+    /// The actions the open Cmd+. menu offers, with the server and file they came from and the
+    /// file versions they were asked for at.
+    menu: Option<(Rc<Client>, PathBuf, Vec<CodeAction>, AskedAt)>,
 }
 
 /// Quick fixes first (preferred ones leading), then refactorings, then source actions, as
@@ -185,7 +187,7 @@ impl Shell {
             return;
         };
         let doc = document_key(editor.read(cx).path());
-        self.flush_change(&doc, &editor, cx);
+        let asked = self.versions_for_request(cx);
         let Some(client) = self.document_client(&doc) else {
             return self.lsp_failed("No code actions", NO_SERVER.into(), cx);
         };
@@ -239,7 +241,7 @@ impl Shell {
                         .disabled(action.disabled.is_some()),
                     );
                 }
-                this.code_actions.menu = Some((client, doc, actions));
+                this.code_actions.menu = Some((client, doc, actions, asked));
                 this.open_context_menu(position, items, window, cx);
             });
         })
@@ -248,7 +250,7 @@ impl Shell {
 
     /// Runs the action picked from the Cmd+. menu: its edit, then its command.
     pub(super) fn apply_code_action(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some((client, doc, mut actions)) = self.code_actions.menu.take() else {
+        let Some((client, doc, mut actions, asked)) = self.code_actions.menu.take() else {
             return;
         };
         if index >= actions.len() {
@@ -272,7 +274,8 @@ impl Shell {
                 false => action,
             };
             if let Some(edit) = &action.edit {
-                let applied = this.update(cx, |this, cx| this.apply_workspace_edit(edit, cx));
+                let applied =
+                    this.update(cx, |this, cx| this.apply_requested_edit(edit, &asked, cx));
                 match applied {
                     Ok(Ok(_)) => {}
                     Ok(Err(why)) => {

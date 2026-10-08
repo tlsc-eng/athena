@@ -7,10 +7,14 @@ use gpui::{Context, Entity};
 
 use super::Shell;
 use super::fileops;
+use super::item::ItemView;
 use super::lsp::document_key;
 
 /// Closed files larger than this are not edited, as the editor would not open them either.
 const MAX_FILE: u64 = 16 * 1024 * 1024;
+
+/// Each open file's buffer version when a request went to the server, by document key.
+pub(super) type AskedAt = HashMap<PathBuf, i64>;
 
 /// What a workspace edit changed, for the message after a rename or a fix.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -56,6 +60,28 @@ fn write_text(path: &Path, text: &str) -> Result<(), String> {
         .map_err(|e| format!("Could not write {}: {e:#}", name(path)))
 }
 
+fn not_empty(path: &Path) -> String {
+    format!(
+        "The language server asked to replace {}, which is not empty; nothing was changed.",
+        name(path)
+    )
+}
+
+/// Whether `to` only re-cases `from` on a case-insensitive disk, where both name one file.
+fn recases(from: &Path, to: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if from == to || from.to_string_lossy().to_lowercase() != to.to_string_lossy().to_lowercase() {
+        return false;
+    }
+    match (
+        std::fs::symlink_metadata(from),
+        std::fs::symlink_metadata(to),
+    ) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
 fn edit_error(path: &Path, e: EditError) -> String {
     match e {
         EditError::Overlap { line } => format!(
@@ -83,6 +109,8 @@ pub(super) struct OpenText {
     pub version: Option<i64>,
     /// The language server has this file open, so an edit naming a version must match it.
     pub synced: bool,
+    /// Its version when the request was sent, which an edit naming no version must match.
+    pub asked: Option<i64>,
 }
 
 /// Files as a dry run sees them: a planned text, or gone.
@@ -139,10 +167,11 @@ fn check_edit(
                 version,
                 edits,
             } => {
-                if let (Some(version), Some(file)) = (version, open(path))
-                    && file.synced
-                    && file.version != Some(*version)
-                {
+                let stale = open(path).is_some_and(|file| match version {
+                    Some(version) => file.synced && file.version != Some(*version),
+                    None => file.asked.is_some_and(|asked| file.version != Some(asked)),
+                });
+                if stale {
                     return Err(format!(
                         "{} changed while the language server worked; nothing was changed.",
                         name(path)
@@ -172,6 +201,12 @@ fn check_edit(
                             name(path)
                         ));
                     }
+                    if overlay
+                        .text(path, &open)?
+                        .is_some_and(|text| !text.is_empty())
+                    {
+                        return Err(not_empty(path));
+                    }
                 }
                 overlay.files.insert(path.clone(), Some(String::new()));
             }
@@ -181,7 +216,9 @@ fn check_edit(
                 ignore_if_exists,
                 ..
             } => {
-                if overlay.exists(to, &open) {
+                let recased = !overlay.files.contains_key(to)
+                    && recases(&overlay.disk_path(from), &overlay.disk_path(to));
+                if overlay.exists(to, &open) && !recased {
                     if *ignore_if_exists {
                         continue;
                     }
@@ -253,6 +290,9 @@ fn apply_change(
             if exists && (*ignore_if_exists || !*overwrite) {
                 return Ok(());
             }
+            if exists && std::fs::metadata(path).is_ok_and(|m| m.len() > 0) {
+                return Err(not_empty(path));
+            }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
@@ -270,7 +310,7 @@ fn apply_change(
             ignore_if_exists,
             ..
         } => {
-            if *ignore_if_exists && std::fs::symlink_metadata(to).is_ok() {
+            if *ignore_if_exists && std::fs::symlink_metadata(to).is_ok() && !recases(from, to) {
                 return Ok(());
             }
             if let Some(parent) = to.parent() {
@@ -342,20 +382,54 @@ impl Shell {
             .next()
     }
 
-    /// Applies a server's workspace edit: open files through their editor, one undo step each,
-    /// closed files written as a save would. Checked whole first; a disk error stops midway.
+    /// Sends every open file's pending change, then notes each one's version, so an edit the
+    /// server answers with can be refused if a file it changes is edited meanwhile.
+    pub(super) fn versions_for_request(&mut self, cx: &Context<Self>) -> AskedAt {
+        let editors: Vec<Entity<EditorView>> = self
+            .items
+            .values()
+            .filter_map(|view| match view {
+                ItemView::Editor(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut asked = AskedAt::new();
+        for editor in editors {
+            let doc = document_key(editor.read(cx).path());
+            self.flush_change(&doc, &editor, cx);
+            if let Some(version) = editor.read(cx).version() {
+                asked.insert(doc, version as i64);
+            }
+        }
+        asked
+    }
+
+    /// Applies an edit the server sent on its own; see [`Self::apply_requested_edit`].
     pub(super) fn apply_workspace_edit(
         &mut self,
         edit: &WorkspaceEdit,
         cx: &mut Context<Self>,
     ) -> Result<Applied, String> {
+        self.apply_requested_edit(edit, &AskedAt::new(), cx)
+    }
+
+    /// Applies a server's workspace edit: open files through their editor, one undo step each,
+    /// closed files written as a save would. Checked whole first; a disk error stops midway.
+    pub(super) fn apply_requested_edit(
+        &mut self,
+        edit: &WorkspaceEdit,
+        asked: &AskedAt,
+        cx: &mut Context<Self>,
+    ) -> Result<Applied, String> {
         let open = |path: &Path| {
             let editor = self.editor_holding(path, cx)?;
             let e = editor.read(cx);
+            let doc = document_key(path);
             Some(OpenText {
                 text: e.text()?,
                 version: e.version().map(|v| v as i64),
-                synced: self.lsp_knows(&document_key(path)),
+                synced: self.lsp_knows(&doc),
+                asked: asked.get(&doc).copied(),
             })
         };
         check_edit(edit, open)?;
@@ -419,6 +493,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         open: HashMap<PathBuf, (String, i64)>,
+        asked: AskedAt,
         renamed: Vec<(PathBuf, PathBuf)>,
     }
 
@@ -430,6 +505,7 @@ mod tests {
                     text: text.clone(),
                     version: Some(*version),
                     synced: true,
+                    asked: self.asked.get(path).copied(),
                 })
             }
         }
@@ -545,6 +621,128 @@ mod tests {
         assert!(
             run(&gone, &mut Fake::default()).is_ok(),
             "a missing file may be deleted"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_edit_naming_no_version_is_refused_once_its_file_changed_since_the_request() {
+        let dir = temp("asked");
+        let closed = dir.join("a.go");
+        let open = dir.join("b.go");
+        std::fs::write(&closed, "alpha\n").unwrap();
+        let mut fake = Fake::default();
+        fake.open.insert(open.clone(), ("beta x\n".into(), 6));
+        fake.asked.insert(open.clone(), 5);
+        let edit = WorkspaceEdit {
+            changes: vec![
+                change(&closed, None, vec![edit(0, 0, 5, "ALPHA")]),
+                change(&open, None, vec![edit(0, 0, 4, "BETA")]),
+            ],
+        };
+        let why = run(&edit, &mut fake).unwrap_err();
+        assert!(why.contains("changed while"), "{why}");
+        assert_eq!(std::fs::read_to_string(&closed).unwrap(), "alpha\n");
+        assert_eq!(fake.open[&open].0, "beta x\n");
+
+        fake.asked.insert(open.clone(), 6);
+        run(&edit, &mut fake).unwrap();
+        assert_eq!(fake.open[&open].0, "BETA x\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn creating_over_a_file_only_ever_replaces_an_empty_one() {
+        let dir = temp("overwrite");
+        let full = dir.join("full.go");
+        let empty = dir.join("empty.go");
+        std::fs::write(&full, "package keep\n").unwrap();
+        std::fs::write(&empty, "").unwrap();
+        let create = |path: &Path| FileChange::Create {
+            path: path.to_path_buf(),
+            overwrite: true,
+            ignore_if_exists: false,
+        };
+        let why = run(
+            &WorkspaceEdit {
+                changes: vec![create(&full)],
+            },
+            &mut Fake::default(),
+        )
+        .unwrap_err();
+        assert!(why.contains("not empty"), "{why}");
+        assert_eq!(std::fs::read_to_string(&full).unwrap(), "package keep\n");
+
+        let filled_then_replaced = WorkspaceEdit {
+            changes: vec![
+                change(&empty, None, vec![edit(0, 0, 0, "package x\n")]),
+                create(&empty),
+            ],
+        };
+        assert!(run(&filled_then_replaced, &mut Fake::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&empty).unwrap(), "");
+
+        let mut applied = Applied::default();
+        let why = apply_change(
+            &create(&full),
+            &mut Fake::default(),
+            &mut applied,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(why.contains("not empty"), "the applier refuses too: {why}");
+        assert_eq!(std::fs::read_to_string(&full).unwrap(), "package keep\n");
+
+        run(
+            &WorkspaceEdit {
+                changes: vec![create(&empty)],
+            },
+            &mut Fake::default(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&empty).unwrap(), "");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_case_only_rename_goes_through_on_a_case_insensitive_disk() {
+        let dir = temp("recase");
+        let lower = dir.join("util.go");
+        let upper = dir.join("Util.go");
+        std::fs::write(&lower, "package util\n").unwrap();
+        if !upper.exists() {
+            return std::fs::remove_dir_all(&dir).unwrap();
+        }
+        let edit = WorkspaceEdit {
+            changes: vec![FileChange::Rename {
+                from: lower.clone(),
+                to: upper.clone(),
+                overwrite: false,
+                ignore_if_exists: false,
+            }],
+        };
+        let mut fake = Fake::default();
+        run(&edit, &mut fake).unwrap();
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["Util.go"]);
+        assert_eq!(fake.renamed, [(lower.clone(), upper.clone())]);
+
+        let other = dir.join("other.go");
+        std::fs::write(&other, "package other\n").unwrap();
+        let clobber = WorkspaceEdit {
+            changes: vec![FileChange::Rename {
+                from: other.clone(),
+                to: dir.join("UTIL.go"),
+                overwrite: false,
+                ignore_if_exists: false,
+            }],
+        };
+        assert!(
+            run(&clobber, &mut Fake::default()).is_err(),
+            "another file is still refused"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

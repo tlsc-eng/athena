@@ -66,12 +66,10 @@ impl Shell {
 
     /// Enter in the rename field: renames everywhere the server finds the symbol.
     pub(super) fn lsp_rename_confirm(&mut self, name: String, cx: &mut Context<Self>) {
-        let Some((doc, at, editor)) = self.lsp.renaming.take() else {
+        let Some((doc, at, _)) = self.lsp.renaming.take() else {
             return;
         };
-        if let Some(editor) = editor.upgrade() {
-            self.flush_change(&doc, &editor, cx);
-        }
+        let asked = self.versions_for_request(cx);
         let Some(client) = self.document_client(&doc) else {
             return self.lsp_failed("Rename failed", NO_SERVER.into(), cx);
         };
@@ -85,7 +83,7 @@ impl Shell {
                     cx,
                 ),
                 Ok(edit) => {
-                    if let Err(why) = this.apply_workspace_edit(&edit, cx) {
+                    if let Err(why) = this.apply_requested_edit(&edit, &asked, cx) {
                         this.lsp_failed("Rename failed", why, cx);
                     }
                 }
