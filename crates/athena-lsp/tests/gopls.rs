@@ -44,7 +44,10 @@ fn gopls_reports_an_unused_import_and_finds_definitions() {
     assert_eq!(unused.severity, Severity::Error);
     assert_eq!(unused.range.start.line, 2);
 
-    let call = Position { line: 6, character: 19 };
+    let call = Position {
+        line: 6,
+        character: 19,
+    };
     let found = futures_lite_block_on(client.definition(&file, call));
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].path, file);

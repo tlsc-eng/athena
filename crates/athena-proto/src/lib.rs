@@ -51,6 +51,10 @@ pub enum AppMsg {
     Identify {
         session: PaneId,
     },
+    /// Language server diagnostics for one file, or for every open project when `path` is None.
+    Diagnostics {
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -65,6 +69,18 @@ pub enum AppReply {
         session: Option<PaneId>,
         project: Option<PathBuf>,
     },
+    Diagnostics(Vec<DiagnosticInfo>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DiagnosticInfo {
+    pub path: PathBuf,
+    /// 1-based line; the column counts UTF-16 units, as language servers do.
+    pub line: u32,
+    pub column: u32,
+    pub severity: String,
+    pub message: String,
+    pub source: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

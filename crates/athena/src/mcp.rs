@@ -41,6 +41,12 @@ struct RunArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DiagnosticsArgs {
+    /// Absolute path of one file; leave out for every open project.
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ProjectFilesArgs {
     /// Project root from list_projects; defaults to the project this session runs in.
     project: Option<String>,
@@ -219,10 +225,20 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Compiler and linter diagnostics for a file or the whole project. Returns an empty list until Athena's language servers land."
+        description = "Errors and warnings from Athena's language servers (gopls, typescript-language-server). Covers files open in Athena's editor and, for Go, the rest of their packages. Lines are 1-based; columns count UTF-16 units."
     )]
-    async fn get_diagnostics(&self) -> Result<CallToolResult, ErrorData> {
-        json(&Vec::<serde_json::Value>::new())
+    async fn get_diagnostics(
+        &self,
+        Parameters(args): Parameters<DiagnosticsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let AppReply::Diagnostics(list) = ask(AppMsg::Diagnostics {
+            path: args.path.map(PathBuf::from),
+        })
+        .await?
+        else {
+            return Err(unexpected());
+        };
+        json(&list)
     }
 }
 

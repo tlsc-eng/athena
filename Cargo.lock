@@ -451,6 +451,7 @@ dependencies = [
  "async-channel 2.5.0",
  "athena-containers",
  "athena-editor",
+ "athena-lsp",
  "athena-playwright",
  "athena-preview",
  "athena-proto",

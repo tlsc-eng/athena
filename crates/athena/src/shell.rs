@@ -4,6 +4,7 @@ mod containers_view;
 mod drawer;
 mod fuzzy;
 mod item;
+mod lsp;
 mod notices;
 mod palette;
 mod panes;
@@ -62,6 +63,7 @@ pub struct Shell {
     last_drawer_tab: drawer::DrawerTab,
     containers: containers_view::ContainersState,
     playwright: playwright_view::PlaywrightState,
+    lsp: lsp::LspState,
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
@@ -162,6 +164,7 @@ impl Shell {
             last_drawer_tab: drawer::DrawerTab::Notifications,
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
+            lsp: lsp::LspState::default(),
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
@@ -248,6 +251,7 @@ impl Shell {
         if let Some(index) = self.workspace.active {
             let root = self.workspace.projects[index].root.clone();
             self.drop_project_items(&root, cx);
+            self.lsp_project_closed(&root);
             self.zoomed = None;
             self.focus_pending = true;
             self.workspace.close_project(index);
@@ -520,6 +524,7 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_previews(cx);
+        self.take_lsp_jump(window, cx);
         let t = cx.theme().clone();
         let body = div()
             .relative()

@@ -22,6 +22,7 @@ libc.workspace = true
 athena-containers.workspace = true
 athena-playwright.workspace = true
 athena-preview.workspace = true
+athena-lsp.workspace = true
 athena-editor.workspace = true
 athena-term.workspace = true
 athena-ui.workspace = true

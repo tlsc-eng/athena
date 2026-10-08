@@ -87,8 +87,23 @@ impl Shell {
             }
             ItemKind::Editor { path } => {
                 let view = cx.new(|cx| EditorView::open(path.clone(), cx));
-                cx.subscribe(&view, |_, _, _: &EditorEvent, cx| cx.notify())
-                    .detach();
+                cx.subscribe(&view, |this, view, event: &EditorEvent, cx| {
+                    match event {
+                        EditorEvent::Changed => {}
+                        EditorEvent::Edited { .. } => this.lsp_edited(&view, cx),
+                        EditorEvent::Saved => this.lsp_saved(&view, cx),
+                        EditorEvent::GoToDefinition { line, character } => {
+                            let at = athena_lsp::Position {
+                                line: *line,
+                                character: *character,
+                            };
+                            this.lsp_definition(&view, at, cx);
+                        }
+                    }
+                    cx.notify();
+                })
+                .detach();
+                self.lsp_opened(root, &view, cx);
                 ItemView::Editor(view)
             }
             ItemKind::Preview { url } => {
@@ -357,6 +372,10 @@ impl Shell {
         };
         if let Some(view) = self.items.remove(&(root, item)) {
             view.close(cx);
+            if let ItemView::Editor(editor) = &view {
+                let path = editor.read(cx).path().to_path_buf();
+                self.lsp_closed(&path, cx);
+            }
         }
         let Some(i) = self.workspace.active else {
             return;

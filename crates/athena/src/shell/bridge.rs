@@ -52,6 +52,20 @@ impl Shell {
             }
             AppMsg::Identify { .. } => AppReply::Ok,
             AppMsg::RunInTerminal { .. } => AppReply::Error("needs confirmation".into()),
+            AppMsg::Diagnostics { path } => {
+                let roots: Vec<PathBuf> = self
+                    .workspace
+                    .projects
+                    .iter()
+                    .map(|p| p.root.canonicalize().unwrap_or_else(|_| p.root.clone()))
+                    .collect();
+                match path.map(|p| resolve_in_roots(&p, &roots)).transpose() {
+                    Ok(path) => {
+                        AppReply::Diagnostics(self.diagnostics_under(path.as_deref(), &roots))
+                    }
+                    Err(e) => AppReply::Error(e),
+                }
+            }
             AppMsg::WhoAmI => AppReply::Caller {
                 session: caller,
                 project: caller.and_then(|s| self.session_root(s)),
@@ -217,7 +231,11 @@ impl Shell {
         Ok(())
     }
 
-    fn editor_for(&mut self, path: &PathBuf, cx: &mut Context<Self>) -> Option<ItemView> {
+    pub(super) fn editor_for(
+        &mut self,
+        path: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Option<ItemView> {
         let project = self.workspace.active_project()?;
         let root = project.root.clone();
         let item = project
