@@ -8,14 +8,17 @@ cask "athena" do
   homepage "https://github.com/tlsc-eng/athena"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :tahoe"
+  depends_on macos: :tahoe
 
   app "Athena.app"
   binary "#{appdir}/Athena.app/Contents/MacOS/athena"
 
   # Ad-hoc signed, with no Developer ID: Gatekeeper refuses a quarantined copy outright.
-  postflight do
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/Athena.app"]
+  postflight_steps do
+    run "/usr/bin/xattr",
+        args:           ["-dr", "com.apple.quarantine", "{{appdir}}/Athena.app"],
+        writable_paths: ["Athena.app"],
+        writable_base:  :appdir
   end
 
   uninstall quit: "io.tlsc.athena"
