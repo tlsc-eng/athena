@@ -34,6 +34,8 @@ impl Notification {
 
 pub(super) struct Toast {
     id: u64,
+    /// Title and body of a toast that is not kept in the Notifications list.
+    transient: Option<(String, String)>,
     _dismiss: Task<()>,
 }
 
@@ -225,7 +227,7 @@ impl Shell {
                 view.update(cx, |v, cx| v.mark_attention(cx));
             }
             if window.is_window_active() {
-                self.show_toast(notification.id, cx);
+                self.show_toast(notification.id, None, cx);
             } else {
                 let (title, body) = describe(
                     &notification.kind,
@@ -259,8 +261,24 @@ impl Shell {
             at: now_ms(),
             read: true,
         });
-        self.show_toast(id, cx);
+        if self.notifications.len() > KEEP {
+            self.notifications.remove(0);
+        }
+        self.show_toast(id, None, cx);
         self.notices_changed(cx);
+    }
+
+    /// A toast for something only worth seeing now (a lookup that found nothing), not kept in the list.
+    pub(super) fn transient_notice(
+        &mut self,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.next_notice += 1;
+        let id = self.next_notice;
+        self.show_toast(id, Some((title.into(), body.into())), cx);
+        cx.notify();
     }
 
     pub(super) fn unread(&self) -> usize {
@@ -273,7 +291,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn show_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+    fn show_toast(&mut self, id: u64, transient: Option<(String, String)>, cx: &mut Context<Self>) {
         let dismiss = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
             let _ = this.update(cx, |this, cx| {
@@ -283,6 +301,7 @@ impl Shell {
         });
         self.toasts.push(Toast {
             id,
+            transient,
             _dismiss: dismiss,
         });
         if self.toasts.len() > MAX_TOASTS {
@@ -297,12 +316,13 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.toasts.retain(|t| t.id != id);
         let Some(n) = self.notifications.iter_mut().find(|n| n.id == id) else {
+            cx.notify();
             return;
         };
         n.read = true;
         let target = n.project.clone().zip(n.item);
-        self.toasts.retain(|t| t.id != id);
         if let Some((root, item)) = target {
             self.focus_item(&root, item, window, cx);
         }
@@ -354,10 +374,21 @@ impl Shell {
         let cards: Vec<AnyElement> = self
             .toasts
             .iter()
-            .filter_map(|toast| self.notifications.iter().find(|n| n.id == toast.id))
-            .map(|n| {
-                let (title, body) = describe(&n.kind, self.project_name(&n.project).as_deref());
-                let id = n.id;
+            .filter_map(|toast| match &toast.transient {
+                Some((title, body)) => {
+                    Some((toast.id, title.clone(), body.clone(), t.color.content_muted))
+                }
+                None => self
+                    .notifications
+                    .iter()
+                    .find(|n| n.id == toast.id)
+                    .map(|n| {
+                        let (title, body) =
+                            describe(&n.kind, self.project_name(&n.project).as_deref());
+                        (n.id, title, body, self.kind_color(&n.kind, cx))
+                    }),
+            })
+            .map(|(id, title, body, color)| {
                 let card = div()
                     .id(("toast", id))
                     .w(px(360.))
@@ -372,7 +403,7 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_notification(id, window, cx)
                     }))
-                    .child(div().w(px(2.)).flex_none().bg(self.kind_color(&n.kind, cx)))
+                    .child(div().w(px(2.)).flex_none().bg(color))
                     .child(
                         div()
                             .flex_1()

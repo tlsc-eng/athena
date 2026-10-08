@@ -497,8 +497,7 @@ impl Shell {
 
     /// Says why a lookup went nowhere, so a click or key press is never silently ignored.
     fn lsp_failed(&mut self, title: &str, body: String, cx: &mut Context<Self>) {
-        let title = title.to_string();
-        self.local_notice(NoticeKind::Message { title, body }, cx);
+        self.transient_notice(title, body, cx);
     }
 
     /// Opens a definition found since the last frame; opening a tab needs the window.
