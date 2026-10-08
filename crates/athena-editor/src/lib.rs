@@ -7,13 +7,14 @@ mod hover;
 mod image;
 mod line_jump;
 mod lines;
+mod pairs;
 pub mod recovery;
 mod shared;
 mod signature;
 mod syntax;
 mod view;
 
-pub use buffer::{Buffer, Cursor, DiskState, Edit, Indent, SaveError, Selection};
+pub use buffer::{Buffer, Cursor, DiskState, Edit, Indent, LineEnding, SaveError, Selection};
 pub use completion::{Completion, ServerEdit};
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};

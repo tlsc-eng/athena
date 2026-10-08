@@ -79,6 +79,16 @@ actions!(
         GoToLine,
         ShowCompletions,
         ShowHover,
+        IndentLines,
+        OutdentLines,
+        MoveLinesUp,
+        MoveLinesDown,
+        CopyLinesUp,
+        CopyLinesDown,
+        DeleteLines,
+        InsertLineBelow,
+        InsertLineAbove,
+        FindReplace,
     ]
 );
 
@@ -140,6 +150,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-l", GoToLine, ctx),
         KeyBinding::new("ctrl-space", ShowCompletions, ctx),
         KeyBinding::new("cmd-k cmd-i", ShowHover, ctx),
+        KeyBinding::new("shift-tab", OutdentLines, ctx),
+        KeyBinding::new("cmd-]", IndentLines, ctx),
+        KeyBinding::new("cmd-[", OutdentLines, ctx),
+        KeyBinding::new("alt-up", MoveLinesUp, ctx),
+        KeyBinding::new("alt-down", MoveLinesDown, ctx),
+        KeyBinding::new("alt-shift-up", CopyLinesUp, ctx),
+        KeyBinding::new("alt-shift-down", CopyLinesDown, ctx),
+        KeyBinding::new("cmd-shift-k", DeleteLines, ctx),
+        KeyBinding::new("cmd-enter", InsertLineBelow, ctx),
+        // VS Code's cmd-shift-enter (Insert Line Above) stays Athena's Zoom Pane.
+        KeyBinding::new("cmd-alt-f", FindReplace, ctx),
     ]);
 }
 
@@ -247,9 +268,12 @@ pub(crate) struct EditorLayout {
 
 struct FindBar {
     input: Entity<TextInput>,
+    replace: Entity<TextInput>,
+    /// The replace row is shown, as Cmd+Alt+F or the bar's chevron reveals it.
+    replacing: bool,
     matches: Vec<Range<usize>>,
     current: usize,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 /// Files larger than this are reloaded from disk off the UI thread.
@@ -737,45 +761,72 @@ impl EditorView {
         }
     }
 
-    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Cmd+F opens the find bar alone; Cmd+Alt+F (`replace`) opens it with the replace row.
+    fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self
             .buf()
             .map(|b| b.selected_text(&self.cursor))
             .filter(|s| !s.is_empty() && !s.contains('\n'));
-        let input = match &self.find {
-            Some(find) => find.input.clone(),
-            None => {
-                let input = cx.new(|cx| TextInput::new("Find", cx));
-                let subscription =
-                    cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                        match event {
-                            InputEvent::Changed => this.refresh_find(true, cx),
-                            InputEvent::Submit | InputEvent::SubmitBeside | InputEvent::Down => {
-                                this.step_find(1)
-                            }
-                            InputEvent::Up => this.step_find(-1),
-                            InputEvent::Cancel => {
-                                this.close_find(cx);
-                                window.focus(&this.focus);
-                            }
+        if self.find.is_none() {
+            let input = cx.new(|cx| TextInput::new("Find", cx));
+            let replace = cx.new(|cx| TextInput::new("Replace", cx));
+            let find_events =
+                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::Changed => this.refresh_find(true, cx),
+                        InputEvent::Submit | InputEvent::SubmitBeside | InputEvent::Down => {
+                            this.step_find(1)
                         }
-                        cx.notify();
-                    });
-                self.find = Some(FindBar {
-                    input: input.clone(),
-                    matches: Vec::new(),
-                    current: 0,
-                    _subscription: subscription,
+                        InputEvent::Up => this.step_find(-1),
+                        InputEvent::Cancel => {
+                            this.close_find(cx);
+                            window.focus(&this.focus);
+                        }
+                    }
+                    cx.notify();
                 });
-                self.find_closing = None;
-                self.find_opening = Some(Opening::now());
-                input
-            }
+            let replace_events = cx.subscribe_in(
+                &replace,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::Submit => this.replace_one(cx),
+                        InputEvent::SubmitBeside => this.replace_all(cx),
+                        InputEvent::Cancel => {
+                            this.close_find(cx);
+                            window.focus(&this.focus);
+                        }
+                        InputEvent::Changed | InputEvent::Up | InputEvent::Down => {}
+                    }
+                    cx.notify();
+                },
+            );
+            self.find = Some(FindBar {
+                input,
+                replace,
+                replacing: false,
+                matches: Vec::new(),
+                current: 0,
+                _subscriptions: [find_events, replace_events],
+            });
+            self.find_closing = None;
+            self.find_opening = Some(Opening::now());
+        }
+        let Some(find) = self.find.as_mut() else {
+            return;
         };
+        find.replacing = replace;
+        let (input, replace_input) = (find.input.clone(), find.replace.clone());
         if let Some(seed) = seed {
             input.update(cx, |i, cx| i.set_text(seed, cx));
         }
-        window.focus(&input.focus_handle(cx));
+        // With a search to replace already typed, the replace field is the one to fill in.
+        let target = if replace && !input.read(cx).text().is_empty() {
+            replace_input
+        } else {
+            input
+        };
+        window.focus(&target.focus_handle(cx));
         cx.notify();
     }
 
@@ -858,36 +909,82 @@ impl EditorView {
         self.find.as_ref().map_or(&[], |f| f.matches.as_slice())
     }
 
-    fn render_find(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_find(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (find, closing) = match (&self.find, &self.find_closing) {
             (Some(find), _) => (find, None),
             (None, Some((find, closing))) => (find, Some(*closing)),
             (None, None) => return None,
         };
-        let t = cx.theme();
+        let t = cx.theme().clone();
         let count = match find.matches.len() {
             0 => "No results".to_string(),
             n => format!("{} of {n}", find.current + 1),
         };
+        let field = |input: &Entity<TextInput>| {
+            let focused = input.focus_handle(cx).is_focused(window);
+            div()
+                .w(px(280.))
+                .h(px(24.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .bg(t.color.surface_sunken)
+                .border_1()
+                .border_color(if focused {
+                    t.color.accent
+                } else {
+                    t.color.border_strong
+                })
+                .rounded(t.shape.radius_control)
+                .child(input.clone())
+        };
+        let chevron = div()
+            .id("find-toggle-replace")
+            .w(px(16.))
+            .h(px(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(t.shape.radius_control)
+            .text_color(t.color.content_muted)
+            .cursor_pointer()
+            .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+            .tooltip(|_, cx| athena_ui::Tooltip::view("Toggle Replace  ⌥⌘F", cx))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_replace(window, cx)))
+            .child(if find.replacing { "⌄" } else { "›" });
+        let find_row = div()
+            .h(px(24.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(chevron)
+            .child(field(&find.input))
+            .child(div().text_color(t.color.content_muted).child(count));
+        let replace_row = find.replacing.then(|| {
+            div()
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .pl(px(24.))
+                .child(field(&find.replace))
+                .child(
+                    Button::new("find-replace-one", "Replace", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, _, cx| this.replace_one(cx))),
+                )
+                .child(
+                    Button::new("find-replace-all", "Replace All", ButtonKind::Ghost)
+                        .on_click(cx.listener(|this, _, _, cx| this.replace_all(cx))),
+                )
+        });
         let row = div()
             .size_full()
             .flex()
-            .items_center()
-            .gap(px(12.))
-            .child(
-                div()
-                    .w(px(280.))
-                    .h(px(24.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .bg(t.color.surface_sunken)
-                    .border_1()
-                    .border_color(t.color.accent)
-                    .rounded(t.shape.radius_control)
-                    .child(find.input.clone()),
-            )
-            .child(div().text_color(t.color.content_muted).child(count));
+            .flex_col()
+            .justify_center()
+            .gap(px(4.))
+            .child(find_row)
+            .children(replace_row);
         // The bar's height snaps so the text below re-lays out once; only the row inside moves.
         let row = match closing {
             Some(closing) => motion::animate_exit(
@@ -909,7 +1006,7 @@ impl EditorView {
         Some(
             div()
                 .flex_none()
-                .h(px(36.))
+                .h(px(if find.replacing { 64. } else { 36. }))
                 .px(px(12.))
                 .overflow_hidden()
                 .bg(t.color.surface)
@@ -918,6 +1015,86 @@ impl EditorView {
                 .text_size(t.typography.caption)
                 .child(row),
         )
+    }
+}
+
+impl EditorView {
+    fn toggle_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let replacing = self.find.as_ref().is_some_and(|f| f.replacing);
+        self.open_find(!replacing, window, cx);
+    }
+
+    fn select_current_match(&mut self) {
+        self.step_find(0);
+    }
+
+    /// Replaces the selected match and selects the next one; a selection off the matches first
+    /// moves to the current match, as VS Code's Replace does.
+    fn replace_one(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        let Some(current) = find.matches.get(find.current).cloned() else {
+            return;
+        };
+        if self.cursor.selection.range() != current {
+            self.select_current_match();
+            cx.notify();
+            return;
+        }
+        let with = find.replace.read(cx).text().to_string();
+        self.with_buffer(cx, |b, c| b.replace_range(c, current, &with));
+        self.select_current_match();
+    }
+
+    /// Replaces every match as one undo step.
+    fn replace_all(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        let with = find.replace.read(cx).text().to_string();
+        let edits: Vec<(Range<usize>, String)> = find
+            .matches
+            .iter()
+            .map(|m| (m.clone(), with.clone()))
+            .collect();
+        if !edits.is_empty() {
+            self.with_buffer(cx, |b, c| b.apply_edits(c, &edits, None));
+        }
+    }
+
+    fn on_line_actions(
+        el: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        el.on_action(cx.listener(|this, _: &IndentLines, _, cx| {
+            this.with_buffer(cx, |b, c| b.indent_lines(c, false))
+        }))
+        .on_action(cx.listener(|this, _: &OutdentLines, _, cx| {
+            this.with_buffer(cx, |b, c| b.indent_lines(c, true))
+        }))
+        .on_action(cx.listener(|this, _: &MoveLinesUp, _, cx| {
+            this.with_buffer(cx, |b, c| b.move_lines(c, false))
+        }))
+        .on_action(cx.listener(|this, _: &MoveLinesDown, _, cx| {
+            this.with_buffer(cx, |b, c| b.move_lines(c, true))
+        }))
+        .on_action(cx.listener(|this, _: &CopyLinesUp, _, cx| {
+            this.with_buffer(cx, |b, c| b.copy_lines(c, false))
+        }))
+        .on_action(cx.listener(|this, _: &CopyLinesDown, _, cx| {
+            this.with_buffer(cx, |b, c| b.copy_lines(c, true))
+        }))
+        .on_action(cx.listener(|this, _: &DeleteLines, _, cx| {
+            this.with_buffer(cx, |b, c| b.delete_lines(c))
+        }))
+        .on_action(cx.listener(|this, _: &InsertLineBelow, _, cx| {
+            this.with_buffer(cx, |b, c| b.insert_line(c, true))
+        }))
+        .on_action(cx.listener(|this, _: &InsertLineAbove, _, cx| {
+            this.with_buffer(cx, |b, c| b.insert_line(c, false))
+        }))
+        .on_action(cx.listener(|this, _: &FindReplace, w, cx| this.open_find(true, w, cx)))
     }
 }
 
@@ -1037,7 +1214,7 @@ impl Render for EditorView {
             ));
         }
         root.children(self.render_conflict(cx))
-            .children(self.render_find(cx))
+            .children(self.render_find(window, cx))
             .child(
                 div()
                     .id("editor-body")
@@ -1209,7 +1386,7 @@ impl Render for EditorView {
                         })
                     }))
                     .on_action(cx.listener(|this, _: &Save, _, cx| this.save_formatted(cx)))
-                    .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(window, cx)))
+                    .on_action(cx.listener(|this, _: &Find, w, cx| this.open_find(false, w, cx)))
                     .on_action(cx.listener(|this, _: &FindNext, _, cx| {
                         this.step_find(1);
                         cx.notify();
@@ -1247,6 +1424,7 @@ impl Render for EditorView {
                             this.open_line_jump(window, cx)
                         }),
                     )
+                    .map(|el| Self::on_line_actions(el, cx))
                     .child(EditorElement::new(cx.entity(), focused)),
             )
             .children(self.render_line_jump(cx))
@@ -1694,7 +1872,11 @@ impl EntityInputHandler for EditorView {
         if !text.is_empty() {
             let text = text.to_string();
             self.typing = true;
-            self.with_buffer(cx, |b, c| b.insert(c, &text));
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => self.with_buffer(cx, |b, c| b.type_char(c, ch)),
+                _ => self.with_buffer(cx, |b, c| b.insert(c, &text)),
+            }
             self.completion_after_typing(&text, cx);
             self.signature_after_typing(&text, cx);
         }
@@ -1823,6 +2005,37 @@ mod tests {
         assert_eq!(b.full_text(), "let old = 1;\nkeep\nold();\n");
         replace_differing(&mut b, &mut c, "let old = 1;\nkeep\nold();\n");
         assert!(!b.undo(&mut c), "an unchanged text adds no undo step");
+    }
+
+    #[test]
+    fn line_and_replace_keystrokes_parse() {
+        let parse = |s: &str| gpui::Keystroke::parse(s).unwrap();
+        assert_eq!(parse("cmd-]").key, "]");
+        assert_eq!(parse("cmd-[").key, "[");
+        let k = parse("alt-shift-up");
+        assert!(k.modifiers.alt && k.modifiers.shift && k.key == "up");
+        let k = parse("cmd-shift-k");
+        assert!(k.modifiers.platform && k.modifiers.shift && k.key == "k");
+        let k = parse("cmd-alt-f");
+        assert!(k.modifiers.platform && k.modifiers.alt && k.key == "f");
+        assert!(parse("shift-tab").modifiers.shift);
+        assert_eq!(parse("cmd-enter").key, "enter");
+    }
+
+    #[test]
+    fn replacing_every_match_is_one_undo_step() {
+        let mut b = Buffer::new("foo Foo bar foo\n", None);
+        let mut c = Cursor::default();
+        let edits: Vec<_> = b
+            .find_all("foo")
+            .into_iter()
+            .map(|m| (m, "qux".to_string()))
+            .collect();
+        b.apply_edits(&mut c, &edits, None);
+        assert_eq!(b.full_text(), "qux qux bar qux\n");
+        assert!(b.undo(&mut c));
+        assert_eq!(b.full_text(), "foo Foo bar foo\n");
+        assert!(!b.undo(&mut c), "one step");
     }
 
     #[test]

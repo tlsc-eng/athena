@@ -10,7 +10,8 @@ use anyhow::{Context, Result, bail};
 use ropey::Rope;
 use tree_sitter::{InputEdit, Point};
 
-use crate::display::{Fold, indent_fold_at};
+use crate::display::{Fold, TAB_WIDTH, indent_fold_at};
+use crate::pairs::{self, AutoClosed};
 use crate::syntax::{Lang, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
@@ -48,6 +49,7 @@ impl Selection {
 pub struct Cursor {
     pub selection: Selection,
     goal_column: Option<usize>,
+    pub(crate) closed: AutoClosed,
 }
 
 impl Cursor {
@@ -55,6 +57,7 @@ impl Cursor {
         Self {
             selection: Selection::cursor(char),
             goal_column: None,
+            closed: AutoClosed::default(),
         }
     }
 
@@ -68,6 +71,7 @@ impl Cursor {
             self.selection.anchor = edit.map(self.selection.anchor);
             self.selection.head = edit.map(self.selection.head);
             self.goal_column = None;
+            self.closed.clear();
         }
         self.selection.anchor = self.selection.anchor.min(len);
         self.selection.head = self.selection.head.min(len);
@@ -109,6 +113,53 @@ impl Indent {
         match self {
             Self::Tab => "\t".into(),
             Self::Spaces(n) => " ".repeat(n),
+        }
+    }
+
+    /// Columns one level of indentation spans.
+    pub fn size(self) -> usize {
+        match self {
+            Self::Tab => TAB_WIDTH,
+            Self::Spaces(n) => n,
+        }
+    }
+
+    /// Whitespace reaching visual column `col`, in this style.
+    fn fill(self, col: usize) -> String {
+        match self {
+            Self::Tab => "\t".repeat(col / TAB_WIDTH) + &" ".repeat(col % TAB_WIDTH),
+            Self::Spaces(_) => " ".repeat(col),
+        }
+    }
+}
+
+/// The visual column leading blanks reach, and how many chars they are.
+fn indent_width(line: &str) -> (usize, usize) {
+    let mut col = 0;
+    let mut chars = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += TAB_WIDTH - col % TAB_WIDTH,
+            _ => break,
+        }
+        chars += 1;
+    }
+    (col, chars)
+}
+
+/// How lines end, from the first line break in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEnding {
+    Lf,
+    CrLf,
+}
+
+impl LineEnding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::CrLf => "\r\n",
         }
     }
 }
@@ -522,6 +573,12 @@ impl Buffer {
         let at = range.start + text.chars().count();
         c.selection = Selection::cursor(at);
         c.goal_column = None;
+        let (end, inserted) = (range.end, at - range.start);
+        c.closed.retain_map(|p| match p {
+            p if p < range.start => Some(p),
+            p if p >= end => Some(p - (end - range.start) + inserted),
+            _ => None,
+        });
         self.redo.clear();
 
         let now = Instant::now();
@@ -625,7 +682,7 @@ impl Buffer {
                 anchor: start + select.start,
                 head: start + select.end,
             },
-            goal_column: None,
+            ..Cursor::default()
         };
         self.redo.clear();
         self.last_edit = None;
@@ -646,24 +703,50 @@ impl Buffer {
             .chars()
             .take_while(|c| *c == ' ' || *c == '\t')
             .collect();
-        let before_cursor = self.text(self.line_start(line)..c.selection.range().start);
-        if before_cursor.trim_end().ends_with(['{', '(', '[']) {
-            indent.push_str(&self.indent.unit());
+        let range = c.selection.range();
+        let before_cursor = self.text(self.line_start(line)..range.start);
+        let opener = before_cursor.trim_end().chars().next_back();
+        if !matches!(opener, Some('{' | '(' | '[')) {
+            return self.replace(c, range, &format!("\n{indent}"), EditKind::Other);
         }
-        self.replace(
-            c,
-            c.selection.range(),
-            &format!("\n{indent}"),
-            EditKind::Other,
-        );
+        let outer = indent.clone();
+        indent.push_str(&self.indent.unit());
+        let line_end = self.line_start(line) + self.line_len(line);
+        let after_cursor = self.text(range.end.min(line_end)..line_end);
+        let blanks = after_cursor.len() - after_cursor.trim_start().len();
+        let closer = opener
+            .and_then(|o| bracket_pair(&o.to_string()))
+            .map(|(_, close)| close);
+        if range.is_empty() && closer.is_some_and(|close| after_cursor[blanks..].starts_with(close))
+        {
+            // Enter between a bracket pair puts the closer on its own line below the cursor.
+            let at = range.start + 1 + indent.chars().count();
+            let text = format!("\n{indent}\n{outer}");
+            return self.transact(
+                c,
+                vec![(range.start..range.end + blanks, text)],
+                Selection::cursor(at),
+            );
+        }
+        self.replace(c, range, &format!("\n{indent}"), EditKind::Other);
     }
 
+    /// Indents the selected lines, or inserts indentation over the cursor or over a selection
+    /// within one line, as VS Code does.
     pub fn tab(&mut self, c: &mut Cursor) {
+        let range = c.selection.range();
+        if !range.is_empty() {
+            let (first, last) = (self.line_of(range.start), self.line_of(range.end));
+            let line_end = self.line_start(first) + self.line_len(first);
+            if first != last || (range.start == self.line_start(first) && range.end == line_end) {
+                return self.indent_lines(c, false);
+            }
+        }
         let unit = match self.indent {
             Indent::Tab => "\t".to_string(),
-            Indent::Spaces(n) => " ".repeat(n - self.column_of(c.selection.head) % n),
+            Indent::Spaces(n) => " ".repeat(n - self.column_of(range.start) % n),
         };
-        self.replace(c, c.selection.range(), &unit, EditKind::Insert);
+        self.replace(c, range, &unit, EditKind::Insert);
     }
 
     pub fn backspace(&mut self, c: &mut Cursor) {
@@ -671,8 +754,15 @@ impl Buffer {
         if !range.is_empty() {
             return self.replace(c, range, "", EditKind::Delete);
         }
-        if range.start > 0 {
-            self.replace(c, range.start - 1..range.start, "", EditKind::Delete);
+        let head = range.start;
+        if head > 0 && head < self.len_chars() && c.closed.contains(head) {
+            let pairs = pairs::pairs_for(self.lang());
+            if pairs::closer_of(&pairs, self.rope.char(head - 1)) == Some(self.rope.char(head)) {
+                return self.replace(c, head - 1..head + 1, "", EditKind::Delete);
+            }
+        }
+        if head > 0 {
+            self.replace(c, head - 1..head, "", EditKind::Delete);
         }
     }
 
@@ -728,7 +818,7 @@ impl Buffer {
         }
         *c = Cursor {
             selection: tx.before,
-            goal_column: None,
+            ..Cursor::default()
         };
         self.redo.push(tx);
         self.last_edit = None;
@@ -745,7 +835,7 @@ impl Buffer {
         }
         *c = Cursor {
             selection: tx.after,
-            goal_column: None,
+            ..Cursor::default()
         };
         self.undo.push(tx);
         self.last_edit = None;
@@ -806,6 +896,323 @@ impl Buffer {
         };
     }
 
+    /// Applies non-overlapping `changes`, in offsets of the current text, as one undo step that
+    /// leaves `after` selected.
+    fn transact(
+        &mut self,
+        c: &mut Cursor,
+        mut changes: Vec<(Range<usize>, String)>,
+        after: Selection,
+    ) {
+        let before = c.selection;
+        *c = Cursor {
+            selection: after,
+            ..Cursor::default()
+        };
+        if changes.is_empty() {
+            return;
+        }
+        // Later changes first, so each one's offsets still hold when it is applied.
+        changes.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+        let mut applied = Vec::with_capacity(changes.len());
+        for (range, inserted) in changes {
+            let change = Change {
+                start: range.start,
+                deleted: self.rope.slice(range).to_string(),
+                inserted,
+            };
+            let edit = self.apply(&change);
+            self.reparse(&edit);
+            applied.push(change);
+        }
+        self.redo.clear();
+        self.last_edit = None;
+        if self.saved_at.is_some_and(|at| at > self.undo.len()) {
+            self.saved_at = None;
+        }
+        self.undo.push(Transaction {
+            changes: applied,
+            before,
+            after,
+        });
+    }
+
+    /// The lines a selection covers; one ending at the start of a line leaves that line out.
+    fn selected_lines(&self, selection: Selection) -> (usize, usize) {
+        let range = selection.range();
+        let first = self.line_of(range.start);
+        let mut last = self.line_of(range.end);
+        if last > first && range.end == self.line_start(last) {
+            last -= 1;
+        }
+        (first, last)
+    }
+
+    /// The line break the file uses, judged by its first line.
+    pub fn line_ending(&self) -> LineEnding {
+        let first = self.rope.line(0);
+        let n = first.len_chars();
+        if n >= 2 && first.char(n - 1) == '\n' && first.char(n - 2) == '\r' {
+            LineEnding::CrLf
+        } else {
+            LineEnding::Lf
+        }
+    }
+
+    /// Highlights the text as `lang`, or as plain text, whatever its file name says.
+    pub fn set_lang(&mut self, lang: Option<Lang>) {
+        if lang != self.lang() {
+            self.syntax = lang.map(|lang| Syntax::new(lang, &self.rope));
+            self.version += 1;
+        }
+    }
+
+    /// Moves every selected line to the next indentation stop, or the previous one with
+    /// `outdent`, rewriting its indentation in the buffer's style; one undo step.
+    pub fn indent_lines(&mut self, c: &mut Cursor, outdent: bool) {
+        let (first, last) = self.selected_lines(c.selection);
+        let size = self.indent.size().max(1);
+        let mut changes = Vec::new();
+        for line in first..=last {
+            let text = self.line(line);
+            if text.is_empty() && (first != last || outdent) {
+                continue;
+            }
+            let (col, chars) = indent_width(&text);
+            let target = match (outdent, col) {
+                (true, 0) => continue,
+                (true, _) => (col - 1) / size * size,
+                (false, _) => (col / size + 1) * size,
+            };
+            let fill = self.indent.fill(target);
+            // Indentation is ASCII, so its char count is its byte length.
+            if fill != text[..chars] {
+                let start = self.line_start(line);
+                changes.push((start..start + chars, fill));
+            }
+        }
+        let s = c.selection;
+        let after = if s.is_empty() {
+            Selection::cursor(through_indents(&changes, s.head, false))
+        } else {
+            Selection {
+                anchor: through_indents(&changes, s.anchor, s.anchor < s.head),
+                head: through_indents(&changes, s.head, s.head < s.anchor),
+            }
+        };
+        self.transact(c, changes, after);
+    }
+
+    /// Rewrites every line's indentation in `to`'s style and keeps using it; one undo step.
+    pub fn convert_indentation(&mut self, c: &mut Cursor, to: Indent) {
+        let mut changes = Vec::new();
+        for line in 0..self.len_lines() {
+            let text = self.line(line);
+            let (col, chars) = indent_width(&text);
+            let fill = to.fill(col);
+            if fill != text[..chars] {
+                let start = self.line_start(line);
+                changes.push((start..start + chars, fill));
+            }
+        }
+        let s = c.selection;
+        let after = Selection {
+            anchor: through_indents(&changes, s.anchor, false),
+            head: through_indents(&changes, s.head, false),
+        };
+        self.indent = to;
+        self.transact(c, changes, after);
+    }
+
+    /// Swaps the selected lines with the line above or below; the selection moves with them.
+    pub fn move_lines(&mut self, c: &mut Cursor, down: bool) {
+        let (first, last) = self.selected_lines(c.selection);
+        if (!down && first == 0) || (down && last + 1 >= self.len_lines()) {
+            return;
+        }
+        let eol = self.line_ending().as_str();
+        let (top, bottom, other) = if down {
+            (first, last + 1, last + 1)
+        } else {
+            (first - 1, last, first - 1)
+        };
+        let other_text = self.line(other);
+        let mut rows: Vec<String> = (first..=last).map(|l| self.line(l)).collect();
+        if down {
+            rows.insert(0, other_text.clone());
+        } else {
+            rows.push(other_text.clone());
+        }
+        let start = self.line_start(top);
+        let end = self.line_start(bottom) + self.line_len(bottom);
+        let step = other_text.chars().count() + eol.len();
+        let shift = |at: usize| if down { at + step } else { at - step };
+        let after = Selection {
+            anchor: shift(c.selection.anchor),
+            head: shift(c.selection.head),
+        };
+        self.transact(c, vec![(start..end, rows.join(eol))], after);
+    }
+
+    /// Duplicates the selected lines; the selection follows the copy below, or stays on the one above.
+    pub fn copy_lines(&mut self, c: &mut Cursor, down: bool) {
+        let (first, last) = self.selected_lines(c.selection);
+        let eol = self.line_ending().as_str();
+        let block = (first..=last)
+            .map(|l| self.line(l))
+            .collect::<Vec<_>>()
+            .join(eol);
+        let end = self.line_start(last) + self.line_len(last);
+        let step = if down {
+            block.chars().count() + eol.len()
+        } else {
+            0
+        };
+        let after = Selection {
+            anchor: c.selection.anchor + step,
+            head: c.selection.head + step,
+        };
+        self.transact(c, vec![(end..end, format!("{eol}{block}"))], after);
+    }
+
+    /// Deletes the selected lines, leaving the cursor in the same column of the line that follows.
+    pub fn delete_lines(&mut self, c: &mut Cursor) {
+        let (first, last) = self.selected_lines(c.selection);
+        let col = self.column_of(c.selection.head);
+        let (range, landing) = if last + 1 < self.len_lines() {
+            let start = self.line_start(first);
+            let next = self.line_len(last + 1);
+            (start..self.line_start(last + 1), start + col.min(next))
+        } else if first > 0 {
+            let above = self.line_start(first - 1);
+            let len = self.line_len(first - 1);
+            (above + len..self.len_chars(), above + col.min(len))
+        } else {
+            (0..self.len_chars(), 0)
+        };
+        self.transact(c, vec![(range, String::new())], Selection::cursor(landing));
+    }
+
+    /// Opens an indented line below the cursor's line, or above it, without splitting it.
+    pub fn insert_line(&mut self, c: &mut Cursor, below: bool) {
+        let line = self.line_of(c.selection.head);
+        let text = self.line(line);
+        let mut indent: String = text
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let eol = self.line_ending().as_str();
+        let start = self.line_start(line);
+        if !below {
+            let at = start + indent.chars().count();
+            return self.transact(
+                c,
+                vec![(start..start, format!("{indent}{eol}"))],
+                Selection::cursor(at),
+            );
+        }
+        if text.trim_end().ends_with(['{', '(', '[']) {
+            indent.push_str(&self.indent.unit());
+        }
+        let end = start + self.line_len(line);
+        let at = end + eol.len() + indent.chars().count();
+        self.transact(
+            c,
+            vec![(end..end, format!("{eol}{indent}"))],
+            Selection::cursor(at),
+        );
+    }
+
+    /// Types `ch` as VS Code does: closing brackets and quotes, typing over closers it inserted,
+    /// and wrapping a selection in a pair.
+    pub fn type_char(&mut self, c: &mut Cursor, ch: char) {
+        let pairs = pairs::pairs_for(self.lang());
+        let range = c.selection.range();
+        let close = pairs::closer_of(&pairs, ch);
+        if !range.is_empty() {
+            return match close {
+                Some(close) => self.surround(c, ch, close),
+                None => self.insert(c, &ch.to_string()),
+            };
+        }
+        let head = range.start;
+        let next = (head < self.len_chars()).then(|| self.rope.char(head));
+        if next == Some(ch) && c.closed.contains(head) {
+            c.closed.retain_map(|at| (at != head).then_some(at));
+            c.selection = Selection::cursor(head + 1);
+            c.goal_column = None;
+            self.extend_last_step(head, c.selection);
+            return;
+        }
+        if let Some(close) = close {
+            let prev = (head > 0).then(|| self.rope.char(head - 1));
+            if pairs::should_close(ch, prev, next, self.in_string_or_comment(head)) {
+                self.replace(c, range, &format!("{ch}{close}"), EditKind::Insert);
+                c.selection = Selection::cursor(head + 1);
+                self.extend_last_step(head + 2, c.selection);
+                c.closed.push(head + 1);
+                return;
+            }
+        }
+        self.insert(c, &ch.to_string());
+    }
+
+    /// Lets the next keystroke join the undo step that ended at `was`, now that the cursor moved.
+    fn extend_last_step(&mut self, was: usize, now: Selection) {
+        if let Some(last) = self.undo.last_mut()
+            && last.after == Selection::cursor(was)
+        {
+            last.after = now;
+        }
+    }
+
+    fn surround(&mut self, c: &mut Cursor, open: char, close: char) {
+        let s = c.selection;
+        let range = s.range();
+        let (start, end) = (range.start + 1, range.end + 1);
+        let after = if s.anchor <= s.head {
+            Selection {
+                anchor: start,
+                head: end,
+            }
+        } else {
+            Selection {
+                anchor: end,
+                head: start,
+            }
+        };
+        let changes = vec![
+            (range.start..range.start, open.to_string()),
+            (range.end..range.end, close.to_string()),
+        ];
+        self.transact(c, changes, after);
+    }
+
+    /// Whether `at` sits inside a string or comment, where pairs are not auto-closed.
+    pub(crate) fn in_string_or_comment(&self, at: usize) -> bool {
+        let line = self.line_of(at);
+        let byte = self.rope.char_to_byte(at);
+        let line_end = self
+            .rope
+            .char_to_byte(self.line_start(line) + self.line_len(line));
+        self.highlights(line..line + 1)
+            .iter()
+            .any(|(r, token)| match token {
+                Token::String | Token::StringSpecial | Token::Escape => {
+                    r.start < byte && byte < r.end
+                }
+                // A line comment runs to the line's end; a block comment ends at its `*/`.
+                Token::Comment => {
+                    r.start < byte
+                        && (byte < r.end
+                            || (byte == r.end
+                                && r.end >= line_end
+                                && !self.rope.byte_slice(r.clone()).to_string().ends_with("*/")))
+                }
+                _ => false,
+            })
+    }
+
     fn set_head(&self, c: &mut Cursor, head: usize, extend: bool) {
         let head = head.min(self.len_chars());
         c.selection = if extend {
@@ -816,6 +1223,18 @@ impl Buffer {
         } else {
             Selection::cursor(head)
         };
+        self.forget_closers_behind(c);
+    }
+
+    /// Auto-inserted closers stop being typed over once the cursor leaves the text between them.
+    fn forget_closers_behind(&self, c: &mut Cursor) {
+        let head = c.selection.head;
+        let line_end = {
+            let line = self.line_of(head);
+            self.line_start(line) + self.line_len(line)
+        };
+        c.closed
+            .retain_map(|at| (at >= head && at < line_end).then_some(at));
     }
 
     pub fn move_left(&self, c: &mut Cursor, extend: bool) {
@@ -1201,6 +1620,23 @@ fn differing_span(rope: &Rope, text: &str) -> Option<(Range<usize>, String)> {
     }
     let range = rope.byte_to_char(prefix)..rope.byte_to_char(old_len - suffix);
     Some((range, text[prefix..new.len() - suffix].to_string()))
+}
+
+/// Where `at` lands after indentation `changes` (ascending, one per line); with `stay`, a point in
+/// the indentation keeps its column, as the start of a selection does in VS Code.
+fn through_indents(changes: &[(Range<usize>, String)], at: usize, stay: bool) -> usize {
+    let mut shift = 0isize;
+    for (r, text) in changes {
+        let len = text.chars().count();
+        if at > r.end || (at == r.end && !stay) {
+            shift += len as isize - r.len() as isize;
+        } else if at >= r.start {
+            return (r.start as isize + shift) as usize + (at - r.start).min(len);
+        } else {
+            break;
+        }
+    }
+    (at as isize + shift) as usize
 }
 
 pub(crate) fn is_word(c: char) -> bool {
@@ -1812,5 +2248,287 @@ mod tests {
                 .iter()
                 .any(|(r, t)| &text[r.clone()] == "func" && *t == Token::Keyword)
         );
+    }
+
+    fn select(anchor: usize, head: usize) -> Cursor {
+        Cursor {
+            selection: Selection { anchor, head },
+            ..Default::default()
+        }
+    }
+
+    /// Runs `op` and checks it undoes in one step back to the original text and selection.
+    fn one_step(b: &mut Buffer, c: &mut Cursor, op: impl FnOnce(&mut Buffer, &mut Cursor)) {
+        let (text, before) = (b.full_text(), c.selection);
+        op(b, c);
+        let (after_text, after) = (b.full_text(), c.selection);
+        assert!(b.undo(c));
+        assert_eq!(b.full_text(), text, "undo restores the text");
+        assert_eq!(c.selection, before, "undo restores the selection");
+        b.redo(c);
+        assert_eq!((b.full_text(), c.selection), (after_text, after));
+    }
+
+    #[test]
+    fn tab_indents_selected_lines_instead_of_replacing_them() {
+        let mut b = buf("a\n  b\n\nc\n", "/x/a.ts");
+        assert_eq!(b.indent, Indent::Spaces(2));
+        let mut c = select(0, b.line_start(3) + 1);
+        one_step(&mut b, &mut c, |b, c| b.tab(c));
+        assert_eq!(
+            b.full_text(),
+            "  a\n    b\n\n  c\n",
+            "the empty line stays empty"
+        );
+        assert_eq!(c.selection, select(0, b.line_start(3) + 3).selection);
+        b.indent_lines(&mut c, true);
+        b.indent_lines(&mut c, true);
+        assert_eq!(b.full_text(), "a\nb\n\nc\n");
+    }
+
+    #[test]
+    fn tab_replaces_a_selection_inside_one_line() {
+        let mut b = buf("let abc = 1", "/x/a.ts");
+        let mut c = select(4, 7);
+        b.tab(&mut c);
+        assert_eq!(b.full_text(), "let    = 1", "two spaces to the next stop");
+        let mut b = buf("let abc = 1", "/x/a.ts");
+        let mut c = select(0, 11);
+        b.tab(&mut c);
+        assert_eq!(b.full_text(), "  let abc = 1", "a whole line indents");
+    }
+
+    #[test]
+    fn indenting_snaps_to_stops_and_rewrites_mixed_blanks() {
+        let mut b = buf("   x\n\t  y\n", "/x/a.py");
+        b.indent = Indent::Spaces(4);
+        let mut c = select(0, b.len_chars());
+        b.indent_lines(&mut c, false);
+        assert_eq!(b.full_text(), "    x\n        y\n");
+        b.indent_lines(&mut c, true);
+        assert_eq!(b.full_text(), "x\n    y\n");
+
+        let mut b = buf("  \tz\n", "/x/main.go");
+        let mut c = Cursor::at(b.line_start(0) + 3);
+        b.indent_lines(&mut c, false);
+        assert_eq!(b.full_text(), "\t\tz\n", "tabs in a tab-indented file");
+        assert_eq!(c.head(), 2, "the cursor stays before the code");
+    }
+
+    #[test]
+    fn outdent_keeps_the_cursor_with_its_text_including_wide_chars() {
+        let mut b = buf("    héllo 😀\n", "/x/a.py");
+        let mut c = Cursor::at(9);
+        one_step(&mut b, &mut c, |b, c| b.indent_lines(c, true));
+        assert_eq!(b.full_text(), "héllo 😀\n");
+        assert_eq!(c.head(), 5);
+        let mut c = Cursor::at(2);
+        b.indent_lines(&mut c, true);
+        assert_eq!(b.full_text(), "héllo 😀\n", "nothing to outdent");
+    }
+
+    #[test]
+    fn moves_lines_up_and_down_with_the_selection() {
+        let mut b = buf("one\ntwo\nthree\n", "/x/a.txt");
+        let mut c = Cursor::at(5);
+        one_step(&mut b, &mut c, |b, c| b.move_lines(c, true));
+        assert_eq!(b.full_text(), "one\nthree\ntwo\n");
+        assert_eq!(b.line_of(c.head()), 2);
+        assert_eq!(b.column_of(c.head()), 1);
+        b.move_lines(&mut c, false);
+        b.move_lines(&mut c, false);
+        assert_eq!(b.full_text(), "two\none\nthree\n");
+        b.move_lines(&mut c, false);
+        assert_eq!(
+            b.full_text(),
+            "two\none\nthree\n",
+            "the first line stays put"
+        );
+
+        let mut b = buf("a\nb\nc\nd", "/x/a.txt");
+        let mut c = select(b.line_start(1), b.line_start(3));
+        b.move_lines(&mut c, false);
+        assert_eq!(
+            b.full_text(),
+            "b\nc\na\nd",
+            "a selection ending at a line start leaves it out"
+        );
+        assert_eq!(c.selection, select(0, b.line_start(2)).selection);
+    }
+
+    #[test]
+    fn moving_keeps_crlf_line_breaks() {
+        let mut b = buf("a\r\nb\r\nc\r\n", "/x/a.txt");
+        assert_eq!(b.line_ending(), LineEnding::CrLf);
+        let mut c = Cursor::at(0);
+        b.move_lines(&mut c, true);
+        assert_eq!(b.full_text(), "b\r\na\r\nc\r\n");
+        assert_eq!(c.head(), 3);
+    }
+
+    #[test]
+    fn copies_lines_and_follows_the_copy_down() {
+        let mut b = buf("x\ny\n", "/x/a.txt");
+        let mut c = Cursor::at(1);
+        one_step(&mut b, &mut c, |b, c| b.copy_lines(c, true));
+        assert_eq!(b.full_text(), "x\nx\ny\n");
+        assert_eq!(c.head(), 3);
+        let mut c = Cursor::at(b.line_start(2));
+        b.copy_lines(&mut c, false);
+        assert_eq!(b.full_text(), "x\nx\ny\ny\n");
+        assert_eq!(c.head(), b.line_start(2), "copy up stays on the upper line");
+    }
+
+    #[test]
+    fn deletes_lines_keeping_the_column() {
+        let mut b = buf("first\nsecond\nthird", "/x/a.txt");
+        let mut c = Cursor::at(4);
+        one_step(&mut b, &mut c, |b, c| b.delete_lines(c));
+        assert_eq!(b.full_text(), "second\nthird");
+        assert_eq!(c.head(), 4);
+        let mut c = Cursor::at(b.len_chars());
+        b.delete_lines(&mut c);
+        assert_eq!(
+            b.full_text(),
+            "second",
+            "the last line takes the break before it"
+        );
+        assert_eq!(c.head(), 5);
+        b.delete_lines(&mut c);
+        assert_eq!(b.full_text(), "");
+    }
+
+    #[test]
+    fn inserts_lines_below_and_above_without_splitting() {
+        let mut b = buf("\tif x {\n\t}\n", "/x/main.go");
+        let mut c = Cursor::at(3);
+        one_step(&mut b, &mut c, |b, c| b.insert_line(c, true));
+        assert_eq!(b.full_text(), "\tif x {\n\t\t\n\t}\n");
+        assert_eq!(c.head(), b.line_start(1) + 2);
+        let mut c = Cursor::at(b.line_start(2) + 1);
+        b.insert_line(&mut c, false);
+        assert_eq!(b.full_text(), "\tif x {\n\t\t\n\t\n\t}\n");
+        assert_eq!(c.head(), b.line_start(2) + 1);
+    }
+
+    #[test]
+    fn enter_between_brackets_opens_an_indented_line() {
+        let mut b = buf("  f({})", "/x/a.ts");
+        let mut c = Cursor::at(5);
+        b.newline(&mut c);
+        assert_eq!(b.full_text(), "  f({\n    \n  })");
+        assert_eq!(c.head(), 10);
+        assert!(b.undo(&mut c));
+        assert_eq!(b.full_text(), "  f({})");
+    }
+
+    fn typed(b: &mut Buffer, c: &mut Cursor, keys: &str) {
+        for ch in keys.chars() {
+            b.type_char(c, ch);
+        }
+    }
+
+    #[test]
+    fn closes_pairs_and_types_over_what_it_closed() {
+        let mut b = buf("", "/x/a.ts");
+        let mut c = Cursor::default();
+        typed(&mut b, &mut c, "f(\"a");
+        assert_eq!(b.full_text(), "f(\"a\")");
+        typed(&mut b, &mut c, "\")");
+        assert_eq!(b.full_text(), "f(\"a\")", "typed over, not doubled");
+        assert_eq!(c.head(), 6);
+        typed(&mut b, &mut c, ";");
+        assert!(b.undo(&mut c));
+        assert_eq!(b.full_text(), "", "typing undoes as one step");
+    }
+
+    #[test]
+    fn only_closers_it_inserted_are_typed_over() {
+        let mut b = buf("x)", "/x/a.ts");
+        let mut c = Cursor::at(1);
+        typed(&mut b, &mut c, ")");
+        assert_eq!(b.full_text(), "x))");
+        let mut b = buf("", "/x/a.ts");
+        let mut c = Cursor::default();
+        typed(&mut b, &mut c, "(");
+        b.move_left(&mut c, false);
+        b.move_right(&mut c, false);
+        b.move_right(&mut c, false);
+        b.move_left(&mut c, false);
+        typed(&mut b, &mut c, ")");
+        assert_eq!(b.full_text(), "())", "leaving the pair forgets its closer");
+    }
+
+    #[test]
+    fn pairs_are_not_closed_before_words_after_words_or_in_strings_and_comments() {
+        let mut b = buf("foo", "/x/a.ts");
+        let mut c = Cursor::at(0);
+        typed(&mut b, &mut c, "(");
+        assert_eq!(b.full_text(), "(foo");
+
+        let mut b = buf("const s = \"ab\"; // note\n", "/x/a.ts");
+        let mut c = Cursor::at(12);
+        assert!(b.in_string_or_comment(12));
+        typed(&mut b, &mut c, "(");
+        assert_eq!(b.full_text(), "const s = \"a(b\"; // note\n");
+        let end = b.line_len(0);
+        assert!(b.in_string_or_comment(end));
+        let mut c = Cursor::at(end);
+        typed(&mut b, &mut c, "'");
+        assert_eq!(b.full_text(), "const s = \"a(b\"; // note'\n");
+        assert!(!b.in_string_or_comment(15), "after the closing quote");
+
+        let mut b = buf("let it = ", "/x/a.rs");
+        let mut c = Cursor::at(9);
+        typed(&mut b, &mut c, "'");
+        assert_eq!(
+            b.full_text(),
+            "let it = '",
+            "Rust lifetimes keep a lone quote"
+        );
+    }
+
+    #[test]
+    fn backspace_deletes_an_empty_pair_it_inserted() {
+        let mut b = buf("", "/x/main.go");
+        let mut c = Cursor::default();
+        typed(&mut b, &mut c, "[");
+        b.backspace(&mut c);
+        assert_eq!(b.full_text(), "");
+        let mut b = buf("()", "/x/main.go");
+        let mut c = Cursor::at(1);
+        b.backspace(&mut c);
+        assert_eq!(
+            b.full_text(),
+            ")",
+            "a pair typed by hand loses only the opener"
+        );
+    }
+
+    #[test]
+    fn surrounds_a_selection_keeping_it_selected() {
+        let mut b = buf("a héllo b", "/x/a.ts");
+        let mut c = select(7, 2);
+        one_step(&mut b, &mut c, |b, c| b.type_char(c, '"'));
+        assert_eq!(b.full_text(), "a \"héllo\" b");
+        assert_eq!(c.selection, select(8, 3).selection);
+        b.type_char(&mut c, 'x');
+        assert_eq!(
+            b.full_text(),
+            "a \"x\" b",
+            "other keys replace the selection"
+        );
+    }
+
+    #[test]
+    fn converts_indentation_between_tabs_and_spaces() {
+        let mut b = buf("a\n\tb\n\t\tc\n", "/x/a.py");
+        let mut c = Cursor::at(b.line_start(2) + 2);
+        one_step(&mut b, &mut c, |b, c| {
+            b.convert_indentation(c, Indent::Spaces(4))
+        });
+        assert_eq!(b.full_text(), "a\n    b\n        c\n");
+        assert_eq!(c.head(), b.line_start(2) + 8);
+        assert_eq!(b.indent, Indent::Spaces(4));
     }
 }
