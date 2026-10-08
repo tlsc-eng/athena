@@ -278,6 +278,10 @@ impl Shell {
             .into_any_element()
     }
 
+    pub(super) fn usage_open(&self) -> bool {
+        self.usage.open
+    }
+
     pub(super) fn render_usage_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.usage.open {
             return None;

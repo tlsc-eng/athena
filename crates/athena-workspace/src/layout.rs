@@ -37,6 +37,9 @@ pub enum ItemKind {
     Editor {
         path: PathBuf,
     },
+    Preview {
+        url: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

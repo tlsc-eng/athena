@@ -38,6 +38,7 @@ actions!(
         RunPlaywright,
         EnablePlaywrightMcp,
         DisablePlaywrightMcp,
+        NewPreview,
     ]
 );
 
@@ -125,6 +126,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::action("Containers", ShowContainers),
                 MenuItem::action("Playwright", ShowPlaywright),
+                MenuItem::action("New Browser Preview", NewPreview),
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),

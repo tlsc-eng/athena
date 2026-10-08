@@ -31,10 +31,10 @@ use gpui::{
 use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
     DisablePlaywrightMcp, EnableClaudeHooks, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewTerminal, NextProject, NextTab,
-    PrevProject, PrevTab, QuickOpen, Quit, RunPlaywright, SelectProject, SelectTab, ShowContainers,
-    ShowPlaywright, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen, ToggleNotifications,
-    TogglePaneZoom, Zoom,
+    FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject,
+    NextTab, PrevProject, PrevTab, QuickOpen, Quit, RunPlaywright, SelectProject, SelectTab,
+    ShowContainers, ShowPlaywright, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
+    ToggleNotifications, TogglePaneZoom, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -519,6 +519,7 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_previews(cx);
         let t = cx.theme().clone();
         let body = div()
             .relative()
@@ -553,6 +554,7 @@ impl Render for Shell {
             .on_action(|_: &Zoom, window, _| window.zoom_window())
             .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())
             .on_action(cx.listener(|this, _: &NewTerminal, w, cx| this.new_terminal(w, cx)))
+            .on_action(cx.listener(|this, _: &NewPreview, w, cx| this.new_preview(w, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, w, cx| this.close_active_tab(w, cx)))
             .on_action(
                 cx.listener(|this, _: &SplitRight, w, cx| this.split(Axis::Horizontal, w, cx)),
@@ -576,6 +578,7 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, a: &SelectTab, w, cx| this.activate_tab_in_focused(a.0, w, cx)),
             )
+            .capture_any_mouse_down(|_, window, _| athena_preview::restore_key_focus(window))
             .on_mouse_move(cx.listener(Self::drag_move))
             .on_mouse_up(
                 MouseButton::Left,

@@ -111,7 +111,7 @@ impl Shell {
             .focused_pane()?;
         match &pane.active_item()?.kind {
             ItemKind::Editor { path } => Some(path.clone()),
-            ItemKind::Terminal { .. } => None,
+            ItemKind::Terminal { .. } | ItemKind::Preview { .. } => None,
         }
     }
 

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use athena_editor::{EditorEvent, EditorView};
+use athena_preview::{PreviewEvent, PreviewView};
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
 use athena_workspace::{
@@ -90,6 +91,27 @@ impl Shell {
                     .detach();
                 ItemView::Editor(view)
             }
+            ItemKind::Preview { url } => {
+                let view = cx.new(|cx| PreviewView::new(root.to_path_buf(), url.clone(), cx));
+                let (project_root, item_id) = key.clone();
+                cx.subscribe(&view, move |this, _, event: &PreviewEvent, cx| {
+                    let PreviewEvent::Navigated(url) = event;
+                    let item = this
+                        .workspace
+                        .projects
+                        .iter_mut()
+                        .find(|p| p.root == project_root)
+                        .and_then(|p| p.layout.as_mut())
+                        .and_then(|l| l.item_mut(item_id));
+                    if let Some(item) = item {
+                        item.kind = ItemKind::Preview { url: url.clone() };
+                        this.schedule_save(cx);
+                    }
+                    cx.notify();
+                })
+                .detach();
+                ItemView::Preview(view)
+            }
         };
         self.items.insert(key, view.clone());
         Some(view)
@@ -103,6 +125,7 @@ impl Shell {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "Untitled".into()),
+            (None, ItemKind::Preview { url }) => athena_preview::label_for(url),
         }
     }
 
@@ -180,10 +203,42 @@ impl Shell {
     }
 
     pub(super) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_item(ItemKind::Terminal { session: None }, window, cx);
+    }
+
+    pub(super) fn new_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = athena_preview::DEFAULT_URL.to_string();
+        self.add_item(ItemKind::Preview { url }, window, cx);
+    }
+
+    /// Web previews float above gpui, so only those in a visible tab with nothing drawn over them show.
+    pub(super) fn sync_previews(&mut self, cx: &mut Context<Self>) {
+        let mut shown = std::collections::HashSet::new();
+        let covered = self.palette.is_some() || self.usage_open();
+        if let Some(project) = self.workspace.active_project().filter(|_| !covered)
+            && let Some(layout) = &project.layout
+        {
+            let panes = match self.zoomed.and_then(|z| layout.pane(z)) {
+                Some(pane) => vec![pane],
+                None => layout.panes(),
+            };
+            for item in panes.into_iter().filter_map(|p| p.active_item()) {
+                shown.insert((project.root.clone(), item.id));
+            }
+        }
+        for (key, view) in &self.items {
+            if let ItemView::Preview(view) = view {
+                let visible = shown.contains(key);
+                view.update(cx, |v, _| v.set_visible(visible));
+            }
+        }
+    }
+
+    /// Opens `kind` as a new tab in the focused pane.
+    fn add_item(&mut self, kind: ItemKind, window: &mut Window, cx: &mut Context<Self>) {
         let Some(i) = self.workspace.active else {
             return;
         };
-        let kind = ItemKind::Terminal { session: None };
         match self.workspace.projects[i].layout.as_mut() {
             Some(layout) => {
                 let focused = layout.focused;
