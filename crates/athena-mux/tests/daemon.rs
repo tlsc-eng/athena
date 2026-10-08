@@ -122,8 +122,13 @@ fn session_survives_client_disconnect_and_replays() {
 
     conn.send(&ClientMsg::Kill { pane }).unwrap();
     conn.send(&ClientMsg::ListPanes).unwrap();
-    let ServerMsg::Panes { panes } = next(&mut reader) else {
-        panic!("expected Panes")
+    // Live output and the kill's Exited can still arrive ahead of the reply.
+    let panes = loop {
+        match next(&mut reader) {
+            ServerMsg::Panes { panes } => break panes,
+            ServerMsg::Output { .. } | ServerMsg::Exited { .. } | ServerMsg::Foreground { .. } => {}
+            other => panic!("unexpected {other:?}"),
+        }
     };
     assert!(panes.is_empty());
 }
