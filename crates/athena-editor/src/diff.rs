@@ -247,8 +247,9 @@ fn common_suffix(a: &[u32], b: &[u32]) -> usize {
 /// cost limit it returns the furthest point reached instead; `None` means "replace it all".
 fn bisect(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
     let (n, m) = (a.len() as isize, b.len() as isize);
-    let max_d = (n + m + 1) / 2;
     let limit = MIN_COST_LIMIT.max(((n + m) as f64).sqrt() as usize) as isize;
+    // Sized by the edits actually explored, not the input, which recursion would allocate again.
+    let max_d = ((n + m + 1) / 2).min(limit);
     let offset = max_d + 1;
     let len = (2 * offset + 1) as usize;
     let mut v1 = vec![-1isize; len];
@@ -258,7 +259,7 @@ fn bisect(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
     let delta = n - m;
     let front = delta % 2 != 0;
     let (mut k1start, mut k1end, mut k2start, mut k2end) = (0, 0, 0, 0);
-    for d in 0..max_d.min(limit) {
+    for d in 0..max_d {
         let mut k1 = -d + k1start;
         while k1 <= d - k1end {
             let i = (offset + k1) as usize;

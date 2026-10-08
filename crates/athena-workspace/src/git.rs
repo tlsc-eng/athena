@@ -313,11 +313,11 @@ fn run(cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
 
 /// Error from a run killed for taking longer than its time limit.
 #[derive(Debug)]
-pub struct TimedOut;
+pub struct TimedOut(Duration);
 
 impl std::fmt::Display for TimedOut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "git did not finish within {} seconds", TIMEOUT.as_secs())
+        write!(f, "git did not finish within {} seconds", self.0.as_secs())
     }
 }
 
@@ -358,14 +358,14 @@ fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(TimedOut.into());
+            return Err(TimedOut(limit).into());
         }
         std::thread::sleep(Duration::from_millis(5));
     };
     // A process git started (a hook, a credential helper) can hold the pipes open after git exits.
     let collect = |pipe: mpsc::Receiver<Vec<u8>>| {
         pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .map_err(|_| TimedOut)
+            .map_err(|_| TimedOut(limit))
     };
     let stdout = collect(stdout)?;
     if !status.success() {
@@ -464,11 +464,15 @@ pub fn blame_line(
     Ok(parse_blame(&String::from_utf8_lossy(&run(cmd, contents)?)))
 }
 
+/// Commands that rewrite the index or worktree can take minutes on a big tree, and a kill
+/// halfway leaves `index.lock` behind.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// `git add` for the given paths.
 pub fn stage(root: &Path, paths: &[PathBuf]) -> Result<()> {
     let mut cmd = git(root);
     cmd.args(["add", "--"]).args(paths);
-    run(cmd, None).map(drop)
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
 /// Takes the given paths out of the index again, keeping the worktree.
@@ -484,7 +488,7 @@ pub fn unstage(root: &Path, paths: &[PathBuf]) -> Result<()> {
         Err(_) => cmd.args(["rm", "--cached", "-q", "--"]),
     };
     cmd.args(paths);
-    run(cmd, None).map(drop)
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
 /// Which stored version of a file to read.
@@ -494,7 +498,8 @@ pub enum Rev {
     Index,
 }
 
-/// A file's contents at HEAD or in the index; `None` when it is not there (new, or no commits yet).
+/// A file's contents at HEAD or in the index as checkout would write them (line endings and
+/// filters applied); `None` when it is not there (new, or no commits yet).
 pub fn show(root: &Path, rev: Rev, rel: &Path) -> Result<Option<Vec<u8>>> {
     let spec = match rev {
         Rev::Head => format!("HEAD:./{}", rel.display()),
@@ -508,14 +513,31 @@ pub fn show(root: &Path, rev: Rev, rel: &Path) -> Result<Option<Vec<u8>>> {
         Err(_) => return Ok(None),
     }
     let mut cmd = git(root);
-    cmd.args(["cat-file", "blob", &spec]);
+    cmd.args(["cat-file", "--filters", &spec]);
     run(cmd, None).map(Some)
 }
 
-/// Puts `contents` in the index as `rel`, leaving the worktree alone; staging one hunk does this.
-pub fn write_index(root: &Path, rel: &Path, contents: &str) -> Result<()> {
+/// Puts `contents` in the index as `rel`, or takes `rel` out of it for `None`, leaving the
+/// worktree alone; staging one hunk does this. Refuses when the index no longer holds `expected`.
+pub fn write_index(root: &Path, rel: &Path, expected: &str, contents: Option<&str>) -> Result<()> {
+    let now = show(root, Rev::Index, rel)?.unwrap_or_default();
+    if now != expected.as_bytes() {
+        bail!(
+            "{} changed in the index since the diff was shown",
+            rel.display()
+        );
+    }
+    let Some(contents) = contents else {
+        let mut remove = git(root);
+        remove
+            .args(["update-index", "--force-remove", "--"])
+            .arg(rel);
+        return run(remove, None).map(drop);
+    };
     let mut hash = git(root);
-    hash.args(["hash-object", "-w", "--stdin"]);
+    // `--path` runs the clean side of the file's filters and line-ending conversion.
+    hash.args(["hash-object", "-w", "--stdin", "--path"])
+        .arg(rel);
     let sha = String::from_utf8_lossy(&run(hash, Some(contents))?)
         .trim()
         .to_string();
@@ -531,10 +553,12 @@ pub fn write_index(root: &Path, rel: &Path, contents: &str) -> Result<()> {
             if exec { "100755" } else { "100644" }.to_string()
         }
     };
+    // Unlike the other paths here, a `--cacheinfo` path is relative to the repository's top.
+    let top = format!("{}{}", prefix(root)?, rel.display());
     let mut update = git(root);
     update
         .args(["update-index", "--add", "--cacheinfo"])
-        .arg(format!("{mode},{sha},{}", rel.display()));
+        .arg(format!("{mode},{sha},{top}"));
     run(update, None).map(drop)
 }
 
@@ -551,13 +575,13 @@ pub fn commit(root: &Path, message: &str, amend: bool) -> Result<()> {
     run_within(cmd, Some(message), COMMIT_TIMEOUT).map(drop)
 }
 
-/// The last commit's full message, for the amend box.
-pub fn last_message(root: &Path) -> Result<String> {
+/// The last commit's id and full message, for the amend box.
+pub fn last_commit(root: &Path) -> Result<(String, String)> {
     let mut cmd = git(root);
-    cmd.args(["log", "-1", "--format=%B"]);
-    Ok(String::from_utf8_lossy(&run(cmd, None)?)
-        .trim_end()
-        .to_string())
+    cmd.args(["log", "-1", "--format=%H%n%B"]);
+    let out = String::from_utf8_lossy(&run(cmd, None)?).into_owned();
+    let (id, message) = out.split_once('\n').unwrap_or((&out, ""));
+    Ok((id.to_string(), message.trim_end().to_string()))
 }
 
 /// Copies a file into `backup` (keeping its relative path) before it is overwritten or deleted.
@@ -577,7 +601,7 @@ pub fn discard(root: &Path, rel: &Path, backup: &Path) -> Result<()> {
     keep_copy(root, rel, backup)?;
     let mut cmd = git(root);
     cmd.args(["restore", "--worktree", "--"]).arg(rel);
-    run(cmd, None).map(drop)
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
 /// Writes `contents` over a file that still holds `expected`, keeping a copy in `backup` first.
@@ -667,7 +691,7 @@ pub fn switch(root: &Path, branch: &str, how: Switch) -> Result<()> {
         Switch::Create => cmd.arg("-c"),
     };
     cmd.arg(branch);
-    run(cmd, None).map(drop)
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1105,7 +1129,13 @@ mod tests {
         }
         let dir = committed_repo("stage-hunk", "a\nb\nc\nd\n");
         std::fs::write(dir.join("f.txt"), "a\nB\nc\nD\n").unwrap();
-        write_index(&dir, Path::new("f.txt"), "a\nB\nc\nd\n").unwrap();
+        write_index(
+            &dir,
+            Path::new("f.txt"),
+            "a\nb\nc\nd\n",
+            Some("a\nB\nc\nd\n"),
+        )
+        .unwrap();
         let staged = git_out(&dir, &["diff", "--cached", "--no-color"]);
         let unstaged = git_out(&dir, &["diff", "--no-color"]);
         assert!(staged.contains("+B") && !staged.contains("+D"), "{staged}");
@@ -1120,12 +1150,18 @@ mod tests {
         assert_eq!(show(&dir, Rev::Head, Path::new("new.txt")).unwrap(), None);
 
         // Unstaging writes HEAD's text back to the index.
-        write_index(&dir, Path::new("f.txt"), "a\nb\nc\nd\n").unwrap();
+        write_index(
+            &dir,
+            Path::new("f.txt"),
+            "a\nB\nc\nd\n",
+            Some("a\nb\nc\nd\n"),
+        )
+        .unwrap();
         assert!(git_out(&dir, &["diff", "--cached"]).is_empty());
 
         // A hunk of an untracked file stages it as added.
         std::fs::write(dir.join("new.txt"), "x\ny\n").unwrap();
-        write_index(&dir, Path::new("new.txt"), "x\n").unwrap();
+        write_index(&dir, Path::new("new.txt"), "", Some("x\n")).unwrap();
         let snap = status(&dir, "", true).unwrap();
         let (_, new) = snap
             .entries
@@ -1134,6 +1170,103 @@ mod tests {
             .unwrap();
         assert_eq!(new.staged, Some(FileStatus::Added));
         assert_eq!(new.unstaged, Some(FileStatus::Modified));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_hunk_staged_from_a_subfolder_project_lands_on_that_file() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("stage-sub", "top\n");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/f.txt"), "a\nb\n").unwrap();
+        stage(&dir, &[PathBuf::from("sub/f.txt")]).unwrap();
+        commit(&dir, "Add sub", false).unwrap();
+        let sub = dir.join("sub");
+        std::fs::write(sub.join("f.txt"), "a\nB\nc\n").unwrap();
+        write_index(&sub, Path::new("f.txt"), "a\nb\n", Some("a\nB\n")).unwrap();
+        let listed = git_out(&dir, &["ls-files"]);
+        assert_eq!(listed, "f.txt\nsub/f.txt\n");
+        assert_eq!(git_out(&dir, &["show", ":sub/f.txt"]), "a\nB\n");
+        assert_eq!(git_out(&dir, &["show", ":f.txt"]), "top\n");
+
+        // Taking an entry out also resolves the path under the subfolder.
+        write_index(&sub, Path::new("f.txt"), "a\nB\n", None).unwrap();
+        assert_eq!(git_out(&dir, &["ls-files"]), "f.txt\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn staging_against_an_index_that_moved_on_is_refused() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("stage-stale", "a\nb\n");
+        std::fs::write(dir.join("f.txt"), "A\nB\n").unwrap();
+        // Someone staged the file in a terminal after the diff was read.
+        stage(&dir, &[PathBuf::from("f.txt")]).unwrap();
+        let err = write_index(&dir, Path::new("f.txt"), "a\nb\n", Some("A\nb\n")).unwrap_err();
+        assert!(err.to_string().contains("changed in the index"), "{err:#}");
+        assert_eq!(git_out(&dir, &["show", ":f.txt"]), "A\nB\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hunks_go_through_the_repositorys_line_endings_and_filters() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("stage-eol", "seed\n");
+        std::fs::write(
+            dir.join(".gitattributes"),
+            "*.txt text eol=crlf\n*.dat filter=caps\n",
+        )
+        .unwrap();
+        // The index keeps lower case, checkout writes upper case; git-lfs works the same way.
+        repo_git(&dir, &["config", "filter.caps.clean", "tr A-Z a-z"]);
+        repo_git(&dir, &["config", "filter.caps.smudge", "tr a-z A-Z"]);
+        std::fs::write(dir.join("f.txt"), "a\r\nb\r\nc\r\nd\r\n").unwrap();
+        std::fs::write(dir.join("g.dat"), "ONE\nTWO\n").unwrap();
+        stage(&dir, &[PathBuf::from(".")]).unwrap();
+        commit(&dir, "Add text and data", false).unwrap();
+        assert_eq!(
+            git_out(&dir, &["cat-file", "blob", ":f.txt"]),
+            "a\nb\nc\nd\n"
+        );
+        assert_eq!(git_out(&dir, &["cat-file", "blob", ":g.dat"]), "one\ntwo\n");
+
+        let index = show(&dir, Rev::Index, Path::new("f.txt")).unwrap().unwrap();
+        assert_eq!(index, b"a\r\nb\r\nc\r\nd\r\n");
+        std::fs::write(dir.join("f.txt"), "a\r\nB\r\nc\r\nD\r\n").unwrap();
+        write_index(
+            &dir,
+            Path::new("f.txt"),
+            "a\r\nb\r\nc\r\nd\r\n",
+            Some("a\r\nB\r\nc\r\nd\r\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            git_out(&dir, &["cat-file", "blob", ":f.txt"]),
+            "a\nB\nc\nd\n"
+        );
+        let unstaged = git_out(&dir, &["diff", "--no-color", "--", "f.txt"]);
+        assert!(
+            unstaged.contains("+D") && !unstaged.contains("+B"),
+            "{unstaged}"
+        );
+
+        assert_eq!(
+            show(&dir, Rev::Head, Path::new("g.dat")).unwrap().unwrap(),
+            b"ONE\nTWO\n"
+        );
+        std::fs::write(dir.join("g.dat"), "ONE\nTHREE\n").unwrap();
+        write_index(&dir, Path::new("g.dat"), "ONE\nTWO\n", Some("ONE\nTHREE\n")).unwrap();
+        assert_eq!(
+            git_out(&dir, &["cat-file", "blob", ":g.dat"]),
+            "one\nthree\n"
+        );
+        assert!(git_out(&dir, &["diff", "--", "g.dat"]).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1172,12 +1305,15 @@ mod tests {
         std::fs::write(dir.join("f.txt"), "b\n").unwrap();
         stage(&dir, &[PathBuf::from("f.txt")]).unwrap();
         commit(&dir, "Change a to b\n\nWith a body.", false).unwrap();
-        assert_eq!(last_message(&dir).unwrap(), "Change a to b\n\nWith a body.");
+        assert_eq!(
+            last_commit(&dir).unwrap().1,
+            "Change a to b\n\nWith a body."
+        );
         assert_eq!(git_out(&dir, &["rev-list", "--count", "HEAD"]).trim(), "2");
         std::fs::write(dir.join("f.txt"), "c\n").unwrap();
         stage(&dir, &[PathBuf::from("f.txt")]).unwrap();
         commit(&dir, "Change a to c", true).unwrap();
-        assert_eq!(last_message(&dir).unwrap(), "Change a to c");
+        assert_eq!(last_commit(&dir).unwrap().1, "Change a to c");
         assert_eq!(git_out(&dir, &["rev-list", "--count", "HEAD"]).trim(), "2");
         assert_eq!(
             show(&dir, Rev::Head, Path::new("f.txt")).unwrap().unwrap(),

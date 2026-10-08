@@ -53,10 +53,16 @@ const TOOLBAR: f32 = 32.;
 /// A hunk action, carrying the full text the file or index should have afterwards.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffEvent {
-    /// New index contents with one change staged.
-    Stage(String),
+    /// New index contents with one change staged; `expected` is what the index held when diffed.
+    Stage {
+        contents: String,
+        expected: String,
+    },
     /// New index contents with one staged change taken back out.
-    Unstage(String),
+    Unstage {
+        contents: String,
+        expected: String,
+    },
     /// New file contents with one change undone; `expected` is what the file held when diffed.
     Revert {
         contents: String,
@@ -199,7 +205,10 @@ pub struct DiffView {
     inline: bool,
     loaded: Option<Rc<Loaded>>,
     error: Option<SharedString>,
-    computing: Option<Task<()>>,
+    /// The texts being diffed, by hash, so a reload of the same texts does not restart it.
+    computing: Option<(u64, Task<()>)>,
+    /// A hunk action was sent and the texts it was made from have not been reloaded yet.
+    acting: bool,
     /// The change hunk navigation last moved to; scrolling by hand forgets it.
     current: Option<usize>,
     scrolled_once: bool,
@@ -235,6 +244,7 @@ impl DiffView {
             loaded: None,
             error: None,
             computing: None,
+            acting: false,
             current: None,
             scrolled_once: false,
             scroll: UniformListScrollHandle::new(),
@@ -256,14 +266,20 @@ impl DiffView {
         Some(&self.loaded.as_ref()?.new.text)
     }
 
-    /// Diffs two texts off the main thread; the same texts again are ignored.
+    /// Diffs two texts off the main thread; the same texts again, shown or in progress, are ignored.
     pub fn set_texts(&mut self, old: String, new: String, cx: &mut Context<Self>) {
+        self.acting = false;
         if self.error.is_none()
             && self
                 .loaded
                 .as_ref()
                 .is_some_and(|l| l.old.text == old && l.new.text == new)
         {
+            self.computing = None;
+            return;
+        }
+        let key = texts_key(&old, &new);
+        if self.computing.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
         let lang = Lang::for_path(&self.path).or_else(|| {
@@ -273,9 +289,10 @@ impl DiffView {
         let work = cx
             .background_executor()
             .spawn(async move { Loaded::compute(old, new, lang) });
-        self.computing = Some(cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let loaded = work.await;
             let _ = this.update(cx, |this, cx| {
+                this.computing = None;
                 this.error = None;
                 this.loaded = Some(Rc::new(loaded));
                 if this
@@ -289,13 +306,16 @@ impl DiffView {
                 }
                 cx.notify();
             });
-        }));
+        });
+        self.computing = Some((key, task));
     }
 
     /// Shows why the versions could not be read (a binary file, a missing revision).
     pub fn set_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.acting = false;
         self.error = Some(message.into());
         self.loaded = None;
+        self.computing = None;
         cx.notify();
     }
 
@@ -403,6 +423,10 @@ impl DiffView {
     }
 
     fn emit_action(&mut self, change: usize, kind: HunkKind, cx: &mut Context<Self>) {
+        // A second click before the reload would act on texts the first one already changed.
+        if self.acting || self.computing.is_some() {
+            return;
+        }
         let Some(loaded) = self.loaded.clone() else {
             return;
         };
@@ -411,15 +435,29 @@ impl DiffView {
         };
         let (a, b) = (loaded.old.line_strs(), loaded.new.line_strs());
         let event = match kind {
-            HunkKind::Stage => DiffEvent::Stage(diff::apply_change(&a, &b, c)),
-            HunkKind::Unstage => DiffEvent::Unstage(diff::revert_change(&a, &b, c)),
+            HunkKind::Stage => DiffEvent::Stage {
+                contents: diff::apply_change(&a, &b, c),
+                expected: loaded.old.text.clone(),
+            },
+            HunkKind::Unstage => DiffEvent::Unstage {
+                contents: diff::revert_change(&a, &b, c),
+                expected: loaded.new.text.clone(),
+            },
             HunkKind::Revert => DiffEvent::Revert {
                 contents: diff::revert_change(&a, &b, c),
                 expected: loaded.new.text.clone(),
             },
         };
+        self.acting = true;
         cx.emit(event);
     }
+}
+
+fn texts_key(old: &str, new: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (old, new).hash(&mut h);
+    h.finish()
 }
 
 #[derive(Clone, Copy)]

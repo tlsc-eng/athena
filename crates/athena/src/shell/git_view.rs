@@ -58,6 +58,8 @@ pub(super) struct GitState {
     before_amend: Option<String>,
     /// The last commit's body while amending; the box shows only its subject line.
     amend_body: Option<String>,
+    /// The commit Amend filled the box from, so a commit made since is not rewritten with it.
+    amend_head: Option<String>,
     committing: bool,
     /// Branches for the branch picker, newest first.
     pub(super) branches: Vec<git::Branch>,
@@ -658,6 +660,7 @@ impl Shell {
             Some(body) => with_body(&message, body),
             None => message,
         };
+        let amend_head = self.git.amend_head.clone().filter(|_| amend);
         self.git.committing = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -665,6 +668,14 @@ impl Shell {
             let done = cx
                 .background_executor()
                 .spawn(async move {
+                    if let Some(head) = amend_head
+                        && git::last_commit(&root)?.0 != head
+                    {
+                        anyhow::bail!(
+                            "The last commit changed since Amend filled in its message. Turn \
+                             Amend off and on again to amend the new one."
+                        );
+                    }
                     if !stage_first.is_empty() {
                         git::stage(&root, &stage_first)?;
                     }
@@ -678,6 +689,7 @@ impl Shell {
                         this.git.amend = false;
                         this.git.before_amend = None;
                         this.git.amend_body = None;
+                        this.git.amend_head = None;
                         if let Some(input) = this.git.commit_input.clone() {
                             input.update(cx, |i, cx| i.set_text("", cx));
                         }
@@ -707,6 +719,7 @@ impl Shell {
         cx.notify();
         if !self.git.amend {
             self.git.amend_body = None;
+            self.git.amend_head = None;
             if let Some(before) = self.git.before_amend.take() {
                 input.update(cx, |i, cx| i.set_text(before, cx));
             }
@@ -718,15 +731,16 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let last = cx
                 .background_executor()
-                .spawn(async move { git::last_message(&root) })
+                .spawn(async move { git::last_commit(&root) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if !this.git.amend {
                     return;
                 }
-                let Ok(last) = last else {
+                let Ok((head, last)) = last else {
                     return;
                 };
+                this.git.amend_head = Some(head);
                 let typed = input.read(cx).text().to_string();
                 this.git.before_amend = Some(typed);
                 // The box holds one line, so the body waits aside and is sent back with it.

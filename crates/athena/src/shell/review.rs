@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, bail};
 use athena_editor::{DiffEvent, DiffView, HunkActions};
 use athena_workspace::git::{self, Rev};
 use athena_workspace::{DiffBase, ItemKind};
-use gpui::{AppContext as _, Context, Entity, Window};
+use gpui::{AppContext as _, Context, Entity, EntityId, Window};
 
 use super::Shell;
 use super::item::{ItemView, file_label};
@@ -23,6 +23,36 @@ const KEEP_COPIES: Duration = Duration::from_secs(30 * 24 * 3600);
 #[derive(Default)]
 pub(super) struct ReviewState {
     edit_toasts: HashMap<PathBuf, u64>,
+    loads: Loads,
+}
+
+/// One load per diff at a time; a reload asked for meanwhile runs once after it, so a late
+/// result never replaces a newer one.
+#[derive(Default)]
+struct Loads {
+    /// Views with a load running, and whether another was asked for since it started.
+    running: HashMap<EntityId, bool>,
+}
+
+impl Loads {
+    /// Whether to start a load now.
+    fn start(&mut self, view: EntityId) -> bool {
+        match self.running.get_mut(&view) {
+            Some(again) => {
+                *again = true;
+                false
+            }
+            None => {
+                self.running.insert(view, false);
+                true
+            }
+        }
+    }
+
+    /// Whether to load again because a reload was asked for while this one ran.
+    fn finish(&mut self, view: EntityId) -> bool {
+        self.running.remove(&view).unwrap_or(false)
+    }
 }
 
 /// The tab title VS Code gives a diff.
@@ -122,6 +152,24 @@ fn load(
     Ok((text(old)?, text(new)?))
 }
 
+/// Stages one hunk; staging the last hunk of a deleted file stages the deletion.
+fn stage_hunk(root: &Path, rel: &Path, expected: &str, contents: &str) -> Result<()> {
+    let deleted = contents.is_empty() && std::fs::symlink_metadata(root.join(rel)).is_err();
+    git::write_index(root, rel, expected, (!deleted).then_some(contents))
+}
+
+/// Unstages one hunk; unstaging the last hunk of a newly added file takes it out of the index.
+fn unstage_hunk(
+    root: &Path,
+    rel: &Path,
+    head_rel: &Path,
+    expected: &str,
+    contents: &str,
+) -> Result<()> {
+    let added = contents.is_empty() && git::show(root, Rev::Head, head_rel)?.is_none();
+    git::write_index(root, rel, expected, (!added).then_some(contents))
+}
+
 /// Where revert and discard keep the version they replace, one folder per action.
 pub(super) fn backup_dir() -> Result<PathBuf> {
     let dir = athena_proto::data_dir()?.join("discarded");
@@ -181,23 +229,35 @@ impl Shell {
         base: &DiffBase,
         cx: &mut Context<Self>,
     ) {
+        let id = view.entity_id();
+        if !self.review.loads.start(id) {
+            return;
+        }
         let path = view.read(cx).path().to_path_buf();
         let orig = self.git_orig_path(root, &path);
         let (root, base) = (root.to_path_buf(), base.clone());
         let weak = view.downgrade();
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
+            let (task_root, task_base) = (root.clone(), base.clone());
             let loaded = cx
                 .background_executor()
-                .spawn(async move { load(&root, &path, orig, &base) })
+                .spawn(async move { load(&task_root, &path, orig, &task_base) })
                 .await;
-            let Some(view) = weak.upgrade() else {
-                return;
-            };
-            let _ = view.update(cx, |v, cx| match loaded {
-                Ok((old, new)) => v.set_texts(old, new, cx),
-                Err(err) => {
-                    tracing::debug!(path = %v.path().display(), "diff: {err:#}");
-                    v.set_error(format!("{err:#}"), cx)
+            let view = weak.upgrade();
+            if let Some(view) = &view {
+                let _ = view.update(cx, |v, cx| match loaded {
+                    Ok((old, new)) => v.set_texts(old, new, cx),
+                    Err(err) => {
+                        tracing::debug!(path = %v.path().display(), "diff: {err:#}");
+                        v.set_error(format!("{err:#}"), cx)
+                    }
+                });
+            }
+            let _ = this.update(cx, |this, cx| {
+                if this.review.loads.finish(id)
+                    && let Some(view) = view
+                {
+                    this.load_diff(&root, &view, &base, cx);
                 }
             });
         })
@@ -255,14 +315,17 @@ impl Shell {
             },
             (_, Err(_)) => return,
         };
+        let head_rel = self
+            .git_orig_path(root, &path)
+            .unwrap_or_else(|| rel.clone());
         let (failure, job): (&str, Box<dyn FnOnce() -> Result<()> + Send>) = match event {
-            DiffEvent::Stage(contents) => (
+            DiffEvent::Stage { contents, expected } => (
                 "Could not stage the change",
-                Box::new(move || git::write_index(&dir, &rel, &contents)),
+                Box::new(move || stage_hunk(&dir, &rel, &expected, &contents)),
             ),
-            DiffEvent::Unstage(contents) => (
+            DiffEvent::Unstage { contents, expected } => (
                 "Could not unstage the change",
-                Box::new(move || git::write_index(&dir, &rel, &contents)),
+                Box::new(move || unstage_hunk(&dir, &rel, &head_rel, &expected, &contents)),
             ),
             DiffEvent::Revert { contents, expected } => (
                 "Could not revert the change",
@@ -388,6 +451,79 @@ mod tests {
         let untracked = load(&dir, &dir.join("fresh.txt"), None, &DiffBase::Index).unwrap();
         assert_eq!(untracked, (String::new(), "new\n".to_string()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_last_hunk_of_a_deleted_or_new_file_moves_the_index_entry() {
+        if !git::available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-review-hunk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let git_out = |args: &[&str]| {
+            let out = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.name=T", "-c", "user.email=t@x"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        std::fs::write(dir.join("gone.txt"), "a\nb\n").unwrap();
+        std::fs::write(dir.join("empty.txt"), "x\n").unwrap();
+        git_out(&["init", "-q"]);
+        git_out(&["add", "-A"]);
+        git_out(&["commit", "-qm", "init"]);
+
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        let (old, new) = load(&dir, &dir.join("gone.txt"), None, &DiffBase::Index).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("a\nb\n", ""));
+        stage_hunk(&dir, Path::new("gone.txt"), &old, &new).unwrap();
+        assert_eq!(git_out(&["ls-files", "--", "gone.txt"]), "");
+        assert_eq!(
+            git_out(&["status", "--porcelain", "--", "gone.txt"]),
+            "D  gone.txt\n"
+        );
+
+        // A file emptied on disk stays tracked, as an empty file.
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        stage_hunk(&dir, Path::new("empty.txt"), "x\n", "").unwrap();
+        assert_eq!(
+            git_out(&["status", "--porcelain", "--", "empty.txt"]),
+            "M  empty.txt\n"
+        );
+
+        std::fs::write(dir.join("new.txt"), "n\n").unwrap();
+        git_out(&["add", "new.txt"]);
+        let rel = Path::new("new.txt");
+        let (old, new) = load(&dir, &dir.join("new.txt"), None, &DiffBase::Head).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("", "n\n"));
+        unstage_hunk(&dir, rel, rel, &new, &old).unwrap();
+        assert_eq!(
+            git_out(&["status", "--porcelain", "--", "new.txt"]),
+            "?? new.txt\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_reload_asked_for_during_a_load_runs_once_after_it() {
+        let mut loads = Loads::default();
+        let (a, b) = (EntityId::from(1u64), EntityId::from(2u64));
+        assert!(loads.start(a));
+        assert!(!loads.start(a));
+        assert!(!loads.start(a));
+        assert!(loads.start(b));
+        assert!(loads.finish(a));
+        assert!(loads.start(a));
+        assert!(!loads.finish(a));
+        assert!(!loads.finish(b));
+        assert!(loads.running.is_empty());
     }
 
     #[test]
