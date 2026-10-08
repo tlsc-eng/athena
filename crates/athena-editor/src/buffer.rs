@@ -687,14 +687,16 @@ impl Buffer {
         }
         let lines: Vec<String> = (first..=last).map(|l| self.line(l)).collect();
         let code = |l: &String| !l.trim().is_empty();
+        // Only ASCII blanks count as indent, so slicing by it never lands inside a wider char.
+        let blank = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
         let all_commented = lines
             .iter()
             .filter(|l| code(l))
-            .all(|l| l.trim_start().starts_with(prefix.trim_end()));
+            .all(|l| l[blank(l)..].starts_with(prefix.trim_end()));
         let indent = lines
             .iter()
             .filter(|l| code(l))
-            .map(|l| l.len() - l.trim_start().len())
+            .map(|l| blank(l))
             .min()
             .unwrap_or(0);
         let rewritten: Vec<String> = lines
@@ -703,7 +705,7 @@ impl Buffer {
                 if !code(l) {
                     l.clone()
                 } else if all_commented {
-                    let at = l.len() - l.trim_start().len();
+                    let at = blank(l);
                     let rest = &l[at..];
                     let rest = rest
                         .strip_prefix(prefix)
@@ -1227,6 +1229,26 @@ mod tests {
         assert_eq!(b.rope().to_string(), "\t// x := 1\n\t// y := 2\n");
         b.toggle_comment(&mut c);
         assert_eq!(b.rope().to_string(), "\tx := 1\n\ty := 2\n");
+    }
+
+    #[test]
+    fn comments_lines_indented_with_wide_blanks_without_panicking() {
+        let text = "\u{a0}\u{a0}x := 1\n  y := 2\n\u{3000}z := 3\n";
+        let mut b = buf(text, "/x/a.go");
+        let mut c = Cursor {
+            selection: Selection {
+                anchor: 0,
+                head: b.len_chars(),
+            },
+            ..Default::default()
+        };
+        b.toggle_comment(&mut c);
+        assert_eq!(
+            b.rope().to_string(),
+            "// \u{a0}\u{a0}x := 1\n//   y := 2\n// \u{3000}z := 3\n"
+        );
+        b.toggle_comment(&mut c);
+        assert_eq!(b.rope().to_string(), text);
     }
 
     #[test]
