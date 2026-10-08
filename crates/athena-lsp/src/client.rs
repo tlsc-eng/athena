@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
 use crate::markup::{Hover, parse_hover};
 use crate::protocol::{self, Diagnostic, Location, Position};
+use crate::signature::{SignatureHelp, parse_signature_help};
 use crate::{ServerKind, env};
 
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
@@ -49,6 +50,7 @@ pub struct Client {
     child: Arc<Mutex<Option<Child>>>,
     /// Characters after which the server offers completions, known once it has started.
     triggers: Arc<OnceLock<Vec<String>>>,
+    signature_triggers: Arc<OnceLock<Vec<String>>>,
 }
 
 impl Client {
@@ -58,8 +60,10 @@ impl Client {
         let pending: Pending = Arc::default();
         let child: Arc<Mutex<Option<Child>>> = Arc::default();
         let triggers: Arc<OnceLock<Vec<String>>> = Arc::default();
+        let signature_triggers: Arc<OnceLock<Vec<String>>> = Arc::default();
         let session = Session {
             triggers: triggers.clone(),
+            signature_triggers: signature_triggers.clone(),
             kind,
             root,
             outgoing: out_rx,
@@ -83,6 +87,7 @@ impl Client {
             next_id: AtomicI64::new(1),
             child,
             triggers,
+            signature_triggers,
         };
         (client, events_rx)
     }
@@ -90,6 +95,11 @@ impl Client {
     /// The server's completion trigger characters; empty until it has started.
     pub fn completion_triggers(&self) -> &[String] {
         self.triggers.get().map_or(&[], Vec::as_slice)
+    }
+
+    /// Characters that open or move signature help, such as `(` and `,`; empty until started.
+    pub fn signature_triggers(&self) -> &[String] {
+        self.signature_triggers.get().map_or(&[], Vec::as_slice)
     }
 
     fn notify(&self, method: &'static str, params: Value) {
@@ -166,6 +176,19 @@ impl Client {
         Ok(parse_hover(&answer(reply).await?))
     }
 
+    /// The signature of the call around `at`; `None` outside any call.
+    pub async fn signature_help(
+        &self,
+        path: &Path,
+        at: Position,
+    ) -> Result<Option<SignatureHelp>, String> {
+        let reply = self.request(
+            "textDocument/signatureHelp",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        Ok(parse_signature_help(&answer(reply).await?))
+    }
+
     /// The edits that format the whole document, indenting with tabs or `tab_size` spaces.
     pub async fn formatting(
         &self,
@@ -226,6 +249,7 @@ struct Session {
     pending: Pending,
     child: Arc<Mutex<Option<Child>>>,
     triggers: Arc<OnceLock<Vec<String>>>,
+    signature_triggers: Arc<OnceLock<Vec<String>>>,
 }
 
 impl Session {
@@ -274,17 +298,26 @@ impl Session {
         if result.is_null() {
             bail!("{} refused to start", self.kind.program());
         }
-        let triggers = result
-            .pointer("/capabilities/completionProvider/triggerCharacters")
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let _ = self.triggers.set(triggers);
+        let strings = |pointer: &str| -> Vec<String> {
+            result
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let _ = self.triggers.set(strings(
+            "/capabilities/completionProvider/triggerCharacters",
+        ));
+        let mut signature = strings("/capabilities/signatureHelpProvider/triggerCharacters");
+        signature.extend(strings(
+            "/capabilities/signatureHelpProvider/retriggerCharacters",
+        ));
+        let _ = self.signature_triggers.set(signature);
         send(&writer, &notification("initialized", json!({})))?;
         let _ = self.events.send_blocking(Event::Ready);
 
@@ -322,6 +355,12 @@ impl Session {
                     "references": {},
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
                     "formatting": {},
+                    "signatureHelp": {
+                        "signatureInformation": {
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "parameterInformation": {"labelOffsetSupport": true}
+                        }
+                    },
                     "completion": {
                         "completionItem": {"snippetSupport": true},
                         "contextSupport": true

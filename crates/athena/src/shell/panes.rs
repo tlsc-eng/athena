@@ -187,6 +187,11 @@ impl Shell {
                             line,
                             character,
                         } => return this.lsp_hover(&view, *request, (*line, *character), cx),
+                        EditorEvent::SignatureHelp {
+                            request,
+                            line,
+                            character,
+                        } => return this.lsp_signature(&view, *request, (*line, *character), cx),
                         EditorEvent::Format {
                             request,
                             tab_size,

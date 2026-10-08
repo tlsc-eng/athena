@@ -23,6 +23,7 @@ use crate::element::EditorElement;
 use crate::hover::Hovering;
 use crate::line_jump::LineJump;
 use crate::shared::{self, SharedBuffer};
+use crate::signature::Signing;
 
 actions!(
     editor,
@@ -169,6 +170,13 @@ pub enum EditorEvent {
         line: u32,
         character: u32,
     },
+    /// The signature of the call around a zero-based line and UTF-16 column is wanted; answer
+    /// with [`EditorView::show_signature`].
+    SignatureHelp {
+        request: u64,
+        line: u32,
+        character: u32,
+    },
     /// Cmd+S wants the file formatted before it is saved; answer with
     /// [`EditorView::format_and_save`], with no edits if formatting is not possible.
     Format {
@@ -255,6 +263,7 @@ pub struct EditorView {
     pub(crate) line_jump: Option<LineJump>,
     pub(crate) hovering: Hovering,
     pub(crate) completing: Completing,
+    pub(crate) signing: Signing,
     /// Whether Cmd+S formats first, from the workspace; `None` means the language decides.
     pub(crate) format_setting: Option<bool>,
     /// The format request a save waits for, and the buffer version it was asked about.
@@ -320,6 +329,7 @@ impl EditorView {
             line_jump: None,
             hovering: Hovering::default(),
             completing: Completing::default(),
+            signing: Signing::default(),
             typing: false,
             format_setting: None,
             formatting: None,
@@ -582,6 +592,7 @@ impl EditorView {
         self.hide_hover(cx);
         if !std::mem::take(&mut self.typing) {
             self.dismiss_completion(cx);
+            self.hide_signature(cx);
         }
         if edited {
             self.refresh_find(false, cx);
@@ -1088,10 +1099,14 @@ impl Render for EditorView {
                     }))
                     .on_action(cx.listener(|this, _: &Backspace, _, cx| {
                         let open = this.completion_open();
-                        this.typing = open;
+                        let signing = this.signing_shown();
+                        this.typing = open || signing;
                         this.with_buffer(cx, |b, c| b.backspace(c));
                         if open {
                             this.refilter_completion(cx);
+                        }
+                        if signing {
+                            this.request_signature(cx);
                         }
                     }))
                     .on_action(cx.listener(|this, _: &Delete, _, cx| {
@@ -1161,7 +1176,10 @@ impl Render for EditorView {
                         this.with_buffer(cx, |b, c| b.toggle_comment(c))
                     }))
                     .on_action(cx.listener(|this, _: &Escape, _, cx| {
-                        if this.dismiss_completion(cx) || this.hide_hover(cx) {
+                        if this.dismiss_completion(cx)
+                            || this.hide_signature(cx)
+                            || this.hide_hover(cx)
+                        {
                             return;
                         }
                         if !this.close_find(cx) {
@@ -1187,6 +1205,7 @@ impl Render for EditorView {
             )
             .children(self.render_line_jump(cx))
             .children(self.render_hover(cx))
+            .children(focused.then(|| self.render_signature(cx)).flatten())
             .children(focused.then(|| self.render_completion(cx)).flatten())
             .children(self.render_marker_bar(cx))
             .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
@@ -1537,6 +1556,7 @@ impl EntityInputHandler for EditorView {
             self.typing = true;
             self.with_buffer(cx, |b, c| b.insert(c, &text));
             self.completion_after_typing(&text, cx);
+            self.signature_after_typing(&text, cx);
         }
     }
 

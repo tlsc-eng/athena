@@ -5,12 +5,14 @@ mod completion;
 mod env;
 mod markup;
 mod protocol;
+mod signature;
 
 pub use client::{Client, Event};
 pub use completion::{CompletionItem, CompletionList, TextEdit};
 pub use env::{find_program, server_env};
 pub use markup::{Hover, MarkupBlock, expand_snippet, markdown_blocks};
 pub use protocol::{Diagnostic, Location, Position, Range, Severity, path_from_uri, uri_from_path};
+pub use signature::SignatureHelp;
 
 /// The language servers Athena knows how to start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

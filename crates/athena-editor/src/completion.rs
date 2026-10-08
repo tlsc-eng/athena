@@ -367,6 +367,14 @@ impl EditorView {
             }));
             b.apply_edits(c, &edits, item.select.clone());
         });
+        // A function just completed into its parentheses shows its parameters, as in VS Code.
+        let head = self.cursor.head();
+        if self
+            .buf()
+            .is_some_and(|b| head > 0 && b.text(head - 1..head) == "(")
+        {
+            self.request_signature(cx);
+        }
     }
 
     fn scroll_completion(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {

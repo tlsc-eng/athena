@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_editor::{Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, ServerEdit};
+use athena_editor::{
+    Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, ServerEdit, Signature,
+};
 use athena_lsp::{
     Client, CompletionItem, Diagnostic, Event, Location, MarkupBlock, Position, ServerKind,
     Severity,
@@ -136,6 +138,16 @@ fn completion(item: CompletionItem) -> Completion {
     }
 }
 
+/// Tells an editor which typed characters ask its server for suggestions and signature help.
+fn push_triggers(editor: &Entity<EditorView>, client: &Client, cx: &mut Context<Shell>) {
+    let completion = client.completion_triggers().to_vec();
+    let signature = client.signature_triggers().to_vec();
+    editor.update(cx, |e, _| {
+        e.set_completion_triggers(Some(completion));
+        e.set_signature_triggers(signature);
+    });
+}
+
 fn marker(d: &Diagnostic) -> Marker {
     Marker {
         start: (d.range.start.line, d.range.start.character),
@@ -171,8 +183,7 @@ impl Shell {
         };
         if let Some(client) = self.document_client(&doc) {
             // Another tab already opened this file in its server.
-            let triggers = client.completion_triggers().to_vec();
-            editor.update(cx, |e, _| e.set_completion_triggers(Some(triggers)));
+            push_triggers(editor, &client, cx);
             return;
         }
         let Some((kind, language_id)) = server_for(lang) else {
@@ -183,8 +194,7 @@ impl Shell {
             return;
         };
         client.did_open(&doc, language_id, version as i64, text);
-        let triggers = client.completion_triggers().to_vec();
-        editor.update(cx, |e, _| e.set_completion_triggers(Some(triggers)));
+        push_triggers(editor, &client, cx);
         self.lsp.documents.insert(doc, key);
     }
 
@@ -234,7 +244,7 @@ impl Shell {
                 };
                 server.ready = true;
                 // Editors opened while the server started learn its trigger characters now.
-                let triggers = server.client.completion_triggers().to_vec();
+                let client = server.client.clone();
                 let docs: Vec<PathBuf> = self
                     .lsp
                     .documents
@@ -244,8 +254,7 @@ impl Shell {
                     .collect();
                 for doc in docs {
                     for editor in self.editors_showing(&doc, cx) {
-                        let triggers = triggers.clone();
-                        editor.update(cx, |e, _| e.set_completion_triggers(Some(triggers)));
+                        push_triggers(&editor, &client, cx);
                     }
                 }
             }
@@ -426,6 +435,44 @@ impl Shell {
             };
             tracing::debug!("hover → {} blocks", blocks.len());
             let _ = weak.update(cx, |e, cx| e.show_hover(request, blocks, cx));
+        })
+        .detach();
+    }
+
+    /// Asks the server for the signature of the call around `at`.
+    pub(super) fn lsp_signature(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        at: (u32, u32),
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let Some(client) = self.document_client(&doc) else {
+            editor.update(cx, |e, cx| e.show_signature(request, None, cx));
+            return;
+        };
+        let at = Position {
+            line: at.0,
+            character: at.1,
+        };
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let help = match client.signature_help(&doc, at).await {
+                Ok(help) => help,
+                Err(why) => {
+                    tracing::debug!("signature help failed: {why}");
+                    None
+                }
+            };
+            tracing::debug!(found = help.is_some(), "signature help");
+            let signature = help.map(|h| Signature {
+                label: h.label,
+                active: h.active,
+                documentation: h.documentation,
+            });
+            let _ = weak.update(cx, |e, cx| e.show_signature(request, signature, cx));
         })
         .detach();
     }
