@@ -5,11 +5,12 @@ cd "${0:a:h}/.."
 
 version=$(cargo metadata --no-deps --format-version 1 \
   | python3 -I -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="athena"))')
-app=dist/Athena.app
+stage=dist.new
+app=$stage/Athena.app
 
 cargo build --release --locked -p athena -p athena-mux
 
-rm -rf dist
+rm -rf "$stage"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/athena target/release/athena-mux "$app/Contents/MacOS/"
 cp assets/Athena.icns "$app/Contents/Resources/"
@@ -21,5 +22,11 @@ codesign --force --sign - --timestamp=none "$app/Contents/MacOS/athena-mux"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --strict --deep "$app"
 
-ditto -c -k --keepParent "$app" "dist/Athena-$version-arm64.zip"
-shasum -a 256 "dist/Athena-$version-arm64.zip" | tee "dist/Athena-$version-arm64.zip.sha256"
+ditto -c -k --keepParent "$app" "$stage/Athena-$version-arm64.zip"
+(cd "$stage" && shasum -a 256 "Athena-$version-arm64.zip" | tee "Athena-$version-arm64.zip.sha256")
+
+# Swap whole directories: a daemon started from dist/Athena.app must never find its path missing.
+rm -rf dist.old
+[[ -d dist ]] && mv dist dist.old
+mv "$stage" dist
+rm -rf dist.old

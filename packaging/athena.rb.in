@@ -23,5 +23,12 @@ cask "athena" do
 
   uninstall quit: "io.tlsc.athena"
 
-  zap trash: "~/Library/Application Support/athena"
+  # Not in uninstall: upgrades run that stanza, and must leave running shells alone.
+  # By zap time the app is back in the staged path, so the relative executable resolves.
+  zap script: {
+        executable:   "Athena.app/Contents/MacOS/athena",
+        args:         ["mux", "stop"],
+        must_succeed: false,
+      },
+      trash:  "~/Library/Application Support/athena"
 end
