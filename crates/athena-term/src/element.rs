@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use alacritty_terminal::index::Point as GridPoint;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
@@ -15,6 +17,16 @@ use crate::terminal::GridSize;
 use crate::view::TerminalView;
 
 const LINE_HEIGHT_RATIO: f32 = 1.4;
+
+/// Logs each prepaint and its duration under `athena::render` when dropped.
+struct PrepaintTimer(Instant);
+
+impl Drop for PrepaintTimer {
+    fn drop(&mut self) {
+        let us = self.0.elapsed().as_micros() as u64;
+        tracing::trace!(target: "athena::render", us, "terminal prepaint");
+    }
+}
 
 pub struct TerminalElement {
     view: Entity<TerminalView>,
@@ -105,6 +117,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let _timer = PrepaintTimer(Instant::now());
         let theme = cx.theme();
         let palette = theme.terminal.clone();
         let font_size = theme.typography.code;
