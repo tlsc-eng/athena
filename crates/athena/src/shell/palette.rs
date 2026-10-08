@@ -432,9 +432,11 @@ impl Shell {
             return;
         };
         palette.status = Some("Loading symbols…");
+        palette.asked += 1;
         let asked = palette.asked;
         let path = editor.read(cx).path().to_path_buf();
         let doc = document_key(&path);
+        self.flush_change(&doc, &editor, cx);
         cx.spawn(async move |this, cx| {
             let found = client.document_symbols(&doc).await;
             let _ = this.update(cx, |this, cx| {
