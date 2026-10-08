@@ -68,6 +68,8 @@ pub(super) struct SearchState {
     collapsed: HashSet<PathBuf>,
     selected: Option<(usize, usize)>,
     matches: usize,
+    /// The query the finished results answer, which Replace All replaces rather than the field's text.
+    results_for: Option<String>,
     running: bool,
     truncated: bool,
     replacing: bool,
@@ -279,6 +281,15 @@ impl SearchState {
             .map(|i| i.read(cx).text().to_string())
             .unwrap_or_default()
     }
+
+    /// Replace All is offered only for finished results of the query now in the field.
+    fn can_replace(&self, cx: &gpui::App) -> bool {
+        replace_allowed(self, &self.query(cx))
+    }
+}
+
+fn replace_allowed(s: &SearchState, query: &str) -> bool {
+    !s.files.is_empty() && !s.replacing && !s.running && s.results_for.as_deref() == Some(query)
 }
 
 impl Shell {
@@ -372,6 +383,7 @@ impl Shell {
                         Found::Done { truncated } => {
                             this.search.running = false;
                             this.search.truncated = truncated;
+                            this.search.results_for = Some(query.clone());
                             tracing::debug!(
                                 matches = this.search.matches,
                                 truncated,
@@ -392,6 +404,7 @@ impl Shell {
         self.search.files = Rc::default();
         self.search.rows = Rc::default();
         self.search.matches = 0;
+        self.search.results_for = None;
         self.search.selected = None;
         self.search.truncated = false;
         self.search.collapsed.clear();
@@ -477,13 +490,13 @@ impl Shell {
 
     /// Asks first, then replaces in open editors' buffers (undoable there) and on disk elsewhere.
     fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.search.query(cx);
+        if !self.search.can_replace(cx) {
+            return;
+        }
+        let query = self.search.results_for.clone().unwrap_or_default();
         let (Some(re), Some(root)) = (matcher(&query), self.search.root.clone()) else {
             return;
         };
-        if self.search.files.is_empty() || self.search.replacing {
-            return;
-        }
         let with = self
             .search
             .replace
@@ -655,7 +668,7 @@ impl Shell {
                 .text_size(t.typography.caption)
                 .child(input)
         };
-        let can_replace = !self.search.files.is_empty() && !self.search.replacing;
+        let can_replace = self.search.can_replace(cx);
         let bar = div()
             .h(px(36.))
             .flex_none()
@@ -881,6 +894,25 @@ mod tests {
             },
         );
         (out, truncated)
+    }
+
+    #[test]
+    fn replace_all_waits_for_finished_results_of_the_current_query() {
+        let mut s = SearchState {
+            files: Rc::new(vec![FileHits {
+                path: "/p/a.rs".into(),
+                hits: Vec::new(),
+            }]),
+            results_for: Some("foo".into()),
+            ..Default::default()
+        };
+        assert!(replace_allowed(&s, "foo"));
+        assert!(!replace_allowed(&s, "foob"), "typed past the results");
+        s.running = true;
+        assert!(!replace_allowed(&s, "foo"), "a newer search is running");
+        s.running = false;
+        s.results_for = None;
+        assert!(!replace_allowed(&s, "foo"), "results of no finished search");
     }
 
     fn names(found: &[FileHits], root: &Path) -> Vec<String> {
