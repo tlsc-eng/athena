@@ -11,7 +11,7 @@ jobs:
   release:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Select Xcode and Metal toolchain
         run: |
@@ -19,7 +19,7 @@ jobs:
           xcodebuild -downloadComponent MetalToolchain
           xcrun --find metal
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@4dfd137a5aecc12897f37a01818006f58cf58347 # 1.98.0
 
       - name: Tag matches the crate version
         run: |
