@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+gpui = "=0.2.2"
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+ropey = "1.6"
+tree-sitter = "0.27"
+tree-sitter-go = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+streaming-iterator = "0.1"
+postcard = { version = "1.1", features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-channel = "2.5"
+libproc = "0.14"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+athena-proto = { path = "crates/athena-proto" }
+athena-term = { path = "crates/athena-term" }
+athena-editor = { path = "crates/athena-editor" }
+athena-workspace = { path = "crates/athena-workspace" }
+athena-ui = { path = "crates/athena-ui" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
