@@ -1,4 +1,4 @@
-# Roadmap report: v0.2.0 and v0.3.0
+# Roadmap report: v0.2.0, v0.3.0 and v0.4.0
 
 What happened while you were away, for the roadmap in `piped-orbiting-stearns.md` (Phases A–E).
 
@@ -6,10 +6,164 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
   installed here with `brew upgrade --cask athena`)
 - Release: v0.3.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.3.0 (tap `5f58c02`,
   installed here with `brew upgrade --cask athena`)
+- Release: v0.4.0 — <link added at release>
 
 The screen was locked for most of the work after v0.2.0. Everything below marked
 **unverified on screen** is covered by unit tests, logs or synthetic-key runs, but nobody has
 looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+
+## v0.4.0
+
+Plan: [plans/v0.4.md](plans/v0.4.md), three file-disjoint lanes (editing, navigation and language
+features, reviewing changes), `v0.3.0..main`. The sections after this one cover v0.2.0 and v0.3.0.
+
+### What shipped
+
+**Editing** (`b472f7f`, `3242abb`, `04f08e2`, `26d9d70`, `c9ad865`)
+- Tab, Shift+Tab, Cmd+] and Cmd+[ indent and outdent selected lines (Tab used to replace a
+  multi-line selection with whitespace).
+- Auto-closing brackets and quotes with type-over, surround selection and Backspace of an inserted
+  pair, skipped inside strings and comments; Enter between brackets opens an indented line.
+- Line operations: move (Alt+Up/Down), copy (Alt+Shift+Up/Down), delete (Cmd+Shift+K), insert
+  below (Cmd+Enter); insert above in the palette.
+- Find and replace in file (Cmd+Alt+F), each replace one undo step.
+- Indentation guides with the active block brighter; whitespace drawn inside the selection.
+- Text zoom for editors and terminals (Cmd+= / Cmd+- / Cmd+0), saved in the workspace.
+- A VS Code style status bar: branch, Ln/Col and selection count, indentation (menu to change or
+  convert), encoding, line ending, language (menu to re-highlight) and a language server dot.
+
+**Navigation and language features** (`8db43e5`, `48f3ab3`, `17c548d`, `b18b33d`, `a59db35`,
+`9922de4`, `26a84fb`, `9002017`)
+- Cmd+click `file:line:col` references in terminal output (Go, tsc, eslint, cargo/rustc, Rust
+  panics, Python tracebacks, Claude Code) and OSC 8 `file://` links.
+- Problems drawer tab grouped by file, F8 / Shift+F8 across files, Cmd+Shift+M, and an
+  error/warning counter in the title bar.
+- Go to symbol in file (Cmd+Shift+O, `@`) and in workspace (Cmd+Alt+O, `#`).
+- A workspace edit applier for rename, code actions and server `workspace/applyEdit`: checked
+  whole before anything changes, one undo step per open file, atomic writes for closed ones.
+- Rename symbol (F2) with an inline field; quick fixes and refactorings (Cmd+., editor menu, gutter
+  marker); organize imports folded into format on save for Go.
+- Go to implementation (Cmd+F12) and type definition (menu and palette).
+
+**Git and diffs** (`95f47f4`, `f51faea`, `a36628c`, `9542b5b`, `1bbb928`, `b54305d`)
+- Diff tabs, side by side or inline, with syntax highlighting, word-level marks, Alt+F5 change
+  navigation and Stage / Unstage / Revert per change. A Changes row opens its diff.
+- Commit box with Cmd+Enter, Amend (keeps the last message's body) and smart commit; Discard per
+  file and group with a copy kept for 30 days (untracked files go to the Trash).
+- Branch picker (palette, the branch button, the status bar branch): switch, create, track a remote
+  branch; never forced.
+- MCP `open_diff` tool so Claude can show the user a diff.
+
+**Claude Code** (`9909f8d`, `86945dc`)
+- PreToolUse and PostToolUse hooks on `Edit|MultiEdit|Write`. The first takes a copy of each file
+  before the session's first edit to it; the second shows "Claude edited main.go" with **Review
+  diff**, which opens the session's changes to the file against that copy. Existing installs have
+  to run **Enable Claude Code hooks for this project** again to get them.
+- Research on Claude Code's IDE protocol, see [Next](#next-the-claude-code-ide-protocol).
+
+### Decisions made without you
+
+From the commit messages:
+- VS Code keys where free; otherwise: workspace symbols on Cmd+Alt+O because Cmd+T is New
+  terminal; Insert Line Above unbound because Cmd+Shift+Enter is Zoom pane; Go to Type Definition
+  has no key; F8 works only in an editor, since in a terminal it belongs to the running program.
+- Tab on a selection inside one line still replaces it, as VS Code does. Auto-close follows VS
+  Code's "auto": only inserted closers are typed over or deleted with their opener.
+- Text zoom changes the code font only, in 1 px steps between 6 and 40 px; the image viewer keeps
+  its own Cmd+= / Cmd+- / Cmd+0 while focused.
+- The status bar's branch opens the branch picker, as in VS Code, not the Changes tab.
+- Problems leaves out hints, as VS Code does. Several implementations are listed in the References
+  tab, which now names what it lists.
+- The code action marker is painted as a dot, not a lightbulb emoji, and shows only when a
+  diagnostic on the cursor's line has a quick fix.
+- Organize imports and formatting are computed against the same text and merged; a formatting
+  edit inside the import block is dropped.
+- Workspace edits: only file create and rename are advertised, deletes are refused; an edit with
+  no document version is refused if an open file it touches changed since the request; creating
+  over a non-empty file is refused. Server-initiated `applyEdit` has nothing to compare against
+  and is not checked for staleness.
+- In terminal links, a relative name that neither the shell's folder nor the project has (Go test
+  output) is looked up in the project, opening Go to file when several match.
+- The diff is a hand-rolled Myers (about 300 lines with tests) rather than the `similar` crate,
+  under the 200-line replacement bar once its glue is counted, with xdiff's cost limit so large
+  unrelated files finish quickly. The diff view copies `element.rs`'s token colour match instead
+  of touching another lane's file.
+- The commit message field holds one line; Enter does nothing there. Amend shows the subject and
+  sends the body back unchanged, and refuses if `HEAD` moved since. With nothing staged, Commit
+  offers to stage everything.
+- Discard and Revert keep a copy under `Application Support/athena/discarded` for 30 days.
+- Commit, amend, stage, unstage, discard and branch switch get a 10 minute limit (pre-commit hooks,
+  big checkouts); status keeps 30 s.
+- Edit hooks: the PreToolUse hook always exits 0, since a failing one would block the edit;
+  snapshots are pruned after 7 days, then oldest first beyond 200 MB; files over 20 MB or not
+  regular files are skipped, and their review compares with the index and says so. The edit
+  notice goes over `app.sock` rather than the mux protocol, which an older daemon could not
+  decode. One toast per file, kept 15 s.
+- "Hooks enabled" now means every current hook is installed, so Enable shows again for an older
+  install; Disable removes only Athena's commands, even from an entry shared with the user's.
+
+### Review fixes
+
+A review of `v0.3.0..8b536bc` found 1 critical, 10 major and 4 minor issues plus 8 smaller ones;
+all are fixed on `main`:
+- Hunk staging (`caf999a`): the index path was wrong for a project opened on a subfolder
+  (critical); a stale index is now refused; eol and clean/smudge filters (git-lfs) are honoured;
+  the last hunk of a deleted or new file stages the deletion or untracks the file; large diffs no
+  longer restart on every 5 s poll; Amend refuses a moved `HEAD`; longer git limits.
+- Claude edit hooks (`b84d2a1`, `5e23fb9`): a Write larger than 64 KB recorded the edited file as
+  its own baseline; the hook input is now stream-parsed. Large and non-regular files are skipped
+  with a marker and their review says why. FIFOs no longer block the hook.
+- Hook settings (`c08b5b7`, `e789a43`): the user's own commands sharing an entry with Athena's are
+  kept; a wrongly shaped settings file is left untouched; symlinks and 0600 permissions survive.
+- Workspace edits (`a2efcb6`): stale unversioned edits and creating over a non-empty file are
+  refused; case-only renames work.
+- Editor: lines break only at LF, CRLF and CR, as language servers count them (`02f65e9`); Enter
+  between brackets after a non-ASCII blank no longer deletes the closer and uses CRLF in CRLF
+  files (`273cd30`); Convert Indentation to Tabs uses the file's indent size (`f4964d6`); format on
+  save keeps a replace that shares its start with an insert (`79a95e4`).
+- Smaller: OSC 8 links open only regular files (`638b75b`); a code action with `"edit": null` is
+  resolved (`5e1dc60`); F8 no longer sticks on a clamped stale problem (`786ea82`); Go to symbol
+  in file sends pending edits first and ignores a stale reply (`011c3da`).
+
+Before the review: Enter over a downward multi-line selection panicked (`9e2082f`); Amend folded a
+multi-line message into one line and Discard All / Stage All touched conflicted files (`1bbb928`).
+
+### Unverified on screen
+
+The screen stayed locked for the whole release, so nothing visual was looked at: the status bar,
+indentation guides and selection whitespace, auto-pairs, zoom, the replace row, the Problems tab
+and title bar counter, the symbol palettes, the rename field, the code action menu and gutter
+marker, the diff view in both modes with its word marks and change bars, the commit box and Amend,
+the branch picker, the "Claude edited" toast and review tab, and the terminal link underline.
+
+What was checked: unit tests throughout; a gopls 0.23 integration test for rename (cross-file),
+prepareRename, the missing-import quick fix, organize imports, document and workspace symbols and
+implementation; temp-repository tests for every git operation; link detection built from real
+go 1.27, cargo and python 3 output; a debug app under an isolated `HOME` where the edit hooks took
+snapshots from Claude-shaped input and the MCP `open_diff` call opened a diff tab that survived a
+restart.
+
+### Known gaps
+
+- The diff view has no text selection or copy, and no way to hide unchanged regions.
+- The commit message is a single line.
+- Moved lines (Alt+Up/Down) are not re-indented to their new block.
+- Zoom changes only the code font; the rest of the interface keeps its size.
+- The gutter marker appears only for quick fixes, not for refactorings available on a line.
+- Cmd+. may be taken by macOS or another app before Athena sees it; Quick Fix… in the editor menu
+  is the fallback.
+- F-keys (F2, F8, F12, Alt+F5) need Fn on a Mac keyboard unless standard function keys are on.
+
+### Next: the Claude Code IDE protocol
+
+[plans/claude-ide.md](plans/claude-ide.md) recommends implementing Claude Code's IDE protocol in
+v0.5, behind a setting that is off by default for one release, scoped to what the CLI (2.1.295)
+actually calls: `openDiff`, `close_tab`, `closeAllDiffTabs` and `getDiagnostics`, plus the
+`selection_changed` and `at_mentioned` notifications. `openDiff` gives approval before an edit is
+applied, which hooks cannot; the new diff view covers most of its UI, so the estimate is about 7
+days. If the blocking diff tab grows past about 5 days, or `openDiff` turns out not to fire in the
+permission modes people use, the fallback is selection, at-mention and diagnostics only (about 4
+days). Open questions need a stub-server test first.
 
 ## What shipped
 
@@ -219,8 +373,8 @@ Still open:
 - Tree-row drag to move files and multiple windows are not built.
 - Rendering performance is unmeasured (see Performance).
 
-Backlog candidates from the plan: rename symbol, document outline, problems panel, diff viewer
-and commit UI, multi-cursor, word wrap, light theme, keymap file.
+Backlog candidates from the plan: multi-cursor, word wrap, light theme, keymap file (rename symbol,
+document symbols, the problems panel, the diff viewer and the commit UI shipped in v0.4.0).
 
 ## What to check when you're back
 
@@ -241,3 +395,20 @@ and commit UI, multi-cursor, word wrap, light theme, keymap file.
 12. Leave a file unsaved with auto save off and press Cmd+Shift+W: it asks first.
 13. Compare the title-bar usage with `/usage` in Claude Code.
 14. Empty `athena-trash-test.txt` from the Trash.
+
+For v0.4.0:
+
+15. In a project, run **Enable Claude Code hooks for this project** again (older installs lack the
+    edit hooks), start Claude and have it edit a file: "Claude edited …" appears, **Review diff**
+    shows "Before Claude" against the file, and Revert on one change undoes just that change.
+16. Edit a Go file, open the Changes tab and click its row: a diff tab opens. Stage one change,
+    step with Alt+F5 (with Fn), switch to Inline, then commit with Cmd+Enter; turn Amend on and off.
+    Click the branch in the status bar: the branch picker opens.
+17. In a Go file: F2 on a function used in another file renames both; remove an import and press
+    Cmd+. on the error (the gutter dot should show); Cmd+Shift+O lists symbols; Cmd+F12 on an
+    interface method; save and check imports are organized.
+18. Select three lines and press Tab, then Shift+Tab; type `(` and `"`; Alt+Up a line; Cmd+Alt+F
+    and replace a word; Cmd+= twice then Cmd+0 in an editor and a terminal. Look at the indentation
+    guides and the status bar, and click its indentation and language.
+19. In a terminal run a failing `go test ./...` and Cmd+click the `_test.go:NN` line; open the
+    Problems tab with Cmd+Shift+M and step with F8.
