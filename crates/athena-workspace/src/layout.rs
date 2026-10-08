@@ -198,37 +198,127 @@ impl Layout {
 
     /// Splits `pane`, putting a new pane holding `kind` after it; the new pane takes focus.
     pub fn split(&mut self, pane: PaneId, axis: Axis, kind: ItemKind) -> Option<PaneId> {
-        let new_pane = PaneId(self.next());
-        let item = ItemId(self.next());
-        fn walk(node: &mut Node, target: PaneId, make: &mut Option<(Axis, Pane)>) -> bool {
+        self.pane(pane)?;
+        let item = Item {
+            id: ItemId(self.next()),
+            kind,
+        };
+        self.split_off(pane, axis, item, false)
+    }
+
+    /// Puts `item` in a new pane beside `target`, before it when `first`; the new pane takes focus.
+    fn split_off(&mut self, target: PaneId, axis: Axis, item: Item, first: bool) -> Option<PaneId> {
+        fn walk(node: &mut Node, target: PaneId, make: &mut Option<(Axis, Pane, bool)>) -> bool {
             match node {
                 Node::Leaf(p) if p.id == target => {
-                    let (axis, fresh) = make.take().expect("split once");
+                    let (axis, fresh, first) = make.take().expect("split once");
                     let old = std::mem::replace(node, Node::Leaf(fresh.clone()));
+                    let (a, b) = if first {
+                        (Node::Leaf(fresh), old)
+                    } else {
+                        (old, Node::Leaf(fresh))
+                    };
                     *node = Node::Split {
                         axis,
                         ratio: 0.5,
-                        first: Box::new(old),
-                        second: Box::new(Node::Leaf(fresh)),
+                        first: Box::new(a),
+                        second: Box::new(b),
                     };
                     true
                 }
                 Node::Leaf(_) => false,
-                Node::Split { first, second, .. } => {
-                    walk(first, target, make) || walk(second, target, make)
-                }
+                Node::Split {
+                    first: a,
+                    second: b,
+                    ..
+                } => walk(a, target, make) || walk(b, target, make),
             }
         }
+        let new_pane = PaneId(self.next());
         let fresh = Pane {
             id: new_pane,
-            items: vec![Item { id: item, kind }],
+            items: vec![item],
             active: 0,
         };
-        if !walk(&mut self.tree, pane, &mut Some((axis, fresh))) {
+        if !walk(&mut self.tree, target, &mut Some((axis, fresh, first))) {
             return None;
         }
         self.focused = new_pane;
         Some(new_pane)
+    }
+
+    /// The pane holding `item` and the item's index in it.
+    pub fn find_item(&self, item: ItemId) -> Option<(PaneId, usize)> {
+        self.panes().into_iter().find_map(|p| {
+            p.items
+                .iter()
+                .position(|i| i.id == item)
+                .map(|index| (p.id, index))
+        })
+    }
+
+    /// Takes `item` out of its pane, keeping that pane's active tab where it was.
+    fn detach(&mut self, item: ItemId) -> Option<(PaneId, Item)> {
+        let (pane, index) = self.find_item(item)?;
+        let p = self.pane_mut(pane)?;
+        let taken = p.items.remove(index);
+        if p.active > index || p.active >= p.items.len() {
+            p.active = p.active.saturating_sub(1);
+        }
+        Some((pane, taken))
+    }
+
+    /// Moves a tab to `index` in pane `to` (an index into that pane's tabs as they are now), keeping
+    /// its id; an emptied source pane closes. Returns false when nothing would change.
+    pub fn move_item(&mut self, item: ItemId, to: PaneId, index: usize) -> bool {
+        let Some((from, at)) = self.find_item(item) else {
+            return false;
+        };
+        let Some(target) = self.pane(to) else {
+            return false;
+        };
+        let len = target.items.len();
+        let dest = if from == to {
+            index.min(len - 1)
+        } else {
+            index.min(len)
+        };
+        if from == to && dest == at {
+            return false;
+        }
+        let Some((_, moved)) = self.detach(item) else {
+            return false;
+        };
+        let p = self.pane_mut(to).expect("target pane exists");
+        p.items.insert(dest, moved);
+        p.active = dest;
+        if self.pane(from).is_some_and(|p| p.items.is_empty()) {
+            self.close_pane(from);
+        }
+        self.focused = to;
+        true
+    }
+
+    /// Splits `target` with `item` moved out of its pane into a new one, keeping the item's id; an
+    /// emptied source pane closes. Returns the new pane, or `None` when the move would empty `target`.
+    pub fn split_with_item(
+        &mut self,
+        target: PaneId,
+        axis: Axis,
+        item: ItemId,
+        place_first: bool,
+    ) -> Option<PaneId> {
+        let (from, _) = self.find_item(item)?;
+        let source_len = self.pane(from)?.items.len();
+        self.pane(target)?;
+        if from == target && source_len == 1 {
+            return None;
+        }
+        let (_, moved) = self.detach(item)?;
+        if source_len == 1 {
+            self.close_pane(from);
+        }
+        self.split_off(target, axis, moved, place_first)
     }
 
     /// Removes an item; returns false when that emptied its pane and the pane was the last one.
@@ -592,6 +682,84 @@ mod tests {
         assert_eq!(l.ratio_at(&[true]), Some(0.3));
         assert_eq!(l.ratio_at(&[false]), None, "a pane has no ratio");
         assert_eq!(l.ratio_at(&[true, true, false]), None);
+    }
+
+    fn item_ids(l: &Layout, pane: PaneId) -> Vec<u64> {
+        l.pane(pane).unwrap().items.iter().map(|i| i.id.0).collect()
+    }
+
+    #[test]
+    fn move_item_keeps_item_id_and_collapses_empty_pane() {
+        let mut l = Layout::new(term());
+        let p1 = l.focused;
+        let p2 = l.split(p1, Axis::Horizontal, term()).unwrap();
+        let moving = l.pane(p2).unwrap().items[0].clone();
+        assert!(l.move_item(moving.id, p1, 99));
+        assert_eq!(ids(&l), vec![p1.0], "the emptied pane closes");
+        let p = l.pane(p1).unwrap();
+        assert_eq!(p.items.last(), Some(&moving), "same id, same kind");
+        assert_eq!(p.active, p.items.len() - 1);
+        assert_eq!(l.focused, p1);
+    }
+
+    #[test]
+    fn move_item_into_same_pane_reorders() {
+        let mut l = Layout::new(term());
+        let p1 = l.focused;
+        let a = l.pane(p1).unwrap().items[0].id;
+        let b = l.add_item(p1, term()).unwrap();
+        let c = l.add_item(p1, term()).unwrap();
+        assert!(l.move_item(a, p1, 2));
+        assert_eq!(item_ids(&l, p1), vec![b.0, c.0, a.0]);
+        assert_eq!(l.pane(p1).unwrap().active, 2);
+        assert!(l.move_item(a, p1, 0));
+        assert_eq!(item_ids(&l, p1), vec![a.0, b.0, c.0]);
+        assert!(
+            !l.move_item(a, p1, 0),
+            "dropping a tab on itself does nothing"
+        );
+    }
+
+    #[test]
+    fn move_item_keeps_the_source_panes_active_tab() {
+        let mut l = Layout::new(term());
+        let p1 = l.focused;
+        let a = l.pane(p1).unwrap().items[0].id;
+        let b = l.add_item(p1, term()).unwrap();
+        let c = l.add_item(p1, term()).unwrap();
+        let p2 = l.split(p1, Axis::Horizontal, term()).unwrap();
+        assert_eq!(l.pane(p1).unwrap().active, 2);
+        assert!(l.move_item(a, p2, 0));
+        assert_eq!(item_ids(&l, p1), vec![b.0, c.0]);
+        assert_eq!(l.pane(p1).unwrap().active, 1, "c stays active");
+        assert_eq!(l.pane(p2).unwrap().items[0].id, a);
+        assert_eq!(l.pane(p2).unwrap().active, 0);
+    }
+
+    #[test]
+    fn split_with_item_places_first_when_asked() {
+        let mut l = Layout::new(term());
+        let p1 = l.focused;
+        let a = l.pane(p1).unwrap().items[0].id;
+        let b = l.add_item(p1, term()).unwrap();
+        let p2 = l.split_with_item(p1, Axis::Horizontal, b, true).unwrap();
+        assert_eq!(ids(&l), vec![p2.0, p1.0]);
+        assert_eq!(item_ids(&l, p2), vec![b.0]);
+        assert_eq!(item_ids(&l, p1), vec![a.0]);
+        assert_eq!(l.focused, p2);
+        let p3 = l.split_with_item(p1, Axis::Vertical, b, false).unwrap();
+        assert_eq!(ids(&l), vec![p1.0, p3.0], "b's old pane closed");
+        assert_eq!(item_ids(&l, p3), vec![b.0]);
+    }
+
+    #[test]
+    fn split_with_item_refuses_to_empty_its_own_pane() {
+        let mut l = Layout::new(term());
+        let p1 = l.focused;
+        let only = l.pane(p1).unwrap().items[0].id;
+        let before = l.clone();
+        assert_eq!(l.split_with_item(p1, Axis::Horizontal, only, false), None);
+        assert_eq!(l, before);
     }
 
     #[test]
