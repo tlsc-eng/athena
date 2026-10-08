@@ -99,6 +99,7 @@ pub struct Shell {
     /// Keys oneshot animations so reopening something replays them.
     generation: u64,
     save_task: Option<Task<()>>,
+    redraw_pending: Option<Task<()>>,
     rail_from: usize,
     switch_count: u64,
     focus_pending: bool,
@@ -216,6 +217,7 @@ impl Shell {
             ratio_anim: None,
             generation: 0,
             save_task: None,
+            redraw_pending: None,
             switch_count: 0,
             focus_pending: true,
             _subscriptions: subscriptions,

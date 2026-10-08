@@ -18,6 +18,7 @@ use super::item::{ItemView, file_label};
 use crate::actions::NewTerminal;
 
 const TAB_STRIP_HEIGHT: f32 = 32.;
+const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// How far a resize handle reaches past each side of the line it drags.
 pub(super) const DIVIDER_HIT: f32 = 3.;
 
@@ -120,7 +121,7 @@ impl Shell {
                 cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
                     let TerminalEvent::Attached(session) = event else {
                         this.check_playwright_run(cx);
-                        cx.notify();
+                        this.notify_coalesced(cx);
                         return;
                     };
                     let item = this
@@ -216,6 +217,20 @@ impl Shell {
         };
         self.items.insert(key, view.clone());
         Some(view)
+    }
+
+    /// Redraws for terminal label, bell and Claude-state changes at most once a frame.
+    fn notify_coalesced(&mut self, cx: &mut Context<Self>) {
+        if self.redraw_pending.is_some() {
+            return;
+        }
+        self.redraw_pending = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FRAME).await;
+            let _ = this.update(cx, |this, cx| {
+                this.redraw_pending = None;
+                cx.notify();
+            });
+        }));
     }
 
     pub(super) fn item_label(&self, root: &Path, item: &Item, cx: &Context<Self>) -> String {
@@ -327,6 +342,13 @@ impl Shell {
 
     /// Web previews float above gpui, so only those in a visible tab with nothing drawn over them show.
     pub(super) fn sync_previews(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .items
+            .values()
+            .any(|v| matches!(v, ItemView::Preview(_) | ItemView::Doc(_)))
+        {
+            return;
+        }
         let mut shown = std::collections::HashSet::new();
         let covered = self.palette.is_some() || self.palette_closing.is_some() || self.usage_open();
         if let Some(project) = self.workspace.active_project().filter(|_| !covered)

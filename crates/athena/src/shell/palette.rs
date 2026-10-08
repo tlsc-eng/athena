@@ -157,29 +157,31 @@ impl Shell {
         let entries = match mode {
             Mode::Files | Mode::FilesBeside => Vec::new(),
             Mode::Claude => claude_entries(""),
-            Mode::Commands => commands()
-                .into_iter()
-                .filter(|(label, _)| {
-                    let root = self.workspace.active_project().map(|p| p.root.as_path());
-                    let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
-                    let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
-                    let playwright =
-                        root.is_some_and(|r| athena_playwright::find_config(r).is_some());
-                    !(label.starts_with("Enable Claude Code hooks") && hooks_on
-                        || label.starts_with("Disable Claude Code hooks") && !hooks_on
-                        || label.starts_with("Enable Playwright MCP") && (mcp_on || !playwright)
-                        || label.starts_with("Disable Playwright MCP") && !mcp_on
-                        || *label == "Run Playwright tests" && !playwright)
-                })
-                .map(|(label, action)| Entry {
-                    detail: window
-                        .highest_precedence_binding_for_action(action.as_ref())
-                        .map(|b| keystrokes(&b)),
-                    key: label.to_string(),
-                    label: label.to_string(),
-                    target: Target::Command(action),
-                })
-                .collect(),
+            Mode::Commands => {
+                let root = self.workspace.active_project().map(|p| p.root.as_path());
+                let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
+                let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
+                let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
+                commands()
+                    .into_iter()
+                    .filter(|(label, _)| {
+                        !(label.starts_with("Enable Claude Code hooks") && hooks_on
+                            || label.starts_with("Disable Claude Code hooks") && !hooks_on
+                            || label.starts_with("Enable Playwright MCP")
+                                && (mcp_on || !playwright)
+                            || label.starts_with("Disable Playwright MCP") && !mcp_on
+                            || *label == "Run Playwright tests" && !playwright)
+                    })
+                    .map(|(label, action)| Entry {
+                        detail: window
+                            .highest_precedence_binding_for_action(action.as_ref())
+                            .map(|b| keystrokes(&b)),
+                        key: label.to_string(),
+                        label: label.to_string(),
+                        target: Target::Command(action),
+                    })
+                    .collect()
+            }
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
