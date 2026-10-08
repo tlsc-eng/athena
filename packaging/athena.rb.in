@@ -2,10 +2,10 @@ cask "athena" do
   version "@VERSION@"
   sha256 "@SHA256@"
 
-  url "https://github.com/bjsonn/athena/releases/download/v#{version}/Athena-#{version}-arm64.zip"
+  url "https://github.com/tlsc-eng/athena/releases/download/v#{version}/Athena-#{version}-arm64.zip"
   name "Athena"
   desc "Personal IDE with persistent terminals and Claude Code integration"
-  homepage "https://github.com/bjsonn/athena"
+  homepage "https://github.com/tlsc-eng/athena"
 
   depends_on arch: :arm64
   depends_on macos: ">= :tahoe"
