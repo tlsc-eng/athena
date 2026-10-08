@@ -141,6 +141,12 @@ impl Commands {
         id
     }
 
+    /// Drops a command that never ran, such as Enter on an empty prompt.
+    pub fn forget(&mut self, id: u32) {
+        self.by_id.remove(&id);
+        self.order.retain(|&old| old != id);
+    }
+
     pub fn get(&self, id: u32) -> Option<&Command> {
         self.by_id.get(&id)
     }

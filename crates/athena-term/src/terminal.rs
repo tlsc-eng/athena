@@ -193,7 +193,17 @@ impl Terminal {
             return;
         }
         match mark {
-            Mark::Prompt => self.prompt_start = Some(self.cursor_abs()),
+            Mark::Prompt => {
+                if let Some((id, _)) = self.prompt
+                    && self
+                        .commands
+                        .get(id)
+                        .is_some_and(|c| c.output_start.is_none() && c.exit.is_none())
+                {
+                    self.commands.forget(id);
+                }
+                self.prompt_start = Some(self.cursor_abs());
+            }
             Mark::Command => self.tag_prompt(true),
             Mark::Output => {
                 self.tag_prompt(true);
@@ -1014,6 +1024,16 @@ mod tests {
         feed(&mut t, b"% ");
         assert_eq!(prompts(&t), [(0, Some(Some(0))), (2, None)]);
         assert_eq!(t.last_output(), Ok("a".to_string()));
+    }
+
+    #[test]
+    fn a_prompt_left_without_running_anything_gets_no_mark() {
+        let (mut t, _) = terminal();
+        feed(
+            &mut t,
+            b"\x1b]133;A\x07% \r\n\x1b]133;A\x07% ^C\r\n\x1b]133;A\x07% ",
+        );
+        assert_eq!(prompts(&t), [(2, None)]);
     }
 
     #[test]
