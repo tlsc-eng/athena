@@ -368,6 +368,7 @@ impl Shell {
                 .inset_0()
                 .flex()
                 .justify_center()
+                .items_start()
                 .pt(px(96.))
                 .on_mouse_down(
                     MouseButton::Left,

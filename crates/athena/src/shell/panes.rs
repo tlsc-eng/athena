@@ -668,8 +668,8 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_tab(pane_id, index, window, cx)
                     }))
-                    .children(self.item_badge(root, item, &t, cx))
                     .child(self.item_label(root, item, cx))
+                    .children(self.item_badge(root, item, &t, cx))
                     .child(
                         div()
                             .id(("tab-close", item.id.0))
