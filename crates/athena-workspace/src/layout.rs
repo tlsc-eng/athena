@@ -47,13 +47,33 @@ pub enum ItemKind {
     Rendered {
         path: PathBuf,
     },
+    /// Two versions of a file compared.
+    Diff {
+        path: PathBuf,
+        base: DiffBase,
+    },
+}
+
+/// What a diff tab compares, VS Code's way: the staged change, the unstaged change, or a
+/// Claude Code session's edits.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DiffBase {
+    /// HEAD against the index.
+    Head,
+    /// The index against the file on disk.
+    Index,
+    /// The file before a Claude Code session first edited it, against the file on disk.
+    Snapshot { session: String },
 }
 
 impl ItemKind {
     /// The file a tab shows, for editors and viewers.
     pub fn file(&self) -> Option<&PathBuf> {
         match self {
-            Self::Editor { path } | Self::Image { path } | Self::Rendered { path } => Some(path),
+            Self::Editor { path }
+            | Self::Image { path }
+            | Self::Rendered { path }
+            | Self::Diff { path, .. } => Some(path),
             Self::Terminal { .. } | Self::Preview { .. } => None,
         }
     }

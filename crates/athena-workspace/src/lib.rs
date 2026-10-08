@@ -6,8 +6,8 @@ mod scope;
 pub mod watch;
 
 pub use layout::{
-    Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath, Pane,
-    PaneId, Rect,
+    Axis, DiffBase, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath,
+    Pane, PaneId, Rect,
 };
 pub use persist::{is_corrupt, load, save, set_aside};
 pub use project::{Project, git_branch};
@@ -223,8 +223,10 @@ fn rebase_files(layout: &mut Layout, from: &Path, to: &Path) {
         let Some(item) = layout.item_mut(id) else {
             continue;
         };
-        if let ItemKind::Editor { path } | ItemKind::Image { path } | ItemKind::Rendered { path } =
-            &mut item.kind
+        if let ItemKind::Editor { path }
+        | ItemKind::Image { path }
+        | ItemKind::Rendered { path }
+        | ItemKind::Diff { path, .. } = &mut item.kind
             && let Ok(rest) = path.strip_prefix(from)
         {
             *path = to.join(rest);

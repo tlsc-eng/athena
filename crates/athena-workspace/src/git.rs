@@ -370,7 +370,15 @@ fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<
     let stdout = collect(stdout)?;
     if !status.success() {
         let stderr = collect(stderr)?;
-        bail!("{}", String::from_utf8_lossy(&stderr).trim());
+        // `git commit` with nothing staged explains itself on stdout.
+        let said = [stderr, stdout]
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+            .find(|s| !s.is_empty());
+        bail!(
+            "{}",
+            said.unwrap_or_else(|| format!("git failed ({status})"))
+        );
     }
     Ok(stdout)
 }
@@ -477,6 +485,196 @@ pub fn unstage(root: &Path, paths: &[PathBuf]) -> Result<()> {
     };
     cmd.args(paths);
     run(cmd, None).map(drop)
+}
+
+/// Which stored version of a file to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rev {
+    Head,
+    Index,
+}
+
+/// A file's contents at HEAD or in the index; `None` when it is not there (new, or no commits yet).
+pub fn show(root: &Path, rev: Rev, rel: &Path) -> Result<Option<Vec<u8>>> {
+    let spec = match rev {
+        Rev::Head => format!("HEAD:./{}", rel.display()),
+        Rev::Index => format!(":./{}", rel.display()),
+    };
+    let mut exists = git(root);
+    exists.args(["cat-file", "-e", &spec]);
+    match run(exists, None) {
+        Ok(_) => {}
+        Err(e) if e.is::<TimedOut>() => return Err(e),
+        Err(_) => return Ok(None),
+    }
+    let mut cmd = git(root);
+    cmd.args(["cat-file", "blob", &spec]);
+    run(cmd, None).map(Some)
+}
+
+/// Puts `contents` in the index as `rel`, leaving the worktree alone; staging one hunk does this.
+pub fn write_index(root: &Path, rel: &Path, contents: &str) -> Result<()> {
+    let mut hash = git(root);
+    hash.args(["hash-object", "-w", "--stdin"]);
+    let sha = String::from_utf8_lossy(&run(hash, Some(contents))?)
+        .trim()
+        .to_string();
+    let mut ls = git(root);
+    ls.args(["ls-files", "-s", "--"]).arg(rel);
+    let listed = String::from_utf8_lossy(&run(ls, None)?).into_owned();
+    let mode = match listed.split_whitespace().next() {
+        Some(mode) => mode.to_string(),
+        None => {
+            let exec = std::fs::metadata(root.join(rel)).is_ok_and(|m| {
+                std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0
+            });
+            if exec { "100755" } else { "100644" }.to_string()
+        }
+    };
+    let mut update = git(root);
+    update
+        .args(["update-index", "--add", "--cacheinfo"])
+        .arg(format!("{mode},{sha},{}", rel.display()));
+    run(update, None).map(drop)
+}
+
+/// Pre-commit hooks can run a test suite; the usual limit would kill them.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Commits the index with `message`, or rewrites the last commit with it when `amend`.
+pub fn commit(root: &Path, message: &str, amend: bool) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.args(["commit", "--quiet", "--file", "-"]);
+    if amend {
+        cmd.arg("--amend");
+    }
+    run_within(cmd, Some(message), COMMIT_TIMEOUT).map(drop)
+}
+
+/// The last commit's full message, for the amend box.
+pub fn last_message(root: &Path) -> Result<String> {
+    let mut cmd = git(root);
+    cmd.args(["log", "-1", "--format=%B"]);
+    Ok(String::from_utf8_lossy(&run(cmd, None)?)
+        .trim_end()
+        .to_string())
+}
+
+/// Copies a file into `backup` (keeping its relative path) before it is overwritten or deleted.
+fn keep_copy(root: &Path, rel: &Path, backup: &Path) -> Result<()> {
+    let from = root.join(rel);
+    if !from.is_file() {
+        return Ok(());
+    }
+    let to = backup.join(rel);
+    std::fs::create_dir_all(to.parent().unwrap_or(backup))?;
+    std::fs::copy(&from, &to).with_context(|| format!("keep a copy of {}", rel.display()))?;
+    Ok(())
+}
+
+/// Throws away a tracked file's unstaged changes, keeping a copy of it in `backup` first.
+pub fn discard(root: &Path, rel: &Path, backup: &Path) -> Result<()> {
+    keep_copy(root, rel, backup)?;
+    let mut cmd = git(root);
+    cmd.args(["restore", "--worktree", "--"]).arg(rel);
+    run(cmd, None).map(drop)
+}
+
+/// Writes `contents` over a file that still holds `expected`, keeping a copy in `backup` first.
+pub fn revert_file(
+    root: &Path,
+    rel: &Path,
+    expected: &str,
+    contents: &str,
+    backup: &Path,
+) -> Result<()> {
+    let path = root.join(rel);
+    let now = std::fs::read(&path).unwrap_or_default();
+    if now != expected.as_bytes() {
+        bail!("{} changed since the diff was shown", rel.display());
+    }
+    keep_copy(root, rel, backup)?;
+    let tmp = path.with_file_name(format!(
+        ".{}.athena-revert",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    std::fs::write(&tmp, contents)?;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// A local or remote-tracking branch, newest commit first in `branches`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Branch {
+    /// `main`, or `origin/main` for a remote one.
+    pub name: String,
+    pub remote: bool,
+    pub current: bool,
+    /// "3 days ago".
+    pub when: String,
+    pub subject: String,
+}
+
+/// Parses `for-each-ref` records of refname, short name, HEAD marker, date and subject.
+pub fn parse_branches(out: &str) -> Vec<Branch> {
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.split('\0');
+            let full = f.next()?;
+            let name = f.next()?.to_string();
+            let current = f.next()? == "*";
+            let when = f.next().unwrap_or_default().to_string();
+            let subject = f.next().unwrap_or_default().to_string();
+            let remote = full.starts_with("refs/remotes/");
+            // `origin/HEAD` points at another branch; listing it twice helps nobody.
+            (!(remote && full.ends_with("/HEAD"))).then_some(Branch {
+                name,
+                remote,
+                current,
+                when,
+                subject,
+            })
+        })
+        .collect()
+}
+
+pub fn branches(root: &Path) -> Result<Vec<Branch>> {
+    let mut cmd = git(root);
+    cmd.args([
+        "for-each-ref",
+        "--sort=-committerdate",
+        "--format=%(refname)%00%(refname:short)%00%(HEAD)%00%(committerdate:relative)%00%(subject)",
+        "refs/heads",
+        "refs/remotes",
+    ]);
+    Ok(parse_branches(&String::from_utf8_lossy(&run(cmd, None)?)))
+}
+
+/// `git switch`: to a local branch, to a new local branch tracking a remote one, or to a new
+/// branch made at HEAD. Git itself refuses when local changes would be overwritten.
+pub fn switch(root: &Path, branch: &str, how: Switch) -> Result<()> {
+    if branch.starts_with('-') {
+        bail!("a branch name cannot start with a dash");
+    }
+    let mut cmd = git(root);
+    cmd.arg("switch");
+    match how {
+        Switch::Existing => cmd.arg("--no-guess"),
+        Switch::Track => cmd.arg("--track"),
+        Switch::Create => cmd.arg("-c"),
+    };
+    cmd.arg(branch);
+    run(cmd, None).map(drop)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Switch {
+    Existing,
+    Track,
+    Create,
 }
 
 /// Per-file statuses plus every folder's most severe one, for colouring a file tree.
@@ -871,5 +1069,182 @@ mod tests {
             .unwrap();
         assert_eq!(a.status(), FileStatus::Untracked);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A repository with one commit of `f.txt`, set up so our own git runs can commit in it.
+    fn committed_repo(name: &str, contents: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("athena-git-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        std::fs::write(dir.join("f.txt"), contents).unwrap();
+        repo_git(&dir, &["init", "-q"]);
+        for (key, value) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            repo_git(&dir, &["config", key, value]);
+        }
+        repo_git(&dir, &["add", "-A"]);
+        repo_git(&dir, &["commit", "-qm", "init"]);
+        dir
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let mut cmd = git(dir);
+        cmd.args(args);
+        String::from_utf8(run(cmd, None).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn staging_one_hunk_leaves_the_others_unstaged() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("stage-hunk", "a\nb\nc\nd\n");
+        std::fs::write(dir.join("f.txt"), "a\nB\nc\nD\n").unwrap();
+        write_index(&dir, Path::new("f.txt"), "a\nB\nc\nd\n").unwrap();
+        let staged = git_out(&dir, &["diff", "--cached", "--no-color"]);
+        let unstaged = git_out(&dir, &["diff", "--no-color"]);
+        assert!(staged.contains("+B") && !staged.contains("+D"), "{staged}");
+        assert!(
+            unstaged.contains("+D") && !unstaged.contains("+B"),
+            "{unstaged}"
+        );
+        let index = show(&dir, Rev::Index, Path::new("f.txt")).unwrap().unwrap();
+        assert_eq!(index, b"a\nB\nc\nd\n");
+        let head = show(&dir, Rev::Head, Path::new("f.txt")).unwrap().unwrap();
+        assert_eq!(head, b"a\nb\nc\nd\n");
+        assert_eq!(show(&dir, Rev::Head, Path::new("new.txt")).unwrap(), None);
+
+        // Unstaging writes HEAD's text back to the index.
+        write_index(&dir, Path::new("f.txt"), "a\nb\nc\nd\n").unwrap();
+        assert!(git_out(&dir, &["diff", "--cached"]).is_empty());
+
+        // A hunk of an untracked file stages it as added.
+        std::fs::write(dir.join("new.txt"), "x\ny\n").unwrap();
+        write_index(&dir, Path::new("new.txt"), "x\n").unwrap();
+        let snap = status(&dir, "", true).unwrap();
+        let (_, new) = snap
+            .entries
+            .iter()
+            .find(|(p, _)| *p == dir.join("new.txt"))
+            .unwrap();
+        assert_eq!(new.staged, Some(FileStatus::Added));
+        assert_eq!(new.unstaged, Some(FileStatus::Modified));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reverting_a_hunk_keeps_a_copy_and_refuses_a_file_that_moved_on() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("revert-hunk", "a\nb\n");
+        let backup = dir.join("backup");
+        std::fs::write(dir.join("f.txt"), "a\nB\nc\n").unwrap();
+        let err = revert_file(&dir, Path::new("f.txt"), "stale", "a\nb\nc\n", &backup);
+        assert!(err.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "a\nB\nc\n"
+        );
+        revert_file(&dir, Path::new("f.txt"), "a\nB\nc\n", "a\nb\nc\n", &backup).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "a\nb\nc\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("f.txt")).unwrap(),
+            "a\nB\nc\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn commit_then_amend_rewrites_the_last_commit() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("commit", "a\n");
+        std::fs::write(dir.join("f.txt"), "b\n").unwrap();
+        stage(&dir, &[PathBuf::from("f.txt")]).unwrap();
+        commit(&dir, "Change a to b\n\nWith a body.", false).unwrap();
+        assert_eq!(last_message(&dir).unwrap(), "Change a to b\n\nWith a body.");
+        assert_eq!(git_out(&dir, &["rev-list", "--count", "HEAD"]).trim(), "2");
+        std::fs::write(dir.join("f.txt"), "c\n").unwrap();
+        stage(&dir, &[PathBuf::from("f.txt")]).unwrap();
+        commit(&dir, "Change a to c", true).unwrap();
+        assert_eq!(last_message(&dir).unwrap(), "Change a to c");
+        assert_eq!(git_out(&dir, &["rev-list", "--count", "HEAD"]).trim(), "2");
+        assert_eq!(
+            show(&dir, Rev::Head, Path::new("f.txt")).unwrap().unwrap(),
+            b"c\n"
+        );
+        let nothing = commit(&dir, "Empty", false).unwrap_err();
+        assert!(nothing.to_string().contains("nothing"), "{nothing:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn discarding_restores_the_index_version_and_keeps_a_copy() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("discard", "a\n");
+        let backup = dir.join("backup");
+        std::fs::write(dir.join("f.txt"), "mine\n").unwrap();
+        discard(&dir, Path::new("f.txt"), &backup).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "a\n");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("f.txt")).unwrap(),
+            "mine\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn switching_branches_is_refused_over_conflicting_local_changes() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("switch", "a\n");
+        switch(&dir, "feat", Switch::Create).unwrap();
+        std::fs::write(dir.join("f.txt"), "feat\n").unwrap();
+        stage(&dir, &[PathBuf::from("f.txt")]).unwrap();
+        commit(&dir, "On feat", false).unwrap();
+        switch(&dir, "main", Switch::Existing).unwrap();
+        let list = branches(&dir).unwrap();
+        let names: Vec<(&str, bool)> = list.iter().map(|b| (b.name.as_str(), b.current)).collect();
+        assert!(
+            names.contains(&("main", true)) && names.contains(&("feat", false)),
+            "{names:?}"
+        );
+
+        std::fs::write(dir.join("f.txt"), "dirty\n").unwrap();
+        let err = switch(&dir, "feat", Switch::Existing).unwrap_err();
+        assert!(err.to_string().contains("overwritten"), "{err:#}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(git_out(&dir, &["branch", "--show-current"]).trim(), "main");
+        assert!(switch(&dir, "-f", Switch::Create).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn branch_records_skip_the_remote_head_alias() {
+        let out = "refs/heads/main\0main\0*\x002 days ago\0Fix\n\
+                   refs/remotes/origin/HEAD\0origin\0 \x001 day ago\0x\n\
+                   refs/remotes/origin/dev\0origin/dev\0 \x001 day ago\0Dev work\n";
+        let list = parse_branches(out);
+        assert_eq!(list.len(), 2);
+        assert!(list[0].current && !list[0].remote);
+        assert_eq!(list[1].name, "origin/dev");
+        assert!(list[1].remote);
+        assert_eq!(list[1].subject, "Dev work");
     }
 }
