@@ -16,6 +16,7 @@ use crate::element::EditorElement;
 actions!(
     editor,
     [
+        GoToDefinition,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -105,12 +106,39 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-g", FindPrev, ctx),
         KeyBinding::new("cmd-/", ToggleComment, ctx),
         KeyBinding::new("escape", Escape, ctx),
+        KeyBinding::new("f12", GoToDefinition, ctx),
     ]);
 }
 
 pub enum EditorEvent {
     /// Dirty state or save result changed; tab strips should redraw.
     Changed,
+    /// The text changed; `version` only ever grows.
+    Edited {
+        version: u64,
+    },
+    Saved,
+    /// Zero-based line and UTF-16 column of the symbol to look up.
+    GoToDefinition {
+        line: u32,
+        character: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MarkerSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+/// A diagnostic to draw, positioned as language servers count (zero-based line, UTF-16 column).
+#[derive(Clone, Debug)]
+pub struct Marker {
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    pub severity: MarkerSeverity,
+    pub message: String,
 }
 
 /// What the element laid out last frame, kept for hit-testing and IME placement.
@@ -142,6 +170,7 @@ pub struct EditorView {
     save_error: Option<String>,
     selecting: bool,
     was_dirty: bool,
+    pub(crate) markers: Vec<Marker>,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -172,6 +201,53 @@ impl EditorView {
             save_error: None,
             selecting: false,
             was_dirty: false,
+            markers: Vec::new(),
+        }
+    }
+
+    pub fn lang(&self) -> Option<crate::Lang> {
+        self.buffer.as_ref()?.lang()
+    }
+
+    pub fn text(&self) -> Option<String> {
+        Some(self.buffer.as_ref()?.full_text())
+    }
+
+    pub fn version(&self) -> Option<u64> {
+        Some(self.buffer.as_ref()?.version())
+    }
+
+    pub fn set_markers(&mut self, markers: Vec<Marker>, cx: &mut Context<Self>) {
+        self.markers = markers;
+        cx.notify();
+    }
+
+    /// Moves the cursor to a zero-based line and UTF-16 column.
+    pub fn go_to_position(&mut self, line: u32, character: u32, cx: &mut Context<Self>) {
+        self.with_buffer(cx, |b| {
+            let at = b.char_at_utf16(line, character);
+            b.move_to(at, false);
+        });
+    }
+
+    fn markers_at_cursor(&self) -> Vec<&Marker> {
+        let Some(b) = self.buffer.as_ref() else {
+            return Vec::new();
+        };
+        let (line, _) = b.utf16_position(b.selection.head);
+        let mut found: Vec<&Marker> = self
+            .markers
+            .iter()
+            .filter(|m| m.start.0 <= line && line <= m.end.0)
+            .collect();
+        found.sort_by_key(|m| m.severity);
+        found
+    }
+
+    fn definition_at(&self, char: usize, cx: &mut Context<Self>) {
+        if let Some(b) = self.buffer.as_ref() {
+            let (line, character) = b.utf16_position(char);
+            cx.emit(EditorEvent::GoToDefinition { line, character });
         }
     }
 
@@ -207,6 +283,9 @@ impl EditorView {
         };
         let result = buffer.save();
         self.save_error = result.as_ref().err().map(|e| format!("{e:#}"));
+        if result.is_ok() {
+            cx.emit(EditorEvent::Saved);
+        }
         self.changed(cx);
         result.is_ok()
     }
@@ -230,6 +309,8 @@ impl EditorView {
         self.autoscroll = true;
         if edited {
             self.refresh_find(false, cx);
+            let version = self.buffer.as_ref().map_or(0, Buffer::version);
+            cx.emit(EditorEvent::Edited { version });
             self.changed(cx);
         } else {
             cx.notify();
@@ -268,6 +349,11 @@ impl EditorView {
             2 => buffer.select_word_at(at),
             n if n >= 3 => buffer.select_line_at(at),
             _ => buffer.move_to(at, event.modifiers.shift),
+        }
+        if event.modifiers.platform && event.click_count == 1 {
+            self.definition_at(at, cx);
+            cx.notify();
+            return;
         }
         self.selecting = true;
         cx.notify();
@@ -435,6 +521,49 @@ impl EditorView {
     }
 }
 
+impl EditorView {
+    /// The diagnostics on the cursor's line, worst first.
+    fn render_marker_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let markers = self.markers_at_cursor();
+        let worst = markers.first()?;
+        let t = cx.theme();
+        let color = marker_color(worst.severity, t);
+        let first_line = worst.message.lines().next().unwrap_or_default().to_string();
+        let more = (markers.len() > 1).then(|| format!("+{} more", markers.len() - 1));
+        Some(
+            div()
+                .flex_none()
+                .h(px(28.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .border_t_1()
+                .border_color(t.color.border)
+                .text_size(t.typography.caption)
+                .child(div().size(px(6.)).flex_none().bg(color))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_color(t.color.content_secondary)
+                        .child(first_line),
+                )
+                .children(more.map(|m| div().text_color(t.color.content_muted).child(m))),
+        )
+    }
+}
+
+pub(crate) fn marker_color(severity: MarkerSeverity, t: &athena_ui::Theme) -> gpui::Hsla {
+    match severity {
+        MarkerSeverity::Error => t.color.danger,
+        MarkerSeverity::Warning => t.color.warning,
+        MarkerSeverity::Info => t.color.content_disabled,
+    }
+}
+
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
@@ -463,6 +592,11 @@ impl Render for EditorView {
                     .key_context("Editor")
                     .cursor_text()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                    .on_action(cx.listener(|this, _: &GoToDefinition, _, cx| {
+                        if let Some(head) = this.buffer.as_ref().map(|b| b.selection.head) {
+                            this.definition_at(head, cx);
+                        }
+                    }))
                     .on_mouse_move(cx.listener(Self::mouse_move))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                     .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
@@ -608,6 +742,7 @@ impl Render for EditorView {
                     }))
                     .child(EditorElement::new(cx.entity(), focused)),
             )
+            .children(self.render_marker_bar(cx))
             .children(self.save_error.clone().map(|err| {
                 div()
                     .flex_none()

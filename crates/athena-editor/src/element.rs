@@ -214,6 +214,15 @@ impl Element for EditorElement {
         }
 
         let finds = view.find_matches().to_vec();
+        let marks: Vec<(std::ops::Range<usize>, crate::MarkerSeverity)> = view
+            .markers
+            .iter()
+            .map(|m| {
+                let a = buffer.char_at_utf16(m.start.0, m.start.1);
+                let b = buffer.char_at_utf16(m.end.0, m.end.1);
+                (a..b.max(a), m.severity)
+            })
+            .collect();
         let y_of = |line: usize| bounds.top() + lh * line as f32 - px(view.scroll.y);
         let x0 = text_left - px(scroll_x);
         for (line, start, n, display, shaped) in &lines {
@@ -249,11 +258,30 @@ impl Element for EditorElement {
             }
             frame.text.push((point(x0, y), shaped.clone()));
 
+            let mut worst = None;
+            for (range, severity) in &marks {
+                if range.start > end || range.end < *start {
+                    continue;
+                }
+                worst = worst.min(Some(*severity)).or(Some(*severity));
+                let a = range.start.clamp(*start, end);
+                let b = range.end.clamp(*start, end);
+                let xa = shaped.x_for_index(display.char_to_byte[a - start]);
+                let xb = shaped.x_for_index(display.char_to_byte[b - start]);
+                let width = if b > a { xb - xa } else { cell };
+                frame.overlay.push(fill(
+                    Bounds::new(point(x0 + xa, y + lh - px(2.)), size(width, px(1.))),
+                    crate::view::marker_color(*severity, &theme),
+                ));
+            }
+
             let number = (line + 1).to_string();
-            let color = if *line == head_line {
-                syntax.line_number_active
-            } else {
-                syntax.line_number
+            let color = match worst {
+                Some(
+                    severity @ (crate::MarkerSeverity::Error | crate::MarkerSeverity::Warning),
+                ) => crate::view::marker_color(severity, &theme),
+                _ if *line == head_line => syntax.line_number_active,
+                _ => syntax.line_number,
             };
             let label = text_system.shape_line(
                 number.clone().into(),

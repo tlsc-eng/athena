@@ -204,6 +204,40 @@ impl Buffer {
         self.line_start(line) + col.min(self.line_len(line))
     }
 
+    /// Zero-based line and UTF-16 column of a char index, as language servers count them.
+    pub fn utf16_position(&self, char: usize) -> (u32, u32) {
+        let char = char.min(self.rope.len_chars());
+        let line = self.line_of(char);
+        let start = self.line_start(line);
+        let col: usize = self
+            .rope
+            .slice(start..char)
+            .chars()
+            .map(char::len_utf16)
+            .sum();
+        (line as u32, col as u32)
+    }
+
+    /// The char index at a zero-based line and UTF-16 column, clamped to the document.
+    pub fn char_at_utf16(&self, line: u32, col: u32) -> usize {
+        let line = (line as usize).min(self.len_lines().saturating_sub(1));
+        let start = self.line_start(line);
+        let mut units = 0;
+        let mut chars = 0;
+        for c in self.line(line).chars() {
+            if units >= col as usize {
+                break;
+            }
+            units += c.len_utf16();
+            chars += 1;
+        }
+        start + chars
+    }
+
+    pub fn full_text(&self) -> String {
+        self.rope.to_string()
+    }
+
     pub fn highlights(&self, lines: Range<usize>) -> Vec<(Range<usize>, Token)> {
         let Some(syntax) = &self.syntax else {
             return Vec::new();
@@ -672,6 +706,16 @@ fn detect_indent(text: &str, path: Option<&Path>) -> Indent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16_positions_round_trip() {
+        let b = Buffer::new("a\nx😀y = 1\n", None);
+        let y = b.line_start(1) + 2;
+        assert_eq!(b.utf16_position(y), (1, 3));
+        assert_eq!(b.char_at_utf16(1, 3), y);
+        assert_eq!(b.char_at_utf16(1, 99), b.line_start(1) + b.line_len(1));
+        assert_eq!(b.char_at_utf16(99, 0), b.line_start(2));
+    }
 
     fn buf(text: &str, path: &str) -> Buffer {
         Buffer::new(text, Some(PathBuf::from(path)))

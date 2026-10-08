@@ -6,4 +6,4 @@ mod view;
 
 pub use buffer::{Buffer, Indent, Selection};
 pub use syntax::{Lang, Token};
-pub use view::{EditorEvent, EditorView, init};
+pub use view::{EditorEvent, EditorView, Marker, MarkerSeverity, init};
