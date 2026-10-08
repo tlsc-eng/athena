@@ -29,9 +29,9 @@ use athena_term::ClaudeState;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
 use gpui::{
-    Animation, AnyElement, Bounds, Context, FocusHandle, FontWeight, IntoElement, MouseButton,
-    PathPromptOptions, Pixels, Render, Subscription, Task, Window, WindowBounds, div, prelude::*,
-    px,
+    Animation, AnyElement, Bounds, Context, ExternalPaths, FocusHandle, FontWeight, IntoElement,
+    MouseButton, PathPromptOptions, Pixels, Render, Subscription, Task, Window, WindowBounds, div,
+    prelude::*, px,
 };
 
 use crate::actions::{
@@ -59,6 +59,8 @@ pub struct Shell {
     items: HashMap<(PathBuf, ItemId), item::ItemView>,
     pane_area: Rc<RefCell<Bounds<Pixels>>>,
     drag: Option<panes::Drag>,
+    /// The pane and zone a dragged tab would land in.
+    drop_hint: Option<(PaneId, dnd::DropZone)>,
     palette: Option<palette::Palette>,
     palette_closing: Option<(palette::Palette, motion::Closing)>,
     context_menu: Option<(gpui::Entity<athena_ui::ContextMenu>, Subscription)>,
@@ -187,6 +189,7 @@ impl Shell {
             items: HashMap::new(),
             pane_area: Rc::default(),
             drag: None,
+            drop_hint: None,
             palette: None,
             palette_closing: None,
             context_menu: None,
@@ -304,6 +307,22 @@ impl Shell {
         let index = self.workspace.add_project(root);
         self.workspace.active = previous;
         self.switch_to(index, cx);
+    }
+
+    /// Files and folders dropped from Finder: folders open as projects, files as tabs.
+    fn open_dropped(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        for path in paths {
+            if path.is_dir() {
+                self.open_folder(path.clone(), cx);
+                continue;
+            }
+            if self.workspace.active.is_none()
+                && let Some(parent) = path.parent()
+            {
+                self.open_folder(parent.to_path_buf(), cx);
+            }
+            self.open_file(path.clone(), window, cx);
+        }
     }
 
     fn close_project(&mut self, _: &CloseProject, _: &mut Window, cx: &mut Context<Self>) {
@@ -513,10 +532,12 @@ impl Shell {
             )
         });
 
+        let drop_tint = t.color.surface_accent;
         div()
             .relative()
             .w(px(RAIL_WIDTH))
             .flex_none()
+            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_tint))
             .flex()
             .flex_col()
             .items_center()
@@ -681,6 +702,9 @@ impl Render for Shell {
             )
             .capture_any_mouse_down(|_, window, _| athena_preview::restore_key_focus(window))
             .on_mouse_move(cx.listener(Self::drag_move))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.open_dropped(paths.paths(), window, cx)
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.drag_end(cx)),

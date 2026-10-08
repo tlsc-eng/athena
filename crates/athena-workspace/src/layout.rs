@@ -268,8 +268,8 @@ impl Layout {
         Some((pane, taken))
     }
 
-    /// Moves a tab to `index` in pane `to` (an index into that pane's tabs as they are now), keeping
-    /// its id; an emptied source pane closes. Returns false when nothing would change.
+    /// Moves a tab so it ends up at `index` among pane `to`'s tabs (clamped), keeping its id; an
+    /// emptied source pane closes. Returns false when nothing would change.
     pub fn move_item(&mut self, item: ItemId, to: PaneId, index: usize) -> bool {
         let Some((from, at)) = self.find_item(item) else {
             return false;

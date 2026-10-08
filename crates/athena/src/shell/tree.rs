@@ -386,6 +386,10 @@ impl Shell {
             .flex()
             .flex_col()
             .bg(t.color.surface)
+            .drag_over::<gpui::ExternalPaths>({
+                let tint = t.color.surface_accent;
+                move |s, _, _, _| s.bg(tint)
+            })
             .border_r_1()
             .border_color(t.color.border)
             .child(

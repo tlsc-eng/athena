@@ -8,12 +8,14 @@ use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
 };
 use gpui::{
-    Animation, AnyElement, Bounds, Context, CursorStyle, ElementId, Entity, FontWeight, Hsla,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel, SharedString, Window, canvas,
-    div, linear_color_stop, linear_gradient, point, prelude::*, px, relative, size,
+    Animation, AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
+    FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel,
+    SharedString, Window, canvas, div, linear_color_stop, linear_gradient, point, prelude::*, px,
+    relative, size,
 };
 
 use super::Shell;
+use super::dnd::{DropZone, TabDrag, TabGhost, strip_drop_index, zone_for};
 use super::item::{ItemView, file_label};
 use crate::actions::NewTerminal;
 
@@ -942,6 +944,9 @@ impl Shell {
         if std::mem::take(&mut self.focus_pending) {
             self.focus_active_item(window, cx);
         }
+        if !cx.has_active_drag() {
+            self.drop_hint = None;
+        }
         let live = |(r, p): &(PathBuf, PaneId)| *r != root || layout.pane(*p).is_some();
         self.tab_scroll.retain(|key, _| live(key));
 
@@ -1076,6 +1081,21 @@ impl Shell {
                 let born = self
                     .tab_born
                     .is_some_and(|(i, opening)| i == item.id && opening.running(t.motion.fast));
+                let label = self.item_label(root, item, cx);
+                let drag = TabDrag {
+                    pane: pane_id,
+                    item: item_id,
+                    label: label.clone().into(),
+                };
+                let insertion = div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .bg(t.color.accent)
+                    .invisible()
+                    .group_drag_over::<TabDrag>(group.clone(), |s| s.visible());
                 let tab = div()
                     .id(("tab", item.id.0))
                     .group(group.clone())
@@ -1126,7 +1146,15 @@ impl Shell {
                             .file()
                             .map(|path| athena_ui::file_icon(path, false, cx)),
                     )
-                    .child(self.item_label(root, item, cx))
+                    .on_drag(drag, |drag: &TabDrag, _, _, cx| {
+                        let label = drag.label.clone();
+                        cx.new(|_| TabGhost { label })
+                    })
+                    .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                        this.drop_tab_at(drag, pane_id, Some(index), window, cx)
+                    }))
+                    .child(insertion)
+                    .child(label)
                     .children(self.item_badge(root, item, &t, cx))
                     .child(
                         div()
@@ -1253,7 +1281,21 @@ impl Shell {
                     .flex()
                     .overflow_x_scroll()
                     .track_scroll(&scroll)
-                    .children(tabs),
+                    .children(tabs)
+                    // Last, so tab indices still match the scroll handle's children.
+                    .child(
+                        div()
+                            .id(("tab-strip-end", pane_id.0))
+                            .flex_1()
+                            .min_w(px(32.))
+                            .h_full()
+                            .drag_over::<TabDrag>(|s, _, _, cx| {
+                                s.bg(cx.theme().color.surface_accent)
+                            })
+                            .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                                this.drop_tab_at(drag, pane_id, None, window, cx)
+                            })),
+                    ),
             )
             .when(left, |el| el.child(fade(true)))
             .when(right, |el| el.child(fade(false)))
@@ -1267,10 +1309,18 @@ impl Shell {
             Some(view) => view.element(),
             None => div().into_any_element(),
         };
+        let drop_layer = cx
+            .has_active_drag()
+            .then(|| self.render_drop_layer(pane_id, &t, cx));
         // Opacity only: moving or resizing the box would resize the shell mid-animation.
         let content = motion::animate_if(
             t.motion.reduced,
-            div().flex_1().min_h_0().child(content),
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(content)
+                .children(drop_layer),
             (
                 "tab-content",
                 active.map_or(0, |i| i.id.0) ^ (self.tab_switches << 32),
@@ -1321,6 +1371,138 @@ impl Shell {
             Animation::new(t.motion.base).with_easing(motion::ease_enter()),
             |el, d| el.opacity(d).top(px(4. * (1. - d))),
         )
+    }
+
+    /// Covers a pane's content while a tab is dragged, tinting the half (or all) it would land in.
+    fn render_drop_layer(
+        &self,
+        pane: PaneId,
+        t: &athena_ui::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let zone = self.drop_hint.filter(|(p, _)| *p == pane).map(|(_, z)| z);
+        let tint = zone.map(|zone| {
+            let half = relative(0.5);
+            let el = div()
+                .absolute()
+                .bg(t.color.accent.opacity(0.12))
+                .border_1()
+                .border_color(t.color.accent);
+            match zone {
+                DropZone::Center => el.inset_0(),
+                DropZone::Left => el.left_0().top_0().bottom_0().w(half),
+                DropZone::Right => el.right_0().top_0().bottom_0().w(half),
+                DropZone::Top => el.left_0().right_0().top_0().h(half),
+                DropZone::Bottom => el.left_0().right_0().bottom_0().h(half),
+            }
+        });
+        div()
+            .id(("drop-layer", pane.0))
+            .absolute()
+            .inset_0()
+            // Every pane hears every move of a drag, so each claims it only while under the cursor.
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<TabDrag>, _, cx| {
+                    let at = event.event.position;
+                    let next = if event.bounds.contains(&at) {
+                        Some((pane, zone_for(event.bounds, at)))
+                    } else if this.drop_hint.is_some_and(|(p, _)| p == pane) {
+                        None
+                    } else {
+                        return;
+                    };
+                    if this.drop_hint != next {
+                        this.drop_hint = next;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                this.drop_tab_on_pane(drag, pane, window, cx)
+            }))
+            .children(tint)
+            .into_any_element()
+    }
+
+    /// A tab dropped on the strip: before the tab at `before`, or after the last one.
+    fn drop_tab_at(
+        &mut self,
+        drag: &TabDrag,
+        to: PaneId,
+        before: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drop_hint = None;
+        let Some(layout) = self.active_layout() else {
+            return;
+        };
+        let Some(len) = layout.pane(to).map(|p| p.items.len()) else {
+            return;
+        };
+        let item = drag.item;
+        let here = layout
+            .find_item(item)
+            .filter(|_| drag.pane == to)
+            .map(|(_, at)| at);
+        if layout.move_item(item, to, strip_drop_index(here, before, len)) {
+            self.zoomed = None;
+            self.after_tab_moved(item, None, window, cx);
+        }
+    }
+
+    /// A tab dropped on a pane's content: its centre joins the pane, an edge splits it.
+    fn drop_tab_on_pane(
+        &mut self,
+        drag: &TabDrag,
+        target: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let zone = self
+            .drop_hint
+            .take()
+            .filter(|(p, _)| *p == target)
+            .map_or(DropZone::Center, |(_, z)| z);
+        let Some(layout) = self.active_layout() else {
+            return;
+        };
+        let split = match zone {
+            DropZone::Center => None,
+            DropZone::Left => Some((Axis::Horizontal, true)),
+            DropZone::Right => Some((Axis::Horizontal, false)),
+            DropZone::Top => Some((Axis::Vertical, true)),
+            DropZone::Bottom => Some((Axis::Vertical, false)),
+        };
+        let moved = match split {
+            None => {
+                let len = layout.pane(target).map_or(0, |p| p.items.len());
+                (drag.pane != target && layout.move_item(drag.item, target, len)).then_some(None)
+            }
+            Some((axis, first)) => layout
+                .split_with_item(target, axis, drag.item, first)
+                .map(Some),
+        };
+        if let Some(new_pane) = moved {
+            self.zoomed = None;
+            self.after_tab_moved(drag.item, new_pane, window, cx);
+        }
+    }
+
+    fn after_tab_moved(
+        &mut self,
+        item: ItemId,
+        new_pane: Option<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Only a new pane fades in; an existing one keeps showing its live content.
+        if new_pane.is_some() {
+            self.entering = new_pane;
+        }
+        self.note_tab_born(Some(item));
+        self.tab_switches += 1;
+        self.after_layout_change(window, cx);
     }
 
     fn render_divider_handle(

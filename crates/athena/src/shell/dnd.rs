@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use athena_ui::ActiveTheme;
 use athena_workspace::{ItemId, PaneId};
 use gpui::{
@@ -71,10 +69,34 @@ pub(super) fn zone_for(bounds: Bounds<Pixels>, pos: Point<Pixels>) -> DropZone {
     .map_or(DropZone::Center, |(_, zone)| zone)
 }
 
+/// Where a tab dropped on a strip of `len` tabs ends up: just before the tab at `before`, or last.
+/// `here` is its current index when it is already in that strip.
+pub(super) fn strip_drop_index(here: Option<usize>, before: Option<usize>, len: usize) -> usize {
+    match (here, before) {
+        (Some(at), Some(target)) if at < target => target - 1,
+        (_, Some(target)) => target,
+        (Some(_), None) => len - 1,
+        (None, None) => len,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[test]
+    fn a_dropped_tab_lands_just_before_the_tab_under_it() {
+        assert_eq!(strip_drop_index(Some(0), Some(2), 3), 1, "moving right");
+        assert_eq!(strip_drop_index(Some(2), Some(0), 3), 0, "moving left");
+        assert_eq!(strip_drop_index(None, Some(1), 3), 1, "from another pane");
+    }
+
+    #[test]
+    fn the_empty_strip_end_appends() {
+        assert_eq!(strip_drop_index(Some(0), None, 3), 2);
+        assert_eq!(strip_drop_index(None, None, 3), 3);
+    }
 
     fn pane() -> Bounds<Pixels> {
         Bounds::new(point(px(100.), px(50.)), size(px(400.), px(200.)))
