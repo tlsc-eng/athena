@@ -649,7 +649,7 @@ mod tests {
     }
 
     fn repo_git(dir: &Path, args: &[&str]) {
-        let ok = Command::new(GIT)
+        let out = Command::new(GIT)
             .arg("-C")
             .arg(dir)
             .args([
@@ -668,10 +668,13 @@ mod tests {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
-            .unwrap()
-            .status
-            .success();
-        assert!(ok, "git {args:?} failed");
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
 
     #[test]
@@ -730,7 +733,7 @@ mod tests {
             eprintln!("git is not installed; skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-git-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("athena-git-repo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let dir = dir.canonicalize().unwrap();
