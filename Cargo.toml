@@ -13,7 +13,7 @@ publish = false
 gpui = "=0.2.2"
 alacritty_terminal = "0.26"
 portable-pty = "0.9"
-ropey = "1.6"
+ropey = { version = "1.6", default-features = false, features = ["cr_lines", "simd"] }
 tree-sitter = "0.27"
 tree-sitter-go = "0.25"
 tree-sitter-typescript = "0.23"
