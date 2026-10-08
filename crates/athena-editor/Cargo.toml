@@ -27,3 +27,4 @@ anyhow.workspace = true
 gpui.workspace = true
 athena-ui.workspace = true
 imagesize.workspace = true
+libc.workspace = true

@@ -32,18 +32,34 @@ fn name(path: &Path) -> String {
 
 /// A closed file's text, refusing what the editor would refuse: binary, huge or not UTF-8.
 fn read_text(path: &Path) -> Result<Option<String>, String> {
-    let meta = match std::fs::metadata(path) {
-        Ok(meta) => meta,
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let failed = |e: std::io::Error| format!("Could not read {}: {e}", name(path));
+    // Non-blocking, so a FIFO without a writer is refused below instead of hanging here.
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("Could not read {}: {e}", name(path))),
+        Err(e) => return Err(failed(e)),
     };
+    let meta = file.metadata().map_err(failed)?;
     if !meta.is_file() {
         return Err(format!("{} is not a file", name(path)));
     }
+    let too_large = || format!("{} is too large to edit", name(path));
     if meta.len() > MAX_FILE {
-        return Err(format!("{} is too large to edit", name(path)));
+        return Err(too_large());
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", name(path)))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(failed)?;
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(too_large());
+    }
     if bytes.contains(&0) {
         return Err(format!("{} is not a text file", name(path)));
     }
@@ -789,6 +805,21 @@ mod tests {
         };
         assert!(run(&clobber, &mut Fake::default()).is_err());
         assert_eq!(std::fs::read_to_string(&old).unwrap(), "keep me\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn closed_files_are_read_only_when_they_are_regular_files() {
+        let dir = temp("special");
+        let fifo = dir.join("pipe.go");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+        let edit = WorkspaceEdit {
+            changes: vec![change(&fifo, None, vec![edit(0, 0, 0, "x")])],
+        };
+        let why = run(&edit, &mut Fake::default()).unwrap_err();
+        assert!(why.contains("not a file"), "{why}");
+        assert_eq!(read_text(&dir.join("gone.go")), Ok(None));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

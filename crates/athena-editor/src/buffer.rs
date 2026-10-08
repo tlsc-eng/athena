@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::ops::Range;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1560,12 +1560,25 @@ fn stamp(path: &Path) -> Option<Stamp> {
 
 /// A UTF-8 text file's contents and modification time; binary and very large files are refused.
 fn read_text(path: &Path) -> Result<(String, Stamp)> {
-    let meta = fs::metadata(path).with_context(|| format!("open {}", path.display()))?;
+    // Non-blocking, so a FIFO without a writer fails the checks below instead of hanging here.
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    let too_large = || anyhow::anyhow!("{} is larger than 50 MB", path.display());
     if meta.len() > MAX_FILE {
-        bail!("{} is larger than 50 MB", path.display());
+        return Err(too_large());
     }
     let mut bytes = Vec::new();
-    fs::File::open(path)?.read_to_end(&mut bytes)?;
+    file.take(MAX_FILE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(too_large());
+    }
     if bytes.iter().take(8192).any(|b| *b == 0) {
         bail!("{} looks like a binary file", path.display());
     }
@@ -1825,6 +1838,27 @@ mod tests {
         );
         fs::write(dir.join("bin"), [0u8, 1, 2]).unwrap();
         assert!(Buffer::open(&dir.join("bin")).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_regular_files_of_a_sane_size_are_opened() {
+        let file = temp_file("special", "x\n");
+        let dir = file.parent().unwrap().to_path_buf();
+        let fifo = dir.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+        let err = Buffer::open(&fifo).err().unwrap();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(Buffer::open(Path::new("/dev/zero")).is_err());
+        assert!(Buffer::open(&dir).is_err());
+        let huge = dir.join("huge.txt");
+        fs::File::create(&huge)
+            .unwrap()
+            .set_len(MAX_FILE + 1)
+            .unwrap();
+        assert!(Buffer::open(&huge).is_err());
+        assert_eq!(Buffer::open(&file).unwrap().full_text(), "x\n");
         fs::remove_dir_all(&dir).unwrap();
     }
 

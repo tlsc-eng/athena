@@ -495,6 +495,7 @@ dependencies = [
  "athena-ui",
  "gpui",
  "imagesize",
+ "libc",
  "ropey",
  "streaming-iterator",
  "tree-sitter",
