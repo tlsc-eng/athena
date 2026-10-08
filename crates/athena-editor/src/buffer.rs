@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::ops::Range;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -219,10 +220,32 @@ impl Buffer {
     }
 
     /// Writes through a temp file and rename, keeping the file's permissions; a symlink stays a
-    /// link and its target gets the text.
+    /// link and its target gets the text, and a hard-linked file is rewritten in place.
     pub fn save(&mut self) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
         let target = link_target(&path);
+        let meta = fs::metadata(&target).ok();
+        if meta.as_ref().is_some_and(|m| m.is_file() && m.nlink() > 1) {
+            // A rename would split it from its other links, so this write gives up atomicity.
+            let mut out = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&target)
+                .with_context(|| format!("write {}", target.display()))?;
+            self.rope.write_to(&mut out)?;
+            out.sync_all()?;
+        } else {
+            self.replace_file(&target, meta.as_ref())?;
+        }
+        self.disk = stamp(&path);
+        self.saved_at = Some(self.undo.len());
+        // The next keystroke must start a new undo step, or it would fold into the saved one.
+        self.last_edit = None;
+        Ok(())
+    }
+
+    /// Swaps `target` for a fully written temp file, so a failed save never leaves it half written.
+    fn replace_file(&self, target: &Path, meta: Option<&fs::Metadata>) -> Result<()> {
         let tmp = target.with_file_name(format!(
             ".{}.athena-tmp",
             target
@@ -230,18 +253,20 @@ impl Buffer {
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default()
         ));
-        let mut out = fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
-        self.rope.write_to(&mut out)?;
-        out.sync_all()?;
-        if let Ok(meta) = fs::metadata(&target) {
-            fs::set_permissions(&tmp, meta.permissions())?;
+        let written = (|| {
+            let mut out =
+                fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+            self.rope.write_to(&mut out)?;
+            out.sync_all()?;
+            if let Some(meta) = meta {
+                fs::set_permissions(&tmp, meta.permissions())?;
+            }
+            fs::rename(&tmp, target).with_context(|| format!("replace {}", target.display()))
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
-        fs::rename(&tmp, &target).with_context(|| format!("replace {}", target.display()))?;
-        self.disk = stamp(&path);
-        self.saved_at = Some(self.undo.len());
-        // The next keystroke must start a new undo step, or it would fold into the saved one.
-        self.last_edit = None;
-        Ok(())
+        written
     }
 
     /// Whether another program wrote or removed the file since this buffer read or saved it.
@@ -1418,6 +1443,31 @@ mod tests {
             .unwrap()
             .set_modified(later)
             .unwrap();
+    }
+
+    #[test]
+    fn a_failed_save_leaves_no_temp_file_and_hard_links_stay_linked() {
+        let path = temp_file("links", "a\n");
+        let dir = path.parent().unwrap().to_path_buf();
+        let twin = dir.join("twin.go");
+        fs::hard_link(&path, &twin).unwrap();
+        let mut b = Buffer::open(&path).unwrap();
+        b.insert(&mut Cursor::default(), "x");
+        b.save().unwrap();
+        assert_eq!(fs::read_to_string(&twin).unwrap(), "xa\n");
+
+        let folder = dir.join("folder");
+        fs::create_dir_all(folder.join("inside")).unwrap();
+        let mut b = Buffer::new("text", Some(folder.clone()));
+        assert!(b.save().is_err());
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["folder", "main.go", "twin.go"], "no temp file left");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
