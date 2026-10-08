@@ -4,15 +4,20 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::{ClientMsg, PROTO_VERSION, ServerMsg, read_frame, write_frame};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-const SPAWN_WAIT: Duration = Duration::from_secs(3);
+const SPAWN_WAIT: Duration = Duration::from_secs(10);
 const SPAWN_POLL: Duration = Duration::from_millis(50);
+const EXITED_GRACE: Duration = Duration::from_millis(500);
+const EXIT_WAIT: Duration = Duration::from_secs(1);
+
+static SPAWN: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
@@ -23,6 +28,8 @@ pub enum ConnectError {
          run `athena mux stop` to restart it, which ends the shells it runs ({panes})"
     )]
     VersionMismatch { daemon: u32, panes: u32, pid: u32 },
+    #[error("session daemon exited while starting; see mux.log")]
+    DaemonExited,
     #[error("session daemon: {0}")]
     Io(#[from] io::Error),
 }
@@ -96,31 +103,91 @@ pub fn connect_or_spawn(
     log: &Path,
 ) -> Result<(Connection, UnixStream), ConnectError> {
     match connect(socket) {
+        Err(ConnectError::NotRunning | ConnectError::VersionMismatch { panes: 0, .. }) => {}
+        other => return other,
+    }
+    // Every restored terminal connects at once on launch; only the first may start a daemon.
+    let _spawning = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+    match connect(socket) {
         Ok(pair) => return Ok(pair),
         Err(ConnectError::NotRunning) => {}
         Err(ConnectError::VersionMismatch { panes: 0, pid, .. }) => {
-            // SAFETY: plain kill(2) on a pid the daemon reported for itself.
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-            thread::sleep(Duration::from_millis(200));
+            tracing::info!("replacing idle session daemon {pid} from an older build");
+            terminate(pid);
         }
         Err(e) => return Err(e),
     }
     tracing::info!("spawning athena-mux at {}", daemon.display());
-    spawn_daemon(daemon, log)?;
-    let deadline = Instant::now() + SPAWN_WAIT;
+    let exited = spawn_daemon(daemon, log)?;
+    let started = Instant::now();
+    let mut exited_at = None;
     loop {
         match connect(socket) {
-            Err(ConnectError::NotRunning) if Instant::now() < deadline => thread::sleep(SPAWN_POLL),
-            Err(ConnectError::NotRunning) => {
-                tracing::warn!("athena-mux did not listen within {SPAWN_WAIT:?}");
-                return Err(ConnectError::NotRunning);
-            }
+            Err(ConnectError::NotRunning) => {}
             other => return other,
         }
+        if exited_at.is_none() && exited.load(Ordering::Acquire) {
+            exited_at = Some(Instant::now());
+        }
+        // Ours may have lost the lock to a daemon another process is starting, so wait briefly.
+        if exited_at.is_some_and(|t| t.elapsed() >= EXITED_GRACE) {
+            tracing::error!("athena-mux exited before it was listening");
+            return Err(ConnectError::DaemonExited);
+        }
+        if started.elapsed() >= SPAWN_WAIT {
+            tracing::warn!("athena-mux did not listen within {SPAWN_WAIT:?}");
+            return Err(ConnectError::NotRunning);
+        }
+        thread::sleep(SPAWN_POLL);
     }
 }
 
-fn spawn_daemon(daemon: &Path, log: &Path) -> io::Result<()> {
+/// Ends the daemon on `socket` and the shells it runs, whatever its version; false if none ran.
+pub fn stop_daemon(socket: &Path) -> Result<bool, ConnectError> {
+    match connect(socket) {
+        Ok((conn, _)) => {
+            conn.send(&ClientMsg::Shutdown)?;
+            wait_for_exit(conn.daemon_pid);
+            Ok(true)
+        }
+        Err(ConnectError::NotRunning) => Ok(false),
+        Err(ConnectError::VersionMismatch { pid, .. }) => {
+            tracing::info!("stopping session daemon {pid} from an older build");
+            terminate(pid);
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn terminate(pid: u32) {
+    // SAFETY: plain kill(2) on a pid the daemon reported for itself.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    // Daemons before 0.2 started with SIGTERM blocked when the app spawned them.
+    if !wait_for_exit(pid) {
+        // SAFETY: as above.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        wait_for_exit(pid);
+    }
+}
+
+/// Whether `pid` is gone within `EXIT_WAIT`.
+fn wait_for_exit(pid: u32) -> bool {
+    let deadline = Instant::now() + EXIT_WAIT;
+    loop {
+        // SAFETY: signal 0 only checks that the pid exists.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(SPAWN_POLL);
+    }
+}
+
+/// Starts the daemon; the flag turns true if it exits while this process is still running.
+fn spawn_daemon(daemon: &Path, log: &Path) -> io::Result<Arc<AtomicBool>> {
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -131,9 +198,12 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> io::Result<()> {
         .stdout(log.try_clone()?)
         .stderr(log)
         .spawn()?;
+    let exited = Arc::new(AtomicBool::new(false));
+    let flag = exited.clone();
     // Reap it if it exits while we are still running; after we exit, launchd adopts it.
     thread::spawn(move || {
         let _ = child.wait();
+        flag.store(true, Ordering::Release);
     });
-    Ok(())
+    Ok(exited)
 }

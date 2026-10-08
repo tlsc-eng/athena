@@ -15,7 +15,8 @@ const MAX_HOOK_INPUT: u64 = 64 * 1024;
 pub fn run(args: Vec<String>) -> Option<i32> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
-        [] => return None,
+        [] if launched_by_launchd() => return None,
+        [] => return open_app(),
         ["--version" | "-V"] => {
             println!("athena {}", env!("CARGO_PKG_VERSION"));
             return Some(0);
@@ -74,24 +75,12 @@ fn mux_status() -> anyhow::Result<()> {
 }
 
 fn mux_stop() -> anyhow::Result<()> {
-    match athena_proto::connect(&athena_proto::socket_path()?) {
-        Ok((conn, _)) => {
-            conn.send(&ClientMsg::Shutdown)?;
-            println!("session daemon stopped; its shells were hung up");
-            Ok(())
-        }
-        Err(ConnectError::NotRunning) => {
-            println!("session daemon: not running");
-            Ok(())
-        }
-        Err(ConnectError::VersionMismatch { pid, .. }) => {
-            // SAFETY: plain kill(2) on the pid the daemon reported for itself.
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-            println!("session daemon (older build) stopped");
-            Ok(())
-        }
-        Err(err) => Err(err.into()),
+    if athena_proto::stop_daemon(&athena_proto::socket_path()?)? {
+        println!("session daemon stopped; its shells were hung up");
+    } else {
+        println!("session daemon: not running");
     }
+    Ok(())
 }
 
 /// Raises a notice in Athena. Never fails loudly: it runs inside Claude Code hooks, which must not
@@ -161,6 +150,26 @@ fn open_folder(path: &Path) -> Option<i32> {
         .status()
         .is_ok_and(|s| s.success());
     if launched { Some(0) } else { None }
+}
+
+/// Bare `athena` from a shell: brings the running window forward, or starts the app this
+/// executable belongs to. Returns `None` to start the window in this process (a development build).
+fn open_app() -> Option<i32> {
+    let running = athena_proto::app_socket_path().is_ok_and(|p| UnixStream::connect(p).is_ok());
+    let mut open = Command::new("/usr/bin/open");
+    if running {
+        open.args(["-b", "io.tlsc.athena"]);
+    } else {
+        // Homebrew links only the executable, so follow the link to find the bundle.
+        let exe = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .ok()?;
+        let bundle = exe
+            .ancestors()
+            .find(|p| p.extension().is_some_and(|e| e == "app"))?;
+        open.arg(bundle);
+    }
+    open.status().is_ok_and(|s| s.success()).then_some(0)
 }
 
 fn send_to_window(path: &Path) -> anyhow::Result<()> {

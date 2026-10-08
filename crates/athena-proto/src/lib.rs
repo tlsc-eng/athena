@@ -5,7 +5,7 @@ mod codec;
 pub mod logging;
 mod paths;
 
-pub use client::{ConnectError, Connection, connect, connect_or_spawn};
+pub use client::{ConnectError, Connection, connect, connect_or_spawn, stop_daemon};
 pub use codec::{MAX_FRAME, read_frame, write_frame};
 pub use paths::{app_log_path, app_socket_path, data_dir, lock_path, log_path, socket_path};
 

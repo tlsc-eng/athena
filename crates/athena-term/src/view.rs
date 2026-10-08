@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::term::TermMode;
 use anyhow::anyhow;
-use athena_proto::{ClientMsg, Connection, ErrorKind, PaneId, Process, ServerMsg};
+use athena_proto::{ClientMsg, ConnectError, Connection, ErrorKind, PaneId, Process, ServerMsg};
 use athena_ui::{ActiveTheme, ButtonKind, empty_state};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle, Focusable,
@@ -31,6 +31,12 @@ const INPUT_CHUNK: usize = 256 * 1024;
 /// A daemon that dies again this soon after a reconnect is not retried automatically.
 const RECONNECT_COOLDOWN: Duration = Duration::from_secs(10);
 
+/// Waits between connection attempts before a terminal reports the daemon unavailable.
+const CONNECT_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
+
+/// How often a stale terminal checks whether the older daemon has gone.
+const STALE_POLL: Duration = Duration::from_secs(1);
+
 const SESSION_LOST: &[u8] = b"\x1b[2m[previous session ended; started a new shell]\x1b[0m\r\n";
 
 pub fn init(cx: &mut App) {
@@ -50,6 +56,14 @@ pub enum TerminalEvent {
 
 /// How long a Claude Code session may stay silent before it counts as waiting for the user.
 const CLAUDE_IDLE: Duration = Duration::from_secs(3);
+
+/// An older daemon still runs this terminal's shell after an upgrade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stale {
+    Offered,
+    Kept,
+    Restarting,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaudeState {
@@ -85,6 +99,7 @@ impl Transport for MuxTransport {
 pub struct TerminalView {
     terminal: Option<Terminal>,
     error: Option<String>,
+    stale: Option<Stale>,
     cwd: PathBuf,
     pane: Option<PaneId>,
     conn: Option<Arc<Connection>>,
@@ -116,6 +131,7 @@ impl TerminalView {
         let mut view = Self {
             terminal: None,
             error: None,
+            stale: None,
             cwd,
             pane,
             conn: None,
@@ -201,6 +217,11 @@ impl TerminalView {
 
     pub fn foreground_pid(&self) -> Option<i32> {
         self.foreground.as_ref().map(|p| p.pid)
+    }
+
+    /// An older session daemon still runs this terminal's shell, so it cannot attach.
+    pub fn is_stale(&self) -> bool {
+        self.stale.is_some()
     }
 
     /// The daemon pane this view shows, once attached.
@@ -302,21 +323,40 @@ impl TerminalView {
 
     fn connect(&mut self, cx: &mut Context<Self>) {
         self.error = None;
+        self.set_stale(None, cx);
         let first = match self.pane {
             Some(pane) => ClientMsg::Attach { pane },
             None => self.spawn_msg(),
         };
         self._io = Some(cx.spawn(async move |this, cx| {
-            let connected = cx
-                .background_executor()
-                .spawn(async move {
-                    let (conn, reader) = open_connection()?;
-                    conn.send(&first)?;
-                    anyhow::Ok((conn, reader))
-                })
-                .await;
+            let mut retries = CONNECT_RETRIES.iter();
+            let connected = loop {
+                let first = first.clone();
+                let attempt = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let (conn, reader) = open_connection()?;
+                        conn.send(&first)?;
+                        anyhow::Ok((conn, reader))
+                    })
+                    .await;
+                match (attempt, retries.next()) {
+                    (Err(err), Some(delay)) if !is_stale_daemon(&err) => {
+                        tracing::warn!(
+                            "session daemon not reachable ({err:#}); retrying in {delay:?}"
+                        );
+                        cx.background_executor().timer(*delay).await;
+                    }
+                    (attempt, _) => break attempt,
+                }
+            };
             let (conn, reader) = match connected {
                 Ok(pair) => pair,
+                Err(err) if is_stale_daemon(&err) => {
+                    tracing::info!("terminal belongs to an older session daemon: {err:#}");
+                    let _ = this.update(cx, |this, cx| this.set_stale(Some(Stale::Offered), cx));
+                    return;
+                }
                 Err(err) => {
                     tracing::warn!("terminal could not connect to the session daemon: {err:#}");
                     let _ = this.update(cx, |this, cx| {
@@ -372,6 +412,101 @@ impl TerminalView {
                 cx.notify();
             });
         }));
+    }
+
+    fn set_stale(&mut self, stale: Option<Stale>, cx: &mut Context<Self>) {
+        if self.stale == stale {
+            return;
+        }
+        let was_stale = self.stale.is_some();
+        self.stale = stale;
+        if stale.is_some() && !was_stale {
+            self.watch_stale(cx);
+        }
+        cx.emit(TerminalEvent::Changed);
+        cx.notify();
+    }
+
+    /// Reconnects once the older daemon has gone, whoever stopped it.
+    fn watch_stale(&mut self, cx: &mut Context<Self>) {
+        self._io = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STALE_POLL).await;
+                let stale = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let socket = athena_proto::socket_path()?;
+                        let busy = matches!(
+                            athena_proto::connect(&socket),
+                            Err(ConnectError::VersionMismatch { panes: 1.., .. })
+                        );
+                        anyhow::Ok(busy)
+                    })
+                    .await
+                    .unwrap_or(true);
+                if !stale {
+                    let _ = this.update(cx, |this, cx| this.connect(cx));
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Ends the older daemon and its shells, then starts this terminal on a new one.
+    fn restart_sessions(&mut self, cx: &mut Context<Self>) {
+        self.set_stale(Some(Stale::Restarting), cx);
+        self._io = Some(cx.spawn(async move |this, cx| {
+            let stopped = cx
+                .background_executor()
+                .spawn(async move {
+                    let socket = athena_proto::socket_path()?;
+                    anyhow::Ok(athena_proto::stop_daemon(&socket)?)
+                })
+                .await;
+            if let Err(err) = stopped {
+                tracing::warn!("could not stop the older session daemon: {err:#}");
+            }
+            let _ = this.update(cx, |this, cx| this.connect(cx));
+        }));
+    }
+
+    fn render_stale(&self, stale: Stale, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, body) = match stale {
+            Stale::Offered => (
+                "This session ran on an older Athena",
+                "Its shell still runs in the previous session daemon, which this version cannot \
+                 attach to. Restarting ends those shells and starts new ones here.",
+            ),
+            Stale::Kept => (
+                "Older sessions are still running",
+                "This terminal connects once the previous session daemon's shells have exited, \
+                 or when you restart sessions.",
+            ),
+            Stale::Restarting => (
+                "Restarting sessions",
+                "Stopping the previous session daemon.",
+            ),
+        };
+        let restart = (stale != Stale::Restarting).then(|| {
+            athena_ui::Button::new(
+                "terminal-restart-sessions",
+                "Restart sessions",
+                ButtonKind::Primary,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.restart_sessions(cx)))
+        });
+        let keep = (stale == Stale::Offered).then(|| {
+            athena_ui::Button::new("terminal-keep-sessions", "Keep", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _, _, cx| this.set_stale(Some(Stale::Kept), cx)))
+        });
+        empty_state(title, body, None, cx).child(
+            div()
+                .pt(px(8.))
+                .flex()
+                .gap(px(8.))
+                .children(restart)
+                .children(keep),
+        )
     }
 
     fn spawn_msg(&self) -> ClientMsg {
@@ -733,6 +868,12 @@ impl Render for TerminalView {
             .flex_col()
             .bg(t.terminal.background);
 
+        if let Some(stale) = self.stale {
+            return root
+                .items_center()
+                .justify_center()
+                .child(self.render_stale(stale, cx));
+        }
         if let Some(error) = &self.error {
             let retry =
                 athena_ui::Button::new("terminal-retry", "Try again", ButtonKind::Secondary)
@@ -855,10 +996,21 @@ impl gpui::EntityInputHandler for TerminalView {
 
 /// Connects to the session daemon, starting the one installed next to this executable if needed.
 pub fn open_connection() -> anyhow::Result<(Connection, UnixStream)> {
-    let daemon = std::env::current_exe()?.with_file_name("athena-mux");
+    // Through a Homebrew symlink, current_exe is the link and the daemon is not next to it.
+    let daemon = std::env::current_exe()?
+        .canonicalize()?
+        .with_file_name("athena-mux");
     let socket = athena_proto::socket_path()?;
     let log = athena_proto::log_path()?;
     athena_proto::connect_or_spawn(&socket, &daemon, &log).map_err(|e| anyhow!(e))
+}
+
+/// An older daemon still running shells: offer a restart rather than report a failure.
+fn is_stale_daemon(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<ConnectError>(),
+        Some(ConnectError::VersionMismatch { panes: 1.., .. })
+    )
 }
 
 /// Frames from the daemon on a channel, read on a dedicated thread.
@@ -882,6 +1034,21 @@ pub fn read_messages(mut reader: UnixStream) -> async_channel::Receiver<ServerMs
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_daemon_with_shells_marks_the_terminal_stale() {
+        let mismatch = |panes| {
+            anyhow!(ConnectError::VersionMismatch {
+                daemon: 2,
+                panes,
+                pid: 1,
+            })
+        };
+        assert!(is_stale_daemon(&mismatch(3)));
+        assert!(!is_stale_daemon(&mismatch(0)), "an idle one is replaced");
+        assert!(!is_stale_daemon(&anyhow!(ConnectError::NotRunning)));
+        assert!(!is_stale_daemon(&anyhow!(ConnectError::DaemonExited)));
+    }
 
     #[test]
     fn login_shells_count_as_idle() {

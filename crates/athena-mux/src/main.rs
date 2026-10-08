@@ -35,6 +35,9 @@ fn run() -> Result<()> {
         // Spawned from an AppKit app, which ignores SIGTERM; ignored signals survive exec.
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
         libc::signal(libc::SIGINT, libc::SIG_DFL);
+        // Spawned from a dispatch worker thread, which blocks every signal; masks survive exec too.
+        let empty: libc::sigset_t = std::mem::zeroed();
+        libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
     }
     athena_proto::logging::init(&athena_proto::log_path()?, "ATHENA_LOG")?;
 

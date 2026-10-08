@@ -106,7 +106,9 @@ pub fn athena_command() -> PathBuf {
     if brew.exists() {
         return brew.to_path_buf();
     }
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("athena"))
+    std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .unwrap_or_else(|_| PathBuf::from("athena"))
 }
 
 #[cfg(test)]
