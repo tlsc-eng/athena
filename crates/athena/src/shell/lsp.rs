@@ -89,13 +89,14 @@ fn with_snippets(mut found: Vec<Location>) -> Vec<Reference> {
         .collect()
 }
 
-fn server_for(lang: Lang) -> (ServerKind, &'static str) {
-    match lang {
+fn server_for(lang: Lang) -> Option<(ServerKind, &'static str)> {
+    Some(match lang {
         Lang::Go => (ServerKind::Go, "go"),
         Lang::TypeScript => (ServerKind::TypeScript, "typescript"),
         Lang::Tsx => (ServerKind::TypeScript, "typescriptreact"),
         Lang::JavaScript => (ServerKind::TypeScript, "javascript"),
-    }
+        _ => return None,
+    })
 }
 
 /// Servers may report a file by its real path while the editor holds a symlinked one (/tmp).
@@ -139,7 +140,9 @@ impl Shell {
         if self.lsp.documents.contains_key(&doc) {
             return;
         }
-        let (kind, language_id) = server_for(lang);
+        let Some((kind, language_id)) = server_for(lang) else {
+            return;
+        };
         let key = (root.to_path_buf(), kind);
         let Some(client) = self.lsp_client(&key, cx) else {
             return;

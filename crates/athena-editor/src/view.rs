@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +12,7 @@ use gpui::{
 };
 
 use crate::buffer::Buffer;
-use crate::display::DisplayLine;
+use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
 
 actions!(
@@ -58,6 +60,10 @@ actions!(
         FindPrev,
         ToggleComment,
         Escape,
+        FoldAtCursor,
+        UnfoldAtCursor,
+        FoldAll,
+        UnfoldAll,
     ]
 );
 
@@ -111,6 +117,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-alt-g", GoToDefinition, ctx),
         KeyBinding::new("shift-f12", FindReferences, ctx),
         KeyBinding::new("cmd-alt-r", FindReferences, ctx),
+        KeyBinding::new("cmd-k cmd-[", FoldAtCursor, ctx),
+        KeyBinding::new("cmd-k cmd-]", UnfoldAtCursor, ctx),
+        KeyBinding::new("cmd-k cmd-0", FoldAll, ctx),
+        KeyBinding::new("cmd-k cmd-j", UnfoldAll, ctx),
     ]);
 }
 
@@ -156,6 +166,8 @@ pub(crate) struct EditorLayout {
     pub text_left: Pixels,
     pub line_height: Pixels,
     pub lines: Vec<(usize, DisplayLine, ShapedLine)>,
+    /// Left and right edge of the gutter column holding fold chevrons.
+    pub fold_column: (Pixels, Pixels),
 }
 
 struct FindBar {
@@ -180,6 +192,10 @@ pub struct EditorView {
     selecting: bool,
     was_dirty: bool,
     pub(crate) markers: Vec<Marker>,
+    pub(crate) display: DisplayMap,
+    /// Foldable regions by header line, valid for one buffer version.
+    fold_cache: RefCell<(u64, HashMap<usize, Option<Fold>>)>,
+    pub(crate) gutter_hover: bool,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -211,6 +227,9 @@ impl EditorView {
             selecting: false,
             was_dirty: false,
             markers: Vec::new(),
+            display: DisplayMap::default(),
+            fold_cache: RefCell::default(),
+            gutter_hover: false,
         }
     }
 
@@ -315,6 +334,10 @@ impl EditorView {
         let before = buffer.version();
         f(buffer);
         let edited = buffer.version() != before;
+        for (first, old, new) in buffer.take_line_edits() {
+            self.display.apply_edit(first, old, new);
+        }
+        self.reveal_selection();
         self.autoscroll = true;
         if edited {
             self.refresh_find(false, cx);
@@ -336,8 +359,9 @@ impl EditorView {
         let layout = self.layout.as_ref()?;
         let buffer = self.buffer.as_ref()?;
         let y = position.y - layout.origin.y + px(self.scroll.y);
-        let line = ((y / layout.line_height).floor().max(0.) as usize)
-            .min(buffer.len_lines().saturating_sub(1));
+        let rows = self.display.row_count(buffer.len_lines());
+        let row = ((y / layout.line_height).floor().max(0.) as usize).min(rows.saturating_sub(1));
+        let line = self.display.line_of(row);
         let x = position.x - layout.text_left + px(self.scroll.x);
         let col = match layout.lines.iter().find(|(l, _, _)| *l == line) {
             Some((_, display, shaped)) => display.char_for_byte(shaped.closest_index_for_x(x)),
@@ -348,6 +372,9 @@ impl EditorView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
+        if self.click_fold_column(event.position, cx) {
+            return;
+        }
         let Some(at) = self.char_at_position(event.position) else {
             return;
         };
@@ -369,6 +396,14 @@ impl EditorView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let hover = self
+            .layout
+            .as_ref()
+            .is_some_and(|l| event.position.x < l.fold_column.1);
+        if hover != self.gutter_hover {
+            self.gutter_hover = hover;
+            cx.notify();
+        }
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             self.selecting = false;
             return;
@@ -385,7 +420,10 @@ impl EditorView {
     fn scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let lh = self.layout.as_ref().map_or(px(20.), |l| l.line_height);
         let delta = event.delta.pixel_delta(lh);
-        let lines = self.buffer.as_ref().map_or(1, Buffer::len_lines) as f32;
+        let lines = self
+            .buffer
+            .as_ref()
+            .map_or(1, |b| self.display.row_count(b.len_lines())) as f32;
         let max_y = ((lines - 1.) * f32::from(lh)).max(0.);
         self.scroll.y = (self.scroll.y - f32::from(delta.y)).clamp(0., max_y);
         self.scroll.x = (self.scroll.x - f32::from(delta.x)).max(0.);
@@ -471,6 +509,7 @@ impl EditorView {
                 head: m.end,
             };
             self.autoscroll = true;
+            self.reveal_selection();
         }
     }
 
@@ -489,6 +528,7 @@ impl EditorView {
             head: m.end,
         };
         self.autoscroll = true;
+        self.reveal_selection();
     }
 
     pub(crate) fn find_matches(&self) -> &[Range<usize>] {
@@ -615,6 +655,12 @@ impl Render for EditorView {
                         }
                     }))
                     .on_mouse_move(cx.listener(Self::mouse_move))
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if !hovered && this.gutter_hover {
+                            this.gutter_hover = false;
+                            cx.notify();
+                        }
+                    }))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                     .on_action(cx.listener(|this, _: &MoveLeft, _, cx| {
                         this.with_buffer(cx, |b| b.move_left(false))
@@ -622,24 +668,22 @@ impl Render for EditorView {
                     .on_action(cx.listener(|this, _: &MoveRight, _, cx| {
                         this.with_buffer(cx, |b| b.move_right(false))
                     }))
-                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                        this.with_buffer(cx, |b| b.move_vertical(-1, false))
-                    }))
-                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| {
-                        this.with_buffer(cx, |b| b.move_vertical(1, false))
-                    }))
+                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_rows(-1, false, cx)))
+                    .on_action(
+                        cx.listener(|this, _: &MoveDown, _, cx| this.move_rows(1, false, cx)),
+                    )
                     .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
                         this.with_buffer(cx, |b| b.move_left(true))
                     }))
                     .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
                         this.with_buffer(cx, |b| b.move_right(true))
                     }))
-                    .on_action(cx.listener(|this, _: &SelectUp, _, cx| {
-                        this.with_buffer(cx, |b| b.move_vertical(-1, true))
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectDown, _, cx| {
-                        this.with_buffer(cx, |b| b.move_vertical(1, true))
-                    }))
+                    .on_action(
+                        cx.listener(|this, _: &SelectUp, _, cx| this.move_rows(-1, true, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &SelectDown, _, cx| this.move_rows(1, true, cx)),
+                    )
                     .on_action(cx.listener(|this, _: &MoveWordLeft, _, cx| {
                         this.with_buffer(cx, |b| b.move_word(false, false))
                     }))
@@ -678,11 +722,11 @@ impl Render for EditorView {
                     }))
                     .on_action(cx.listener(|this, _: &PageUp, _, cx| {
                         let n = this.page_lines();
-                        this.with_buffer(cx, |b| b.move_vertical(-n, false))
+                        this.move_rows(-n, false, cx)
                     }))
                     .on_action(cx.listener(|this, _: &PageDown, _, cx| {
                         let n = this.page_lines();
-                        this.with_buffer(cx, |b| b.move_vertical(n, false))
+                        this.move_rows(n, false, cx)
                     }))
                     .on_action(cx.listener(|this, _: &Backspace, _, cx| {
                         this.with_buffer(cx, Buffer::backspace)
@@ -757,6 +801,15 @@ impl Render for EditorView {
                             }
                         }
                     }))
+                    .on_action(cx.listener(|this, _: &FoldAtCursor, _, cx| this.fold_at_cursor(cx)))
+                    .on_action(
+                        cx.listener(|this, _: &UnfoldAtCursor, _, cx| this.unfold_at_cursor(cx)),
+                    )
+                    .on_action(cx.listener(|this, _: &FoldAll, _, cx| this.fold_all(cx)))
+                    .on_action(cx.listener(|this, _: &UnfoldAll, _, cx| {
+                        this.display.clear();
+                        cx.notify();
+                    }))
                     .child(EditorElement::new(cx.entity(), focused)),
             )
             .children(self.render_marker_bar(cx))
@@ -773,6 +826,129 @@ impl Render for EditorView {
                     .text_color(t.color.danger)
                     .child(format!("Not saved: {err}"))
             }))
+    }
+}
+
+impl EditorView {
+    /// The region `line` can fold, cached until the text changes.
+    pub(crate) fn fold_at(&self, line: usize) -> Option<Fold> {
+        let buffer = self.buffer.as_ref()?;
+        let mut cache = self.fold_cache.borrow_mut();
+        if cache.0 != buffer.version() {
+            *cache = (buffer.version(), HashMap::new());
+        }
+        *cache.1.entry(line).or_insert_with(|| buffer.fold_at(line))
+    }
+
+    /// Unfolds whatever hides the selection's ends, as a cursor never sits inside a fold.
+    fn reveal_selection(&mut self) {
+        let Some(b) = self.buffer.as_ref() else {
+            return;
+        };
+        if self.display.is_empty() {
+            return;
+        }
+        let (anchor, head) = (b.line_of(b.selection.anchor), b.line_of(b.selection.head));
+        self.display.reveal(anchor);
+        self.display.reveal(head);
+    }
+
+    /// Vertical moves count visual rows, so folded blocks are stepped over.
+    fn move_rows(&mut self, rows: isize, extend: bool, cx: &mut Context<Self>) {
+        let Some(b) = self.buffer.as_ref() else {
+            return;
+        };
+        let row = self.display.row_of(b.line_of(b.selection.head)) as isize + rows;
+        let count = self.display.row_count(b.len_lines()) as isize;
+        let target = (0..count)
+            .contains(&row)
+            .then(|| self.display.line_of(row as usize));
+        let len = b.len_lines() as isize;
+        self.with_buffer(cx, |b| match target {
+            Some(line) => b.move_to_line(line, extend),
+            None => b.move_vertical(if row < 0 { -len } else { len }, extend),
+        });
+    }
+
+    fn click_fold_column(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(layout) = self.layout.as_ref() else {
+            return false;
+        };
+        if position.x < layout.fold_column.0 || position.x >= layout.fold_column.1 {
+            return false;
+        }
+        let Some(line) = self
+            .char_at_position(position)
+            .and_then(|at| Some(self.buffer.as_ref()?.line_of(at)))
+        else {
+            return false;
+        };
+        if !self.display.unfold_at(line) {
+            match self.fold_at(line) {
+                Some(fold) => self.display.fold(fold),
+                None => return false,
+            }
+        }
+        self.cursor_out_of_folds();
+        cx.notify();
+        true
+    }
+
+    /// Moves a cursor that a new fold swallowed up to that fold's header.
+    fn cursor_out_of_folds(&mut self) {
+        let Some(b) = self.buffer.as_mut() else {
+            return;
+        };
+        let line = b.line_of(b.selection.head);
+        if let Some(fold) = self.display.fold_containing(line) {
+            let col = b.column_of(b.selection.head);
+            b.move_to(b.char_at(fold.header(), col), false);
+        }
+    }
+
+    fn fold_at_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(line) = self.buffer.as_ref().map(|b| b.line_of(b.selection.head)) else {
+            return;
+        };
+        // The innermost open region around the cursor, as VS Code picks it.
+        let found = (line.saturating_sub(2000)..=line).rev().find_map(|l| {
+            let fold = self.fold_at(l)?;
+            (self.display.folded_at(l).is_none() && (l == line || fold.end >= line)).then_some(fold)
+        });
+        if let Some(fold) = found {
+            self.display.fold(fold);
+            self.cursor_out_of_folds();
+            self.autoscroll = true;
+            cx.notify();
+        }
+    }
+
+    fn unfold_at_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(line) = self.buffer.as_ref().map(|b| b.line_of(b.selection.head))
+            && self.display.unfold_at(line)
+        {
+            cx.notify();
+        }
+    }
+
+    fn fold_all(&mut self, cx: &mut Context<Self>) {
+        let Some(lines) = self.buffer.as_ref().map(Buffer::len_lines) else {
+            return;
+        };
+        self.display.clear();
+        let mut line = 0;
+        while line < lines {
+            match self.fold_at(line) {
+                Some(fold) => {
+                    self.display.fold(fold);
+                    line = fold.end + 1;
+                }
+                None => line += 1,
+            }
+        }
+        self.cursor_out_of_folds();
+        self.autoscroll = true;
+        cx.notify();
     }
 }
 
@@ -854,7 +1030,8 @@ impl EntityInputHandler for EditorView {
         let col = buffer.column_of(head);
         let x =
             layout.text_left + shaped.x_for_index(display.char_to_byte[col]) - px(self.scroll.x);
-        let y = layout.origin.y + layout.line_height * line as f32 - px(self.scroll.y);
+        let row = self.display.row_of(line);
+        let y = layout.origin.y + layout.line_height * row as f32 - px(self.scroll.y);
         Some(Bounds::new(
             gpui::point(x, y),
             gpui::size(px(2.), layout.line_height),

@@ -8,7 +8,8 @@ use anyhow::{Context, Result, bail};
 use ropey::Rope;
 use tree_sitter::{InputEdit, Point};
 
-use crate::syntax::{Lang, Syntax, Token};
+use crate::display::{Fold, indent_fold_at};
+use crate::syntax::{Lang, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
 const UNDO_GROUP: Duration = Duration::from_millis(500);
@@ -88,16 +89,19 @@ pub struct Buffer {
     last_edit: Option<(EditKind, Instant)>,
     /// Column the cursor tries to return to on vertical moves across shorter lines.
     goal_column: Option<usize>,
+    /// (first line, line breaks removed, line breaks inserted) per change, for folds to follow.
+    line_edits: Vec<(usize, usize, usize)>,
 }
 
 impl Buffer {
     pub fn new(text: &str, path: Option<PathBuf>) -> Self {
         let rope = Rope::from_str(text);
-        let syntax = path
+        let lang = path
             .as_deref()
             .and_then(Lang::for_path)
-            .map(|lang| Syntax::new(lang, &rope));
-        let indent = detect_indent(text, path.as_deref());
+            .or_else(|| Lang::for_shebang(text.lines().next().unwrap_or_default()));
+        let syntax = lang.map(|lang| Syntax::new(lang, &rope));
+        let indent = detect_indent(text, lang);
         Self {
             rope,
             path,
@@ -110,6 +114,7 @@ impl Buffer {
             redo: Vec::new(),
             last_edit: None,
             goal_column: None,
+            line_edits: Vec::new(),
         }
     }
 
@@ -272,6 +277,11 @@ impl Buffer {
         let old_end_char = change.start + change.deleted.chars().count();
         let old_end_byte = self.rope.char_to_byte(old_end_char);
         let old_end_position = self.point(old_end_char);
+        self.line_edits.push((
+            start_position.row,
+            change.deleted.matches('\n').count(),
+            change.inserted.matches('\n').count(),
+        ));
         self.rope.remove(change.start..old_end_char);
         self.rope.insert(change.start, &change.inserted);
         let new_end_char = change.start + change.inserted.chars().count();
@@ -444,7 +454,7 @@ impl Buffer {
 
     /// Comments or uncomments every line the selection touches.
     pub fn toggle_comment(&mut self) {
-        let Some(prefix) = self.lang().map(Lang::comment_prefix) else {
+        let Some(prefix) = self.lang().and_then(Lang::comment_prefix) else {
             return;
         };
         let range = self.selection.range();
@@ -540,6 +550,16 @@ impl Buffer {
         } else {
             self.char_at(target as usize, goal)
         };
+        self.set_head(head, extend);
+        self.goal_column = Some(goal);
+    }
+
+    /// Moves to `line`, keeping the column vertical moves aim for.
+    pub fn move_to_line(&mut self, line: usize, extend: bool) {
+        let goal = *self
+            .goal_column
+            .get_or_insert(self.column_of(self.selection.head));
+        let head = self.char_at(line.min(self.len_lines() - 1), goal);
         self.set_head(head, extend);
         self.goal_column = Some(goal);
     }
@@ -653,6 +673,94 @@ impl Buffer {
         i
     }
 
+    /// Line edits since the last call, oldest first.
+    pub fn take_line_edits(&mut self) -> Vec<(usize, usize, usize)> {
+        std::mem::take(&mut self.line_edits)
+    }
+
+    /// The region `line` can fold: up to the line before the furthest closing bracket of a bracket
+    /// opened on it, else the block indented under it.
+    pub fn fold_at(&self, line: usize) -> Option<Fold> {
+        if line + 1 >= self.len_lines() {
+            return None;
+        }
+        let close = self.syntax.as_ref().and_then(|syntax| {
+            let start = self.rope.line_to_byte(line);
+            let end = self.rope.line_to_byte(line + 1);
+            let mut best = None;
+            for (i, b) in self.rope.byte_slice(start..end).bytes().enumerate() {
+                if matches!(b, b'{' | b'[' | b'(')
+                    && let Some(partner) = syntax.bracket_partner(start + i)
+                {
+                    let partner_line = self.rope.byte_to_line(partner);
+                    if partner_line > line && best.is_none_or(|b| partner_line > b) {
+                        best = Some(partner_line);
+                    }
+                }
+            }
+            best
+        });
+        match close {
+            Some(close) if close >= line + 2 => Some(Fold {
+                start: line + 1,
+                end: close - 1,
+            }),
+            Some(_) => None,
+            None => indent_fold_at(line, self.len_lines(), |l| self.line(l)),
+        }
+    }
+
+    /// The bracket at or just before the cursor and its partner, as char offsets.
+    pub fn matching_bracket(&self) -> Option<(usize, usize)> {
+        let head = self.selection.head;
+        let at = [head, head.wrapping_sub(1)].into_iter().find(|&i| {
+            i < self.len_chars() && bracket_pair(&self.rope.char(i).to_string()).is_some()
+        })?;
+        let byte = self.rope.char_to_byte(at);
+        if let Some(syntax) = &self.syntax
+            && let Some(partner) = syntax.bracket_partner(byte)
+        {
+            return Some((at, self.rope.byte_to_char(partner)));
+        }
+        self.scan_bracket(at).map(|partner| (at, partner))
+    }
+
+    /// Plain nesting count, for text without a parse tree or brackets the tree leaves unpaired.
+    fn scan_bracket(&self, at: usize) -> Option<usize> {
+        const LIMIT: usize = 100_000;
+        let c = self.rope.char(at).to_string();
+        let (open, close) = bracket_pair(&c)?;
+        let (open, close) = (open.chars().next()?, close.chars().next()?);
+        let forward = c.starts_with(open);
+        let mut depth = 0usize;
+        if forward {
+            for (i, ch) in self.rope.chars_at(at).enumerate().take(LIMIT) {
+                depth = match ch {
+                    _ if ch == open => depth + 1,
+                    _ if ch == close => depth - 1,
+                    _ => depth,
+                };
+                if depth == 0 {
+                    return Some(at + i);
+                }
+            }
+        } else {
+            let mut chars = self.rope.chars_at(at + 1);
+            for i in 0..LIMIT.min(at + 1) {
+                let ch = chars.prev()?;
+                depth = match ch {
+                    _ if ch == close => depth + 1,
+                    _ if ch == open => depth - 1,
+                    _ => depth,
+                };
+                if depth == 0 {
+                    return Some(at - i);
+                }
+            }
+        }
+        None
+    }
+
     /// Case-insensitive occurrences of `query`, as char ranges.
     pub fn find_all(&self, query: &str) -> Vec<Range<usize>> {
         if query.is_empty() {
@@ -683,8 +791,8 @@ fn is_word(c: char) -> bool {
 }
 
 /// Tabs if any line starts with one (Go's gofmt style), else the smallest space step in use.
-fn detect_indent(text: &str, path: Option<&Path>) -> Indent {
-    if path.and_then(|p| p.extension()).is_some_and(|e| e == "go") {
+fn detect_indent(text: &str, lang: Option<Lang>) -> Indent {
+    if lang == Some(Lang::Go) {
         return Indent::Tab;
     }
     let mut smallest = usize::MAX;
@@ -815,7 +923,7 @@ mod tests {
             Indent::Spaces(4)
         );
         assert_eq!(detect_indent("a\n\tb\n", None), Indent::Tab);
-        assert_eq!(detect_indent("", Some(Path::new("x.go"))), Indent::Tab);
+        assert_eq!(detect_indent("", Some(Lang::Go)), Indent::Tab);
     }
 
     #[test]
@@ -839,6 +947,55 @@ mod tests {
         fs::write(dir.join("bin"), [0u8, 1, 2]).unwrap();
         assert!(Buffer::open(&dir.join("bin")).is_err());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn matching_bracket_pairs_nested() {
+        let mut b = buf("func f() {\n\tif x { g(\"}\") }\n}\n", "/x/a.go");
+        b.move_to(9, false);
+        assert_eq!(b.matching_bracket(), Some((9, b.len_chars() - 2)));
+        b.move_to(b.len_chars() - 1, false);
+        assert_eq!(b.matching_bracket(), Some((b.len_chars() - 2, 9)));
+        let inner = b.full_text().find("{ g").unwrap();
+        b.move_to(inner + 1, false);
+        let close = b.full_text().rfind(") }").unwrap() + 2;
+        assert_eq!(b.matching_bracket(), Some((inner, close)));
+        b.move_to(3, false);
+        assert_eq!(b.matching_bracket(), None);
+
+        let mut plain = buf("a (b [c] d) e", "/x/notes.txt");
+        plain.move_to(2, false);
+        assert_eq!(plain.matching_bracket(), Some((2, 10)));
+        plain.move_to(8, false);
+        assert_eq!(plain.matching_bracket(), Some((7, 5)));
+    }
+
+    #[test]
+    fn folds_start_at_brackets_and_fall_back_to_indent() {
+        let go = "func f() {\n\tx := []int{\n\t\t1,\n\t}\n\treturn\n}\n";
+        let b = buf(go, "/x/a.go");
+        assert_eq!(b.fold_at(0), Some(Fold { start: 1, end: 4 }));
+        assert_eq!(b.fold_at(1), Some(Fold { start: 2, end: 2 }));
+        assert_eq!(b.fold_at(2), None);
+        let py = "def f():\n    if x:\n        pass\n    return 1\n";
+        let b = buf(py, "/x/a.py");
+        assert_eq!(b.fold_at(0), Some(Fold { start: 1, end: 3 }));
+        assert_eq!(b.fold_at(1), Some(Fold { start: 2, end: 2 }));
+        let one_line = buf("f(a, {\n})\n", "/x/a.ts");
+        assert_eq!(one_line.fold_at(0), None);
+    }
+
+    #[test]
+    fn edits_report_line_deltas() {
+        let mut b = buf("a\nb\nc", "/x/a.ts");
+        b.take_line_edits();
+        b.move_to(2, false);
+        b.insert("x\ny\n");
+        b.select_all();
+        b.backspace();
+        assert_eq!(b.take_line_edits(), vec![(1, 0, 2), (0, 4, 0)]);
+        b.undo();
+        assert_eq!(b.take_line_edits(), vec![(0, 0, 4)]);
     }
 
     #[test]
