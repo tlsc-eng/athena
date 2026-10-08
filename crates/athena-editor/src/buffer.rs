@@ -697,13 +697,13 @@ impl Buffer {
     }
 
     pub fn newline(&mut self, c: &mut Cursor) {
-        let line = self.line_of(c.selection.head);
+        let range = c.selection.range();
+        let line = self.line_of(range.start);
         let current = self.line(line);
         let mut indent: String = current
             .chars()
             .take_while(|c| *c == ' ' || *c == '\t')
             .collect();
-        let range = c.selection.range();
         let before_cursor = self.text(self.line_start(line)..range.start);
         let opener = before_cursor.trim_end().chars().next_back();
         if !matches!(opener, Some('{' | '(' | '[')) {
@@ -2408,6 +2408,14 @@ mod tests {
         b.insert_line(&mut c, false);
         assert_eq!(b.full_text(), "\tif x {\n\t\t\n\t\n\t}\n");
         assert_eq!(c.head(), b.line_start(2) + 1);
+    }
+
+    #[test]
+    fn enter_over_a_downward_multi_line_selection_replaces_it() {
+        let mut b = buf("  ab\n  cd\n  ef", "/x/a.ts");
+        let mut c = select(3, b.line_start(2) + 3);
+        b.newline(&mut c);
+        assert_eq!(b.full_text(), "  a\n  f");
     }
 
     #[test]
