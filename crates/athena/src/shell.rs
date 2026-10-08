@@ -35,7 +35,7 @@ use crate::actions::{
     FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject,
     NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SelectProject,
     SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight, ToggleFileTree,
-    ToggleFullScreen, ToggleNotifications, TogglePaneZoom, Zoom,
+    ToggleFullScreen, ToggleNotifications, TogglePaneZoom, TogglePreview, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -67,6 +67,8 @@ pub struct Shell {
     /// Per project, the pane a file opened from a terminal goes to.
     last_editor_pane: HashMap<PathBuf, PaneId>,
     window_title: String,
+    /// A file a rendered document's link asked for, opened at the next frame.
+    pending_open: Option<PathBuf>,
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
@@ -171,6 +173,7 @@ impl Shell {
             lsp: lsp::LspState::default(),
             last_editor_pane: HashMap::new(),
             window_title: String::new(),
+            pending_open: None,
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
@@ -554,6 +557,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_previews(cx);
         self.take_lsp_jump(window, cx);
+        self.take_pending_open(window, cx);
         self.sync_window_title(window, cx);
         let t = cx.theme().clone();
         let body = div()
@@ -608,6 +612,7 @@ impl Render for Shell {
                 this.focus_direction(Direction::Down, w, cx)
             }))
             .on_action(cx.listener(|this, _: &TogglePaneZoom, _, cx| this.toggle_zoom(cx)))
+            .on_action(cx.listener(|this, _: &TogglePreview, w, cx| this.toggle_rendered(w, cx)))
             .on_action(cx.listener(|this, _: &NextTab, w, cx| this.cycle_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, w, cx| this.cycle_tab(-1, w, cx)))
             .on_action(

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use athena_editor::{EditorEvent, EditorView, ImageView, is_image_path};
-use athena_preview::{PreviewEvent, PreviewView};
+use athena_preview::{DocEvent, DocView, PreviewEvent, PreviewView, is_document_path};
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
 use athena_workspace::{
@@ -91,7 +91,11 @@ impl Shell {
                     match event {
                         EditorEvent::Changed => {}
                         EditorEvent::Edited { .. } => this.lsp_edited(&view, cx),
-                        EditorEvent::Saved => this.lsp_saved(&view, cx),
+                        EditorEvent::Saved => {
+                            this.lsp_saved(&view, cx);
+                            let path = view.read(cx).path().to_path_buf();
+                            this.refresh_docs(&path, cx);
+                        }
                         EditorEvent::GoToDefinition { line, character } => {
                             let at = athena_lsp::Position {
                                 line: *line,
@@ -115,6 +119,16 @@ impl Shell {
             }
             ItemKind::Image { path } => {
                 ItemView::Image(cx.new(|cx| ImageView::open(path.clone(), cx)))
+            }
+            ItemKind::Rendered { path } => {
+                let view = cx.new(|cx| DocView::new(root.to_path_buf(), path.clone(), cx));
+                cx.subscribe(&view, |this, _, event: &DocEvent, cx| {
+                    let DocEvent::OpenFile(path) = event;
+                    this.pending_open = Some(path.clone());
+                    cx.notify();
+                })
+                .detach();
+                ItemView::Doc(view)
             }
             ItemKind::Preview { url } => {
                 let view = cx.new(|cx| PreviewView::new(root.to_path_buf(), url.clone(), cx));
@@ -148,6 +162,7 @@ impl Shell {
             (None, ItemKind::Terminal { .. }) => "Terminal".into(),
             (None, ItemKind::Editor { path } | ItemKind::Image { path }) => file_label(path),
             (None, ItemKind::Preview { url }) => athena_preview::label_for(url),
+            (None, ItemKind::Rendered { path }) => athena_preview::doc_label_for(path),
         }
     }
 
@@ -264,9 +279,11 @@ impl Shell {
             }
         }
         for (key, view) in &self.items {
-            if let ItemView::Preview(view) = view {
-                let visible = shown.contains(key);
-                view.update(cx, |v, _| v.set_visible(visible));
+            let visible = shown.contains(key);
+            match view {
+                ItemView::Preview(view) => view.update(cx, |v, _| v.set_visible(visible)),
+                ItemView::Doc(view) => view.update(cx, |v, _| v.set_visible(visible)),
+                _ => {}
             }
         }
     }
@@ -984,9 +1001,67 @@ impl Shell {
     /// Picks up edits made outside Athena, e.g. after the window regains focus.
     pub(super) fn reload_changed_files(&mut self, cx: &mut Context<Self>) {
         for view in self.items.values() {
-            if let ItemView::Image(image) = view {
-                image.update(cx, |v, cx| v.reload_if_changed(cx));
+            match view {
+                ItemView::Image(image) => image.update(cx, |v, cx| v.reload_if_changed(cx)),
+                ItemView::Doc(doc) => doc.update(cx, |v, cx| v.refresh(cx)),
+                _ => {}
             }
+        }
+    }
+
+    /// Re-renders previews of `path` after its editor saved it.
+    fn refresh_docs(&mut self, path: &Path, cx: &mut Context<Self>) {
+        for view in self.items.values() {
+            if let ItemView::Doc(doc) = view
+                && doc.read(cx).path() == path
+            {
+                doc.update(cx, |v, cx| v.refresh(cx));
+            }
+        }
+    }
+
+    /// Cmd+Shift+V: from a Markdown or Mermaid editor shows its preview beside it; from a preview
+    /// goes back to the source.
+    pub(super) fn toggle_rendered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = self
+            .workspace
+            .active_project()
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.focused_pane())
+            .and_then(|p| p.active_item())
+            .map(|i| i.kind.clone())
+        else {
+            return;
+        };
+        let path = match active {
+            ItemKind::Rendered { path } => return self.open_file(path, window, cx),
+            ItemKind::Editor { path } if is_document_path(&path) => path,
+            _ => return,
+        };
+        let Some(layout) = self.active_layout() else {
+            return;
+        };
+        let kind = ItemKind::Rendered { path };
+        let existing = layout.panes().into_iter().find_map(|p| {
+            p.items
+                .iter()
+                .position(|item| item.kind == kind)
+                .map(|index| (p.id, index))
+        });
+        if let Some((pane, index)) = existing {
+            return self.activate_tab(pane, index, window, cx);
+        }
+        let focused = layout.focused;
+        let pane = layout.split(focused, Axis::Horizontal, kind);
+        self.zoomed = None;
+        self.entering = pane;
+        self.after_layout_change(window, cx);
+    }
+
+    /// Opens a file a rendered document linked to; opening a tab needs the window.
+    pub(super) fn take_pending_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.pending_open.take() {
+            self.open_file(path, window, cx);
         }
     }
 

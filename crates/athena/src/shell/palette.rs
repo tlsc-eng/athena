@@ -82,6 +82,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Playwright", Box::new(actions::ShowPlaywright)),
         ("Run Playwright tests", Box::new(actions::RunPlaywright)),
         ("New browser preview", Box::new(actions::NewPreview)),
+        ("Open Markdown preview", Box::new(actions::TogglePreview)),
         (
             "Enable Playwright MCP for Claude in this project",
             Box::new(actions::EnablePlaywrightMcp),

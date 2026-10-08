@@ -40,6 +40,7 @@ actions!(
         EnablePlaywrightMcp,
         DisablePlaywrightMcp,
         NewPreview,
+        TogglePreview,
     ]
 );
 
@@ -83,6 +84,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-b", ToggleFileTree, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
         KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
+        KeyBinding::new("cmd-shift-v", TogglePreview, None),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -128,6 +130,7 @@ pub fn init(cx: &mut App) {
                 MenuItem::action("Containers", ShowContainers),
                 MenuItem::action("Playwright", ShowPlaywright),
                 MenuItem::action("New Browser Preview", NewPreview),
+                MenuItem::action("Open Markdown Preview", TogglePreview),
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),

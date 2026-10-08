@@ -16,3 +16,4 @@ objc2-foundation = { workspace = true, features = ["NSURL", "NSURLRequest", "NSG
 objc2-app-kit = { workspace = true, features = ["NSView", "NSResponder", "NSWindow", "NSGraphics"] }
 objc2-web-kit.workspace = true
 block2.workspace = true
+pulldown-cmark.workspace = true

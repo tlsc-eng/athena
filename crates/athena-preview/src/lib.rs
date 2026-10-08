@@ -1,5 +1,7 @@
 //! A browser preview pane: a WKWebView laid over a gpui element.
 
+mod doc;
+mod markdown;
 mod web;
 
 use std::path::PathBuf;
@@ -10,8 +12,9 @@ use gpui::{
     div, prelude::*, px,
 };
 
+pub use doc::{DocEvent, DocView, is_document_path, label_for as doc_label_for};
 pub use web::restore_key_focus;
-use web::{Web, WebEvent};
+use web::{Mode, Web, WebEvent};
 
 pub const DEFAULT_URL: &str = "http://localhost:3000";
 
@@ -183,6 +186,7 @@ impl PreviewView {
                 self.loading = false;
                 self.error = Some(message);
             }
+            WebEvent::OpenLocal(_) | WebEvent::OpenExternal(_) => {}
         }
         self.sync_hidden();
         cx.notify();
@@ -190,7 +194,7 @@ impl PreviewView {
 
     fn place(&mut self, bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window) {
         if self.web.is_none() {
-            self.web = Web::new(&self.root, self.events.clone(), window);
+            self.web = Web::new(&self.root, Mode::Browser, self.events.clone(), window);
             if let Some(web) = &self.web {
                 web.load(&self.url);
                 self.loading = true;

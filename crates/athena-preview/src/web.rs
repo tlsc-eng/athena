@@ -9,7 +9,8 @@ use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{NSResponder, NSView, NSWindowOrderingMode};
 use objc2_foundation::{
-    NSError, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest,
+    NSError, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSURLRequest,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKUIDelegate,
@@ -22,10 +23,22 @@ pub(crate) enum WebEvent {
     Committed(String),
     Finished,
     Failed(String),
+    /// A document link to a file, which Athena opens itself.
+    OpenLocal(PathBuf),
+    /// A document link to the web, which goes to the default browser.
+    OpenExternal(String),
+}
+
+/// A browsing preview, or a rendered document whose links leave the page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Browser,
+    Document,
 }
 
 pub(crate) struct Ivars {
     events: async_channel::Sender<WebEvent>,
+    mode: Mode,
 }
 
 define_class!(
@@ -47,6 +60,10 @@ define_class!(
         ) {
             // SAFETY: a navigation action always carries a request.
             let url = unsafe { action.request().URL() };
+            if self.ivars().mode == Mode::Document {
+                let url = url.map(|u| url_string(&u)).unwrap_or_default();
+                return handler.call((self.document_policy(&url),));
+            }
             let policy = if url.is_some_and(|u| allowed(&url_string(&u))) {
                 WKNavigationActionPolicy::Allow
             } else {
@@ -92,10 +109,29 @@ define_class!(
 );
 
 impl Delegate {
-    fn new(events: async_channel::Sender<WebEvent>, mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(Ivars { events });
+    fn new(
+        events: async_channel::Sender<WebEvent>,
+        mode: Mode,
+        mtm: MainThreadMarker,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Ivars { events, mode });
         // SAFETY: NSObject's init on a freshly allocated instance.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// A document only navigates within itself; links are handed to the app instead.
+    fn document_policy(&self, url: &str) -> WKNavigationActionPolicy {
+        if url.to_ascii_lowercase().starts_with("about:") {
+            return WKNavigationActionPolicy::Allow;
+        }
+        let event = match crate::markdown::local_path(url) {
+            Some(path) => Some(WebEvent::OpenLocal(path)),
+            None => external(url).then(|| WebEvent::OpenExternal(url.to_string())),
+        };
+        if let Some(event) = event {
+            let _ = self.ivars().events.try_send(event);
+        }
+        WKNavigationActionPolicy::Cancel
     }
 
     fn failed(&self, error: &NSError) {
@@ -119,6 +155,12 @@ pub(crate) fn allowed(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     let scheme = lower.split_once(':').map_or("", |(s, _)| s);
     matches!(scheme, "http" | "https") || matches!(lower.as_str(), "about:blank" | "about:srcdoc")
+}
+
+/// Links a document may send to the default browser or mail client.
+fn external(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
 }
 
 thread_local! {
@@ -163,12 +205,13 @@ pub(crate) struct Web {
 impl Web {
     pub(crate) fn new(
         root: &Path,
+        mode: Mode,
         events: async_channel::Sender<WebEvent>,
         window: &Window,
     ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let host = host_view(window)?;
-        let delegate = Delegate::new(events, mtm);
+        let delegate = Delegate::new(events, mode, mtm);
         // SAFETY: WebKit objects created and configured on the main thread.
         let view = unsafe {
             let config = WKWebViewConfiguration::new(mtm);
@@ -181,6 +224,11 @@ impl Web {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             view.setInspectable(cfg!(debug_assertions));
+            if mode == Mode::Document {
+                // Transparent until the page paints, so opening a document never flashes white.
+                let no = NSNumber::new_bool(false);
+                let _: () = msg_send![&view, setValue: &*no, forKey: &*NSString::from_str("drawsBackground")];
+            }
             view
         };
         view.setHidden(true);
@@ -201,6 +249,24 @@ impl Web {
         let request = NSURLRequest::requestWithURL(&url);
         // SAFETY: loading into a live web view on the main thread.
         unsafe { self.view.loadRequest(&request) };
+    }
+
+    /// Shows `html` with no base URL, so it can reach nothing but what it carries inline.
+    pub(crate) fn load_html(&self, html: &str) {
+        // SAFETY: loading into a live web view on the main thread.
+        unsafe {
+            self.view
+                .loadHTMLString_baseURL(&NSString::from_str(html), None)
+        };
+    }
+
+    /// Runs `script` in the page, ignoring its result.
+    pub(crate) fn run_script(&self, script: &str) {
+        // SAFETY: as above.
+        unsafe {
+            self.view
+                .evaluateJavaScript_completionHandler(&NSString::from_str(script), None)
+        };
     }
 
     pub(crate) fn reload(&self) {
@@ -291,6 +357,14 @@ pub fn restore_key_focus(window: &Window) {
 #[cfg(test)]
 mod tests {
     use super::allowed;
+
+    #[test]
+    fn documents_send_only_web_and_mail_links_out() {
+        assert!(super::external("https://tlsc.io"));
+        assert!(super::external("mailto:a@b"));
+        assert!(!super::external("file:///etc/passwd"));
+        assert!(!super::external("javascript:alert(1)"));
+    }
 
     #[test]
     fn only_web_schemes_are_allowed() {

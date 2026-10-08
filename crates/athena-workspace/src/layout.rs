@@ -43,13 +43,17 @@ pub enum ItemKind {
     Image {
         path: PathBuf,
     },
+    /// A Markdown or Mermaid file shown rendered.
+    Rendered {
+        path: PathBuf,
+    },
 }
 
 impl ItemKind {
     /// The file a tab shows, for editors and viewers.
     pub fn file(&self) -> Option<&PathBuf> {
         match self {
-            Self::Editor { path } | Self::Image { path } => Some(path),
+            Self::Editor { path } | Self::Image { path } | Self::Rendered { path } => Some(path),
             Self::Terminal { .. } | Self::Preview { .. } => None,
         }
     }
@@ -574,6 +578,12 @@ mod tests {
             l.focused,
             ItemKind::Image {
                 path: "/x/logo.png".into(),
+            },
+        );
+        l.add_item(
+            l.focused,
+            ItemKind::Rendered {
+                path: "/x/README.md".into(),
             },
         );
         let json = serde_json::to_string(&l).unwrap();
