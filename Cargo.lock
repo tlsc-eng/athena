@@ -444,6 +444,11 @@ dependencies = [
 [[package]]
 name = "athena-workspace"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "atomic"
