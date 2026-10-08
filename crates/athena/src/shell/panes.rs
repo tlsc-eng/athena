@@ -175,10 +175,17 @@ impl Shell {
                 let view = cx.new(|cx| TerminalView::new(root.to_path_buf(), *session, cx));
                 let (project_root, item_id) = key.clone();
                 cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
-                    let TerminalEvent::Attached(session) = event else {
-                        this.check_playwright_run(cx);
-                        this.notify_coalesced(cx);
-                        return;
+                    let session = match event {
+                        TerminalEvent::Attached(session) => session,
+                        TerminalEvent::ContextMenu { open } => {
+                            let key = (project_root.clone(), item_id);
+                            return this.note_item_menu(key, *open, cx);
+                        }
+                        TerminalEvent::Changed => {
+                            this.check_playwright_run(cx);
+                            this.notify_coalesced(cx);
+                            return;
+                        }
                     };
                     let item = this
                         .workspace
@@ -205,9 +212,13 @@ impl Shell {
                     v.set_autosave(delay, cx);
                     v.set_format_on_save(format_on_save);
                 });
-                cx.subscribe(&view, |this, view, event: &EditorEvent, cx| {
+                let menu_key = key.clone();
+                cx.subscribe(&view, move |this, view, event: &EditorEvent, cx| {
                     match event {
                         EditorEvent::Changed => {}
+                        EditorEvent::ContextMenu { open } => {
+                            return this.note_item_menu(menu_key.clone(), *open, cx);
+                        }
                         EditorEvent::Edited { .. } => {
                             this.lsp_edited(&view, cx);
                             this.follow_docs(&view, cx);
@@ -444,6 +455,7 @@ impl Shell {
         let covered = self.palette.is_some()
             || self.palette_closing.is_some()
             || self.context_menu.is_some()
+            || !self.item_menus.is_empty()
             || self.usage_open();
         if let Some(project) = self.workspace.active_project().filter(|_| !covered)
             && let Some(layout) = &project.layout
@@ -463,6 +475,18 @@ impl Shell {
                 ItemView::Doc(view) => view.update(cx, |v, _| v.set_visible(visible)),
                 _ => {}
             }
+        }
+    }
+
+    /// An editor's or terminal's own right-click menu opened or closed.
+    fn note_item_menu(&mut self, key: (PathBuf, ItemId), open: bool, cx: &mut Context<Self>) {
+        let changed = if open {
+            self.item_menus.insert(key)
+        } else {
+            self.item_menus.remove(&key)
+        };
+        if changed {
+            cx.notify();
         }
     }
 
@@ -810,6 +834,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.item_menus.remove(&(root.to_path_buf(), item));
         if let Some(view) = self.items.remove(&(root.to_path_buf(), item)) {
             view.close(cx);
             if let ItemView::Editor(editor) = &view {
@@ -2000,6 +2025,7 @@ impl Shell {
     pub(super) fn drop_project_items(&mut self, root: &Path, cx: &mut Context<Self>) {
         self.tab_scroll.retain(|(r, _), _| r != root);
         self.content_switches.retain(|(r, _)| r != root);
+        self.item_menus.retain(|(r, _)| r != root);
         let keys: Vec<_> = self
             .items
             .keys()

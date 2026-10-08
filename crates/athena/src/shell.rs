@@ -21,7 +21,7 @@ mod usage_view;
 mod watch;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -69,6 +69,8 @@ pub struct Shell {
     palette: Option<palette::Palette>,
     palette_closing: Option<(palette::Palette, motion::Closing)>,
     context_menu: Option<(gpui::Entity<athena_ui::ContextMenu>, Subscription)>,
+    /// Tabs whose editor or terminal has its own right-click menu open.
+    item_menus: HashSet<(PathBuf, ItemId)>,
     tree: tree::FileTree,
     tree_opening: Option<motion::Opening>,
     tree_closing: Option<motion::Closing>,
@@ -201,6 +203,7 @@ impl Shell {
             palette: None,
             palette_closing: None,
             context_menu: None,
+            item_menus: HashSet::new(),
             tree: tree::FileTree::default(),
             tree_opening: None,
             tree_closing: None,

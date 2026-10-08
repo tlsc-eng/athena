@@ -192,6 +192,10 @@ pub enum EditorEvent {
         character: u32,
         trigger: Option<String>,
     },
+    /// The right-click menu opened or closed; it is drawn in-window, under native web views.
+    ContextMenu {
+        open: bool,
+    },
 }
 
 /// A change bar in the gutter, in zero-based lines of the saved file.
@@ -1724,10 +1728,12 @@ impl EditorView {
         let subscription = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, _, cx| {
             if this.context_menu.as_ref().is_some_and(|(m, _)| m == menu) {
                 this.context_menu = None;
+                cx.emit(EditorEvent::ContextMenu { open: false });
                 cx.notify();
             }
         });
         self.context_menu = Some((menu, subscription));
+        cx.emit(EditorEvent::ContextMenu { open: true });
         cx.notify();
     }
 }

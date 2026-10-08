@@ -85,6 +85,8 @@ pub enum TerminalEvent {
     Attached(PaneId),
     /// Label, bell or Claude state changed; tab strips and the project rail should redraw.
     Changed,
+    /// The right-click menu opened or closed; it is drawn in-window, under native web views.
+    ContextMenu { open: bool },
 }
 
 /// How long a Claude Code session may stay silent before it counts as waiting for the user.
@@ -1724,10 +1726,12 @@ impl TerminalView {
         let subscription = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, _, cx| {
             if this.context_menu.as_ref().is_some_and(|(m, _)| m == menu) {
                 this.context_menu = None;
+                cx.emit(TerminalEvent::ContextMenu { open: false });
                 cx.notify();
             }
         });
         self.context_menu = Some((menu, subscription));
+        cx.emit(TerminalEvent::ContextMenu { open: true });
         cx.notify();
     }
 }
