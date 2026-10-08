@@ -1,15 +1,18 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use athena_term::TerminalView;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{WindowMode, WindowState, Workspace};
 use gpui::{
-    Animation, AnyElement, Context, FocusHandle, FontWeight, IntoElement, PathPromptOptions,
-    Render, Subscription, Task, Window, WindowBounds, div, prelude::*, px,
+    Animation, AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    PathPromptOptions, Render, Subscription, Task, Window, WindowBounds, div, prelude::*, px,
 };
 
 use crate::actions::{
-    AddProject, CloseProject, Minimize, NextProject, PrevProject, SelectProject, Zoom,
+    AddProject, CloseProject, Minimize, NextProject, PrevProject, SelectProject, ToggleFullScreen,
+    Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -23,9 +26,11 @@ pub struct Shell {
     workspace: Workspace,
     path: PathBuf,
     focus: FocusHandle,
+    terminals: HashMap<PathBuf, Entity<TerminalView>>,
     save_task: Option<Task<()>>,
     rail_from: usize,
     switch_count: u64,
+    focus_terminal: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -61,8 +66,10 @@ impl Shell {
             workspace,
             path,
             focus,
+            terminals: HashMap::new(),
             save_task: None,
             switch_count: 0,
+            focus_terminal: true,
             _subscriptions: subscriptions,
         }
     }
@@ -88,8 +95,26 @@ impl Shell {
         self.rail_from = self.workspace.active.unwrap_or(index);
         self.switch_count += 1;
         self.workspace.activate(index);
+        self.focus_terminal = true;
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    fn active_terminal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<TerminalView>> {
+        let root = self.workspace.active_project()?.root.clone();
+        let terminal = self
+            .terminals
+            .entry(root.clone())
+            .or_insert_with(|| cx.new(|cx| TerminalView::new(root, cx)))
+            .clone();
+        if std::mem::take(&mut self.focus_terminal) {
+            window.focus(&terminal.focus_handle(cx));
+        }
+        Some(terminal)
     }
 
     fn add_project(&mut self, _: &AddProject, _: &mut Window, cx: &mut Context<Self>) {
@@ -119,6 +144,9 @@ impl Shell {
 
     fn close_project(&mut self, _: &CloseProject, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.workspace.active {
+            let root = self.workspace.projects[index].root.clone();
+            self.terminals.remove(&root);
+            self.focus_terminal = true;
             self.workspace.close_project(index);
             self.rail_from = self.workspace.active.unwrap_or(0);
             self.switch_count += 1;
@@ -263,18 +291,10 @@ impl Shell {
             .children(indicator)
     }
 
-    fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
-        let body = match self.workspace.active_project() {
-            Some(project) => empty_state(
-                project.name(),
-                format!(
-                    "{}\nTerminals and editors open here.",
-                    project.root.display()
-                ),
-                None,
-                cx,
-            ),
+        let body = match self.active_terminal(window, cx) {
+            Some(terminal) => div().size_full().child(terminal),
             None => div()
                 .flex()
                 .flex_col()
@@ -311,14 +331,19 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let body = div()
             .flex_1()
             .min_h_0()
             .flex()
             .child(self.render_rail(cx))
-            .child(div().flex_1().min_w_0().child(self.render_content(cx)));
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.render_content(window, cx)),
+            );
         let body = motion::animate_if(
             t.motion.reduced,
             body,
@@ -337,6 +362,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, a: &SelectProject, _, cx| this.switch_to(a.0, cx)))
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
+            .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())
             .size_full()
             .flex()
             .flex_col()

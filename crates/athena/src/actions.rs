@@ -9,6 +9,7 @@ actions!(
         ShowAll,
         Minimize,
         Zoom,
+        ToggleFullScreen,
         AddProject,
         CloseProject,
         PrevProject,
@@ -31,6 +32,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("cmd-alt-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("cmd-o", AddProject, None),
         KeyBinding::new("cmd-shift-w", CloseProject, None),
         KeyBinding::new("cmd-alt-[", PrevProject, None),
@@ -70,6 +72,7 @@ pub fn init(cx: &mut App) {
             items: vec![
                 MenuItem::action("Minimize", Minimize),
                 MenuItem::action("Zoom", Zoom),
+                MenuItem::action("Toggle Full Screen", ToggleFullScreen),
                 MenuItem::separator(),
                 MenuItem::action("Previous Project", PrevProject),
                 MenuItem::action("Next Project", NextProject),

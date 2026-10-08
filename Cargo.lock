@@ -439,6 +439,7 @@ name = "athena"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "athena-term",
  "athena-ui",
  "athena-workspace",
  "gpui",
