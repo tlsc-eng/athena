@@ -29,6 +29,8 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub source: Option<String>,
+    /// The diagnostic as published, handed back verbatim when asking for code actions.
+    pub raw: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,11 +49,18 @@ struct RawDiagnostic {
 
 pub(crate) fn parse_diagnostics(params: &serde_json::Value) -> Option<(PathBuf, Vec<Diagnostic>)> {
     let path = path_from_uri(params.get("uri")?.as_str()?)?;
-    let raw: Vec<RawDiagnostic> =
-        serde_json::from_value(params.get("diagnostics")?.clone()).ok()?;
-    let list = raw
-        .into_iter()
-        .map(|d| Diagnostic {
+    let list = params
+        .get("diagnostics")?
+        .as_array()?
+        .iter()
+        .filter_map(|raw| {
+            Some((
+                serde_json::from_value::<RawDiagnostic>(raw.clone()).ok()?,
+                raw,
+            ))
+        })
+        .map(|(d, raw)| Diagnostic {
+            raw: raw.clone(),
             range: d.range,
             severity: match d.severity {
                 Some(2) => Severity::Warning,

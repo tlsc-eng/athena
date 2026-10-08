@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use athena_lsp::{Client, Event, MarkupBlock, Position, ServerKind, Severity};
+use athena_lsp::{
+    Client, Event, FileChange, MarkupBlock, Position, Range, RenameTarget, ServerKind, Severity,
+    apply_text_edits,
+};
 
 fn next_event(events: &async_channel::Receiver<Event>, deadline: Instant) -> Option<Event> {
     while Instant::now() < deadline {
@@ -187,6 +190,187 @@ fn a_killed_gopls_reports_stopped_and_a_new_one_reports_the_open_file_again() {
 
     let (client, events) = Client::start(ServerKind::Go, dir.clone());
     reports_unused_import(&client, &events);
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gopls_renames_fixes_imports_lists_symbols_and_finds_implementations() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("athena-lsp-edits-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("shapes")).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(dir.join("go.mod"), "module example.com/edits\n\ngo 1.21\n").unwrap();
+    let shapes = "package shapes\n\ntype Shape interface {\n\tArea() float64\n}\n\ntype Square struct {\n\tSide float64\n}\n\nfunc (s Square) Area() float64 { return s.Side * s.Side }\n";
+    let shapes_file = dir.join("shapes/shapes.go");
+    std::fs::write(&shapes_file, shapes).unwrap();
+    let main = "package main\n\nimport \"example.com/edits/shapes\"\n\nfunc total(list []shapes.Shape) float64 {\n\tsum := 0.0\n\tfor _, s := range list {\n\t\tsum += s.Area()\n\t}\n\treturn sum\n}\n\nfunc main() {\n\tfmt.Println(total([]shapes.Shape{shapes.Square{Side: 2}}))\n}\n";
+    let main_file = dir.join("main.go");
+    std::fs::write(&main_file, main).unwrap();
+
+    let (client, events) = Client::start(ServerKind::Go, dir.clone());
+    client.did_open(&main_file, "go", 1, main.into());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let undefined = loop {
+        match next_event(&events, deadline).expect("no diagnostics from gopls in time") {
+            Event::Diagnostics { path, list } if path == main_file => {
+                if let Some(d) = list.into_iter().find(|d| d.message.contains("fmt")) {
+                    break d;
+                }
+            }
+            Event::Stopped(why) => panic!("gopls stopped: {why}"),
+            _ => {}
+        }
+    };
+    assert!(client.supports("/renameProvider/prepareProvider"));
+
+    // The quick fix for an undefined package is an import, as an edit or a command.
+    let fixes = futures_lite_block_on(client.code_actions(
+        &main_file,
+        undefined.range,
+        vec![undefined.raw.clone()],
+        Some(&["quickfix"]),
+    ))
+    .unwrap();
+    let import = fixes
+        .iter()
+        .find(|a| a.title.contains("\"fmt\""))
+        .unwrap_or_else(|| panic!("no import fix in {fixes:?}"));
+    assert!(import.is_quickfix());
+    let import = if import.needs_resolve() {
+        futures_lite_block_on(client.resolve_code_action(import)).unwrap()
+    } else {
+        import.clone()
+    };
+    let edits = match import.edit.as_ref().map(|e| e.changes.as_slice()) {
+        Some([FileChange::Edit { path, edits, .. }]) if *path == main_file => edits.clone(),
+        other => panic!("unexpected import fix {other:?} ({import:?})"),
+    };
+    let fixed = apply_text_edits(main, &edits).unwrap();
+    assert!(fixed.contains("\"fmt\""), "{fixed}");
+
+    let organize = futures_lite_block_on(client.code_actions(
+        &main_file,
+        Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        },
+        Vec::new(),
+        Some(&["source.organizeImports"]),
+    ))
+    .unwrap();
+    assert!(
+        organize
+            .iter()
+            .all(|a| a.kind.as_deref() == Some("source.organizeImports")),
+        "{organize:?}"
+    );
+
+    let symbols = futures_lite_block_on(client.document_symbols(&main_file)).unwrap();
+    let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["total", "main"]);
+    assert_eq!(
+        symbols[0].range.start,
+        Position {
+            line: 4,
+            character: 5
+        }
+    );
+
+    let found = futures_lite_block_on(client.workspace_symbols("Square")).unwrap();
+    let square = found
+        .iter()
+        .find(|s| s.name == "Square" && s.path == shapes_file)
+        .unwrap_or_else(|| panic!("Square not found in {found:?}"));
+    assert_eq!(square.range.start.line, 6);
+
+    // From the interface method's call, the concrete method is the implementation.
+    let call = Position {
+        line: 7,
+        character: 12,
+    };
+    let impls = futures_lite_block_on(client.implementation(&main_file, call)).unwrap();
+    assert!(
+        impls
+            .iter()
+            .any(|l| l.path == shapes_file && l.range.start.line == 10),
+        "{impls:?}"
+    );
+
+    let at_total = Position {
+        line: 4,
+        character: 6,
+    };
+    let target = futures_lite_block_on(client.prepare_rename(&main_file, at_total)).unwrap();
+    match target {
+        Some(RenameTarget::Range(range, _)) => {
+            assert_eq!((range.start.character, range.end.character), (5, 10))
+        }
+        other => panic!("unexpected prepareRename answer {other:?}"),
+    }
+    let keyword = Position {
+        line: 0,
+        character: 2,
+    };
+    assert!(
+        !matches!(
+            futures_lite_block_on(client.prepare_rename(&main_file, keyword)),
+            Ok(Some(_))
+        ),
+        "a keyword cannot be renamed"
+    );
+    let edit = futures_lite_block_on(client.rename(&main_file, at_total, "sumAreas")).unwrap();
+    let [
+        FileChange::Edit {
+            path,
+            version,
+            edits,
+        },
+    ] = edit.changes.as_slice()
+    else {
+        panic!("one file changes: {edit:?}");
+    };
+    assert_eq!(path, &main_file);
+    assert_eq!(
+        *version,
+        Some(1),
+        "the edit names the version it was made for"
+    );
+    let renamed = apply_text_edits(main, edits).unwrap();
+    assert_eq!(renamed.matches("sumAreas(").count(), 2, "{renamed}");
+    assert!(!renamed.contains("total("));
+
+    // Renaming an exported method reaches into the closed file that declares it; gopls only
+    // renames across packages once the file compiles.
+    client.did_change(&main_file, 2, fixed.clone());
+    let area = Position {
+        line: fixed.lines().position(|l| l.contains("s.Area()")).unwrap() as u32,
+        character: 12,
+    };
+    let edit = futures_lite_block_on(client.rename(&main_file, area, "Size")).unwrap();
+    let files: Vec<_> = edit
+        .changes
+        .iter()
+        .filter_map(|c| match c {
+            FileChange::Edit { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        files.contains(&shapes_file) && files.contains(&main_file),
+        "{edit:?}"
+    );
+
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);
 }

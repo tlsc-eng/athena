@@ -10,10 +10,13 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
 
+use crate::code_action::{self, CodeAction, parse_code_action, parse_code_actions};
 use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
+use crate::edit::{WorkspaceEdit, parse_workspace_edit};
 use crate::markup::{Hover, parse_hover};
-use crate::protocol::{self, Diagnostic, Location, Position};
+use crate::protocol::{self, Diagnostic, Location, Position, Range};
 use crate::signature::{SignatureHelp, parse_signature_help};
+use crate::symbol::{Symbol, parse_symbols};
 use crate::{ServerKind, env};
 
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
@@ -29,6 +32,68 @@ pub enum Event {
     },
     /// The server could not start, or stopped; the text says why.
     Stopped(String),
+    /// The server asks for an edit, usually while running a command; answer through `reply`.
+    ApplyEdit {
+        label: Option<String>,
+        edit: WorkspaceEdit,
+        reply: EditReply,
+    },
+}
+
+/// The answer to a server's `workspace/applyEdit`; dropping it unanswered reports a failure.
+pub struct EditReply {
+    writer: Frames,
+    id: Value,
+    answered: bool,
+}
+
+impl EditReply {
+    pub fn send(mut self, result: Result<(), String>) {
+        self.answer(result);
+    }
+
+    fn answer(&mut self, result: Result<(), String>) {
+        self.answered = true;
+        let result = match result {
+            Ok(()) => json!({"applied": true}),
+            Err(why) => json!({"applied": false, "failureReason": why}),
+        };
+        let _ = send(
+            &self.writer,
+            json!({"jsonrpc": "2.0", "id": self.id, "result": result}),
+        );
+    }
+}
+
+impl Drop for EditReply {
+    fn drop(&mut self) {
+        if !self.answered {
+            self.answer(Err("Athena closed before applying the edit".into()));
+        }
+    }
+}
+
+impl std::fmt::Debug for EditReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EditReply({})", self.id)
+    }
+}
+
+/// How a watched file changed, for `workspace/didChangeWatchedFiles`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileEvent {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}
+
+/// What `textDocument/prepareRename` said about the place a rename starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenameTarget {
+    /// The range to rename, and the text to offer when the server gives one.
+    Range(Range, Option<String>),
+    /// Rename the word at the cursor.
+    Word,
 }
 
 enum Outgoing {
@@ -52,6 +117,7 @@ pub struct Client {
     /// Characters after which the server offers completions, known once it has started.
     triggers: Arc<OnceLock<Vec<String>>>,
     signature_triggers: Arc<OnceLock<Vec<String>>>,
+    capabilities: Arc<OnceLock<Value>>,
 }
 
 impl Client {
@@ -62,9 +128,11 @@ impl Client {
         let child: Arc<Mutex<Option<Child>>> = Arc::default();
         let triggers: Arc<OnceLock<Vec<String>>> = Arc::default();
         let signature_triggers: Arc<OnceLock<Vec<String>>> = Arc::default();
+        let capabilities: Arc<OnceLock<Value>> = Arc::default();
         let session = Session {
             triggers: triggers.clone(),
             signature_triggers: signature_triggers.clone(),
+            capabilities: capabilities.clone(),
             kind,
             root,
             outgoing: out_rx.clone(),
@@ -93,6 +161,7 @@ impl Client {
             child,
             triggers,
             signature_triggers,
+            capabilities,
         };
         (client, events_rx)
     }
@@ -114,6 +183,15 @@ impl Client {
     /// Characters that open or move signature help, such as `(` and `,`; empty until started.
     pub fn signature_triggers(&self) -> &[String] {
         self.signature_triggers.get().map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the started server declared the capability at `pointer`, e.g.
+    /// `/renameProvider/prepareProvider`; a bare `true` or an options object both count.
+    pub fn supports(&self, pointer: &str) -> bool {
+        self.capabilities
+            .get()
+            .and_then(|c| c.pointer(pointer))
+            .is_some_and(|v| v.as_bool().unwrap_or(v.is_object()))
     }
 
     fn notify(&self, method: &'static str, params: Value) {
@@ -176,6 +254,28 @@ impl Client {
         locations(reply).await
     }
 
+    /// The concrete types or methods behind the interface or method at `at`.
+    pub async fn implementation(&self, path: &Path, at: Position) -> Result<Vec<Location>, String> {
+        let reply = self.request(
+            "textDocument/implementation",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        locations(reply).await
+    }
+
+    /// Where the type of the expression at `at` is defined.
+    pub async fn type_definition(
+        &self,
+        path: &Path,
+        at: Position,
+    ) -> Result<Vec<Location>, String> {
+        let reply = self.request(
+            "textDocument/typeDefinition",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        locations(reply).await
+    }
+
     /// Every use of the symbol at `at`, its declaration included.
     pub async fn references(&self, path: &Path, at: Position) -> Result<Vec<Location>, String> {
         let reply = self.request(
@@ -221,6 +321,115 @@ impl Client {
                    "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}),
         );
         Ok(parse_text_edits(&answer(reply).await?))
+    }
+
+    /// Whether the symbol at `at` can be renamed, and which text a rename replaces.
+    /// `Ok(None)` means nothing renameable is there.
+    pub async fn prepare_rename(
+        &self,
+        path: &Path,
+        at: Position,
+    ) -> Result<Option<RenameTarget>, String> {
+        let reply = self.request(
+            "textDocument/prepareRename",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        let result = answer(reply).await?;
+        if result.get("defaultBehavior").is_some() {
+            return Ok(Some(RenameTarget::Word));
+        }
+        let range = result.get("range").unwrap_or(&result);
+        let placeholder = result
+            .get("placeholder")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        Ok(serde_json::from_value(range.clone())
+            .ok()
+            .map(|range| RenameTarget::Range(range, placeholder)))
+    }
+
+    /// The edit that renames the symbol at `at` to `name` everywhere it is used.
+    pub async fn rename(
+        &self,
+        path: &Path,
+        at: Position,
+        name: &str,
+    ) -> Result<WorkspaceEdit, String> {
+        let reply = self.request(
+            "textDocument/rename",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at,
+                   "newName": name}),
+        );
+        let result = answer(reply).await?;
+        if result.is_null() {
+            return Ok(WorkspaceEdit::default());
+        }
+        parse_workspace_edit(&result).ok_or_else(|| "the server sent an unreadable edit".into())
+    }
+
+    /// Fixes and refactorings for `range`, given the diagnostics there as the server published
+    /// them; `only` narrows to kinds such as `quickfix`.
+    pub async fn code_actions(
+        &self,
+        path: &Path,
+        range: Range,
+        diagnostics: Vec<Value>,
+        only: Option<&[&str]>,
+    ) -> Result<Vec<CodeAction>, String> {
+        let mut context = json!({"diagnostics": diagnostics, "triggerKind": 1});
+        if let Some(only) = only {
+            context["only"] = json!(only);
+        }
+        let reply = self.request(
+            "textDocument/codeAction",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "range": range,
+                   "context": context}),
+        );
+        Ok(parse_code_actions(&answer(reply).await?))
+    }
+
+    /// Fills in the edit of an action the server sent without one.
+    pub async fn resolve_code_action(&self, action: &CodeAction) -> Result<CodeAction, String> {
+        let reply = self.request("codeAction/resolve", action.raw.clone());
+        parse_code_action(&answer(reply).await?)
+            .ok_or_else(|| "the server sent an unreadable action".into())
+    }
+
+    /// Runs a server command; any edit it makes arrives as [`Event::ApplyEdit`].
+    pub async fn execute_command(&self, command: &code_action::Command) -> Result<Value, String> {
+        let mut params = json!({"command": command.command});
+        if let Some(arguments) = &command.arguments {
+            params["arguments"] = arguments.clone();
+        }
+        let reply = self.request("workspace/executeCommand", params);
+        answer(reply).await
+    }
+
+    /// The symbols declared in a file, outermost first.
+    pub async fn document_symbols(&self, path: &Path) -> Result<Vec<Symbol>, String> {
+        let reply = self.request(
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}}),
+        );
+        Ok(parse_symbols(&answer(reply).await?, Some(path)))
+    }
+
+    /// Symbols anywhere in the workspace whose names match `query`, as the server matches.
+    pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<Symbol>, String> {
+        let reply = self.request("workspace/symbol", json!({"query": query}));
+        Ok(parse_symbols(&answer(reply).await?, None))
+    }
+
+    /// Tells the server files changed on disk outside the documents it has open.
+    pub fn did_change_watched_files(&self, changes: &[(PathBuf, FileEvent)]) {
+        let changes: Vec<Value> = changes
+            .iter()
+            .map(|(path, kind)| json!({"uri": protocol::uri_from_path(path), "type": *kind as u8}))
+            .collect();
+        self.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes": changes}),
+        );
     }
 
     /// Suggestions at `at`; `trigger` is the character typed that asked for them, if any.
@@ -269,6 +478,7 @@ struct Session {
     child: Arc<Mutex<Option<Child>>>,
     triggers: Arc<OnceLock<Vec<String>>>,
     signature_triggers: Arc<OnceLock<Vec<String>>>,
+    capabilities: Arc<OnceLock<Value>>,
 }
 
 impl Session {
@@ -348,6 +558,9 @@ impl Session {
             "/capabilities/signatureHelpProvider/retriggerCharacters",
         ));
         let _ = self.signature_triggers.set(signature);
+        let _ = self
+            .capabilities
+            .set(result.get("capabilities").cloned().unwrap_or(Value::Null));
         send(&writer, notification("initialized", json!({})))?;
         let _ = self.events.send_blocking(Event::Ready);
 
@@ -377,12 +590,42 @@ impl Session {
             "workspaceFolders": [{"uri": uri, "name": name}],
             "capabilities": {
                 "general": {"positionEncodings": ["utf-16"]},
-                "workspace": {"configuration": true, "workspaceFolders": true},
+                "workspace": {
+                    "configuration": true,
+                    "workspaceFolders": true,
+                    "applyEdit": true,
+                    // Deleting files for a server is refused, so it is not offered.
+                    "workspaceEdit": {
+                        "documentChanges": true,
+                        "resourceOperations": ["create", "rename"],
+                        "failureHandling": "abort"
+                    },
+                    "executeCommand": {},
+                    "symbol": {},
+                    "didChangeWatchedFiles": {}
+                },
                 "textDocument": {
                     "synchronization": {"didSave": true},
                     "publishDiagnostics": {},
                     "definition": {"linkSupport": true},
+                    "implementation": {"linkSupport": true},
+                    "typeDefinition": {"linkSupport": true},
                     "references": {},
+                    "rename": {"prepareSupport": true},
+                    "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                    "codeAction": {
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {"valueSet": [
+                                "", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                                "refactor.rewrite", "source", "source.organizeImports",
+                                "source.fixAll"
+                            ]}
+                        },
+                        "isPreferredSupport": true,
+                        "disabledSupport": true,
+                        "dataSupport": true,
+                        "resolveSupport": {"properties": ["edit"]}
+                    },
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
                     "formatting": {},
                     "signatureHelp": {
@@ -442,6 +685,29 @@ impl Reader {
                         None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
                     };
                     let _ = waiter.try_send(reply);
+                }
+            }
+            (Some("workspace/applyEdit"), Some(id)) => {
+                let params = message.get("params");
+                let label = params
+                    .and_then(|p| p.get("label"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let mut reply = EditReply {
+                    writer: self.writer.clone(),
+                    id,
+                    answered: false,
+                };
+                match params
+                    .and_then(|p| p.get("edit"))
+                    .and_then(parse_workspace_edit)
+                {
+                    Some(edit) => {
+                        let _ = self
+                            .events
+                            .send_blocking(Event::ApplyEdit { label, edit, reply });
+                    }
+                    None => reply.answer(Err("Athena could not read this edit".into())),
                 }
             }
             // Servers wait for these answers; gopls stalls without them.
@@ -568,6 +834,7 @@ mod tests {
             child: Arc::default(),
             triggers: Arc::default(),
             signature_triggers: Arc::default(),
+            capabilities: Arc::default(),
         };
         let stdin = client_end.try_clone().unwrap();
         thread::spawn(move || session.serve(stdin, client_end));

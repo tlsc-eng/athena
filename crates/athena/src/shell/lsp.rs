@@ -314,6 +314,9 @@ impl Shell {
                 };
                 self.local_notice(NoticeKind::Message { title, body: why }, cx);
             }
+            Event::ApplyEdit { reply, .. } => {
+                reply.send(Err("Athena does not apply server edits yet".into()))
+            }
         }
     }
 

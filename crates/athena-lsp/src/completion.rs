@@ -65,7 +65,7 @@ pub(crate) fn parse_text_edits(result: &Value) -> Vec<TextEdit> {
         .unwrap_or_default()
 }
 
-fn text_edit(e: &Value) -> Option<TextEdit> {
+pub(crate) fn text_edit(e: &Value) -> Option<TextEdit> {
     Some(TextEdit {
         range: serde_json::from_value(e.get("range")?.clone()).ok()?,
         text: e.get("newText")?.as_str()?.to_string(),

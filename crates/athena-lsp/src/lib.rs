@@ -1,18 +1,24 @@
 //! A small Language Server Protocol client on plain threads, for gopls and typescript-language-server.
 
 mod client;
+mod code_action;
 mod completion;
+mod edit;
 mod env;
 mod markup;
 mod protocol;
 mod signature;
+mod symbol;
 
-pub use client::{Client, Event};
+pub use client::{Client, EditReply, Event, FileEvent, RenameTarget};
+pub use code_action::{CodeAction, Command};
 pub use completion::{CompletionItem, CompletionList, TextEdit};
+pub use edit::{EditError, FileChange, WorkspaceEdit, apply_text_edits};
 pub use env::{find_program, server_env};
 pub use markup::{Hover, MarkupBlock, expand_snippet, markdown_blocks};
 pub use protocol::{Diagnostic, Location, Position, Range, Severity, path_from_uri, uri_from_path};
 pub use signature::SignatureHelp;
+pub use symbol::{Symbol, symbol_kind_label};
 
 /// The language servers Athena knows how to start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
