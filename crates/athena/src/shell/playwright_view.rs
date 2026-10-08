@@ -16,6 +16,8 @@ use super::item::ItemView;
 struct Run {
     root: PathBuf,
     item: ItemId,
+    /// The config's folder, where Playwright resolves relative paths.
+    dir: PathBuf,
     report: PathBuf,
     /// Set once Node is in the foreground; prompt hooks (git, nodenv) briefly run other programs.
     started: bool,
@@ -24,7 +26,7 @@ struct Run {
 #[derive(Default)]
 pub(super) struct PlaywrightState {
     run: Option<Run>,
-    reports: HashMap<PathBuf, Report>,
+    reports: HashMap<PathBuf, (PathBuf, Report)>,
     expanded: Option<usize>,
 }
 
@@ -78,6 +80,7 @@ impl Shell {
         self.playwright.run = Some(Run {
             root,
             item: item.id,
+            dir,
             report,
             started: false,
         });
@@ -101,7 +104,8 @@ impl Shell {
             run.started |= name == "node";
             return;
         }
-        if !run.started {
+        // A run that fails within one foreground poll never shows Node, but leaves no report either.
+        if !run.started && !run.report.exists() {
             return;
         }
         let run = self.playwright.run.take().expect("checked above");
@@ -114,7 +118,9 @@ impl Shell {
                     .tests
                     .iter()
                     .position(|t| t.outcome == Outcome::Failed);
-                self.playwright.reports.insert(run.root.clone(), report);
+                self.playwright
+                    .reports
+                    .insert(run.root.clone(), (run.dir.clone(), report));
                 let title = if failed == 0 {
                     "Playwright passed"
                 } else {
@@ -151,11 +157,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_trace(&self, trace: &Path) {
-        let Some((root, config)) = self.playwright_root() else {
-            return;
-        };
-        let dir = config.parent().unwrap_or(&root).to_path_buf();
+    fn open_trace(dir: &Path, trace: &Path) {
         // Through a login shell so nodenv/Homebrew PATH entries are present, as in a terminal.
         let _ = Command::new("/bin/zsh")
             .args([
@@ -263,7 +265,7 @@ impl Shell {
                 cx,
             ));
         };
-        let Some(report) = self.playwright.reports.get(&root) else {
+        let Some((dir, report)) = self.playwright.reports.get(&root) else {
             let text = if self.playwright.run.is_some() {
                 "Running…"
             } else {
@@ -280,7 +282,7 @@ impl Shell {
             .tests
             .iter()
             .enumerate()
-            .map(|(i, test)| self.render_test(i, test, cx))
+            .map(|(i, test)| self.render_test(i, test, dir, cx))
             .collect();
         div()
             .id("playwright")
@@ -291,7 +293,13 @@ impl Shell {
             .into_any_element()
     }
 
-    fn render_test(&self, index: usize, test: &TestResult, cx: &mut Context<Self>) -> AnyElement {
+    fn render_test(
+        &self,
+        index: usize,
+        test: &TestResult,
+        dir: &Path,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = cx.theme().clone();
         let color = match test.outcome {
             Outcome::Passed => t.color.success,
@@ -352,6 +360,7 @@ impl Shell {
             .iter()
             .find(|a| a.name == "trace" && a.path.exists())
             .map(|a| a.path.clone());
+        let dir = dir.to_path_buf();
         div()
             .flex()
             .flex_col()
@@ -390,7 +399,7 @@ impl Shell {
                                     "Open trace",
                                     ButtonKind::Secondary,
                                 )
-                                .on_click(cx.listener(move |this, _, _, _| this.open_trace(&path)))
+                                .on_click(move |_, _, _| Self::open_trace(&dir, &path))
                             })),
                     ),
             )
