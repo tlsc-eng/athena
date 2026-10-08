@@ -10,7 +10,8 @@ use athena_workspace::{
 use gpui::{
     Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, ElementId, Entity,
     FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel,
-    SharedString, Window, canvas, div, point, prelude::*, px, relative, size,
+    SharedString, Window, canvas, div, linear_color_stop, linear_gradient, point, prelude::*, px,
+    relative, size,
 };
 
 use super::Shell;
@@ -763,6 +764,12 @@ impl Shell {
         if std::mem::take(&mut self.focus_pending) {
             self.focus_active_item(window, cx);
         }
+        let live = |(r, p): &(PathBuf, PaneId)| *r != root || layout.pane(*p).is_some();
+        self.tab_scroll.retain(|key, _| live(key));
+        // A tab scrolled into view moves the strip after this frame's fades were decided.
+        if std::mem::take(&mut self.tab_revealed) {
+            window.request_animation_frame();
+        }
 
         let area = self.pane_area.clone();
         let recorder = canvas(
@@ -893,6 +900,8 @@ impl Shell {
                     .id(("tab", item.id.0))
                     .group(group.clone())
                     .relative()
+                    .flex_none()
+                    .whitespace_nowrap()
                     .h_full()
                     .pl(px(12.))
                     .pr(px(6.))
@@ -976,14 +985,53 @@ impl Shell {
             })
             .collect();
 
+        let active_id = pane.active_item().map(|i| i.id);
+        let (scroll, revealed) = self
+            .tab_scroll
+            .entry((root.to_path_buf(), pane_id))
+            .or_default();
+        if *revealed != active_id {
+            scroll.scroll_to_item(pane.active);
+            *revealed = active_id;
+            self.tab_revealed = true;
+        }
+        let scroll = scroll.clone();
+        // Last frame's scroll position: the strip is laid out after this render.
+        let (offset, max) = (-scroll.offset().x, scroll.max_offset().width);
+        let fade = |left: bool| {
+            let (solid, clear) = (t.color.surface, t.color.surface.opacity(0.));
+            let (from, to) = if left { (solid, clear) } else { (clear, solid) };
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(16.))
+                .when(left, |el| el.left_0())
+                .when(!left, |el| el.right_0())
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(from, 0.),
+                    linear_color_stop(to, 1.),
+                ))
+        };
         let strip = div()
             .h(px(TAB_STRIP_HEIGHT))
             .flex_none()
-            .flex()
+            .relative()
             .bg(t.color.surface)
             .border_b_1()
             .border_color(t.color.border)
-            .children(tabs);
+            .child(
+                div()
+                    .id(("tabs", pane_id.0))
+                    .size_full()
+                    .flex()
+                    .overflow_x_scroll()
+                    .track_scroll(&scroll)
+                    .children(tabs),
+            )
+            .when(offset > px(0.5), |el| el.child(fade(true)))
+            .when(max - offset > px(0.5), |el| el.child(fade(false)));
 
         let active = pane.active_item().cloned();
         let content: AnyElement = match active

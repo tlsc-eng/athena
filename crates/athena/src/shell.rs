@@ -80,6 +80,9 @@ pub struct Shell {
     entering: Option<PaneId>,
     leaving: Option<PaneId>,
     tab_switches: u64,
+    /// Each pane's tab strip scroll, and the tab it last scrolled into view.
+    tab_scroll: HashMap<(PathBuf, PaneId), (gpui::ScrollHandle, Option<ItemId>)>,
+    tab_revealed: bool,
     /// A split easing to 50 % after a divider double-click: its path, starting ratio and generation.
     ratio_anim: Option<(athena_workspace::NodePath, f32, u64)>,
     /// Keys oneshot animations so reopening something replays them.
@@ -188,6 +191,8 @@ impl Shell {
             entering: None,
             leaving: None,
             tab_switches: 0,
+            tab_scroll: HashMap::new(),
+            tab_revealed: false,
             ratio_anim: None,
             generation: 0,
             save_task: None,
