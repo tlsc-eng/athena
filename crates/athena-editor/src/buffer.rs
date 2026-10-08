@@ -2373,7 +2373,10 @@ mod tests {
 
     #[test]
     fn lines_break_only_where_language_servers_break_them() {
-        let b = buf("a\u{b}b\u{c}c\u{85}d\u{2028}e\u{2029}f\ng\r\nh\ri", "/x/a.txt");
+        let b = buf(
+            "a\u{b}b\u{c}c\u{85}d\u{2028}e\u{2029}f\ng\r\nh\ri",
+            "/x/a.txt",
+        );
         assert_eq!(b.len_lines(), 4, "LF, CRLF and a lone CR break lines");
         assert_eq!(b.line(0), "a\u{b}b\u{c}c\u{85}d\u{2028}e\u{2029}f");
         assert_eq!(b.utf16_position(b.len_chars()), (3, 1));
