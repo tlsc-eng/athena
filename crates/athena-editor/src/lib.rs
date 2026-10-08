@@ -13,7 +13,7 @@ mod signature;
 mod syntax;
 mod view;
 
-pub use buffer::{Buffer, Cursor, Edit, Indent, SaveError, Selection};
+pub use buffer::{Buffer, Cursor, DiskState, Edit, Indent, SaveError, Selection};
 pub use completion::{Completion, ServerEdit};
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};

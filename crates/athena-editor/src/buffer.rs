@@ -147,8 +147,33 @@ pub struct Buffer {
     last_edit: Option<(EditKind, Instant)>,
     /// The latest changes, the last one made at `version`.
     edits: VecDeque<Edit>,
-    /// Modification time of the file as last read or written, to notice edits made elsewhere.
-    disk_mtime: Option<SystemTime>,
+    /// The file as last read or written, to notice edits made elsewhere; `None` before it existed.
+    disk: Option<Stamp>,
+}
+
+/// What a file looked like on disk; tools that keep the modification time still change its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    mtime: Option<SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            mtime: meta.modified().ok(),
+            len: meta.len(),
+        }
+    }
+}
+
+/// How the file on disk compares with the text this buffer last read or wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskState {
+    Unchanged,
+    Changed,
+    /// The file is gone (deleted, moved away or checked out of existence).
+    Deleted,
 }
 
 /// Why a checked save wrote nothing.
@@ -156,6 +181,8 @@ pub struct Buffer {
 pub enum SaveError {
     /// The file changed on disk since it was read or last saved.
     Conflict,
+    /// The file was deleted on disk; a checked save must not bring it back.
+    Deleted,
     Io(anyhow::Error),
 }
 
@@ -179,15 +206,15 @@ impl Buffer {
             redo: Vec::new(),
             last_edit: None,
             edits: VecDeque::new(),
-            disk_mtime: None,
+            disk: None,
         }
     }
 
     /// Opens a UTF-8 text file; binary and very large files are refused.
     pub fn open(path: &Path) -> Result<Self> {
-        let (text, mtime) = read_text(path)?;
+        let (text, stamp) = read_text(path)?;
         let mut buffer = Self::new(&text, Some(path.to_path_buf()));
-        buffer.disk_mtime = mtime;
+        buffer.disk = Some(stamp);
         Ok(buffer)
     }
 
@@ -210,27 +237,41 @@ impl Buffer {
             fs::set_permissions(&tmp, meta.permissions())?;
         }
         fs::rename(&tmp, &target).with_context(|| format!("replace {}", target.display()))?;
-        self.disk_mtime = modified(&path);
+        self.disk = stamp(&path);
         self.saved_at = Some(self.undo.len());
         // The next keystroke must start a new undo step, or it would fold into the saved one.
         self.last_edit = None;
         Ok(())
     }
 
-    /// True when another program wrote the file since this buffer read or saved it.
-    pub fn changed_on_disk(&self) -> bool {
+    /// Whether another program wrote or removed the file since this buffer read or saved it.
+    pub fn disk_state(&self) -> DiskState {
         let Some(path) = &self.path else {
-            return false;
+            return DiskState::Unchanged;
         };
-        modified(path).is_some_and(|m| Some(m) != self.disk_mtime)
+        match fs::metadata(path) {
+            Ok(meta) if Some(Stamp::of(&meta)) != self.disk => DiskState::Changed,
+            Ok(_) => DiskState::Unchanged,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.disk.is_some() => {
+                DiskState::Deleted
+            }
+            Err(_) => DiskState::Unchanged,
+        }
     }
 
-    /// Saves unless the file changed on disk, so another program's edit is never overwritten blindly.
+    /// True when another program wrote the file since this buffer read or saved it.
+    pub fn changed_on_disk(&self) -> bool {
+        self.disk_state() == DiskState::Changed
+    }
+
+    /// Saves unless the file changed or vanished on disk, so another program's edit is never
+    /// overwritten blindly and a deleted file is never quietly recreated.
     pub fn save_checked(&mut self) -> Result<(), SaveError> {
-        if self.changed_on_disk() {
-            return Err(SaveError::Conflict);
+        match self.disk_state() {
+            DiskState::Changed => Err(SaveError::Conflict),
+            DiskState::Deleted => Err(SaveError::Deleted),
+            DiskState::Unchanged => self.save().map_err(SaveError::Io),
         }
-        self.save().map_err(SaveError::Io)
     }
 
     /// Writes to `path` and keeps editing it there, highlighting by its new extension.
@@ -250,7 +291,7 @@ impl Buffer {
         if lang != self.lang() {
             self.syntax = lang.map(|lang| Syntax::new(lang, &self.rope));
         }
-        self.disk_mtime = modified(&path).or(self.disk_mtime);
+        self.disk = stamp(&path).or(self.disk);
         self.path = Some(path);
     }
 
@@ -265,7 +306,7 @@ impl Buffer {
     /// Applies a file read by [`read_disk_text`] against this buffer's current text and marks it
     /// saved; reloads with no edit between them undo as one step.
     pub(crate) fn take_disk_text(&mut self, c: &mut Cursor, disk: DiskText) {
-        self.disk_mtime = disk.mtime;
+        self.disk = Some(disk.stamp);
         if let Some((range, inserted)) = disk.change {
             let (prefix, old_end) = (range.start, range.end);
             let new_end = prefix + inserted.chars().count();
@@ -1064,12 +1105,12 @@ fn link_target(path: &Path) -> PathBuf {
     at
 }
 
-fn modified(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).and_then(|m| m.modified()).ok()
+fn stamp(path: &Path) -> Option<Stamp> {
+    fs::metadata(path).ok().map(|m| Stamp::of(&m))
 }
 
 /// A UTF-8 text file's contents and modification time; binary and very large files are refused.
-fn read_text(path: &Path) -> Result<(String, Option<SystemTime>)> {
+fn read_text(path: &Path) -> Result<(String, Stamp)> {
     let meta = fs::metadata(path).with_context(|| format!("open {}", path.display()))?;
     if meta.len() > MAX_FILE {
         bail!("{} is larger than 50 MB", path.display());
@@ -1081,21 +1122,21 @@ fn read_text(path: &Path) -> Result<(String, Option<SystemTime>)> {
     }
     let text =
         String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))?;
-    Ok((text, meta.modified().ok()))
+    Ok((text, Stamp::of(&meta)))
 }
 
 /// A file's text as read from disk, as the one edit that turns a buffer's text into it.
 pub(crate) struct DiskText {
-    mtime: Option<SystemTime>,
+    stamp: Stamp,
     /// The chars replaced and their replacement; `None` when the text is the same.
     change: Option<(Range<usize>, String)>,
 }
 
 /// Reads `path` and compares it with `rope`; it leaves the buffer alone, so it can run off the UI thread.
 pub(crate) fn read_disk_text(path: &Path, rope: &Rope) -> Result<DiskText> {
-    let (text, mtime) = read_text(path)?;
+    let (text, stamp) = read_text(path)?;
     Ok(DiskText {
-        mtime,
+        stamp,
         change: differing_span(rope, &text),
     })
 }
@@ -1377,6 +1418,37 @@ mod tests {
             .unwrap()
             .set_modified(later)
             .unwrap();
+    }
+
+    #[test]
+    fn a_checked_save_never_recreates_a_deleted_file() {
+        let path = temp_file("deleted", "a\n");
+        let mut b = Buffer::open(&path).unwrap();
+        b.insert(&mut Cursor::default(), "x");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(b.disk_state(), DiskState::Deleted);
+        assert!(matches!(b.save_checked(), Err(SaveError::Deleted)));
+        assert!(!path.exists(), "the deleted file stays deleted");
+        b.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "xa\n");
+        assert_eq!(b.disk_state(), DiskState::Unchanged);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_rewrite_that_keeps_the_modification_time_still_counts_as_a_change() {
+        let path = temp_file("same-mtime", "a\n");
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let b = Buffer::open(&path).unwrap();
+        fs::write(&path, "longer\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(b.disk_state(), DiskState::Changed);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

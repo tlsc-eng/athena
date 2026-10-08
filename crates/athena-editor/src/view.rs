@@ -16,7 +16,9 @@ use gpui::{
     UTF16Selection, Window, actions, div, prelude::*, px,
 };
 
-use crate::buffer::{Buffer, Cursor, DiskText, Edit, SaveError, UNDO_GROUP, read_disk_text};
+use crate::buffer::{
+    Buffer, Cursor, DiskState, DiskText, Edit, SaveError, UNDO_GROUP, read_disk_text,
+};
 use crate::completion::Completing;
 use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
@@ -297,8 +299,9 @@ pub struct EditorView {
     autosave: Option<Duration>,
     autosave_task: Option<Task<()>>,
     reloading: Option<Task<()>>,
-    /// The file changed on disk while this buffer had unsaved edits; the bar asks what to keep.
-    conflict: bool,
+    /// The file changed on disk while this buffer had unsaved edits, or was deleted; the bar asks
+    /// what to keep.
+    conflict: Option<DiskState>,
     pub(crate) gutter_marks: Vec<GutterMark>,
     /// A caption drawn after the cursor's line while the cursor stays on that zero-based line.
     pub(crate) blame: Option<(usize, String)>,
@@ -359,7 +362,7 @@ impl EditorView {
             autosave: None,
             autosave_task: None,
             reloading: None,
-            conflict: false,
+            conflict: None,
             gutter_marks: Vec::new(),
             blame: None,
             cursor_line: 0,
@@ -381,8 +384,12 @@ impl EditorView {
             self.refresh_find(false, cx);
             self.note_cursor_line(true, cx);
         }
-        if self.conflict && self.buf().is_some_and(|b| !b.changed_on_disk()) {
-            self.conflict = false;
+        if self.conflict.is_some()
+            && self
+                .buf()
+                .is_some_and(|b| b.disk_state() == DiskState::Unchanged)
+        {
+            self.conflict = None;
         }
         if self.buf().is_some_and(|b| !b.is_dirty()) {
             self.save_error = None;
@@ -552,7 +559,12 @@ impl EditorView {
         let checked = shared.buffer.borrow_mut().save_checked();
         let result = match checked {
             Err(SaveError::Conflict) => {
-                self.conflict = true;
+                self.conflict = Some(DiskState::Changed);
+                cx.notify();
+                return false;
+            }
+            Err(SaveError::Deleted) => {
+                self.conflict = Some(DiskState::Deleted);
                 cx.notify();
                 return false;
             }
@@ -1412,29 +1424,31 @@ impl EditorView {
     fn autosave_now(&mut self, cx: &mut Context<Self>) {
         self.autosave_task = None;
         // A failed save or a conflict waits for the user rather than retrying on every keystroke.
-        if self.is_dirty() && self.error.is_none() && self.save_error.is_none() && !self.conflict {
+        if self.is_dirty()
+            && self.error.is_none()
+            && self.save_error.is_none()
+            && self.conflict.is_none()
+        {
             self.save(cx);
         }
     }
 
-    /// Picks up a change made on disk by another program: a clean buffer reloads, a dirty one asks.
+    /// Picks up a change made on disk by another program: a clean buffer reloads, a dirty one asks,
+    /// and a deleted file keeps its text and asks too.
     pub fn check_disk(&mut self, cx: &mut Context<Self>) {
         if self.error.is_some() {
             self.retry_open(cx);
             return;
         }
-        let Some((changed, dirty)) = self.buf().map(|b| (b.changed_on_disk(), b.is_dirty())) else {
+        let Some((state, dirty)) = self.buf().map(|b| (b.disk_state(), b.is_dirty())) else {
             return;
         };
-        if !changed {
-            return;
+        match state {
+            DiskState::Unchanged => return,
+            DiskState::Changed if !dirty => return self.reload(cx),
+            DiskState::Changed | DiskState::Deleted => self.conflict = Some(state),
         }
-        if dirty {
-            self.conflict = true;
-            cx.notify();
-        } else {
-            self.reload(cx);
-        }
+        cx.notify();
     }
 
     /// A file that could not be opened may have been created, fixed or made readable since.
@@ -1493,7 +1507,9 @@ impl EditorView {
             Ok(disk) => b.take_disk_text(c, disk),
             Err(e) => result = Err(e),
         });
-        self.conflict &= result.is_err();
+        if result.is_ok() {
+            self.conflict = None;
+        }
         self.save_error = result.err().map(|e| format!("{e:#}"));
         if let Some(shared) = &self.buffer {
             shared.changed(cx);
@@ -1507,7 +1523,7 @@ impl EditorView {
             return;
         };
         let result = shared.buffer.borrow_mut().save();
-        self.conflict = false;
+        self.conflict = None;
         self.save_error = result.as_ref().err().map(|e| format!("{e:#}"));
         if result.is_ok() {
             cx.emit(EditorEvent::Saved);
@@ -1545,17 +1561,27 @@ impl EditorView {
         self.display.clear();
         *self.fold_cache.borrow_mut() = Default::default();
         self.path = path;
-        self.conflict = false;
+        self.conflict = None;
         self.save_error = None;
         cx.emit(EditorEvent::Saved);
         self.changed(cx);
         Ok(())
     }
 
-    fn render_conflict(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if !self.conflict {
-            return None;
+    /// Closes this tab through the shell's Close Tab, which asks about unsaved edits first.
+    fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        if let Ok(action) = cx.build_action("athena::CloseTab", None) {
+            window.dispatch_action(action, cx);
         }
+    }
+
+    fn render_conflict(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let deleted = match self.conflict? {
+            DiskState::Unchanged => return None,
+            DiskState::Changed => false,
+            DiskState::Deleted => true,
+        };
         let t = cx.theme();
         let name = self
             .path
@@ -1582,16 +1608,34 @@ impl EditorView {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_color(t.color.content_secondary)
-                        .child(format!("{name} changed on disk while you were editing it.")),
+                        .child(if deleted {
+                            format!("{name} was deleted on disk.")
+                        } else {
+                            format!("{name} changed on disk while you were editing it.")
+                        }),
                 )
-                .child(
-                    Button::new("conflict-reload", "Reload", ButtonKind::Ghost)
-                        .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                )
-                .child(
-                    Button::new("conflict-overwrite", "Overwrite", ButtonKind::Secondary)
-                        .on_click(cx.listener(|this, _, _, cx| this.overwrite(cx))),
-                ),
+                .map(|bar| {
+                    if deleted {
+                        bar.child(
+                            Button::new("deleted-close", "Close", ButtonKind::Ghost).on_click(
+                                cx.listener(|this, _, window, cx| this.close_tab(window, cx)),
+                            ),
+                        )
+                        .child(
+                            Button::new("deleted-save", "Save", ButtonKind::Secondary)
+                                .on_click(cx.listener(|this, _, _, cx| this.overwrite(cx))),
+                        )
+                    } else {
+                        bar.child(
+                            Button::new("conflict-reload", "Reload", ButtonKind::Ghost)
+                                .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                        )
+                        .child(
+                            Button::new("conflict-overwrite", "Overwrite", ButtonKind::Secondary)
+                                .on_click(cx.listener(|this, _, _, cx| this.overwrite(cx))),
+                        )
+                    }
+                }),
         )
     }
 }
