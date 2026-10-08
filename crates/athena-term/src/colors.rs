@@ -18,21 +18,40 @@ pub fn named(name: NamedColor, overrides: &Colors, palette: &TerminalColors) -> 
     }
     let i = name as usize;
     match name {
-        NamedColor::Foreground | NamedColor::BrightForeground => palette.foreground,
+        NamedColor::Foreground => palette.foreground,
+        NamedColor::BrightForeground => palette.bright_foreground,
         NamedColor::Background => palette.background,
         NamedColor::Cursor => palette.cursor,
-        NamedColor::DimForeground => palette.foreground.opacity(0.66),
+        NamedColor::DimForeground => palette.dim_foreground,
         _ if i < 16 => palette.ansi[i],
         _ => {
             let normal = i - NamedColor::DimBlack as usize;
-            palette
-                .ansi
-                .get(normal)
-                .copied()
-                .unwrap_or(palette.foreground)
-                .opacity(0.66)
+            dim(
+                palette
+                    .ansi
+                    .get(normal)
+                    .copied()
+                    .unwrap_or(palette.foreground),
+                palette,
+            )
         }
     }
+}
+
+/// Faint (SGR 2) text: 35 % of the way to the background, but no darker than the theme's dim
+/// foreground unless the colour already was.
+pub fn dim(fg: Hsla, palette: &TerminalColors) -> Hsla {
+    let (a, b) = (Rgba::from(fg), Rgba::from(palette.background));
+    let mix = |x: f32, y: f32| x + (y - x) * 0.35;
+    let mut out: Hsla = Rgba {
+        r: mix(a.r, b.r),
+        g: mix(a.g, b.g),
+        b: mix(a.b, b.b),
+        a: a.a,
+    }
+    .into();
+    out.l = out.l.max(palette.dim_foreground.l.min(fg.l));
+    out
 }
 
 pub fn indexed(i: usize, overrides: &Colors, palette: &TerminalColors) -> Hsla {
@@ -83,6 +102,16 @@ pub fn hsla_to_rgb(c: Hsla) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dim_text_stays_readable_and_never_brightens() {
+        let palette = athena_ui::Theme::dark(false).terminal;
+        let dimmed = dim(palette.foreground, &palette);
+        assert!(dimmed.l < palette.foreground.l);
+        assert!(dimmed.l >= palette.dim_foreground.l);
+        let black = palette.ansi[0];
+        assert!(dim(black, &palette).l <= black.l);
+    }
 
     #[test]
     fn cube_and_greys() {

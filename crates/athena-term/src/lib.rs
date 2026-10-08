@@ -1,5 +1,6 @@
 mod colors;
 mod element;
+mod glyphs;
 mod keys;
 mod links;
 mod terminal;

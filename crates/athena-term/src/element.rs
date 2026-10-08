@@ -1,15 +1,16 @@
 use alacritty_terminal::index::Point as GridPoint;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::vte::ansi::{Color, CursorShape};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use athena_ui::ActiveTheme;
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font,
-    FontFeatures, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style, TextRun,
-    UnderlineStyle, Window, fill, outline, point, px, relative, size,
+    FontFallbacks, FontFeatures, FontStyle, FontWeight, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, StrikethroughStyle, Style,
+    TextRun, UnderlineStyle, Window, fill, outline, point, px, relative, size,
 };
 
 use crate::colors;
+use crate::glyphs;
 use crate::terminal::GridSize;
 use crate::view::TerminalView;
 
@@ -28,6 +29,7 @@ impl TerminalElement {
 
 pub struct Frame {
     backgrounds: Vec<PaintQuad>,
+    glyphs: Vec<PaintQuad>,
     text: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     cursor: Option<PaintQuad>,
     cursor_glyph: Option<(gpui::Point<Pixels>, ShapedLine)>,
@@ -37,10 +39,18 @@ pub struct Frame {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum Underline {
+    Single,
+    Double,
+    Curly,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 struct CellStyle {
     fg: Hsla,
     bold: bool,
-    underline: bool,
+    underline: Option<Underline>,
+    underline_color: Option<Hsla>,
     strike: bool,
 }
 
@@ -102,7 +112,12 @@ impl Element for TerminalElement {
             family: theme.typography.mono.clone(),
             // Ligatures would merge glyphs and break the one-glyph-per-cell grid.
             features: FontFeatures::disable_ligatures(),
-            fallbacks: None,
+            // Geist Mono lacks most symbols TUIs draw; these hold box drawing, braille and emoji.
+            fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "Menlo".into(),
+                "Apple Symbols".into(),
+                "Apple Color Emoji".into(),
+            ])),
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,
         };
@@ -130,6 +145,7 @@ impl Element for TerminalElement {
         let view = self.view.read(cx);
         let mut frame = Frame {
             backgrounds: Vec::new(),
+            glyphs: Vec::new(),
             text: Vec::new(),
             cursor: None,
             cursor_glyph: None,
@@ -166,16 +182,19 @@ impl Element for TerminalElement {
             let flags = cell.flags;
 
             let mut fg_color = cell.fg;
-            if flags.contains(Flags::BOLD)
-                && let Color::Named(name) = fg_color
-                && (name as usize) < 8
-            {
-                fg_color = Color::Named(name.to_bright());
+            if flags.contains(Flags::BOLD) {
+                fg_color = match fg_color {
+                    Color::Named(name) if (name as usize) < 8 || name == NamedColor::Foreground => {
+                        Color::Named(name.to_bright())
+                    }
+                    Color::Indexed(i) if i < 8 => Color::Indexed(i + 8),
+                    other => other,
+                };
             }
             let mut fg = colors::resolve(fg_color, overrides, &palette);
             let mut bg = colors::resolve(cell.bg, overrides, &palette);
             if flags.contains(Flags::DIM) {
-                fg = fg.opacity(0.66);
+                fg = colors::dim(fg, &palette);
             }
             if flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
@@ -202,16 +221,40 @@ impl Element for TerminalElement {
             if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 continue;
             }
+            let underline = if flags.contains(Flags::UNDERCURL) {
+                Some(Underline::Curly)
+            } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                Some(Underline::Double)
+            } else if flags.intersects(Flags::ALL_UNDERLINES) {
+                Some(Underline::Single)
+            } else {
+                None
+            };
             let style = CellStyle {
                 fg,
                 bold: flags.contains(Flags::BOLD),
-                underline: flags.intersects(Flags::ALL_UNDERLINES),
+                underline,
+                underline_color: underline
+                    .and(cell.underline_color())
+                    .map(|c| colors::resolve(c, overrides, &palette)),
                 strike: flags.contains(Flags::STRIKEOUT),
             };
-            if cell.c == ' ' && !style.underline && !style.strike {
+            if cell.c == ' ' && style.underline.is_none() && !style.strike {
                 continue;
             }
-            let simple = cell.c.is_ascii() && cell.zerowidth().is_none();
+            if style.underline.is_none()
+                && !style.strike
+                && let Some(quads) = glyphs::quads(
+                    cell.c,
+                    Bounds::new(origin(col, row), size(cell_width, line_height)),
+                    fg,
+                )
+            {
+                frame.glyphs.extend(quads);
+                continue;
+            }
+            // Every single-width glyph snaps to its cell, so fallback-font symbols keep the grid.
+            let simple = !flags.contains(Flags::WIDE_CHAR) && cell.zerowidth().is_none();
             if simple
                 && let Some(run) = runs.last_mut()
                 && run.grid_aligned
@@ -249,10 +292,10 @@ impl Element for TerminalElement {
             },
             color: style.fg,
             background_color: None,
-            underline: style.underline.then(|| UnderlineStyle {
-                thickness: px(1.),
-                color: Some(style.fg),
-                wavy: false,
+            underline: style.underline.map(|kind| UnderlineStyle {
+                thickness: px(if kind == Underline::Double { 2. } else { 1. }),
+                color: Some(style.underline_color.unwrap_or(style.fg)),
+                wavy: kind == Underline::Curly,
             }),
             strikethrough: style.strike.then(|| StrikethroughStyle {
                 thickness: px(1.),
@@ -308,7 +351,8 @@ impl Element for TerminalElement {
                 let style = CellStyle {
                     fg: palette.cursor_text,
                     bold: cell.flags.contains(Flags::BOLD),
-                    underline: false,
+                    underline: None,
+                    underline_color: None,
                     strike: false,
                 };
                 let runs = [text_run(cell.c.len_utf8(), style)];
@@ -324,7 +368,8 @@ impl Element for TerminalElement {
             let style = CellStyle {
                 fg: palette.foreground,
                 bold: false,
-                underline: true,
+                underline: Some(Underline::Single),
+                underline_color: None,
                 strike: false,
             };
             let runs = [text_run(view.marked.len(), style)];
@@ -358,7 +403,7 @@ impl Element for TerminalElement {
         );
         let line_height = frame.line_height;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for quad in frame.backgrounds.drain(..) {
+            for quad in frame.backgrounds.drain(..).chain(frame.glyphs.drain(..)) {
                 window.paint_quad(quad);
             }
             for (origin, line) in &frame.text {
