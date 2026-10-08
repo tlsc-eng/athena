@@ -411,7 +411,9 @@ impl EditorView {
                     cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                         match event {
                             InputEvent::Changed => this.refresh_find(true, cx),
-                            InputEvent::Submit | InputEvent::Down => this.step_find(1),
+                            InputEvent::Submit | InputEvent::SubmitBeside | InputEvent::Down => {
+                                this.step_find(1)
+                            }
                             InputEvent::Up => this.step_find(-1),
                             InputEvent::Cancel => {
                                 this.find = None;

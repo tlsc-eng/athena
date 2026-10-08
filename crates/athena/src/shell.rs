@@ -33,9 +33,9 @@ use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
     DisablePlaywrightMcp, EnableClaudeHooks, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft,
     FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject,
-    NextTab, PrevProject, PrevTab, QuickOpen, Quit, RunPlaywright, SelectProject, SelectTab,
-    ShowContainers, ShowPlaywright, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
-    ToggleNotifications, TogglePaneZoom, Zoom,
+    NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SelectProject,
+    SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight, ToggleFileTree,
+    ToggleFullScreen, ToggleNotifications, TogglePaneZoom, Zoom,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -64,6 +64,8 @@ pub struct Shell {
     containers: containers_view::ContainersState,
     playwright: playwright_view::PlaywrightState,
     lsp: lsp::LspState,
+    /// Per project, the pane a file opened from a terminal goes to.
+    last_editor_pane: HashMap<PathBuf, PaneId>,
     _notices: Option<Task<()>>,
     _clicks: Task<()>,
     _app_socket: Task<()>,
@@ -165,6 +167,7 @@ impl Shell {
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
             lsp: lsp::LspState::default(),
+            last_editor_pane: HashMap::new(),
             _notices: None,
             _clicks: clicks_task,
             _app_socket: app_socket,
@@ -598,6 +601,9 @@ impl Render for Shell {
             .text_color(t.color.content)
             .on_action(cx.listener(|this, _: &QuickOpen, w, cx| {
                 this.open_palette(palette::Mode::Files, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &QuickOpenBeside, w, cx| {
+                this.open_palette(palette::Mode::FilesBeside, w, cx)
             }))
             .on_action(cx.listener(|this, _: &CommandPalette, w, cx| {
                 this.open_palette(palette::Mode::Commands, w, cx)

@@ -12,7 +12,18 @@ use crate::ActiveTheme;
 actions!(
     text_input,
     [
-        Backspace, Delete, Left, Right, Home, End, Paste, Submit, Cancel, Up, Down
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        Home,
+        End,
+        Paste,
+        Submit,
+        SubmitBeside,
+        Cancel,
+        Up,
+        Down
     ]
 );
 
@@ -29,6 +40,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("cmd-v", Paste, ctx),
         KeyBinding::new("enter", Submit, ctx),
+        KeyBinding::new("cmd-enter", SubmitBeside, ctx),
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("up", Up, ctx),
         KeyBinding::new("down", Down, ctx),
@@ -39,6 +51,8 @@ pub(crate) fn init(cx: &mut App) {
 pub enum InputEvent {
     Changed,
     Submit,
+    /// Cmd+Enter: submit, opening the result to the side.
+    SubmitBeside,
     Cancel,
     Up,
     Down,
@@ -173,6 +187,7 @@ impl Render for TextInput {
                 }
             }))
             .on_action(cx.listener(|_, _: &Submit, _, cx| cx.emit(InputEvent::Submit)))
+            .on_action(cx.listener(|_, _: &SubmitBeside, _, cx| cx.emit(InputEvent::SubmitBeside)))
             .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(InputEvent::Cancel)))
             .on_action(cx.listener(|_, _: &Up, _, cx| cx.emit(InputEvent::Up)))
             .on_action(cx.listener(|_, _: &Down, _, cx| cx.emit(InputEvent::Down)))

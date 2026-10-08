@@ -26,6 +26,7 @@ actions!(
         NextTab,
         PrevTab,
         QuickOpen,
+        QuickOpenBeside,
         CommandPalette,
         ToggleFileTree,
         ToggleNotifications,

@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use athena_ui::{ActiveTheme, InputEvent, TextInput, motion};
 use gpui::{
-    Action, Animation, AnyElement, Context, Entity, Focusable, FontWeight, HighlightStyle,
-    MouseButton, SharedString, StyledText, Subscription, Window, div, prelude::*, px,
+    Action, Animation, AnyElement, ClickEvent, Context, Entity, Focusable, FontWeight,
+    HighlightStyle, MouseButton, SharedString, StyledText, Subscription, Window, div, prelude::*,
+    px,
 };
 
 use super::Shell;
@@ -23,6 +24,8 @@ pub(super) enum Target {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
     Files,
+    /// Files that open in a new pane beside the focused one.
+    FilesBeside,
     Commands,
     Claude,
 }
@@ -59,6 +62,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Next tab", Box::new(actions::NextTab)),
         ("Previous tab", Box::new(actions::PrevTab)),
         ("Go to file", Box::new(actions::QuickOpen)),
+        ("Open file to the side", Box::new(actions::QuickOpenBeside)),
         ("New Claude session", Box::new(actions::NewClaudeSession)),
         (
             "Change the command that starts Claude",
@@ -119,6 +123,7 @@ impl Shell {
     pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match mode {
             Mode::Files => "Go to file…",
+            Mode::FilesBeside => "Open to the side…",
             Mode::Commands => "Run a command…",
             Mode::Claude => "Command that starts Claude Code here…",
         };
@@ -130,12 +135,13 @@ impl Shell {
                 InputEvent::Changed => this.filter_palette(cx),
                 InputEvent::Up => this.move_palette(-1, cx),
                 InputEvent::Down => this.move_palette(1, cx),
-                InputEvent::Submit => this.run_palette(None, window, cx),
+                InputEvent::Submit => this.run_palette(None, false, window, cx),
+                InputEvent::SubmitBeside => this.run_palette(None, true, window, cx),
                 InputEvent::Cancel => this.close_palette(window, cx),
             },
         );
         let entries = match mode {
-            Mode::Files => Vec::new(),
+            Mode::Files | Mode::FilesBeside => Vec::new(),
             Mode::Claude => claude_entries(""),
             Mode::Commands => commands()
                 .into_iter()
@@ -161,13 +167,13 @@ impl Shell {
                 })
                 .collect(),
         };
-        let files = mode == Mode::Files;
+        let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
         self.palette = Some(Palette {
             mode,
             input,
             placeholder_hint: match mode {
-                Mode::Files => "No matching files",
+                Mode::Files | Mode::FilesBeside => "No matching files",
                 _ => "No matching commands",
             },
             entries,
@@ -252,7 +258,14 @@ impl Shell {
         cx.notify();
     }
 
-    fn run_palette(&mut self, row: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Runs the selected row, or `row`; `beside` opens a file in a new pane next to the focused one.
+    fn run_palette(
+        &mut self,
+        row: Option<usize>,
+        beside: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(palette) = self.palette.take() else {
             return;
         };
@@ -260,9 +273,11 @@ impl Shell {
             self.palette = Some(palette);
             return;
         };
+        let beside = beside || palette.mode == Mode::FilesBeside;
         let entry = palette.entries.into_iter().nth(*index);
         self.focus_active_item(window, cx);
         match entry.map(|e| e.target) {
+            Some(Target::File(path)) if beside => self.open_file_beside(path, window, cx),
             Some(Target::File(path)) => self.open_file(path, window, cx),
             Some(Target::Command(action)) => window.dispatch_action(action, cx),
             Some(Target::Claude(command)) => self.start_claude_with(command, window, cx),
@@ -314,8 +329,8 @@ impl Shell {
                         t.color.content
                     })
                     .when(!selected, |el| el.hover(|s| s.bg(t.color.surface_hover)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_palette(Some(row), window, cx)
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.run_palette(Some(row), event.modifiers().platform, window, cx)
                     }))
                     .child(
                         div()

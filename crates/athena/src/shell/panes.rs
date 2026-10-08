@@ -213,8 +213,25 @@ impl Shell {
             layout.focused = pane;
             self.schedule_save(cx);
         }
+        self.note_editor_pane();
         self.focus_active_item(window, cx);
         cx.notify();
+    }
+
+    /// Remembers the focused pane as the project's editor pane while it shows an editor.
+    fn note_editor_pane(&mut self) {
+        let Some(project) = self.workspace.active_project() else {
+            return;
+        };
+        let Some(pane) = project.layout.as_ref().and_then(|l| l.focused_pane()) else {
+            return;
+        };
+        if pane
+            .active_item()
+            .is_some_and(|i| matches!(i.kind, ItemKind::Editor { .. }))
+        {
+            self.last_editor_pane.insert(project.root.clone(), pane.id);
+        }
     }
 
     pub(super) fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -390,12 +407,17 @@ impl Shell {
         self.after_layout_change(window, cx);
     }
 
-    /// Opens `path` as an editor tab: raises an existing tab, else joins a pane that already holds
-    /// editors, else splits the focused pane so terminals stay visible.
+    /// Opens `path` as an editor tab: raises an existing tab, else joins the focused pane if it
+    /// holds editors, else the editor pane used last, else any editor pane, else splits the focused
+    /// pane so terminals stay visible.
     pub(super) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(i) = self.workspace.active else {
             return;
         };
+        let last = self
+            .last_editor_pane
+            .get(&self.workspace.projects[i].root)
+            .copied();
         let kind = ItemKind::Editor { path };
         let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
             self.workspace.projects[i].layout = Some(Layout::new(kind));
@@ -419,11 +441,14 @@ impl Shell {
         {
             Some(focused)
         } else {
-            layout
+            let editor_panes: Vec<PaneId> = layout
                 .panes()
                 .into_iter()
-                .find(|p| p.items.iter().any(is_editor))
+                .filter(|p| p.items.iter().any(is_editor))
                 .map(|p| p.id)
+                .collect();
+            last.filter(|p| editor_panes.contains(p))
+                .or(editor_panes.first().copied())
         };
         match target {
             Some(pane) => {
@@ -436,6 +461,29 @@ impl Shell {
                     self.entering = Some(pane);
                 }
             }
+        }
+        self.after_layout_change(window, cx);
+    }
+
+    /// Opens `path` in a new pane split off beside the focused one, even if a tab already shows it.
+    pub(super) fn open_file_beside(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(i) = self.workspace.active else {
+            return;
+        };
+        let kind = ItemKind::Editor { path };
+        let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
+            self.workspace.projects[i].layout = Some(Layout::new(kind));
+            return self.after_layout_change(window, cx);
+        };
+        self.zoomed = None;
+        let focused = layout.focused;
+        if let Some(pane) = layout.split(focused, Axis::Horizontal, kind) {
+            self.entering = Some(pane);
         }
         self.after_layout_change(window, cx);
     }
@@ -537,6 +585,7 @@ impl Shell {
     }
 
     fn after_layout_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.note_editor_pane();
         self.focus_active_item(window, cx);
         self.schedule_save(cx);
         cx.notify();

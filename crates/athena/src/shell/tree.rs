@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use athena_ui::ActiveTheme;
 use athena_workspace::ItemKind;
-use gpui::{AnyElement, Context, FontWeight, Window, div, prelude::*, px, uniform_list};
+use gpui::{
+    AnyElement, ClickEvent, Context, FontWeight, Window, div, prelude::*, px, uniform_list,
+};
 
 use super::Shell;
 
@@ -159,14 +161,18 @@ impl Shell {
                             })
                             .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
                             .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-                            .on_click(cx.listener(move |this, _, window: &mut Window, cx| {
-                                if is_dir {
-                                    this.tree.toggle(&root, &path);
-                                    cx.notify();
-                                } else {
-                                    this.open_file(path.clone(), window, cx);
-                                }
-                            }))
+                            .on_click(cx.listener(
+                                move |this, event: &ClickEvent, window: &mut Window, cx| {
+                                    if is_dir {
+                                        this.tree.toggle(&root, &path);
+                                        cx.notify();
+                                    } else if event.modifiers().platform {
+                                        this.open_file_beside(path.clone(), window, cx);
+                                    } else {
+                                        this.open_file(path.clone(), window, cx);
+                                    }
+                                },
+                            ))
                             .child(
                                 div()
                                     .w(px(10.))
