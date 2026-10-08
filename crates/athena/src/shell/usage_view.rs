@@ -36,15 +36,21 @@ fn resets_in(at: i64) -> Option<String> {
 
 impl Shell {
     pub(super) fn start_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.poll_usage(false, window, cx);
+    }
+
+    /// Restarts polling; `fresh` re-probes the Keychain for sign-ins on the first round.
+    fn poll_usage(&mut self, fresh: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.workspace.usage_indicator {
             return;
         }
         self._usage = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut fresh = fresh;
             loop {
                 let readings = cx
                     .background_executor()
-                    .spawn(async {
-                        usage::profiles()
+                    .spawn(async move {
+                        usage::profiles(fresh)
                             .into_iter()
                             .map(|p| {
                                 let s = usage::fetch(&p);
@@ -53,6 +59,7 @@ impl Shell {
                             .collect::<Vec<_>>()
                     })
                     .await;
+                fresh = false;
                 let wait = readings
                     .iter()
                     .filter_map(|(_, s)| match s {
@@ -146,7 +153,7 @@ impl Shell {
             .is_none_or(|t| t.elapsed() >= MIN_REFRESH)
         {
             self.usage.fetched = Some(Instant::now());
-            self.start_usage(window, cx);
+            self.poll_usage(true, window, cx);
         }
     }
 
@@ -193,14 +200,12 @@ impl Shell {
             .readings
             .iter()
             .filter_map(|(_, s)| match s {
-                Status::Windows(w) => Some(w),
+                Status::Windows(w) if !w.is_empty() => Some(w),
                 _ => None,
             })
             .max_by(|a, b| {
-                let five = |w: &&Vec<usage::Window>| {
-                    w.iter().find(|x| x.label == "5h").map_or(-1., |x| x.used)
-                };
-                five(a).total_cmp(&five(b))
+                let peak = |w: &&Vec<usage::Window>| w.iter().map(|x| x.used).fold(0., f32::max);
+                peak(a).total_cmp(&peak(b))
             });
         let used = |label: &str| {
             busiest
@@ -249,8 +254,8 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.))
-                        .child(self.bar(five.unwrap_or(0.), 24., cx))
-                        .child(self.bar(week.unwrap_or(0.), 24., cx)),
+                        .children(five.map(|f| self.bar(f, 24., cx)))
+                        .children(week.map(|w| self.bar(w, 24., cx))),
                 )
             })
             .child(summary)

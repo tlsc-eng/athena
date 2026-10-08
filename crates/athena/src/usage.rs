@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+// The query string Claude Code 2.1.294 sends for `/usage`, so the server answers with the same body.
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1";
 /// `security` exit status when the item does not exist.
 const NOT_FOUND: i32 = 44;
@@ -91,33 +92,44 @@ fn security(service: &str, want_secret: bool) -> std::io::Result<std::process::O
     cmd.stdin(Stdio::null()).output()
 }
 
-/// Profiles with a stored Claude Code sign-in, probed at most every 30 minutes.
+/// Profiles with a stored Claude Code sign-in, cached for `PROFILE_TTL` unless `fresh`.
 /// Checking existence does not reveal the secret.
-pub fn profiles() -> Vec<Profile> {
+pub fn profiles(fresh: bool) -> Vec<Profile> {
     static CACHE: Mutex<Option<(Instant, Vec<Profile>)>> = Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((at, list)) = cache.as_ref()
+    if !fresh
+        && let Some((at, list)) = cache.as_ref()
         && at.elapsed() < PROFILE_TTL
     {
         return list.clone();
     }
-    let list = probe_profiles();
-    *cache = Some((Instant::now(), list.clone()));
+    let (list, definite) = probe_profiles();
+    // A failed probe may have hidden a sign-in, so the next poll asks again.
+    if definite {
+        *cache = Some((Instant::now(), list.clone()));
+    }
     list
 }
 
-fn probe_profiles() -> Vec<Profile> {
-    candidates()
+/// The profiles found, and whether every probe answered found or not found.
+fn probe_profiles() -> (Vec<Profile>, bool) {
+    let mut definite = true;
+    let list = candidates()
         .into_iter()
         .map(|(name, dir)| Profile {
             name,
             service: service_for(dir.as_deref()),
         })
-        .filter(|p| {
-            security(&p.service, false)
-                .is_ok_and(|o| o.status.code() != Some(NOT_FOUND) && o.status.success())
+        .filter(|p| match security(&p.service, false) {
+            Ok(o) if o.status.success() => true,
+            Ok(o) if o.status.code() == Some(NOT_FOUND) => false,
+            _ => {
+                definite = false;
+                false
+            }
         })
-        .collect()
+        .collect();
+    (list, definite)
 }
 
 fn now_ms() -> u64 {
@@ -218,17 +230,13 @@ fn interpret(raw: &str) -> Status {
     }
 }
 
-/// Percent used from `percent`, else `utilization`; `None` when neither is present.
-fn used(w: &Value, fraction: bool) -> Option<f32> {
-    if let Some(p) = w["percent"].as_f64() {
-        return Some(p as f32);
-    }
-    let u = w["utilization"].as_f64()?;
-    // `limits` rows may carry the raw 0–1 fraction; legacy fields are already percentages.
-    Some(if fraction && u <= 1. { u * 100. } else { u } as f32)
+fn used(w: &Value) -> Option<f32> {
+    w["percent"]
+        .as_f64()
+        .or_else(|| w["utilization"].as_f64())
+        .map(|p| p as f32)
 }
 
-/// `resets_at` as epoch seconds, given an RFC 3339 string or a number.
 fn resets_at(v: &Value) -> Option<i64> {
     if let Some(s) = v.as_str() {
         return parse_rfc3339(s);
@@ -238,32 +246,47 @@ fn resets_at(v: &Value) -> Option<i64> {
     Some(if n > 1e11 { n / 1000. } else { n } as i64)
 }
 
-/// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)`.
+/// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM|±HHMM)`; `None` if malformed.
 fn parse_rfc3339(s: &str) -> Option<i64> {
-    let (date, time) = s.split_once('T')?;
-    let mut d = date.split('-').map(|p| p.parse::<i64>());
-    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
-    let (clock, offset) = match time.find(['Z', '+', '-']) {
-        Some(i) => (&time[..i], &time[i..]),
-        None => (time, "Z"),
+    let num = |p: &str| {
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<i64>().ok())
+            .flatten()
     };
+    let (date, time) = s.split_once(['T', 't'])?;
+    let mut d = date.split('-');
+    let (y, m, day) = (num(d.next()?)?, num(d.next()?)?, num(d.next()?)?);
+    let i = time.find(['Z', 'z', '+', '-'])?;
+    let (clock, offset) = time.split_at(i);
     let mut c = clock.split(':');
-    let (hh, mm) = (
-        c.next()?.parse::<i64>().ok()?,
-        c.next()?.parse::<i64>().ok()?,
-    );
-    let ss = c
-        .next()
-        .and_then(|s| s.split('.').next()?.parse::<i64>().ok())
-        .unwrap_or(0);
-    let shift = match offset.as_bytes().first() {
-        Some(b'+' | b'-') => {
-            let sign = if offset.starts_with('-') { -1 } else { 1 };
-            let mut o = offset[1..].split(':');
-            sign * (o.next()?.parse::<i64>().ok()? * 3600
-                + o.next().and_then(|m| m.parse::<i64>().ok()).unwrap_or(0) * 60)
+    let (hh, mm) = (num(c.next()?)?, num(c.next()?)?);
+    let sec = c.next()?;
+    let (whole, frac) = sec.split_once('.').unwrap_or((sec, "0"));
+    let ss = num(whole)?;
+    num(frac)?;
+    if d.next().is_some()
+        || c.next().is_some()
+        || !(1..=12).contains(&m)
+        || !(1..=31).contains(&day)
+        || hh > 23
+        || mm > 59
+        || ss > 60
+    {
+        return None;
+    }
+    let shift = match offset.split_at(1) {
+        ("Z" | "z", "") => 0,
+        (sign @ ("+" | "-"), rest) => {
+            let (oh, om) = rest
+                .split_once(':')
+                .or_else(|| (rest.len() == 4).then(|| rest.split_at(2)))?;
+            let (oh, om) = (num(oh)?, num(om)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            (oh * 3600 + om * 60) * if sign == "-" { -1 } else { 1 }
         }
-        _ => 0,
+        _ => return None,
     };
     // Days from civil date (Howard Hinnant's algorithm).
     let y = if m <= 2 { y - 1 } else { y };
@@ -275,46 +298,46 @@ fn parse_rfc3339(s: &str) -> Option<i64> {
     Some(days * 86_400 + hh * 3600 + mm * 60 + ss - shift)
 }
 
-/// Reads the `limits` list, or the older `five_hour` / `seven_day` fields.
-/// A window without a usage figure is left out rather than shown as 0%.
+/// Reads the `limits` list, filling a missing 5h or 7d window from the older `five_hour` /
+/// `seven_day` fields; a window without a usage figure is left out rather than shown as 0%.
 pub fn parse(v: &Value) -> Vec<Window> {
-    let window = |label: String, w: &Value, fraction: bool| {
+    let window = |label: String, w: &Value| {
         Some(Window {
             label,
-            used: used(w, fraction)?,
+            used: used(w)?,
             resets_at: resets_at(&w["resets_at"]),
         })
     };
-    if let Some(limits) = v["limits"].as_array() {
-        let mut out: Vec<Window> = limits
-            .iter()
-            .filter_map(|l| {
-                let label = match l["kind"].as_str()? {
-                    "session" => "5h".to_string(),
-                    "weekly_all" => "7d".to_string(),
-                    "weekly_scoped" => l["scope"]["model"]["display_name"]
-                        .as_str()
-                        .unwrap_or("model")
-                        .to_string(),
-                    _ => return None,
-                };
-                window(label, l, true)
-            })
-            .collect();
-        out.sort_by_key(|w| match w.label.as_str() {
-            "5h" => 0,
-            "7d" => 1,
-            _ => 2,
-        });
-        if !out.is_empty() {
-            return out;
+    let mut out: Vec<Window> = v["limits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| {
+            let label = match l["kind"].as_str()? {
+                "session" => "5h".to_string(),
+                "weekly_all" => "7d".to_string(),
+                "weekly_scoped" => l["scope"]["model"]["display_name"]
+                    .as_str()
+                    .unwrap_or("model")
+                    .to_string(),
+                _ => return None,
+            };
+            window(label, l)
+        })
+        .collect();
+    for (label, key) in [("5h", "five_hour"), ("7d", "seven_day")] {
+        if !out.iter().any(|w| w.label == label)
+            && let Some(w) = window(label.to_string(), &v[key])
+        {
+            out.push(w);
         }
     }
-    [("5h", "five_hour"), ("7d", "seven_day")]
-        .into_iter()
-        .filter(|(_, key)| v[*key].is_object())
-        .filter_map(|(label, key)| window(label.to_string(), &v[key], false))
-        .collect()
+    out.sort_by_key(|w| match w.label.as_str() {
+        "5h" => 0,
+        "7d" => 1,
+        _ => 2,
+    });
+    out
 }
 
 #[cfg(test)]
@@ -382,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn percent_wins_and_fractional_utilization_is_scaled() {
+    fn percent_wins_and_utilization_is_already_a_percentage() {
         let row = |extra: Value| {
             let mut l = json!({ "kind": "session" });
             l.as_object_mut()
@@ -395,7 +418,7 @@ mod tests {
             row(json!({ "percent": 42, "utilization": 0.9 }))[0].used,
             42.
         );
-        assert_eq!(row(json!({ "utilization": 0.42 }))[0].used, 42.);
+        assert_eq!(row(json!({ "utilization": 0.42 }))[0].used, 0.42);
         assert_eq!(row(json!({ "utilization": 42.0 }))[0].used, 42.);
     }
 
@@ -431,6 +454,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_fields_fill_windows_missing_from_limits() {
+        let v = json!({
+            "limits": [{ "kind": "weekly_all", "percent": 31 }],
+            "five_hour": { "utilization": 39.0 },
+            "seven_day": { "utilization": 99.0 }
+        });
+        assert_eq!(
+            parse(&v)
+                .iter()
+                .map(|w| (w.label.as_str(), w.used))
+                .collect::<Vec<_>>(),
+            [("5h", 39.), ("7d", 31.)]
+        );
+    }
+
+    #[test]
     fn resets_at_accepts_epoch_numbers() {
         let v = json!({ "limits": [
             { "kind": "session", "percent": 1, "resets_at": 1_791_482_399 },
@@ -457,6 +496,35 @@ mod tests {
             Some(1_791_460_800)
         );
         assert_eq!(parse_rfc3339("garbage"), None);
+    }
+
+    #[test]
+    fn accepts_lowercase_separators_and_compact_offsets() {
+        for s in [
+            "2026-10-08t12:00:00z",
+            "2026-10-08T14:00:00+0200",
+            "2026-10-08T07:30:00-04:30",
+        ] {
+            assert_eq!(parse_rfc3339(s), Some(1_791_460_800), "{s}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_timestamps() {
+        for s in [
+            "2026-10-08T12:00Z",
+            "2026-10-08T12:00:xxZ",
+            "2026-10-08T12:00:00",
+            "2026-10-08T12:00:00+02",
+            "2026-10-08T12:00:00+0x:00",
+            "2026-10-08T12:00:00Zjunk",
+            "2026-10-08T12:00:00.Z",
+            "2026-13-08T12:00:00Z",
+            "2026-10-08T24:00:00Z",
+            "2026-10-08-01T12:00:00Z",
+        ] {
+            assert_eq!(parse_rfc3339(s), None, "{s}");
+        }
     }
 
     #[test]
