@@ -13,7 +13,8 @@ use athena_lsp::{
 use athena_proto::{DiagnosticInfo, NoticeKind};
 use athena_ui::ActiveTheme;
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Task, Window, div, prelude::*, px, uniform_list,
+    AnyElement, Context, Entity, FontWeight, Task, WeakEntity, Window, div, prelude::*, px,
+    uniform_list,
 };
 
 use super::Shell;
@@ -29,7 +30,7 @@ const FORMAT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Longest line excerpt shown for a reference.
 const SNIPPET_CHARS: usize = 160;
 
-const NO_SERVER: &str = "No language server runs for this file.";
+pub(super) const NO_SERVER: &str = "No language server runs for this file.";
 
 /// A server that stops this many times within `CRASH_WINDOW` is left stopped, as in VS Code.
 const MAX_CRASHES: usize = 5;
@@ -57,6 +58,8 @@ pub(super) struct LspState {
     crashes: HashMap<ServerKey, Vec<Instant>>,
     restarts: HashMap<ServerKey, Task<()>>,
     pub(super) jump: Option<(PathBuf, Position)>,
+    /// The document, cursor and editor a rename field is open for.
+    pub(super) renaming: Option<(PathBuf, Position, WeakEntity<EditorView>)>,
     /// A file name a terminal link gave that matched several files, for Go to File to narrow.
     find_file: Option<String>,
     references: References,
@@ -488,7 +491,12 @@ impl Shell {
     }
 
     /// Sends a pending edit now, so the server answers about what is on screen.
-    fn flush_change(&mut self, doc: &Path, editor: &Entity<EditorView>, cx: &Context<Self>) {
+    pub(super) fn flush_change(
+        &mut self,
+        doc: &Path,
+        editor: &Entity<EditorView>,
+        cx: &Context<Self>,
+    ) {
         if self.lsp.changes.remove(doc).is_some() {
             self.send_change(doc, editor, cx);
         }
@@ -904,7 +912,7 @@ impl Shell {
     }
 
     /// Says why a lookup went nowhere, so a click or key press is never silently ignored.
-    fn lsp_failed(&mut self, title: &str, body: String, cx: &mut Context<Self>) {
+    pub(super) fn lsp_failed(&mut self, title: &str, body: String, cx: &mut Context<Self>) {
         self.transient_notice(title, body, cx);
     }
 

@@ -61,7 +61,7 @@ fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
 }
 
 const LINE_HEIGHT_RATIO: f32 = 1.5;
-const GUTTER_PAD: f32 = 16.;
+pub(crate) const GUTTER_PAD: f32 = 16.;
 /// Width of the gutter column right of the line numbers that holds fold chevrons.
 const FOLD_COLUMN: f32 = 20.;
 const TEXT_PAD: f32 = 8.;
@@ -466,6 +466,16 @@ impl Element for EditorElement {
             );
             let x = numbers_right - label.width;
             frame.gutter.push((point(x, y), label));
+            if view.lightbulb == Some(*line) {
+                let bulb = text_system.shape_line(
+                    "💡".into(),
+                    font_size * 0.75,
+                    &[run("💡".len(), theme.color.warning)],
+                    None,
+                );
+                let x = bounds.left() + (px(GUTTER_PAD) - bulb.width) / 2.;
+                frame.gutter.push((point(x, y), bulb));
+            }
             // Marks come from the saved file, so unsaved line inserts shift them until the next save.
             for mark in &view.gutter_marks {
                 let (top, height, color) = match *mark {

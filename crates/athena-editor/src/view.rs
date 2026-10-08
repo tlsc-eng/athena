@@ -331,6 +331,9 @@ pub struct EditorView {
     pub(crate) blame: Option<(usize, String)>,
     cursor_line: usize,
     context_menu: Option<(Entity<ContextMenu>, Subscription)>,
+    pub(crate) rename: Option<crate::lsp_ui::RenameBox>,
+    /// The zero-based line showing the code action lightbulb.
+    pub(crate) lightbulb: Option<usize>,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -391,6 +394,8 @@ impl EditorView {
             blame: None,
             cursor_line: 0,
             context_menu: None,
+            rename: None,
+            lightbulb: None,
         }
     }
 
@@ -679,6 +684,9 @@ impl EditorView {
         window.focus(&self.focus);
         self.hide_hover(cx);
         self.dismiss_completion(cx);
+        if self.click_lightbulb(event.position, window, cx) {
+            return;
+        }
         if self.click_fold_column(event.position, cx) {
             return;
         }
@@ -1429,6 +1437,7 @@ impl Render for EditorView {
             )
             .children(self.render_line_jump(cx))
             .children(self.render_hover(cx))
+            .children(self.render_rename(cx))
             .children(focused.then(|| self.render_signature(cx)).flatten())
             .children(focused.then(|| self.render_completion(cx)).flatten())
             .children(self.render_marker_bar(cx))
@@ -1958,6 +1967,19 @@ impl EditorView {
         let items = vec![
             item("Go to Definition", "F12", Box::new(GoToDefinition)),
             item("Find References", "⇧F12", Box::new(FindReferences)),
+            item(
+                "Go to Implementations",
+                "⌘F12",
+                Box::new(crate::GoToImplementation),
+            ),
+            item(
+                "Go to Type Definition",
+                "",
+                Box::new(crate::GoToTypeDefinition),
+            ),
+            MenuItem::separator(),
+            item("Rename Symbol", "F2", Box::new(crate::RenameSymbol)),
+            item("Quick Fix…", "⌘.", Box::new(crate::ShowCodeActions)),
             MenuItem::separator(),
             item("Cut", "⌘X", Box::new(Cut)),
             item("Copy", "⌘C", Box::new(Copy)),

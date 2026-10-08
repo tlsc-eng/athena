@@ -9,6 +9,7 @@ mod hover;
 mod image;
 mod line_jump;
 mod lines;
+mod lsp_ui;
 mod pairs;
 pub mod recovery;
 mod shared;
@@ -21,6 +22,9 @@ pub use completion::{Completion, ServerEdit};
 pub use diff_view::{DiffEvent, DiffView, HunkActions};
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
+pub use lsp_ui::{
+    ConfirmRename, GoToImplementation, GoToTypeDefinition, RenameSymbol, ShowCodeActions,
+};
 pub use signature::Signature;
 pub use syntax::{Lang, Token};
 pub use view::{EditorEvent, EditorStatus, EditorView, GutterMark, Marker, MarkerSeverity};
@@ -30,4 +34,5 @@ pub fn init(cx: &mut gpui::App) {
     view::init(cx);
     diff_view::init(cx);
     image::init(cx);
+    lsp_ui::init(cx);
 }

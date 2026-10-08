@@ -18,6 +18,7 @@ mod panes;
 mod playwright_view;
 mod problems;
 mod quit;
+mod rename;
 mod review;
 mod search;
 mod status_bar;
@@ -817,6 +818,14 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ShowProblems, _, cx| this.toggle_problems(cx)))
             .on_action(cx.listener(|this, _: &NextProblem, _, cx| this.go_to_problem(true, cx)))
             .on_action(cx.listener(|this, _: &PrevProblem, _, cx| this.go_to_problem(false, cx)))
+            .on_action(cx.listener(|this, _: &athena_editor::RenameSymbol, w, cx| {
+                this.lsp_rename_start(w, cx)
+            }))
+            .on_action(
+                cx.listener(|this, a: &athena_editor::ConfirmRename, _, cx| {
+                    this.lsp_rename_confirm(a.name.clone(), cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &GoToSymbol, w, cx| {
                 this.open_palette_with(palette::Mode::Files, "@", w, cx)
             }))
