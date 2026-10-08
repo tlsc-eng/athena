@@ -323,6 +323,11 @@ impl EditorView {
         }
     }
 
+    /// Replaces the whole text as one undoable edit spanning only the part that differs.
+    pub fn replace_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.with_buffer(cx, |b| replace_differing(b, text));
+    }
+
     /// Moves the cursor to a zero-based line and UTF-16 column.
     pub fn go_to_position(&mut self, line: u32, character: u32, cx: &mut Context<Self>) {
         self.with_buffer(cx, |b| {
@@ -745,6 +750,39 @@ impl EditorView {
                 .children(more.map(|m| div().text_color(t.color.content_muted).child(m))),
         )
     }
+}
+
+/// Replaces `b`'s text with `text` through one edit covering only the changed span, keeping the selection.
+fn replace_differing(b: &mut Buffer, text: &str) {
+    let old: Vec<char> = b.rope().chars().collect();
+    let new: Vec<char> = text.chars().collect();
+    if old == new {
+        return;
+    }
+    let prefix = old.iter().zip(&new).take_while(|(a, c)| a == c).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, c)| a == c)
+        .count();
+    let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
+    let map = |at: usize| match at {
+        at if at <= prefix => at,
+        at if at >= old_end => at - old_end + new_end,
+        // Inside the changed span, keep the offset; replacements rarely change lengths much.
+        at => at.min(new_end),
+    };
+    let selection = b.selection;
+    b.selection = crate::Selection {
+        anchor: prefix,
+        head: old_end,
+    };
+    b.insert(&new[prefix..new_end].iter().collect::<String>());
+    b.selection = crate::Selection {
+        anchor: map(selection.anchor),
+        head: map(selection.head),
+    };
 }
 
 pub(crate) fn marker_color(severity: MarkerSeverity, t: &athena_ui::Theme) -> gpui::Hsla {
@@ -1311,5 +1349,23 @@ impl EntityInputHandler for EditorView {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacing_text_is_one_undo_step_that_keeps_the_cursor() {
+        let mut b = Buffer::new("let old = 1;\nkeep\nold();\n", None);
+        b.move_to(b.line_start(1) + 2, false);
+        replace_differing(&mut b, "let new = 1;\nkeep\nnew();\n");
+        assert_eq!(b.full_text(), "let new = 1;\nkeep\nnew();\n");
+        assert_eq!(b.selection.head, b.line_start(1) + 2);
+        b.undo();
+        assert_eq!(b.full_text(), "let old = 1;\nkeep\nold();\n");
+        replace_differing(&mut b, "let old = 1;\nkeep\nold();\n");
+        assert!(!b.undo(), "an unchanged text adds no undo step");
     }
 }

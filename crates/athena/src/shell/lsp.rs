@@ -40,7 +40,7 @@ pub(super) struct LspState {
     /// Documents the servers have open, and which server has each.
     documents: HashMap<PathBuf, ServerKey>,
     changes: HashMap<PathBuf, Task<()>>,
-    jump: Option<(PathBuf, Position)>,
+    pub(super) jump: Option<(PathBuf, Position)>,
     references: References,
     /// The project the references were asked from; other projects show the drawer tab empty.
     references_root: Option<PathBuf>,

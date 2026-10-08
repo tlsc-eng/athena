@@ -13,6 +13,7 @@ mod palette;
 mod panes;
 mod playwright_view;
 mod quit;
+mod search;
 mod tree;
 mod usage_view;
 
@@ -41,7 +42,7 @@ use crate::actions::{
     ToggleAutoSave, ToggleFileTree, ToggleFullScreen, ToggleNotifications, TogglePaneZoom,
     TogglePreview, Zoom,
 };
-use crate::actions::{ShowChanges, ToggleBlame};
+use crate::actions::{FindInProject, ShowChanges, ToggleBlame};
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
 const RAIL_WIDTH: f32 = 48.;
@@ -76,6 +77,7 @@ pub struct Shell {
     playwright: playwright_view::PlaywrightState,
     lsp: lsp::LspState,
     git: git_view::GitState,
+    search: search::SearchState,
     /// Per project, the pane a file opened from a terminal goes to.
     last_editor_pane: HashMap<PathBuf, PaneId>,
     window_title: String,
@@ -201,6 +203,7 @@ impl Shell {
             playwright: playwright_view::PlaywrightState::default(),
             lsp: lsp::LspState::default(),
             git: git_view::GitState::default(),
+            search: search::SearchState::default(),
             last_editor_pane: HashMap::new(),
             window_title: String::new(),
             pending_open: None,
@@ -726,6 +729,7 @@ impl Render for Shell {
                 this.set_playwright_mcp(false, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| this.toggle_tree(cx)))
+            .on_action(cx.listener(|this, _: &FindInProject, w, cx| this.find_in_project(w, cx)))
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| {
                 this.toggle_drawer_tab(drawer::DrawerTab::Changes, cx)
             }))

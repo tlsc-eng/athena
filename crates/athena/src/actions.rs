@@ -43,6 +43,7 @@ actions!(
         TogglePreview,
         SaveAs,
         ToggleAutoSave,
+        FindInProject,
         ShowChanges,
         ToggleBlame,
     ]
@@ -90,6 +91,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
         KeyBinding::new("cmd-shift-v", TogglePreview, None),
         KeyBinding::new("cmd-shift-s", SaveAs, None),
+        KeyBinding::new("cmd-shift-f", FindInProject, None),
         KeyBinding::new("cmd-alt-shift-g", ToggleBlame, None),
     ];
     for n in 1..=9 {
@@ -134,6 +136,7 @@ pub fn init(cx: &mut App) {
             items: vec![
                 MenuItem::action("Command Palette", CommandPalette),
                 MenuItem::action("Go to File…", QuickOpen),
+                MenuItem::action("Find in Project…", FindInProject),
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
                 MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::action("Containers", ShowContainers),
