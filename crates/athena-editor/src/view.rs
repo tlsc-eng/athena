@@ -930,6 +930,23 @@ impl EditorView {
     }
 }
 
+/// The opened value once `open` succeeds; until then `error` holds why it failed this time.
+fn retry_open<T>(
+    error: &mut Option<String>,
+    open: impl FnOnce() -> anyhow::Result<T>,
+) -> Option<T> {
+    match open() {
+        Ok(value) => {
+            *error = None;
+            Some(value)
+        }
+        Err(e) => {
+            *error = Some(format!("{e:#}"));
+            None
+        }
+    }
+}
+
 /// Replaces `b`'s text with `text` through one edit covering only the changed span, keeping the selection.
 fn replace_differing(b: &mut Buffer, c: &mut Cursor, text: &str) {
     let old: Vec<char> = b.rope().chars().collect();
@@ -1385,6 +1402,10 @@ impl EditorView {
 
     /// Picks up a change made on disk by another program: a clean buffer reloads, a dirty one asks.
     pub fn check_disk(&mut self, cx: &mut Context<Self>) {
+        if self.error.is_some() {
+            self.retry_open(cx);
+            return;
+        }
         let Some((changed, dirty)) = self.buf().map(|b| (b.changed_on_disk(), b.is_dirty())) else {
             return;
         };
@@ -1397,6 +1418,20 @@ impl EditorView {
         } else {
             self.reload(cx);
         }
+    }
+
+    /// A file that could not be opened may have been created, fixed or made readable since.
+    fn retry_open(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        let Some(shared) = retry_open(&mut self.error, || shared::open(&path, cx)) else {
+            cx.notify();
+            return;
+        };
+        self.seen = shared.buffer.borrow().version();
+        self._buffer_watch = Some(Self::watch(&shared, cx));
+        self.cursor = Cursor::default();
+        self.buffer = Some(shared);
+        self.changed(cx);
     }
 
     /// Replaces the buffer with the file on disk, as one step that undo can take back.
@@ -1670,5 +1705,23 @@ mod tests {
         assert_eq!(b.full_text(), "let old = 1;\nkeep\nold();\n");
         replace_differing(&mut b, &mut c, "let old = 1;\nkeep\nold();\n");
         assert!(!b.undo(&mut c), "an unchanged text adds no undo step");
+    }
+
+    #[test]
+    fn a_file_that_failed_to_open_opens_once_it_is_readable() {
+        let dir = std::env::temp_dir().join(format!("athena-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("late.txt");
+        let mut error = None;
+        assert!(retry_open(&mut error, || Buffer::open(&path)).is_none());
+        assert!(error.is_some(), "a missing file shows why");
+        std::fs::write(&path, [0u8, 1, 2]).unwrap();
+        assert!(retry_open(&mut error, || Buffer::open(&path)).is_none());
+        assert!(error.as_deref().unwrap().contains("binary"), "{error:?}");
+        std::fs::write(&path, "now text\n").unwrap();
+        let b = retry_open(&mut error, || Buffer::open(&path)).unwrap();
+        assert_eq!(b.full_text(), "now text\n");
+        assert_eq!(error, None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
