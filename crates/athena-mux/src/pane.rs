@@ -91,6 +91,12 @@ impl Pane {
             }
             cmd.env("ZDOTDIR", dir);
         }
+        // Lets Claude Code find the window's IDE server; the file is absent while that is off.
+        if let Ok(path) = athena_proto::ide_env_path() {
+            for (key, value) in athena_proto::read_ide_env(&path) {
+                cmd.env(key, value);
+            }
+        }
         // Apps launched from Finder get no locale, which breaks UTF-8 in most shells.
         if std::env::var_os("LANG").is_none() {
             cmd.env("LANG", "en_US.UTF-8");

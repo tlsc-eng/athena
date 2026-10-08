@@ -221,6 +221,40 @@ fn shells_do_not_inherit_the_daemon_environment() {
     assert!(out.contains(&format!("home=[{}]", daemon.home.display())));
 }
 
+/// The window publishes its IDE port in ide.env; each new shell reads it, nothing else from it.
+#[test]
+fn new_shells_get_the_ide_port_from_ide_env() {
+    let daemon = Daemon::start("ide");
+    let env = daemon
+        .home
+        .join("Library/Application Support/athena/ide.env");
+    // A connection per shell, so the first one's output does not get in the way of the second.
+    let probe = || {
+        let (conn, mut reader) = daemon.connect();
+        let reader = &mut reader;
+        let pane = spawn_pane(&conn, reader);
+        conn.send(&ClientMsg::Attach { pane }).unwrap();
+        let line = "echo \"port=[${CLAUDE_CODE_SSE_PORT}] on=[${ENABLE_IDE_INTEGRATION}] \
+                    x=[${EXTRA}] end=[${ATHENA_PANE_ID}]\"\r";
+        conn.send(&ClientMsg::Input {
+            pane,
+            data: line.as_bytes().to_vec(),
+        })
+        .unwrap();
+        read_until(reader, &format!("end=[{pane}]"))
+    };
+    std::fs::write(
+        &env,
+        "CLAUDE_CODE_SSE_PORT=51234\nENABLE_IDE_INTEGRATION=true\nEXTRA=leak\n",
+    )
+    .unwrap();
+    let on = probe();
+    assert!(on.contains("port=[51234] on=[true] x=[]"), "{on}");
+    std::fs::remove_file(&env).unwrap();
+    let off = probe();
+    assert!(off.contains("port=[] on=[] x=[]"), "{off}");
+}
+
 #[test]
 fn reports_the_foreground_program() {
     let daemon = Daemon::start("fg");
