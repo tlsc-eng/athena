@@ -411,6 +411,24 @@ impl Layout {
             .map(|(id, _)| *id)
     }
 
+    /// The ratio of the split at `path`, or `None` if no split is there.
+    pub fn ratio_at(&self, path: &[bool]) -> Option<f32> {
+        let mut node = &self.tree;
+        for &second in path {
+            let Node::Split {
+                first, second: s, ..
+            } = node
+            else {
+                return None;
+            };
+            node = if second { s } else { first };
+        }
+        match node {
+            Node::Split { ratio, .. } => Some(*ratio),
+            Node::Leaf(_) => None,
+        }
+    }
+
     /// Sets the ratio of the split at `path`, clamped so neither side drops below `MIN_PANE`.
     pub fn set_ratio(&mut self, path: &[bool], ratio: f32, split_len: f32) {
         let mut node = &mut self.tree;
@@ -561,6 +579,19 @@ mod tests {
         let (rects, _) = l.layout(B);
         assert!(rects[1].1.w >= MIN_PANE - 1.);
         assert_eq!(clamp_ratio(0.9, 200.), 0.5);
+    }
+
+    #[test]
+    fn ratio_at_reads_the_split_on_the_path() {
+        let mut l = Layout::new(term());
+        let p1 = l.focused;
+        let p2 = l.split(p1, Axis::Horizontal, term()).unwrap();
+        l.split(p2, Axis::Vertical, term());
+        l.set_ratio(&[true], 0.3, 600.);
+        assert_eq!(l.ratio_at(&[]), Some(0.5));
+        assert_eq!(l.ratio_at(&[true]), Some(0.3));
+        assert_eq!(l.ratio_at(&[false]), None, "a pane has no ratio");
+        assert_eq!(l.ratio_at(&[true, true, false]), None);
     }
 
     #[test]

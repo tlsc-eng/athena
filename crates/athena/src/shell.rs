@@ -80,6 +80,10 @@ pub struct Shell {
     entering: Option<PaneId>,
     leaving: Option<PaneId>,
     tab_switches: u64,
+    /// A split easing to 50 % after a divider double-click: its path, starting ratio and generation.
+    ratio_anim: Option<(athena_workspace::NodePath, f32, u64)>,
+    /// Keys oneshot animations so reopening something replays them.
+    generation: u64,
     save_task: Option<Task<()>>,
     rail_from: usize,
     switch_count: u64,
@@ -184,6 +188,8 @@ impl Shell {
             entering: None,
             leaving: None,
             tab_switches: 0,
+            ratio_anim: None,
+            generation: 0,
             save_task: None,
             switch_count: 0,
             focus_pending: true,
@@ -198,6 +204,11 @@ impl Shell {
         shell.start_usage(window, cx);
         crate::system_notify::set_badge(shell.unread());
         shell
+    }
+
+    fn next_generation(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
     }
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {

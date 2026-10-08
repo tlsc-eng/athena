@@ -9,8 +9,8 @@ use athena_workspace::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, Bounds, Context, CursorStyle, ElementId, Entity,
-    FontWeight, Hsla, MouseButton, MouseMoveEvent, Pixels, PromptLevel, SharedString, Window,
-    canvas, div, point, prelude::*, px, relative, size,
+    FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, PromptLevel,
+    SharedString, Window, canvas, div, point, prelude::*, px, relative, size,
 };
 
 use super::Shell;
@@ -758,7 +758,7 @@ impl Shell {
 
         let tree = match self.zoomed.and_then(|z| layout.pane(z).cloned()) {
             Some(pane) => self.render_pane(&root, &pane, true, cx),
-            None => self.render_node(&root, &layout.tree, layout.focused, cx),
+            None => self.render_node(&root, &layout.tree, &mut Vec::new(), layout.focused, cx),
         };
         if std::mem::take(&mut self.focus_pending) {
             self.focus_active_item(window, cx);
@@ -777,7 +777,7 @@ impl Shell {
         .absolute()
         .size_full();
 
-        let dividers = if self.zoomed.is_some() {
+        let dividers = if self.zoomed.is_some() || self.ratio_anim.is_some() {
             Vec::new()
         } else {
             layout.layout(self.pane_area()).1
@@ -801,6 +801,7 @@ impl Shell {
         &mut self,
         root: &Path,
         node: &Node,
+        path: &mut NodePath,
         focused: PaneId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -812,9 +813,14 @@ impl Shell {
                 first,
                 second,
             } => {
-                let a = self.render_node(root, first, focused, cx);
-                let b = self.render_node(root, second, focused, cx);
-                let border = cx.theme().color.border;
+                path.push(false);
+                let a = self.render_node(root, first, path, focused, cx);
+                path.pop();
+                path.push(true);
+                let b = self.render_node(root, second, path, focused, cx);
+                path.pop();
+                let t = cx.theme();
+                let (border, reduced, fast) = (t.color.border, t.motion.reduced, t.motion.fast);
                 let horizontal = *axis == Axis::Horizontal;
                 let first_box = div()
                     .flex_none()
@@ -822,6 +828,21 @@ impl Shell {
                     .when(horizontal, |el| el.h_full().w(relative(*ratio)))
                     .when(!horizontal, |el| el.w_full().h(relative(*ratio)))
                     .child(a);
+                let to = *ratio;
+                // The one sanctioned size animation over live panes: short, and only on double-click.
+                let first_box = match self.ratio_anim.as_ref().filter(|(p, _, _)| p == path) {
+                    Some(&(_, from, generation)) => motion::animate_if(
+                        reduced,
+                        first_box,
+                        ("split-center", generation),
+                        Animation::new(fast).with_easing(motion::ease_standard()),
+                        move |el, d| {
+                            let r = relative(from + (to - from) * d);
+                            if horizontal { el.w(r) } else { el.h(r) }
+                        },
+                    ),
+                    None => first_box.into_any_element(),
+                };
                 let line = div()
                     .flex_none()
                     .bg(border)
@@ -1049,8 +1070,13 @@ impl Shell {
             .h(px(h))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
+                    if event.click_count == 2 {
+                        this.drag = None;
+                        this.center_split(path.clone(), split.size, axis, cx);
+                        return;
+                    }
                     this.drag = Some(Drag::Divider {
                         path: path.clone(),
                         axis,
@@ -1059,6 +1085,45 @@ impl Shell {
                 }),
             )
             .into_any_element()
+    }
+
+    /// Double-clicked divider: splits the space evenly, easing the panes there unless motion is reduced.
+    fn center_split(
+        &mut self,
+        path: NodePath,
+        split: gpui::Size<Pixels>,
+        axis: Axis,
+        cx: &mut Context<Self>,
+    ) {
+        let len = f32::from(match axis {
+            Axis::Horizontal => split.width,
+            Axis::Vertical => split.height,
+        });
+        let Some(layout) = self.active_layout() else {
+            return;
+        };
+        let Some(from) = layout.ratio_at(&path) else {
+            return;
+        };
+        layout.set_ratio(&path, 0.5, len);
+        self.schedule_save(cx);
+        let reduced = cx.theme().motion.reduced;
+        if !reduced && (from - 0.5).abs() > f32::EPSILON {
+            let generation = self.next_generation();
+            self.ratio_anim = Some((path, from, generation));
+            let delay = cx.theme().motion.fast;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.ratio_anim.as_ref().is_some_and(|a| a.2 == generation) {
+                        this.ratio_anim = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     /// Picks up edits made outside Athena, e.g. after the window regains focus.
