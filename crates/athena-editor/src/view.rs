@@ -1001,6 +1001,9 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let focused = self.focus.is_focused(window);
+        if !focused {
+            self.dismiss_completion(cx);
+        }
         let root = div()
             .id("editor")
             .size_full()
