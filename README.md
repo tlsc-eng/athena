@@ -25,11 +25,16 @@ ad-hoc signed without a Developer ID, so the cask removes the quarantine attribu
 a copy downloaded by hand from the releases page is refused by Gatekeeper until you do the same
 (`xattr -dr com.apple.quarantine /Applications/Athena.app`).
 
-`brew uninstall --zap --cask athena` also deletes `~/Library/Application Support/athena`.
+`brew uninstall --zap --cask athena` also stops the session daemon (its shells are hung up) and
+deletes `~/Library/Application Support/athena`. A plain uninstall or upgrade leaves the daemon and
+its shells running.
 
 ## Features
 
 **Terminals**
+
+![Terminals in split panes](docs/screenshots/terminal.png)
+
 - Shell sessions are owned by `athena-mux`, which keeps running when the window closes. Restored
   tabs reattach to the same shells with their scrollback.
 - Split panes right and down, zoom a pane, move focus between panes with the keyboard.
@@ -37,20 +42,23 @@ a copy downloaded by hand from the releases page is refused by Gatekeeper until 
   notification when it finishes. `ATHENA_NOTIFY_AFTER_SECS` changes the threshold when Athena
   (and so its daemon) is started from a shell; `ATHENA_SHELL_INTEGRATION=0` turns the
   integration off.
+- If a new version cannot attach to the shells of an older session daemon, their tabs are marked
+  **stale**: **Restart sessions** ends those shells and starts new ones, **Keep** leaves them
+  running and reconnects once the old daemon exits.
 
 **Editor**
 
-![The editor with diagnostics](docs/screenshots/editor.png)
+![The editor with a diagnostic and the References drawer](docs/screenshots/editor.png)
 
 - Syntax highlighting (tree-sitter) for Go, TypeScript, TSX and JavaScript.
 - Find in file, toggle comment, undo/redo.
-- Diagnostics and go-to-definition from `gopls` and `typescript-language-server` when they are
-  installed; Athena starts them for open files.
-- Go to file (fuzzy) and a command palette.
+- Diagnostics, go-to-definition and find references from `gopls` and
+  `typescript-language-server` when they are installed; Athena starts them for open files.
+  References are listed in a drawer tab; clicking a row opens the file at that line.
+- Go to file (fuzzy) and a command palette. A file opens in the editor pane used last, or in a
+  new pane beside the focused one with Cmd+click in the tree or Cmd+Enter in Go to file.
 
 **Claude Code**
-
-![A Claude Code session in a terminal tab](docs/screenshots/claude.png)
 
 - A new Claude session opens in its own terminal tab; the command that starts Claude is asked
   once per project.
@@ -160,8 +168,9 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-g` | Find next |
 | `cmd-shift-g` | Find previous |
 | `cmd-/` | Toggle comment |
-| `f12` | Go to definition |
+| `f12`, `cmd-alt-g` | Go to definition |
 | `cmd`-click | Go to definition |
+| `shift-f12`, `cmd-alt-r` | Find references |
 | `alt-left` / `alt-right` | Move by word |
 | `cmd-left` / `cmd-right`, `home` / `end` | Line start / end |
 | `cmd-up` / `cmd-down` | Document start / end |
@@ -173,6 +182,14 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `alt-backspace` | Delete word back |
 | `cmd-backspace` | Delete to line start |
 | `escape` | Close find / clear selection |
+
+### File tree and palette
+
+| Keys | Action |
+|---|---|
+| `cmd`-click a file in the tree | Open it in a new pane beside the focused one |
+| `enter` in Go to file | Open the file |
+| `cmd-enter` in Go to file | Open the file in a new pane beside the focused one |
 
 ### Terminal (`crates/athena-term/src/view.rs`)
 
@@ -197,8 +214,23 @@ athena mcp-stdio              MCP server for Claude Code
 ## Files and logs
 
 Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects and
-layout), `notifications.json`, the daemon and app sockets, and `mux.log` (the session daemon's
-log). Check `athena mux status` first when a terminal does not attach.
+layout), `notifications.json`, the daemon and app sockets, `app.log` (the window's log) and
+`mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
+than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.
+
+`ATHENA_LOG` sets the log level in `tracing` filter syntax (default `info`). The `athena` command
+hands off to Launch Services, which does not pass your shell's environment, so quit Athena and
+start it with the variable set:
+
+```sh
+open -a Athena --env ATHENA_LOG=debug
+open -a Athena --env ATHENA_LOG=info,athena_lsp=debug     # debug for language server traffic only
+```
+
+A session daemon that Athena starts inherits the level; one already running keeps its own. At
+`debug`, language server requests and replies are logged.
+
+Check `athena mux status` first when a terminal does not attach, then `mux.log` and `app.log`.
 
 ## Build from source
 
