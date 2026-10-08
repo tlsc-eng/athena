@@ -9,7 +9,7 @@ pub use layout::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath, Pane,
     PaneId, Rect,
 };
-pub use persist::{load, save};
+pub use persist::{is_corrupt, load, save, set_aside};
 pub use project::{Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
 

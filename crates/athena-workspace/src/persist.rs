@@ -1,6 +1,8 @@
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -20,14 +22,52 @@ pub fn load(path: &Path) -> Result<Workspace> {
     }
 }
 
+/// Corrupt copies kept beside the workspace file, newest first.
+const KEEP_CORRUPT: usize = 5;
+
 /// Writes via temp file and rename so a crash never leaves a half-written workspace.
 pub fn save(path: &Path, workspace: &Workspace) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(workspace)?)
+    let mut out = fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+    out.write_all(&serde_json::to_vec_pretty(workspace)?)
         .with_context(|| format!("write {}", tmp.display()))?;
+    // Without this, a power loss after the rename can leave an empty file under the real name.
+    out.sync_all()?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
     fs::rename(&tmp, path).with_context(|| format!("rename to {}", path.display()))?;
     Ok(())
+}
+
+/// Whether a [`load`] error means the file holds something other than a workspace, rather than
+/// that it could not be read right now.
+pub fn is_corrupt(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| e.is::<serde_json::Error>())
+}
+
+/// Moves a corrupt workspace file to `<name>.corrupt-<millis>`, keeping the newest few such copies.
+pub fn set_aside(path: &Path) -> Result<PathBuf> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let name = path
+        .file_name()
+        .context("workspace path has no file name")?
+        .to_string_lossy()
+        .into_owned();
+    let prefix = format!("{name}.corrupt-");
+    let aside = path.with_file_name(format!("{prefix}{millis}"));
+    fs::rename(path, &aside).with_context(|| format!("rename to {}", aside.display()))?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut copies: Vec<PathBuf> = fs::read_dir(dir)?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|e| e.path())
+        .collect();
+    copies.sort();
+    for old in copies.iter().rev().skip(KEEP_CORRUPT) {
+        let _ = fs::remove_file(old);
+    }
+    Ok(aside)
 }
 
 #[cfg(test)]
@@ -65,6 +105,48 @@ mod tests {
 
         fs::write(&path, b"{not json").unwrap();
         assert!(load(&path).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_unparsable_files_count_as_corrupt_and_old_copies_are_pruned() {
+        let dir = std::env::temp_dir().join(format!("athena-corrupt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads any file, so the unreadable case only holds for a normal user.
+        if fs::read(&path).is_err() {
+            assert!(!is_corrupt(&load(&path).unwrap_err()));
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        for i in 0..7 {
+            fs::write(
+                dir.join(format!("workspace.json.corrupt-{:013}", 100 + i)),
+                "x",
+            )
+            .unwrap();
+        }
+        fs::write(&path, b"{not json").unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(is_corrupt(&err), "{err:#}");
+        let aside = set_aside(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fs::read(&aside).unwrap(), b"{not json");
+        let mut left: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), KEEP_CORRUPT, "{left:?}");
+        assert_eq!(
+            left.last().map(String::as_str),
+            aside.file_name().unwrap().to_str()
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

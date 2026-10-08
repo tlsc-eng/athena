@@ -3,6 +3,7 @@
 //! keeps out of version control.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -95,7 +96,9 @@ pub fn write(root: &Path, athena: &Path, enable: bool) -> Result<()> {
     let updated = merge(current, athena, enable);
     fs::create_dir_all(path.parent().expect("settings path has a parent"))?;
     let tmp = path.with_extension("json.athena-tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&updated)? + "\n")?;
+    let mut out = fs::File::create(&tmp)?;
+    out.write_all((serde_json::to_string_pretty(&updated)? + "\n").as_bytes())?;
+    out.sync_all()?;
     fs::rename(&tmp, &path)?;
     Ok(())
 }

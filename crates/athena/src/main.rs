@@ -38,10 +38,24 @@ fn main() {
             athena_term::init(cx);
             athena_editor::init(cx);
 
-            let path = workspace_path();
+            let mut path = workspace_path();
             let mut workspace = athena_workspace::load(&path).unwrap_or_else(|err| {
-                tracing::error!("{err:#}; starting with an empty workspace");
-                let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
+                if athena_workspace::is_corrupt(&err) {
+                    match athena_workspace::set_aside(&path) {
+                        Ok(aside) => tracing::error!(
+                            "{err:#}; kept it as {} and starting with an empty workspace",
+                            aside.display()
+                        ),
+                        Err(e) => tracing::error!("{err:#}; could not keep a copy: {e:#}"),
+                    }
+                } else {
+                    // Saving over a file that could not be read would lose it for good.
+                    path = path.with_file_name("workspace.unreadable-session.json");
+                    tracing::error!(
+                        "{err:#}; leaving it alone and saving this session to {}",
+                        path.display()
+                    );
+                }
                 Workspace::default()
             });
             workspace.prune_missing();
