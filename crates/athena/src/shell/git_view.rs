@@ -56,6 +56,8 @@ pub(super) struct GitState {
     amend: bool,
     /// The message typed before Amend filled in the last commit's, put back when it is turned off.
     before_amend: Option<String>,
+    /// The last commit's body while amending; the box shows only its subject line.
+    amend_body: Option<String>,
     committing: bool,
     /// Branches for the branch picker, newest first.
     pub(super) branches: Vec<git::Branch>,
@@ -652,6 +654,10 @@ impl Shell {
         let Some(root) = self.active_root() else {
             return;
         };
+        let message = match self.git.amend_body.as_deref().filter(|_| amend) {
+            Some(body) => with_body(&message, body),
+            None => message,
+        };
         self.git.committing = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -671,6 +677,7 @@ impl Shell {
                     Ok(()) => {
                         this.git.amend = false;
                         this.git.before_amend = None;
+                        this.git.amend_body = None;
                         if let Some(input) = this.git.commit_input.clone() {
                             input.update(cx, |i, cx| i.set_text("", cx));
                         }
@@ -699,6 +706,7 @@ impl Shell {
         self.git.amend = !self.git.amend;
         cx.notify();
         if !self.git.amend {
+            self.git.amend_body = None;
             if let Some(before) = self.git.before_amend.take() {
                 input.update(cx, |i, cx| i.set_text(before, cx));
             }
@@ -721,10 +729,11 @@ impl Shell {
                 };
                 let typed = input.read(cx).text().to_string();
                 this.git.before_amend = Some(typed);
-                // The box holds one line; the body of the last commit is kept as git has it.
-                input.update(cx, |i, cx| {
-                    i.set_text(last.replace('\n', " ").trim().to_string(), cx)
-                });
+                // The box holds one line, so the body waits aside and is sent back with it.
+                let (subject, body) = last.split_once('\n').unwrap_or((&last, ""));
+                let body = body.trim_matches('\n');
+                this.git.amend_body = (!body.is_empty()).then(|| body.to_string());
+                input.update(cx, |i, cx| i.set_text(subject.trim().to_string(), cx));
             });
         })
         .detach();
@@ -960,8 +969,13 @@ impl Shell {
                                 .iter()
                                 .filter_map(|r| match r {
                                     Row::File {
-                                        group: g, targets, ..
-                                    } if *g == group => Some(targets.clone()),
+                                        group: g,
+                                        targets,
+                                        status,
+                                        ..
+                                    } if *g == group && *status != FileStatus::Conflict => {
+                                        Some(targets.clone())
+                                    }
                                     _ => None,
                                 })
                                 .flatten()
@@ -1140,6 +1154,11 @@ impl Shell {
     }
 }
 
+/// A commit message from the one-line box plus the body kept aside while amending.
+fn with_body(subject: &str, body: &str) -> String {
+    format!("{}\n\n{body}", subject.trim_end())
+}
+
 fn change_rows(root: &Path, prefix: &str, entries: &[(PathBuf, Entry)]) -> Vec<Row> {
     let mut groups: [(Group, Vec<Row>); 3] = [
         (Group::Staged, Vec::new()),
@@ -1210,6 +1229,16 @@ fn row_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amending_sends_the_kept_body_back_after_the_subject() {
+        let last = "Fix the parser\n\nIt dropped the last token.\nSecond line.";
+        let (subject, body) = last.split_once('\n').unwrap();
+        assert_eq!(
+            with_body(subject, body.trim_matches('\n')),
+            "Fix the parser\n\nIt dropped the last token.\nSecond line."
+        );
+    }
 
     #[test]
     fn an_untracked_folder_row_is_marked_as_a_folder() {
