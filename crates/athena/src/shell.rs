@@ -5,6 +5,7 @@ mod item;
 mod notices;
 mod palette;
 mod panes;
+mod quit;
 mod tree;
 mod usage_view;
 
@@ -27,7 +28,7 @@ use gpui::{
 use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
     EnableClaudeHooks, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, Minimize,
-    NewClaudeSession, NewTerminal, NextProject, NextTab, PrevProject, PrevTab, QuickOpen,
+    NewClaudeSession, NewTerminal, NextProject, NextTab, PrevProject, PrevTab, QuickOpen, Quit,
     SelectProject, SelectTab, SplitDown, SplitRight, ToggleFileTree, ToggleFullScreen,
     ToggleNotifications, TogglePaneZoom, Zoom,
 };
@@ -165,6 +166,11 @@ impl Shell {
             focus_pending: true,
             _subscriptions: subscriptions,
         };
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            // Closing the only window quits, so unsaved files get the same question as Cmd+Q.
+            this.update(cx, |this, cx| this.quit(window, cx)).is_err()
+        });
         shell.start_notices(window, cx);
         shell.start_usage(window, cx);
         crate::system_notify::set_badge(shell.unread());
@@ -515,6 +521,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PrevProject, _, cx| this.cycle(-1, cx)))
             .on_action(cx.listener(|this, _: &NextProject, _, cx| this.cycle(1, cx)))
             .on_action(cx.listener(|this, a: &SelectProject, _, cx| this.switch_to(a.0, cx)))
+            .on_action(cx.listener(|this, _: &Quit, w, cx| this.quit(w, cx)))
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
             .on_action(|_: &ToggleFullScreen, window, _| window.toggle_fullscreen())
