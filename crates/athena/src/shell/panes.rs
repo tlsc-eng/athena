@@ -742,6 +742,7 @@ impl Shell {
             self.leaving
                 .insert(key.clone(), motion::Closing::new(generation));
             self.focus_successor_pane(pane.id, window, cx);
+            cx.notify();
             let delay = cx.theme().motion.fast;
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(delay).await;
