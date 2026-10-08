@@ -2,6 +2,7 @@ mod bridge;
 mod claude;
 mod containers_view;
 mod drawer;
+mod fileops;
 mod fuzzy;
 mod item;
 mod lsp;
