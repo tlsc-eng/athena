@@ -62,7 +62,8 @@ pub fn connect(socket: &Path) -> Result<(Connection, UnixStream), ConnectError> 
         },
     )?;
     let hello: Option<ServerMsg> = read_frame(&mut stream)?;
-    stream.set_read_timeout(None)?;
+    // A daemon of another version hangs up after its Hello, and macOS then rejects setsockopt,
+    // so the version is checked before touching the socket again.
     let pid = match hello {
         Some(ServerMsg::Hello { proto, pid, .. }) if proto == PROTO_VERSION => pid,
         Some(ServerMsg::Hello { proto, pid, panes }) => {
@@ -74,6 +75,7 @@ pub fn connect(socket: &Path) -> Result<(Connection, UnixStream), ConnectError> 
         }
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "bad handshake").into()),
     };
+    stream.set_read_timeout(None)?;
     let reader = stream.try_clone()?;
     Ok((
         Connection {
