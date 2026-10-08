@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -9,7 +10,9 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Osc52, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi::{ClearMode, Handler, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{
+    ClearMode, Handler, NamedPrivateMode, PrivateMode, Processor, StdSyncHandler,
+};
 use athena_ui::TerminalColors;
 
 use crate::{colors, links, search};
@@ -335,13 +338,31 @@ impl Terminal {
             self.transport.write(vec![0x0c]);
             return;
         }
-        // A running program ignores ^L, so its cursor line moves to the top here instead.
-        let row = self.term.grid().cursor.point.line.0.max(0) as usize;
-        if row > 0 {
-            self.term.scroll_up(row);
-            self.term.move_up(row);
+        // A running program ignores ^L, so its cursor line moves to the top here instead, unless
+        // the program set a scroll region that would shuffle its lines rather than drop them.
+        let row = self.term.grid().cursor.point.line.0;
+        let region = self.scroll_region();
+        if row > 0 && region.start == 0 && row < region.end {
+            self.term.scroll_up(row as usize);
+            self.term.move_up(row as usize);
             self.term.clear_screen(ClearMode::Saved);
         }
+    }
+
+    /// The DECSTBM scroll region in screen lines, which alacritty only reveals through origin mode.
+    fn scroll_region(&mut self) -> Range<i32> {
+        let cursor = self.term.grid().cursor.clone();
+        let origin = PrivateMode::Named(NamedPrivateMode::Origin);
+        let was_set = self.mode().contains(TermMode::ORIGIN);
+        self.term.set_private_mode(origin);
+        let top = self.term.grid().cursor.point.line.0;
+        self.term.goto(self.term.screen_lines() as i32, 0);
+        let bottom = self.term.grid().cursor.point.line.0 + 1;
+        if !was_set {
+            self.term.unset_private_mode(origin);
+        }
+        self.term.grid_mut().cursor = cursor;
+        top..bottom
     }
 
     pub fn select_all(&mut self) {
@@ -590,6 +611,55 @@ mod tests {
         assert_eq!(t.term().grid().cursor.point.line, Line(0));
         feed(&mut t, b"\rprogress 50%\r\nnext");
         assert_eq!(t.text_lines(100), ["progress 50%", "next"]);
+    }
+
+    #[test]
+    fn clearing_inside_a_scroll_region_below_the_top_leaves_the_screen() {
+        let (mut t, _) = terminal();
+        for i in 0..8 {
+            feed(&mut t, format!("line {i}\r\n").as_bytes());
+        }
+        feed(&mut t, b"\x1b[Hheader\x1b[2;5r\x1b[4;1Hbody");
+        t.clear_scrollback(false);
+        assert_eq!(t.term().grid().history_size(), 0);
+        assert_eq!(
+            t.text_lines(100),
+            ["header", "line 5", "line 6", "body 7"],
+            "no line moves inside the region"
+        );
+        assert_eq!(t.term().grid().cursor.point, Point::new(Line(3), Column(4)));
+        feed(&mut t, b"\x1b[5;1H\n");
+        assert_eq!(
+            t.text_lines(100),
+            ["header", "line 6", "body 7"],
+            "the region the program set still holds"
+        );
+    }
+
+    #[test]
+    fn clearing_above_a_status_line_keeps_the_status_line() {
+        let (mut t, _) = terminal();
+        feed(
+            &mut t,
+            b"\x1b[5;1Hstatus\x1b[1;4r\x1b[1;1Hone\r\ntwo\r\nthree",
+        );
+        t.clear_scrollback(false);
+        assert_eq!(t.text_lines(100), ["three", "", "", "", "status"]);
+        assert_eq!(t.term().grid().cursor.point.line, Line(0));
+        assert!(
+            !t.mode().contains(TermMode::ORIGIN),
+            "probing the region leaves no mode set"
+        );
+    }
+
+    #[test]
+    fn clearing_on_a_status_line_below_the_region_leaves_the_screen() {
+        let (mut t, _) = terminal();
+        feed(&mut t, b"one\r\ntwo\x1b[1;4r\x1b[5;1Hstatus");
+        let screen = t.text_lines(5);
+        t.clear_scrollback(false);
+        assert_eq!(t.text_lines(100), screen);
+        assert_eq!(t.term().grid().cursor.point.line, Line(4));
     }
 
     #[test]
