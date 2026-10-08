@@ -57,6 +57,8 @@ actions!(
         ShowProblems,
         NextProblem,
         PrevProblem,
+        GoToSymbol,
+        GoToWorkspaceSymbol,
     ]
 );
 
@@ -114,6 +116,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd--", FontZoomOut, None),
         KeyBinding::new("cmd-0", FontZoomReset, None),
         KeyBinding::new("cmd-shift-m", ShowProblems, None),
+        KeyBinding::new("cmd-shift-o", GoToSymbol, None),
+        // VS Code's ⌘T opens a terminal here, so workspace symbols take ⌘⌥O.
+        KeyBinding::new("cmd-alt-o", GoToWorkspaceSymbol, None),
         // Only in the editor: in a terminal F8 belongs to the program running there.
         KeyBinding::new("f8", NextProblem, Some("Editor")),
         KeyBinding::new("shift-f8", PrevProblem, Some("Editor")),
@@ -161,6 +166,8 @@ pub fn init(cx: &mut App) {
             items: vec![
                 MenuItem::action("Command Palette", CommandPalette),
                 MenuItem::action("Go to File…", QuickOpen),
+                MenuItem::action("Go to Symbol in File…", GoToSymbol),
+                MenuItem::action("Go to Symbol in Workspace…", GoToWorkspaceSymbol),
                 MenuItem::action("Back", NavigateBack),
                 MenuItem::action("Forward", NavigateForward),
                 MenuItem::action("Find in Project…", FindInProject),

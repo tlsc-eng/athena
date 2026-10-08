@@ -225,9 +225,19 @@ impl Shell {
         self.lsp.documents.insert(doc, key);
     }
 
-    fn document_client(&self, doc: &Path) -> Option<Rc<Client>> {
+    pub(super) fn document_client(&self, doc: &Path) -> Option<Rc<Client>> {
         let key = self.lsp.documents.get(doc)?;
         Some(self.lsp.servers.get(key)?.client.clone())
+    }
+
+    /// The running servers of the project at `root`.
+    pub(super) fn project_clients(&self, root: &Path) -> Vec<Rc<Client>> {
+        self.lsp
+            .servers
+            .iter()
+            .filter(|((r, _), s)| r == root && s.ready)
+            .map(|(_, s)| s.client.clone())
+            .collect()
     }
 
     fn lsp_client(&mut self, key: &ServerKey, cx: &mut Context<Self>) -> Option<Rc<Client>> {

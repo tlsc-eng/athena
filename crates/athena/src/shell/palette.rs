@@ -1,19 +1,27 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use athena_editor::EditorView;
+use athena_lsp::{Position, Symbol, symbol_kind_label};
 use athena_ui::motion::{self, Closing};
 use athena_ui::{ActiveTheme, InputEvent, TextInput};
 use gpui::{
     Action, Animation, AnyElement, ClickEvent, Context, Entity, Focusable, FontWeight,
-    HighlightStyle, MouseButton, SharedString, StyledText, Subscription, Window, div, prelude::*,
-    px,
+    HighlightStyle, MouseButton, SharedString, StyledText, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 
 use super::Shell;
 use super::fuzzy;
+use super::lsp::document_key;
 use crate::actions;
 
 const MAX_FILES: usize = 20_000;
 const MAX_ROWS: usize = 50;
+/// A file's whole outline is listed, as VS Code does, up to this many symbols.
+const MAX_SYMBOL_ROWS: usize = 1000;
+/// Typing pauses this long before the servers are asked for workspace symbols.
+const SYMBOL_QUERY_DELAY: Duration = Duration::from_millis(120);
 
 pub(super) enum Target {
     File(PathBuf),
@@ -21,6 +29,7 @@ pub(super) enum Target {
     /// A command that starts Claude Code in this project.
     Claude(String),
     Branch(super::branches::BranchPick),
+    Symbol(PathBuf, Position),
 }
 
 impl Clone for Target {
@@ -30,11 +39,12 @@ impl Clone for Target {
             Self::Command(action) => Self::Command(action.boxed_clone()),
             Self::Claude(command) => Self::Claude(command.clone()),
             Self::Branch(pick) => Self::Branch(pick.clone()),
+            Self::Symbol(path, at) => Self::Symbol(path.clone(), *at),
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Mode {
     Files,
     /// Files that open in a new pane beside the focused one.
@@ -42,6 +52,28 @@ pub(super) enum Mode {
     Commands,
     Claude,
     Branches,
+    /// The focused file's symbols; Go to File switches here when the query starts with `@`.
+    Symbols,
+    /// Symbols anywhere in the project, after `#`.
+    WorkspaceSymbols,
+}
+
+/// The mode Go to File's query asks for with its first character, as in VS Code.
+fn mode_for_query(query: &str) -> Mode {
+    match query.chars().next() {
+        Some('@') => Mode::Symbols,
+        Some('#') => Mode::WorkspaceSymbols,
+        Some('>') => Mode::Commands,
+        _ => Mode::Files,
+    }
+}
+
+fn placeholder_hint(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Files | Mode::FilesBeside => "No matching files",
+        Mode::Symbols | Mode::WorkspaceSymbols => "No matching symbols",
+        _ => "No matching commands",
+    }
 }
 
 /// Commands offered for starting Claude; typing anything else offers that too.
@@ -50,6 +82,8 @@ const CLAUDE_COMMANDS: &[&str] = &["claude", "claude-tlsc", "claude-ai"];
 pub(super) struct Entry {
     label: String,
     detail: Option<String>,
+    /// A symbol's kind, shown at the right edge.
+    kind: Option<&'static str>,
     /// What the query is matched against (a project-relative path for files).
     key: String,
     target: Target,
@@ -57,11 +91,20 @@ pub(super) struct Entry {
 
 pub(super) struct Palette {
     mode: Mode,
-    input: Entity<TextInput>,
+    /// Opened as Go to File, so a leading `@`, `#` or `>` switches what is listed.
+    switchable: bool,
+    pub(super) input: Entity<TextInput>,
     placeholder_hint: &'static str,
     entries: Vec<Entry>,
     hits: Vec<(usize, Vec<usize>)>,
     selected: usize,
+    /// Shown instead of the list while symbols load, or when there are none to load.
+    status: Option<&'static str>,
+    /// The editor whose symbols are listed and its cursor before the palette moved it.
+    origin: Option<(Entity<EditorView>, (u32, u32))>,
+    /// Bumped per symbol request so a slow answer never replaces a newer one.
+    asked: u64,
+    symbols_task: Option<Task<()>>,
     _subscription: Subscription,
 }
 
@@ -82,6 +125,11 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Next tab", Box::new(actions::NextTab)),
         ("Previous tab", Box::new(actions::PrevTab)),
         ("Go to file", Box::new(actions::QuickOpen)),
+        ("Go to symbol in file", Box::new(actions::GoToSymbol)),
+        (
+            "Go to symbol in workspace",
+            Box::new(actions::GoToWorkspaceSymbol),
+        ),
         ("Go back", Box::new(actions::NavigateBack)),
         ("Go forward", Box::new(actions::NavigateForward)),
         (
@@ -156,18 +204,20 @@ fn project_files(root: &Path) -> Vec<String> {
 impl Shell {
     pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match mode {
-            Mode::Files => "Go to file…",
+            Mode::Files => "Go to file…  (@ symbol, # workspace symbol, > command)",
             Mode::FilesBeside => "Open to the side…",
             Mode::Commands => "Run a command…",
             Mode::Claude => "Command that starts Claude Code here…",
             Mode::Branches => "Switch to a branch, or type a name to create one…",
+            Mode::Symbols => "Go to symbol in file…",
+            Mode::WorkspaceSymbols => "Go to symbol in workspace…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
             &input,
             window,
             |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Changed => this.filter_palette(cx),
+                InputEvent::Changed => this.palette_query_changed(window, cx),
                 InputEvent::Up => this.move_palette(-1, cx),
                 InputEvent::Down => this.move_palette(1, cx),
                 InputEvent::Submit => this.run_palette(None, false, window, cx),
@@ -176,68 +226,91 @@ impl Shell {
             },
         );
         let entries = match mode {
-            Mode::Files | Mode::FilesBeside | Mode::Branches => Vec::new(),
+            Mode::Files
+            | Mode::FilesBeside
+            | Mode::Branches
+            | Mode::Symbols
+            | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
-            Mode::Commands => {
-                let root = self.workspace.active_project().map(|p| p.root.as_path());
-                let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
-                let hooks_any = root.is_some_and(crate::claude_hooks::installed);
-                let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
-                let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
-                let mut commands = commands();
-                // The editor's own action, so it only means something with an editor focused.
-                if self.focused_editor().is_some()
-                    && let Ok(action) = cx.build_action("editor::GoToLine", None)
-                {
-                    let at = commands.iter().position(|(l, _)| *l == "Go to file");
-                    commands.insert(at.map_or(0, |i| i + 1), ("Go to line", action));
-                }
-                commands
-                    .into_iter()
-                    .filter(|(label, _)| {
-                        !(label.starts_with("Enable Claude Code hooks") && hooks_on
-                            || label.starts_with("Disable Claude Code hooks") && !hooks_any
-                            || label.starts_with("Enable Playwright MCP")
-                                && (mcp_on || !playwright)
-                            || label.starts_with("Disable Playwright MCP") && !mcp_on
-                            || *label == "Run Playwright tests" && !playwright)
-                    })
-                    .map(|(label, action)| Entry {
-                        detail: window
-                            .highest_precedence_binding_for_action(action.as_ref())
-                            .map(|b| keystrokes(&b)),
-                        key: label.to_string(),
-                        label: label.to_string(),
-                        target: Target::Command(action),
-                    })
-                    .collect()
-            }
+            Mode::Commands => self.command_entries(window, cx),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
         self.palette_closing = None;
         self.palette = Some(Palette {
             mode,
+            switchable: mode == Mode::Files,
             input,
-            placeholder_hint: match mode {
-                Mode::Files | Mode::FilesBeside => "No matching files",
-                _ => "No matching commands",
-            },
+            placeholder_hint: placeholder_hint(mode),
             entries,
             hits: Vec::new(),
             selected: 0,
+            status: None,
+            origin: None,
+            asked: 0,
+            symbols_task: None,
             _subscription: subscription,
         });
+        if files {
+            self.load_palette_files(cx);
+        }
+        if mode == Mode::Symbols {
+            self.load_document_symbols(cx);
+        }
         self.filter_palette(cx);
+        cx.notify();
+    }
 
-        if files && let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) {
+    /// Commands, with their key bindings, minus those that mean nothing here.
+    fn command_entries(&self, window: &Window, cx: &mut Context<Self>) -> Vec<Entry> {
+        let root = self.workspace.active_project().map(|p| p.root.as_path());
+        let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
+        let hooks_any = root.is_some_and(crate::claude_hooks::installed);
+        let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
+        let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
+        let mut commands = commands();
+        // The editor's own action, so it only means something with an editor focused.
+        if self.focused_editor().is_some()
+            && let Ok(action) = cx.build_action("editor::GoToLine", None)
+        {
+            let at = commands.iter().position(|(l, _)| *l == "Go to file");
+            commands.insert(at.map_or(0, |i| i + 1), ("Go to line", action));
+        }
+        commands
+            .into_iter()
+            .filter(|(label, _)| {
+                !(label.starts_with("Enable Claude Code hooks") && hooks_on
+                    || label.starts_with("Disable Claude Code hooks") && !hooks_any
+                    || label.starts_with("Enable Playwright MCP") && (mcp_on || !playwright)
+                    || label.starts_with("Disable Playwright MCP") && !mcp_on
+                    || *label == "Run Playwright tests" && !playwright)
+            })
+            .map(|(label, action)| Entry {
+                kind: None,
+                detail: window
+                    .highest_precedence_binding_for_action(action.as_ref())
+                    .map(|b| keystrokes(&b)),
+                key: label.to_string(),
+                label: label.to_string(),
+                target: Target::Command(action),
+            })
+            .collect()
+    }
+
+    /// Lists the project's files once they have been walked, off the main thread.
+    fn load_palette_files(&mut self, cx: &mut Context<Self>) {
+        if let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) {
             let walk = cx
                 .background_executor()
                 .spawn(async move { (project_files(&root), root) });
             cx.spawn(async move |this, cx| {
                 let (files, root) = walk.await;
                 let _ = this.update(cx, |this, cx| {
-                    let Some(palette) = this.palette.as_mut() else {
+                    let Some(palette) = this
+                        .palette
+                        .as_mut()
+                        .filter(|p| matches!(p.mode, Mode::Files | Mode::FilesBeside))
+                    else {
                         return;
                     };
                     palette.entries = files
@@ -251,6 +324,7 @@ impl Shell {
                             Entry {
                                 label: name,
                                 detail: dir,
+                                kind: None,
                                 key: rel,
                                 target: Target::File(path),
                             }
@@ -261,7 +335,178 @@ impl Shell {
             })
             .detach();
         }
-        cx.notify();
+    }
+
+    /// Go to File's query changed: a leading `@`, `#` or `>` switches what is listed first.
+    fn palette_query_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else {
+            return;
+        };
+        let query = palette.input.read(cx).text().to_string();
+        if palette.switchable {
+            let wanted = mode_for_query(&query);
+            if wanted != palette.mode {
+                self.switch_palette(wanted, window, cx);
+            }
+        }
+        if self.palette.as_ref().map(|p| p.mode) == Some(Mode::WorkspaceSymbols) {
+            self.request_workspace_symbols(cx);
+        }
+        self.filter_palette(cx);
+    }
+
+    fn switch_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_palette_origin(cx);
+        let commands = (mode == Mode::Commands).then(|| self.command_entries(window, cx));
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        palette.mode = mode;
+        palette.placeholder_hint = placeholder_hint(mode);
+        palette.entries = commands.unwrap_or_default();
+        palette.status = None;
+        palette.asked += 1;
+        palette.symbols_task = None;
+        match mode {
+            Mode::Files => self.load_palette_files(cx),
+            Mode::Symbols => self.load_document_symbols(cx),
+            _ => {}
+        }
+    }
+
+    /// What the query matches against, without the character that picked the mode.
+    fn palette_needle(palette: &Palette, cx: &gpui::App) -> String {
+        let query = palette.input.read(cx).text();
+        if palette.switchable && palette.mode != Mode::Files {
+            query
+                .chars()
+                .skip(1)
+                .collect::<String>()
+                .trim_start()
+                .to_string()
+        } else {
+            query.to_string()
+        }
+    }
+
+    /// Lists the focused editor's symbols, outermost first, as its language server reports them.
+    fn load_document_symbols(&mut self, cx: &mut Context<Self>) {
+        let editor = self.focused_editor();
+        let client = editor
+            .as_ref()
+            .and_then(|e| self.document_client(&document_key(e.read(cx).path())));
+        let origin = editor
+            .as_ref()
+            .and_then(|e| Some((e.clone(), e.read(cx).cursor_utf16()?)));
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        palette.origin = origin;
+        let (Some(editor), Some(client)) = (editor, client) else {
+            palette.status = Some(if palette.origin.is_some() {
+                "No language server lists symbols for this file."
+            } else {
+                "Open a file to list its symbols."
+            });
+            return;
+        };
+        palette.status = Some("Loading symbols…");
+        let asked = palette.asked;
+        let path = editor.read(cx).path().to_path_buf();
+        let doc = document_key(&path);
+        cx.spawn(async move |this, cx| {
+            let found = client.document_symbols(&doc).await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(palette) = this.palette.as_mut().filter(|p| p.asked == asked) else {
+                    return;
+                };
+                palette.status = None;
+                match found {
+                    Ok(symbols) => {
+                        palette.entries = symbol_entries(symbols, Some(&path), None);
+                        if palette.entries.is_empty() {
+                            palette.status = Some("This file has no symbols.");
+                        }
+                    }
+                    Err(why) => {
+                        tracing::warn!("document symbols failed: {why}");
+                        palette.status = Some("The language server could not list symbols.");
+                    }
+                }
+                this.filter_palette(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Asks every server of the active project for symbols matching the query, once typing pauses.
+    fn request_workspace_symbols(&mut self, cx: &mut Context<Self>) {
+        let root = self.active_root();
+        let clients = root
+            .as_ref()
+            .map(|r| self.project_clients(r))
+            .unwrap_or_default();
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        let query = Self::palette_needle(palette, cx);
+        palette.asked += 1;
+        let asked = palette.asked;
+        if query.is_empty() || clients.is_empty() {
+            palette.entries.clear();
+            palette.symbols_task = None;
+            palette.status = Some(if clients.is_empty() {
+                "Open a Go or TypeScript file to start its language server."
+            } else {
+                "Type to search for symbols in the project."
+            });
+            return;
+        }
+        palette.status = palette.entries.is_empty().then_some("Searching symbols…");
+        palette.symbols_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SYMBOL_QUERY_DELAY).await;
+            let mut symbols = Vec::new();
+            for client in clients {
+                match client.workspace_symbols(&query).await {
+                    Ok(found) => symbols.extend(found),
+                    Err(why) => tracing::debug!("workspace symbols failed: {why}"),
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                let Some(palette) = this.palette.as_mut().filter(|p| p.asked == asked) else {
+                    return;
+                };
+                palette.entries = symbol_entries(symbols, None, root.as_deref());
+                palette.status = None;
+                this.filter_palette(cx);
+            });
+        }));
+    }
+
+    /// Moves the editor to the selected symbol while the list is open, as VS Code previews it.
+    fn preview_palette_symbol(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref().filter(|p| p.mode == Mode::Symbols) else {
+            return;
+        };
+        let target = palette
+            .hits
+            .get(palette.selected)
+            .and_then(|(i, _)| palette.entries.get(*i));
+        if let (Some((editor, _)), Some(Target::Symbol(_, at))) =
+            (palette.origin.as_ref(), target.map(|e| &e.target))
+        {
+            let (editor, at) = (editor.clone(), *at);
+            editor.update(cx, |e, cx| e.go_to_position(at.line, at.character, cx));
+        }
+    }
+
+    /// Puts the editor's cursor back where it was before symbols were previewed.
+    fn restore_palette_origin(&mut self, cx: &mut Context<Self>) {
+        if let Some((editor, (line, character))) =
+            self.palette.as_mut().and_then(|p| p.origin.take())
+        {
+            editor.update(cx, |e, cx| e.go_to_position(line, character, cx));
+        }
     }
 
     /// Opens the palette with `query` already typed.
@@ -282,7 +527,7 @@ impl Shell {
         let Some(palette) = self.palette.as_mut() else {
             return;
         };
-        let query = palette.input.read(cx).text().to_string();
+        let query = Self::palette_needle(palette, cx);
         if palette.mode == Mode::Claude {
             palette.entries = claude_entries(&query);
         }
@@ -290,6 +535,7 @@ impl Shell {
             palette.entries = super::branches::entries(&self.git.branches, &query)
                 .into_iter()
                 .map(|b| Entry {
+                    kind: None,
                     label: b.label,
                     detail: b.detail,
                     key: b.key,
@@ -297,6 +543,10 @@ impl Shell {
                 })
                 .collect();
         }
+        let limit = match palette.mode {
+            Mode::Symbols | Mode::WorkspaceSymbols => MAX_SYMBOL_ROWS,
+            _ => MAX_ROWS,
+        };
         let mut hits: Vec<(i32, usize, Vec<usize>)> = palette
             .entries
             .iter()
@@ -308,10 +558,13 @@ impl Shell {
         }
         palette.hits = hits
             .into_iter()
-            .take(MAX_ROWS)
+            .take(limit)
             .map(|(_, i, pos)| (i, pos))
             .collect();
         palette.selected = 0;
+        if !query.is_empty() {
+            self.preview_palette_symbol(cx);
+        }
         cx.notify();
     }
 
@@ -320,11 +573,13 @@ impl Shell {
             && !p.hits.is_empty()
         {
             p.selected = (p.selected as isize + step).rem_euclid(p.hits.len() as isize) as usize;
+            self.preview_palette_symbol(cx);
             cx.notify();
         }
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_palette_origin(cx);
         if let Some(palette) = self.palette.take() {
             self.fade_out_palette(palette, cx);
         }
@@ -362,11 +617,19 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .palette
+            .as_ref()
+            .is_none_or(|p| p.hits.get(row.unwrap_or(p.selected)).is_none())
+        {
+            return;
+        }
+        // Back to where the cursor was first, so Go Back returns there rather than to a preview.
+        self.restore_palette_origin(cx);
         let Some(palette) = self.palette.take() else {
             return;
         };
         let Some((index, _)) = palette.hits.get(row.unwrap_or(palette.selected)) else {
-            self.palette = Some(palette);
             return;
         };
         let beside = beside || palette.mode == Mode::FilesBeside;
@@ -379,6 +642,7 @@ impl Shell {
             Some(Target::Command(action)) => window.dispatch_action(action, cx),
             Some(Target::Claude(command)) => self.start_claude_with(command, window, cx),
             Some(Target::Branch(pick)) => self.run_branch(pick, cx),
+            Some(Target::Symbol(path, at)) => self.lsp.jump = Some((path, at)),
             None => {}
         }
         cx.notify();
@@ -446,21 +710,25 @@ impl Shell {
                                     .with_highlights(bold),
                             )
                             .children(
-                                matches!(entry.target, Target::File(_) | Target::Branch(_))
-                                    .then(|| entry.detail.clone())
-                                    .flatten()
-                                    .map(|d| {
-                                        div()
-                                            .text_size(t.typography.caption)
-                                            .text_color(t.color.content_muted)
-                                            .child(d)
-                                    }),
+                                matches!(
+                                    entry.target,
+                                    Target::File(_) | Target::Branch(_) | Target::Symbol(..)
+                                )
+                                .then(|| entry.detail.clone())
+                                .flatten()
+                                .map(|d| {
+                                    div()
+                                        .text_size(t.typography.caption)
+                                        .text_color(t.color.content_muted)
+                                        .child(d)
+                                }),
                             ),
                     )
                     .children(
                         matches!(entry.target, Target::Command(_))
                             .then(|| entry.detail.clone())
                             .flatten()
+                            .or_else(|| entry.kind.map(str::to_string))
                             .map(|k| {
                                 div()
                                     .font_family(t.typography.mono.clone())
@@ -474,6 +742,7 @@ impl Shell {
             .collect();
 
         let empty = palette.hits.is_empty() && !palette.input.read(cx).text().is_empty();
+        let message = palette.status.or(empty.then_some(palette.placeholder_hint));
         let panel = div()
             .id("palette")
             .w(px(560.))
@@ -508,18 +777,16 @@ impl Shell {
                     .min_h_0()
                     .overflow_y_scroll()
                     .py(px(4.))
-                    .children(rows)
-                    .when(empty, |el| {
-                        el.child(
-                            div()
-                                .h(px(32.))
-                                .px(px(12.))
-                                .flex()
-                                .items_center()
-                                .text_color(t.color.content_muted)
-                                .child(palette.placeholder_hint),
-                        )
-                    }),
+                    .when(palette.status.is_none(), |el| el.children(rows))
+                    .children(message.map(|message| {
+                        div()
+                            .h(px(32.))
+                            .px(px(12.))
+                            .flex()
+                            .items_center()
+                            .text_color(t.color.content_muted)
+                            .child(message)
+                    })),
             );
         let panel = match closing {
             Some(closing) => motion::animate_exit(
@@ -592,6 +859,37 @@ fn keystrokes(binding: &gpui::KeyBinding) -> String {
         .join(" ")
 }
 
+/// Palette rows for symbols; `file` is the editor's own spelling of the path they are all in,
+/// and `root` makes workspace results show where they live.
+fn symbol_entries(symbols: Vec<Symbol>, file: Option<&Path>, root: Option<&Path>) -> Vec<Entry> {
+    let canonical = root.map(document_key);
+    symbols
+        .into_iter()
+        .map(|s| {
+            let path = match (file, root, canonical.as_deref()) {
+                (Some(file), _, _) => file.to_path_buf(),
+                (None, Some(root), Some(canonical)) => s
+                    .path
+                    .strip_prefix(canonical)
+                    .map_or_else(|_| s.path.clone(), |rest| root.join(rest)),
+                _ => s.path.clone(),
+            };
+            let place = root.map(|r| path.strip_prefix(r).unwrap_or(&path).display().to_string());
+            let detail = match (s.container, place) {
+                (Some(c), Some(p)) => Some(format!("{c} · {p}")),
+                (c, p) => c.or(p),
+            };
+            Entry {
+                label: s.name.clone(),
+                detail,
+                kind: Some(symbol_kind_label(s.kind)),
+                key: s.name,
+                target: Target::Symbol(path, s.range.start),
+            }
+        })
+        .collect()
+}
+
 fn claude_entries(query: &str) -> Vec<Entry> {
     let typed = query.trim();
     let mut names: Vec<String> = CLAUDE_COMMANDS.iter().map(|c| c.to_string()).collect();
@@ -603,8 +901,53 @@ fn claude_entries(query: &str) -> Vec<Entry> {
         .map(|name| Entry {
             label: name.clone(),
             detail: None,
+            kind: None,
             key: name.clone(),
             target: Target::Claude(name),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use athena_lsp::Range;
+
+    #[test]
+    fn the_first_character_picks_what_go_to_file_lists() {
+        assert_eq!(mode_for_query("@main"), Mode::Symbols);
+        assert_eq!(mode_for_query("#Server"), Mode::WorkspaceSymbols);
+        assert_eq!(mode_for_query(">split"), Mode::Commands);
+        assert_eq!(mode_for_query("src/@x"), Mode::Files);
+        assert_eq!(mode_for_query(""), Mode::Files);
+    }
+
+    #[test]
+    fn workspace_symbols_open_through_the_project_spelling_of_their_path() {
+        let dir = std::env::temp_dir().join(format!("athena-palette-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        let at = Position {
+            line: 3,
+            character: 5,
+        };
+        let symbol = |name: &str, container: Option<&str>| Symbol {
+            name: name.into(),
+            kind: 12,
+            container: container.map(str::to_string),
+            path: canonical.join("pkg/run.go"),
+            range: Range { start: at, end: at },
+        };
+        let entries = symbol_entries(vec![symbol("Run", Some("pkg"))], None, Some(&dir));
+        assert_eq!(entries[0].detail.as_deref(), Some("pkg · pkg/run.go"));
+        assert_eq!(entries[0].kind, Some("function"));
+        assert!(
+            matches!(&entries[0].target, Target::Symbol(p, a) if *p == dir.join("pkg/run.go") && *a == at)
+        );
+        let open = dir.join("pkg/run.go");
+        let entries = symbol_entries(vec![symbol("helper", None)], Some(&open), None);
+        assert_eq!(entries[0].detail, None);
+        assert!(matches!(&entries[0].target, Target::Symbol(p, _) if *p == open));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

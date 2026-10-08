@@ -51,8 +51,9 @@ use crate::actions::{
     TogglePaneZoom, TogglePreview, Zoom,
 };
 use crate::actions::{
-    FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, NavigateBack, NavigateForward,
-    NextProblem, PrevProblem, RevealInTree, ShowChanges, ShowProblems, SwitchBranch, ToggleBlame,
+    FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, GoToSymbol, GoToWorkspaceSymbol,
+    NavigateBack, NavigateForward, NextProblem, PrevProblem, RevealInTree, ShowChanges,
+    ShowProblems, SwitchBranch, ToggleBlame,
 };
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
@@ -815,6 +816,12 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ShowProblems, _, cx| this.toggle_problems(cx)))
             .on_action(cx.listener(|this, _: &NextProblem, _, cx| this.go_to_problem(true, cx)))
             .on_action(cx.listener(|this, _: &PrevProblem, _, cx| this.go_to_problem(false, cx)))
+            .on_action(cx.listener(|this, _: &GoToSymbol, w, cx| {
+                this.open_palette_with(palette::Mode::Files, "@", w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GoToWorkspaceSymbol, w, cx| {
+                this.open_palette_with(palette::Mode::Files, "#", w, cx)
+            }))
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)
