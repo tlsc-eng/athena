@@ -287,7 +287,7 @@ impl Shell {
         }
     }
 
-    fn editors_under(&self, root: &Path) -> Vec<Entity<EditorView>> {
+    pub(super) fn editors_under(&self, root: &Path) -> Vec<Entity<EditorView>> {
         self.items
             .iter()
             .filter(|((r, _), _)| r == root)

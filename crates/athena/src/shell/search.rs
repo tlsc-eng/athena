@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -6,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use athena_editor::EditorView;
 use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput};
 use gpui::{
     AnyElement, Context, Entity, Focusable, FontWeight, HighlightStyle, PromptLevel,
@@ -17,7 +17,6 @@ use regex::{NoExpand, Regex, RegexBuilder};
 
 use super::Shell;
 use super::drawer::DrawerTab;
-use super::item::ItemView;
 
 /// Typing pauses this long before a new search starts.
 const DEBOUNCE: Duration = Duration::from_millis(150);
@@ -62,6 +61,8 @@ enum Found {
 pub(super) struct SearchState {
     find: Option<Entity<TextInput>>,
     replace: Option<Entity<TextInput>>,
+    /// The project the results belong to, which Replace All rewrites even after a switch.
+    root: Option<PathBuf>,
     files: Rc<Vec<FileHits>>,
     rows: Rc<Vec<Row>>,
     collapsed: HashSet<PathBuf>,
@@ -91,12 +92,42 @@ pub(super) fn matcher(query: &str) -> Option<Regex> {
 fn walk(root: &Path) -> impl Iterator<Item = PathBuf> {
     ignore::WalkBuilder::new(root)
         .hidden(false)
-        .filter_entry(|e| e.file_name() != ".git")
+        .filter_entry(|e| e.file_name() != ".git" && !is_temp(e.path()))
         .sort_by_file_name(|a, b| a.cmp(b))
         .build()
         .flatten()
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .map(|e| e.into_path())
+}
+
+/// Where a replacement is written before it takes the file's place.
+fn temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.athena-tmp"))
+}
+
+fn is_temp(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|n| n.to_string_lossy().ends_with(".athena-tmp"))
+}
+
+/// Replaces `path`'s contents through a rename, so a failed write never leaves it half written.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = temp_path(path);
+    let written = (|| {
+        let mut out = std::fs::File::create(&tmp)?;
+        out.write_all(bytes)?;
+        out.sync_all()?;
+        std::fs::set_permissions(&tmp, std::fs::metadata(path)?.permissions())?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// A file's text, unless it is large, binary or not UTF-8.
@@ -193,15 +224,24 @@ fn search(
     false
 }
 
-/// Replaces every match in files under `root` not in `skip`; returns (files, matches, failures).
-fn replace_on_disk(
-    root: &Path,
-    re: &Regex,
-    with: &str,
-    skip: &HashSet<PathBuf>,
-) -> (usize, usize, Vec<String>) {
-    let (mut files, mut count, mut failed) = (0, 0, Vec::new());
-    for path in walk(root).filter(|p| !skip.contains(p)) {
+/// What a disk replacement did, and which open files it left for their editors.
+#[derive(Debug, Default)]
+struct DiskReplace {
+    files: usize,
+    matches: usize,
+    failed: Vec<String>,
+    /// Paths in `open` that the search walk reaches, so their editors take the replacement.
+    for_editors: HashSet<PathBuf>,
+}
+
+/// Replaces every match in the files a search under `root` reads, except those in `open`.
+fn replace_on_disk(root: &Path, re: &Regex, with: &str, open: &HashSet<PathBuf>) -> DiskReplace {
+    let mut out = DiskReplace::default();
+    for path in walk(root) {
+        if open.contains(&path) {
+            out.for_editors.insert(path);
+            continue;
+        }
         let Some(text) = read_text(&path) else {
             continue;
         };
@@ -210,15 +250,15 @@ fn replace_on_disk(
             continue;
         }
         let replaced = re.replace_all(&text, NoExpand(with));
-        match std::fs::write(&path, replaced.as_bytes()) {
+        match write_atomic(&path, replaced.as_bytes()) {
             Ok(()) => {
-                files += 1;
-                count += n;
+                out.files += 1;
+                out.matches += n;
             }
-            Err(err) => failed.push(format!("{}: {err}", path.display())),
+            Err(err) => out.failed.push(format!("{}: {err}", path.display())),
         }
     }
-    (files, count, failed)
+    out
 }
 
 impl SearchState {
@@ -295,6 +335,10 @@ impl Shell {
         self.search.cancel = Arc::default();
         let query = self.search.query(cx);
         let root = self.workspace.active_project().map(|p| p.root.clone());
+        if root != self.search.root {
+            self.search.root = root.clone();
+            self.clear_results(cx);
+        }
         let (Some(re), Some(root)) = (matcher(&query), root) else {
             self.search.task = None;
             self.search.running = false;
@@ -434,10 +478,7 @@ impl Shell {
     /// Asks first, then replaces in open editors' buffers (undoable there) and on disk elsewhere.
     fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.search.query(cx);
-        let (Some(re), Some(root)) = (
-            matcher(&query),
-            self.workspace.active_project().map(|p| p.root.clone()),
-        ) else {
+        let (Some(re), Some(root)) = (matcher(&query), self.search.root.clone()) else {
             return;
         };
         if self.search.files.is_empty() || self.search.replacing {
@@ -475,38 +516,39 @@ impl Shell {
             if answer.await != Ok(0) {
                 return;
             }
-            let Ok((open, in_editors)) = this.update(cx, |this, cx| {
-                this.replace_in_editors(&root, &re, &with, cx)
+            let Ok(open) = this.update(cx, |this, cx| {
+                this.search.replacing = true;
+                cx.notify();
+                this.editor_paths_under(&root, cx)
             }) else {
                 return;
             };
             let disk_root = root.clone();
-            let (files, count, failed) = cx
+            let disk_re = re.clone();
+            let disk_with = with.clone();
+            let disk = cx
                 .background_executor()
-                .spawn(async move { replace_on_disk(&disk_root, &re, &with, &open) })
+                .spawn(async move { replace_on_disk(&disk_root, &disk_re, &disk_with, &open) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let in_editors = this.replace_in_editors(&root, &disk.for_editors, &re, &with, cx);
                 this.search.replacing = false;
-                let total = count + in_editors.1;
-                tracing::info!(files = files + in_editors.0, total, "replaced in project");
+                let files = disk.files + in_editors.0;
+                let total = disk.matches + in_editors.1;
+                tracing::info!(files, total, "replaced in project");
                 let title = format!(
-                    "Replaced {total} {} in {} {}",
+                    "Replaced {total} {} in {files} {}",
                     if total == 1 {
                         "occurrence"
                     } else {
                         "occurrences"
                     },
-                    files + in_editors.0,
-                    if files + in_editors.0 == 1 {
-                        "file"
-                    } else {
-                        "files"
-                    },
+                    if files == 1 { "file" } else { "files" },
                 );
-                let body = if failed.is_empty() {
+                let body = if disk.failed.is_empty() {
                     String::new()
                 } else {
-                    format!("Could not write {}", failed.join(", "))
+                    format!("Could not write {}", disk.failed.join(", "))
                 };
                 this.transient_notice(&title, body, cx);
                 this.git_kick(cx);
@@ -514,32 +556,35 @@ impl Shell {
             });
         })
         .detach();
-        self.search.replacing = true;
     }
 
-    /// Applies the replacement to every editor under `root`; returns their paths and (files, matches).
+    /// Files open in a loaded editor, which take a replacement there instead of on disk.
+    fn editor_paths_under(&self, root: &Path, cx: &gpui::App) -> HashSet<PathBuf> {
+        self.editors_under(root)
+            .iter()
+            .map(|e| e.read(cx))
+            .filter(|e| e.version().is_some())
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    }
+
+    /// Applies the replacement to the editors on `paths`; returns (files, matches) changed.
     fn replace_in_editors(
         &mut self,
         root: &Path,
+        paths: &HashSet<PathBuf>,
         re: &Regex,
         with: &str,
         cx: &mut Context<Self>,
-    ) -> (HashSet<PathBuf>, (usize, usize)) {
-        let editors: Vec<Entity<EditorView>> = self
-            .items
-            .iter()
-            .filter(|((r, _), _)| r == root)
-            .filter_map(|(_, v)| match v {
-                ItemView::Editor(e) => Some(e.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut open = HashSet::new();
+    ) -> (usize, usize) {
         let mut buffers = HashSet::new();
         let mut changed = HashSet::new();
         let mut count = 0;
-        for editor in editors {
+        for editor in self.editors_under(root) {
             let path = editor.read(cx).path().to_path_buf();
+            if !paths.contains(&path) {
+                continue;
+            }
             // Tabs on the same file share one buffer, which must be replaced in only once.
             if !buffers.insert(super::lsp::document_key(&path)) {
                 continue;
@@ -547,7 +592,6 @@ impl Shell {
             let Some(text) = editor.read(cx).text() else {
                 continue;
             };
-            open.insert(path.clone());
             let n = re.find_iter(&text).count();
             if n == 0 {
                 continue;
@@ -558,7 +602,7 @@ impl Shell {
                 count += n;
             }
         }
-        (open, (changed.len(), count))
+        (changed.len(), count)
     }
 
     pub(super) fn render_search_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -590,6 +634,10 @@ impl Shell {
     /// The Search tab: query and replacement fields above matches grouped by file.
     pub(super) fn render_search(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let find = self.ensure_search_inputs(cx);
+        // Results from the project shown before a switch would be opened and replaced in the wrong one.
+        if self.search.root.as_ref() != self.workspace.active_project().map(|p| &p.root) {
+            self.schedule_search(cx);
+        }
         let replace = self.search.replace.clone();
         let t = cx.theme().clone();
         let field = |input: Entity<TextInput>| {
@@ -659,7 +707,7 @@ impl Shell {
         let rows = self.search.rows.clone();
         let collapsed = self.search.collapsed.clone();
         let selected = self.search.selected;
-        let root = self.workspace.active_project().map(|p| p.root.clone());
+        let root = self.search.root.clone();
         uniform_list(
             "search-results",
             rows.len(),
@@ -915,15 +963,73 @@ mod tests {
         std::fs::write(root.join("src/a.rs"), "old old\nkeep\n").unwrap();
         std::fs::write(root.join("src/b.rs"), "old\n").unwrap();
         std::fs::write(root.join("src/open.rs"), "old\n").unwrap();
-        let skip = HashSet::from([root.join("src/open.rs")]);
-        let (files, count, failed) =
-            replace_on_disk(&root, &matcher("old").unwrap(), "$new", &skip);
-        assert_eq!((files, count), (2, 3));
-        assert!(failed.is_empty());
+        let open = HashSet::from([root.join("src/open.rs")]);
+        let done = replace_on_disk(&root, &matcher("old").unwrap(), "$new", &open);
+        assert_eq!((done.files, done.matches), (2, 3));
+        assert!(done.failed.is_empty());
         let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
         assert_eq!(read("src/a.rs"), "$new $new\nkeep\n");
         assert_eq!(read("src/b.rs"), "$new\n");
         assert_eq!(read("src/open.rs"), "old\n");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn replace_stays_inside_the_search_root() {
+        let searched = project("replace-root");
+        let other = project("replace-other");
+        std::fs::write(searched.join("src/a.rs"), "old\n").unwrap();
+        std::fs::write(other.join("src/a.rs"), "old\n").unwrap();
+        let done = replace_on_disk(&searched, &matcher("old").unwrap(), "new", &HashSet::new());
+        assert_eq!(done.files, 1);
+        assert_eq!(
+            std::fs::read_to_string(searched.join("src/a.rs")).unwrap(),
+            "new\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(other.join("src/a.rs")).unwrap(),
+            "old\n"
+        );
+        std::fs::remove_dir_all(&searched).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    #[test]
+    fn only_open_files_the_search_reads_are_left_for_their_editors() {
+        let root = project("replace-open");
+        let outside = project("replace-outside");
+        std::fs::write(root.join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(root.join("ignored.rs"), "old\n").unwrap();
+        std::fs::write(root.join("src/shown.rs"), "old\n").unwrap();
+        std::fs::write(outside.join("src/far.rs"), "old\n").unwrap();
+        let open = HashSet::from([
+            root.join("ignored.rs"),
+            root.join("src/shown.rs"),
+            outside.join("src/far.rs"),
+        ]);
+        let done = replace_on_disk(&root, &matcher("old").unwrap(), "new", &open);
+        assert_eq!(done.for_editors, HashSet::from([root.join("src/shown.rs")]));
+        assert_eq!(
+            std::fs::read_to_string(root.join("ignored.rs")).unwrap(),
+            "old\n"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[test]
+    fn replacing_on_disk_keeps_the_mode_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = project("replace-mode");
+        let script = root.join("src/run.sh");
+        std::fs::write(&script, "echo old\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let done = replace_on_disk(&root, &matcher("old").unwrap(), "new", &HashSet::new());
+        assert_eq!(done.files, 1);
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "echo new\n");
+        let mode = std::fs::metadata(&script).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        assert!(!temp_path(&script).exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
