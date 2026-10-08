@@ -39,6 +39,17 @@ pub struct Workspace {
     /// Roots of closed projects, most recently closed first, for Open Recent.
     #[serde(default)]
     pub recent: Vec<PathBuf>,
+    #[serde(default)]
+    pub theme: ThemeChoice,
+}
+
+/// Which colour theme to show; `System` follows macOS's light or dark appearance.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 /// Open Recent keeps this many folders, as VS Code does by default.
@@ -100,6 +111,7 @@ impl Default for Workspace {
             ide_integration: false,
             ui: UiState::default(),
             recent: Vec::new(),
+            theme: ThemeChoice::System,
         }
     }
 }
@@ -399,6 +411,17 @@ mod tests {
         let old: Workspace =
             serde_json::from_str(r#"{"projects":[],"active":null,"window":null}"#).unwrap();
         assert!(old.recent.is_empty());
+    }
+
+    #[test]
+    fn the_theme_follows_macos_unless_one_was_chosen() {
+        let old: Workspace =
+            serde_json::from_str(r#"{"projects":[],"active":null,"window":null}"#).unwrap();
+        assert_eq!(old.theme, ThemeChoice::System);
+        let light: Workspace =
+            serde_json::from_str(r#"{"projects":[],"active":null,"window":null,"theme":"Light"}"#)
+                .unwrap();
+        assert_eq!(light.theme, ThemeChoice::Light);
     }
 
     #[test]

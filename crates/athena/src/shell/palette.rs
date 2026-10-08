@@ -206,6 +206,12 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Zoom in", Box::new(actions::FontZoomIn)),
         ("Zoom out", Box::new(actions::FontZoomOut)),
         ("Reset zoom", Box::new(actions::FontZoomReset)),
+        (
+            "Theme: follow system appearance",
+            Box::new(actions::ThemeFollowSystem),
+        ),
+        ("Theme: light", Box::new(actions::ThemeLight)),
+        ("Theme: dark", Box::new(actions::ThemeDark)),
     ]
 }
 

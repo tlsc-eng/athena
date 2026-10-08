@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use athena_ui::{ActiveTheme, Theme};
+use athena_ui::{ActiveTheme, Appearance, Theme};
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, Hsla, Task, Window, canvas, div,
     prelude::*, px,
@@ -64,6 +64,8 @@ pub struct DocView {
     mtime: Option<SystemTime>,
     /// What the page shows now; `None` until it has been loaded.
     shown: Option<Rendered>,
+    /// The theme the page was built with, so a theme switch can rebuild it.
+    page_appearance: Option<Appearance>,
     error: Option<String>,
     pending_text: Option<Task<()>>,
     rendering: Option<Task<()>>,
@@ -103,6 +105,7 @@ impl DocView {
             had_focus: false,
             mtime: None,
             shown: None,
+            page_appearance: None,
             error: None,
             pending_text: None,
             rendering: None,
@@ -197,6 +200,7 @@ impl DocView {
             _ => {
                 self.loaded = false;
                 web.load_html(&page(&next, cx.theme()));
+                self.page_appearance = Some(cx.theme().appearance);
             }
         }
         self.shown = Some(next);
@@ -256,6 +260,14 @@ impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_key(window);
         let t = cx.theme().clone();
+        if self.page_appearance.is_some_and(|a| a != t.appearance)
+            && let (Some(web), Some(shown)) = (&self.web, &self.shown)
+        {
+            self.loaded = false;
+            web.load_html(&page(shown, &t));
+            self.page_appearance = Some(t.appearance);
+            self.sync_hidden();
+        }
         let entity = cx.entity();
         let page = canvas(
             |_, _, _| {},
@@ -375,6 +387,11 @@ fn nonce() -> String {
 fn page(doc: &Rendered, t: &Theme) -> String {
     let c = &t.color;
     let nonce = nonce();
+    let (scheme, dark, stripe) = if t.is_dark() {
+        ("dark", "true", "rgba(255,255,255,.02)")
+    } else {
+        ("light", "false", "rgba(0,0,0,.025)")
+    };
     let (bg, surface, border, text, strong, muted, faint, accent) = (
         hex(c.surface_sunken),
         hex(c.surface),
@@ -388,7 +405,7 @@ fn page(doc: &Rendered, t: &Theme) -> String {
     let mermaid = if doc.mermaid {
         format!(
             "<script nonce=\"{nonce}\">{MERMAID}</script>\n<script nonce=\"{nonce}\">\
-mermaid.initialize({{startOnLoad:false,securityLevel:'strict',theme:'base',darkMode:true,\
+mermaid.initialize({{startOnLoad:false,securityLevel:'strict',theme:'base',darkMode:{dark},\
 fontFamily:'Geist, -apple-system, sans-serif',themeVariables:{{background:'{bg}',\
 primaryColor:'{surface}',primaryTextColor:'{strong}',primaryBorderColor:'{border_strong}',\
 secondaryColor:'{accent_surface}',tertiaryColor:'{surface}',lineColor:'{muted}',\
@@ -412,7 +429,7 @@ document.addEventListener('DOMContentLoaded',function(){{mermaid.run();}});</scr
 {mermaid}
 <style>
 {fonts}
-:root{{color-scheme:dark}}
+:root{{color-scheme:{scheme}}}
 html{{background:{bg}}}
 body{{margin:0;padding:24px 32px 64px;color:{text};font:15px/1.6 Geist,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}}
 #content{{max-width:880px;margin:0 auto}}
@@ -432,7 +449,7 @@ blockquote{{margin-left:0;padding:0 1em;color:{muted};border-left:3px solid {bor
 .markdown-alert{{color:{text};border-left-color:{accent}}}
 table{{border-collapse:collapse;display:block;overflow:auto;max-width:100%}}
 th,td{{border:1px solid {border};padding:6px 13px}} th{{color:{strong};font-weight:600;background:{surface}}}
-tr:nth-child(2n) td{{background:rgba(255,255,255,.02)}}
+tr:nth-child(2n) td{{background:{stripe}}}
 hr{{border:0;border-top:1px solid {border};margin:24px 0}}
 img{{max-width:100%}}
 li+li{{margin-top:.25em}} li>input[type=checkbox]{{margin:0 .4em 0 -1.2em;accent-color:{accent}}}
@@ -487,5 +504,23 @@ mod tests {
             &theme,
         );
         assert!(diagram.contains("mermaid.initialize"));
+    }
+
+    #[test]
+    fn pages_follow_the_light_theme() {
+        let light = Theme::light(false);
+        let rendered = markdown::render_file(
+            Path::new("/a.mmd"),
+            "graph TD\nA-->B",
+            &mut ImageCache::default(),
+        );
+        let html = page(&rendered, &light);
+        assert!(html.contains("color-scheme:light"));
+        assert!(html.contains("darkMode:false"));
+        assert!(html.contains("background:#f9f7f3"));
+        assert!(html.contains("color:#1a1614"));
+        assert!(!html.contains("rgba(255,255,255"));
+        let dark = page(&rendered, &Theme::dark(false));
+        assert!(dark.contains("color-scheme:dark") && dark.contains("darkMode:true"));
     }
 }

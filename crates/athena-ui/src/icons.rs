@@ -191,7 +191,9 @@ impl Tint {
             Self::Red => t.color.danger,
             Self::Green => t.color.success,
             Self::Muted => t.color.content_muted,
-            Self::Plain => t.color.content_disabled,
+            // Light disabled text is too faint for a glyph.
+            Self::Plain if t.is_dark() => t.color.content_disabled,
+            Self::Plain => t.color.border_strong,
         }
     }
 }
@@ -261,6 +263,27 @@ mod tests {
                 "icons/default.svg",
                 "{icon} is not bundled"
             );
+        }
+    }
+
+    #[test]
+    fn every_tint_stands_out_from_the_tree_in_both_themes() {
+        let tints = [
+            Tint::Blue,
+            Tint::Cyan,
+            Tint::Amber,
+            Tint::Accent,
+            Tint::Magenta,
+            Tint::Red,
+            Tint::Green,
+            Tint::Muted,
+            Tint::Plain,
+        ];
+        for t in [Theme::dark(false), Theme::light(false)] {
+            for tint in tints {
+                let ratio = crate::theme::contrast(tint.color(&t), t.color.surface);
+                assert!(ratio >= 3., "{:?} {tint:?}: {ratio:.2}", t.appearance);
+            }
         }
     }
 

@@ -65,6 +65,9 @@ actions!(
         SendToClaude,
         OpenRecent,
         ClearRecent,
+        ThemeFollowSystem,
+        ThemeLight,
+        ThemeDark,
     ]
 );
 
@@ -257,6 +260,14 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Zoom In", FontZoomIn),
                 MenuItem::action("Zoom Out", FontZoomOut),
                 MenuItem::action("Reset Zoom", FontZoomReset),
+                MenuItem::submenu(Menu {
+                    name: "Theme".into(),
+                    items: vec![
+                        MenuItem::action("Follow System Appearance", ThemeFollowSystem),
+                        MenuItem::action("Light", ThemeLight),
+                        MenuItem::action("Dark", ThemeDark),
+                    ],
+                }),
                 MenuItem::separator(),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PrevTab),

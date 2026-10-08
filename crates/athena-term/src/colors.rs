@@ -38,8 +38,8 @@ pub fn named(name: NamedColor, overrides: &Colors, palette: &TerminalColors) -> 
     }
 }
 
-/// Faint (SGR 2) text: 35 % of the way to the background, but no darker than the theme's dim
-/// foreground unless the colour already was.
+/// Faint (SGR 2) text: 35 % of the way to the background, but no closer to it than the theme's
+/// dim foreground unless the colour already was.
 pub fn dim(fg: Hsla, palette: &TerminalColors) -> Hsla {
     let (a, b) = (Rgba::from(fg), Rgba::from(palette.background));
     let mix = |x: f32, y: f32| x + (y - x) * 0.35;
@@ -50,7 +50,11 @@ pub fn dim(fg: Hsla, palette: &TerminalColors) -> Hsla {
         a: a.a,
     }
     .into();
-    out.l = out.l.max(palette.dim_foreground.l.min(fg.l));
+    out.l = if palette.background.l > 0.5 {
+        out.l.min(palette.dim_foreground.l.max(fg.l))
+    } else {
+        out.l.max(palette.dim_foreground.l.min(fg.l))
+    };
     out
 }
 
@@ -111,6 +115,16 @@ mod tests {
         assert!(dimmed.l >= palette.dim_foreground.l);
         let black = palette.ansi[0];
         assert!(dim(black, &palette).l <= black.l);
+    }
+
+    #[test]
+    fn dim_text_on_a_light_background_fades_toward_it_but_stays_readable() {
+        let palette = athena_ui::Theme::light(false).terminal;
+        let dimmed = dim(palette.foreground, &palette);
+        assert!(dimmed.l > palette.foreground.l);
+        assert!(dimmed.l <= palette.dim_foreground.l);
+        let grey = palette.ansi[15];
+        assert!(dim(grey, &palette).l >= grey.l, "never darkens");
     }
 
     #[test]

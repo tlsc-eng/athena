@@ -1,3 +1,4 @@
+mod appearance;
 mod branches;
 mod bridge;
 mod claude;
@@ -151,7 +152,11 @@ impl Shell {
         window.focus(&focus);
         cx.global_mut::<athena_ui::Theme>()
             .set_code_zoom(workspace.ui.font_zoom);
+        athena_ui::set_appearance(appearance::resolve(workspace.theme, window), cx);
         let subscriptions = vec![
+            cx.observe_window_appearance(window, |this, window, cx| {
+                athena_ui::set_appearance(appearance::resolve(this.workspace.theme, window), cx);
+            }),
             cx.observe_window_bounds(window, |this, window, cx| {
                 this.workspace.window = Some(window_state(window.window_bounds()));
                 this.schedule_save(cx);
@@ -875,6 +880,17 @@ impl Render for Shell {
                     this.open_folder(a.0.clone(), cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ThemeFollowSystem, w, cx| {
+                    this.set_theme_choice(athena_workspace::ThemeChoice::System, w, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::actions::ThemeLight, w, cx| {
+                this.set_theme_choice(athena_workspace::ThemeChoice::Light, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ThemeDark, w, cx| {
+                this.set_theme_choice(athena_workspace::ThemeChoice::Dark, w, cx)
+            }))
             .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {
                 this.workspace.recent.clear();
                 this.schedule_save(cx);
