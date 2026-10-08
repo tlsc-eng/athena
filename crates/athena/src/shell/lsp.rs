@@ -42,6 +42,8 @@ pub(super) struct LspState {
     changes: HashMap<PathBuf, Task<()>>,
     jump: Option<(PathBuf, Position)>,
     references: References,
+    /// The project the references were asked from; other projects show the drawer tab empty.
+    references_root: Option<PathBuf>,
     /// Bumped per lookup so a slow answer cannot replace a newer one.
     references_asked: u64,
     reference_opened: Option<usize>,
@@ -339,6 +341,7 @@ impl Shell {
         self.flush_change(&doc, editor, cx);
         self.lsp.references_asked += 1;
         self.lsp.reference_opened = None;
+        self.lsp.references_root = self.workspace.active_project().map(|p| p.root.clone());
         self.show_drawer_tab(DrawerTab::References, cx);
         let Some(client) = self
             .lsp
@@ -380,8 +383,14 @@ impl Shell {
         .detach();
     }
 
+    /// The last lookup, if it was made in the active project.
+    fn active_references(&self) -> Option<&References> {
+        let root = self.workspace.active_project().map(|p| &p.root);
+        (self.lsp.references_root.as_ref() == root).then_some(&self.lsp.references)
+    }
+
     pub(super) fn render_references_count(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let References::Found(list) = &self.lsp.references else {
+        let Some(References::Found(list)) = self.active_references() else {
             return None;
         };
         let t = cx.theme();
@@ -411,7 +420,7 @@ impl Shell {
                 .child(text)
                 .into_any_element()
         };
-        let list = match &self.lsp.references {
+        let list = match self.active_references().unwrap_or(&References::Idle) {
             References::Idle => {
                 return message(
                     "Press Shift+F12 or ⌘⌥R on a symbol to list where it is used.".into(),
@@ -424,10 +433,13 @@ impl Shell {
             }
             References::Found(list) => list.clone(),
         };
-        let root = self
+        let roots: Vec<PathBuf> = self
             .workspace
             .active_project()
-            .and_then(|p| p.root.canonicalize().ok());
+            .into_iter()
+            .flat_map(|p| [p.root.canonicalize().ok(), Some(p.root.clone())])
+            .flatten()
+            .collect();
         let opened = self.lsp.reference_opened;
         uniform_list(
             "references",
@@ -436,9 +448,9 @@ impl Shell {
                 range
                     .map(|i| {
                         let r = &list[i];
-                        let shown = root
-                            .as_ref()
-                            .and_then(|root| r.path.strip_prefix(root).ok())
+                        let shown = roots
+                            .iter()
+                            .find_map(|root| r.path.strip_prefix(root).ok())
                             .unwrap_or(&r.path);
                         let place = format!(
                             "{}:{}:{}",
