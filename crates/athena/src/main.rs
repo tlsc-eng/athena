@@ -2,6 +2,7 @@ mod actions;
 mod app_socket;
 mod claude_hooks;
 mod cli;
+mod ide;
 mod mcp;
 mod procinfo;
 mod shell;
@@ -100,6 +101,7 @@ fn install_panic_hook() {
     let recovery = athena_proto::recovery_dir().ok();
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        ide::on_panic();
         let kept = recovery
             .as_deref()
             .map(athena_editor::recovery::write_dirty);
