@@ -1,6 +1,11 @@
+mod layout;
 mod persist;
 mod project;
 
+pub use layout::{
+    Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath, Pane,
+    PaneId, Rect,
+};
 pub use persist::{load, save};
 pub use project::{Project, git_branch};
 
