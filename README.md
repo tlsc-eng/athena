@@ -57,6 +57,13 @@ its shells running.
   References are listed in a drawer tab; clicking a row opens the file at that line.
 - Go to file (fuzzy) and a command palette. A file opens in the editor pane used last, or in a
   new pane beside the focused one with Cmd+click in the tree or Cmd+Enter in Go to file.
+- Auto save one second after you stop typing (palette: "Toggle auto save"), unsaved markers on
+  tabs, tree rows and the window title, Save As, and a Reload / Overwrite bar when a file changes
+  on disk while you have unsaved edits (unchanged files just reload).
+- Markdown and Mermaid preview (`cmd-shift-v`): tables, task lists, local images and links,
+  ```` ```mermaid ```` blocks and `.mmd` files, re-rendered on save.
+- Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, SVG) open in a viewer that fits and zooms.
+- File-type icons from [seti-ui](https://github.com/jesseweed/seti-ui) in the tree and on tabs.
 
 **Claude Code**
 
@@ -148,6 +155,8 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-alt-down` | Focus pane down |
 | `cmd-shift-enter` | Zoom pane |
 | `cmd-b` | Toggle file tree |
+| `cmd-shift-s` | Save as |
+| `cmd-shift-v` | Markdown preview beside the editor / back to the source |
 | `cmd-j` | Notifications |
 | `ctrl-cmd-f` | Toggle full screen |
 | `cmd-m` | Minimize |
@@ -182,6 +191,9 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `alt-backspace` | Delete word back |
 | `cmd-backspace` | Delete to line start |
 | `escape` | Close find / clear selection |
+
+Image viewer: `cmd-=` / `cmd--` zoom in / out, `cmd-0` fit to the pane, `cmd`-scroll zooms at the
+pointer.
 
 ### File tree and palette
 
@@ -264,3 +276,8 @@ cargo deny check
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+Bundled third-party assets keep their own licences: the Geist fonts (SIL OFL,
+`crates/athena-ui/assets/fonts/OFL.txt`), seti-ui icons (MIT,
+`crates/athena-ui/assets/icons/LICENSE-seti.md`) and Mermaid (MIT,
+`crates/athena-preview/assets/LICENSE-mermaid`).
