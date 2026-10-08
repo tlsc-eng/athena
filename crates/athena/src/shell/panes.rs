@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use athena_editor::{EditorEvent, EditorView};
+use athena_editor::{EditorEvent, EditorView, ImageView, is_image_path};
 use athena_preview::{PreviewEvent, PreviewView};
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
@@ -14,7 +14,7 @@ use gpui::{
 };
 
 use super::Shell;
-use super::item::ItemView;
+use super::item::{ItemView, file_label};
 use crate::actions::NewTerminal;
 
 const TAB_STRIP_HEIGHT: f32 = 32.;
@@ -113,6 +113,9 @@ impl Shell {
                 self.lsp_opened(root, &view, cx);
                 ItemView::Editor(view)
             }
+            ItemKind::Image { path } => {
+                ItemView::Image(cx.new(|cx| ImageView::open(path.clone(), cx)))
+            }
             ItemKind::Preview { url } => {
                 let view = cx.new(|cx| PreviewView::new(root.to_path_buf(), url.clone(), cx));
                 let (project_root, item_id) = key.clone();
@@ -143,10 +146,7 @@ impl Shell {
         match (self.items.get(&(root.to_path_buf(), item.id)), &item.kind) {
             (Some(view), _) => view.label(cx),
             (None, ItemKind::Terminal { .. }) => "Terminal".into(),
-            (None, ItemKind::Editor { path }) => path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled".into()),
+            (None, ItemKind::Editor { path } | ItemKind::Image { path }) => file_label(path),
             (None, ItemKind::Preview { url }) => athena_preview::label_for(url),
         }
     }
@@ -234,10 +234,7 @@ impl Shell {
         let Some(pane) = project.layout.as_ref().and_then(|l| l.focused_pane()) else {
             return;
         };
-        if pane
-            .active_item()
-            .is_some_and(|i| matches!(i.kind, ItemKind::Editor { .. }))
-        {
+        if pane.active_item().is_some_and(|i| i.kind.file().is_some()) {
             self.last_editor_pane.insert(project.root.clone(), pane.id);
         }
     }
@@ -426,13 +423,13 @@ impl Shell {
             .last_editor_pane
             .get(&self.workspace.projects[i].root)
             .copied();
-        let kind = ItemKind::Editor { path };
+        let kind = file_kind(path);
         let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
             self.workspace.projects[i].layout = Some(Layout::new(kind));
             return self.after_layout_change(window, cx);
         };
         self.zoomed = None;
-        let is_editor = |item: &Item| matches!(item.kind, ItemKind::Editor { .. });
+        let is_editor = |item: &Item| item.kind.file().is_some();
         let existing = layout.panes().into_iter().find_map(|p| {
             p.items
                 .iter()
@@ -483,7 +480,7 @@ impl Shell {
         let Some(i) = self.workspace.active else {
             return;
         };
-        let kind = ItemKind::Editor { path };
+        let kind = file_kind(path);
         let Some(layout) = self.workspace.projects[i].layout.as_mut() else {
             self.workspace.projects[i].layout = Some(Layout::new(kind));
             return self.after_layout_change(window, cx);
@@ -984,6 +981,15 @@ impl Shell {
             .into_any_element()
     }
 
+    /// Picks up edits made outside Athena, e.g. after the window regains focus.
+    pub(super) fn reload_changed_files(&mut self, cx: &mut Context<Self>) {
+        for view in self.items.values() {
+            if let ItemView::Image(image) = view {
+                image.update(cx, |v, cx| v.reload_if_changed(cx));
+            }
+        }
+    }
+
     /// Hangs up every shell in a project that is being closed.
     pub(super) fn drop_project_items(&mut self, root: &Path, cx: &mut Context<Self>) {
         let keys: Vec<_> = self
@@ -997,5 +1003,14 @@ impl Shell {
                 view.close(cx);
             }
         }
+    }
+}
+
+/// Images open in the viewer; everything else in the text editor.
+fn file_kind(path: PathBuf) -> ItemKind {
+    if is_image_path(&path) {
+        ItemKind::Image { path }
+    } else {
+        ItemKind::Editor { path }
     }
 }

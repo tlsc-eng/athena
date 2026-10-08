@@ -40,6 +40,19 @@ pub enum ItemKind {
     Preview {
         url: String,
     },
+    Image {
+        path: PathBuf,
+    },
+}
+
+impl ItemKind {
+    /// The file a tab shows, for editors and viewers.
+    pub fn file(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Editor { path } | Self::Image { path } => Some(path),
+            Self::Terminal { .. } | Self::Preview { .. } => None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -555,6 +568,12 @@ mod tests {
             Axis::Vertical,
             ItemKind::Editor {
                 path: "/x/main.go".into(),
+            },
+        );
+        l.add_item(
+            l.focused,
+            ItemKind::Image {
+                path: "/x/logo.png".into(),
             },
         );
         let json = serde_json::to_string(&l).unwrap();

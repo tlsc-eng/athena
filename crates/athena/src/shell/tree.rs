@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use athena_ui::ActiveTheme;
-use athena_workspace::ItemKind;
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, Window, div, prelude::*, px, uniform_list,
 };
@@ -111,10 +110,7 @@ impl Shell {
             .layout
             .as_ref()?
             .focused_pane()?;
-        match &pane.active_item()?.kind {
-            ItemKind::Editor { path } => Some(path.clone()),
-            ItemKind::Terminal { .. } | ItemKind::Preview { .. } => None,
-        }
+        pane.active_item()?.kind.file().cloned()
     }
 
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {

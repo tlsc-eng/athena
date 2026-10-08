@@ -100,6 +100,7 @@ impl Shell {
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.tree.invalidate();
+                    this.reload_changed_files(cx);
                     let reduced = motion::system_reduce_motion();
                     if cx.theme().motion.reduced != reduced {
                         cx.global_mut::<athena_ui::Theme>().motion.reduced = reduced;

@@ -52,6 +52,7 @@ futures = "0.3"
 bollard = { version = "=0.21.1", default-features = false, features = ["pipe"] }
 thiserror = "2"
 tracing = "0.1"
+imagesize = "0.13"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 athena-proto = { path = "crates/athena-proto" }
