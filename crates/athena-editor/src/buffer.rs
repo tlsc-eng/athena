@@ -144,6 +144,11 @@ impl Cursors {
         &self.all
     }
 
+    /// Every caret, to change in ways that keep their order and keep them apart.
+    pub(crate) fn all_mut(&mut self) -> &mut [Cursor] {
+        &mut self.all
+    }
+
     pub fn len(&self) -> usize {
         self.all.len()
     }

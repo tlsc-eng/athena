@@ -17,6 +17,7 @@ mod shared;
 mod signature;
 mod syntax;
 mod view;
+mod wrap;
 
 pub use buffer::{
     Buffer, Cursor, Cursors, DiskState, Edit, Indent, LineEnding, SaveError, Selection,

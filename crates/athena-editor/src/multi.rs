@@ -122,13 +122,21 @@ impl EditorView {
             self.cursor.all().iter().rev().copied().collect()
         };
         for c in order {
-            let row = self.display.row_of(b.line_of(c.head())) as isize + dir;
-            if !(0..rows).contains(&row) {
-                continue;
-            }
             let mut added = c;
             added.selection = Selection::cursor(c.head());
-            b.move_to_line(&mut added, self.display.line_of(row as usize), false);
+            if self.display.wrap_cols().is_some() {
+                let Some((at, goal)) = self.row_target(&b, &c, dir) else {
+                    continue;
+                };
+                b.move_to(&mut added, at, false);
+                added.goal_column = Some(goal);
+            } else {
+                let row = self.display.row_of(b.line_of(c.head())) as isize + dir;
+                if !(0..rows).contains(&row) {
+                    continue;
+                }
+                b.move_to_line(&mut added, self.display.line_of(row as usize), false);
+            }
             all.push(added);
             // The caret furthest in that direction leads, so the view follows the column's end.
             primary.get_or_insert(all.len() - 1);

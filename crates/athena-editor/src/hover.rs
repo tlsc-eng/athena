@@ -61,12 +61,11 @@ impl EditorView {
             return None;
         }
         let line = self.display.line_of(row);
-        let (_, display, shaped) = layout.lines.iter().find(|(l, _, _)| *l == line)?;
         let x = position.x - layout.text_left + px(self.scroll.x);
         if x < px(0.) {
             return None;
         }
-        let col = display.char_for_byte(shaped.index_for_x(x)?);
+        let col = layout.row(row)?.col_under(x)?;
         b.word_at(b.line_start(line) + col)
     }
 
@@ -76,15 +75,11 @@ impl EditorView {
         let b = self.buf()?;
         let char = char.min(b.len_chars());
         let line = b.line_of(char);
-        let (_, display, shaped) = layout.lines.iter().find(|(l, _, _)| *l == line)?;
         // Last frame's line may be shorter than the text is now.
-        let byte = display
-            .char_to_byte
-            .get(b.column_of(char))
-            .or(display.char_to_byte.last())?;
-        let x = layout.text_left + shaped.x_for_index(*byte) - px(self.scroll.x);
-        let row = self.display.row_of(line);
-        let y = layout.origin.y + layout.line_height * row as f32 - px(self.scroll.y);
+        let col = b.column_of(char);
+        let r = layout.row_holding(line, col)?;
+        let x = layout.text_left + r.x_for(col) - px(self.scroll.x);
+        let y = layout.origin.y + layout.line_height * r.row as f32 - px(self.scroll.y);
         Some(point(x, y))
     }
 

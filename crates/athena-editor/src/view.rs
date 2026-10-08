@@ -95,6 +95,7 @@ actions!(
         SelectAllOccurrences,
         AddCursorAbove,
         AddCursorBelow,
+        ToggleWordWrap,
     ]
 );
 
@@ -174,6 +175,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-alt-down", AddCursorBelow, ctx),
         KeyBinding::new("cmd-k cmd-d", SkipOccurrence, ctx),
         KeyBinding::new("cmd-shift-l", SelectAllOccurrences, ctx),
+        KeyBinding::new("alt-z", ToggleWordWrap, ctx),
     ]);
 }
 
@@ -276,9 +278,79 @@ pub(crate) struct EditorLayout {
     pub line_height: Pixels,
     /// Width of one column of the monospace font.
     pub cell: Pixels,
-    pub lines: Vec<(usize, DisplayLine, ShapedLine)>,
+    pub rows: Vec<LayoutRow>,
     /// Left and right edge of the gutter column holding fold chevrons.
     pub fold_column: (Pixels, Pixels),
+}
+
+impl EditorLayout {
+    /// The row drawn on visual row `row`, if it was on screen.
+    pub fn row(&self, row: usize) -> Option<&LayoutRow> {
+        self.rows.iter().find(|r| r.row == row)
+    }
+
+    /// The row a caret at char `col` of `line` is drawn on, else that line's last row shown.
+    pub fn row_holding(&self, line: usize, col: usize) -> Option<&LayoutRow> {
+        let mut rows = self.rows.iter().filter(|r| r.line == line);
+        rows.clone()
+            .find(|r| r.holds(col))
+            .or_else(|| rows.next_back())
+    }
+}
+
+/// One visual row drawn last frame: a whole line, or one wrapped piece of it.
+pub(crate) struct LayoutRow {
+    pub line: usize,
+    pub row: usize,
+    /// The chars of the line this row shows.
+    pub chars: Range<usize>,
+    /// The whole line, which `chars` index into.
+    pub display: Rc<DisplayLine>,
+    pub shaped: ShapedLine,
+    /// How far right a wrapped line's continuation row starts.
+    pub indent: Pixels,
+    pub last: bool,
+}
+
+impl LayoutRow {
+    fn byte(&self, col: usize) -> usize {
+        let map = &self.display.char_to_byte;
+        map.get(col).or(map.last()).copied().unwrap_or(0)
+    }
+
+    /// X of char `col` of the line, from the left of the text.
+    pub fn x_for(&self, col: usize) -> Pixels {
+        let col = col.clamp(self.chars.start, self.chars.end);
+        let byte = self.byte(col).saturating_sub(self.byte(self.chars.start));
+        self.indent + self.shaped.x_for_index(byte)
+    }
+
+    /// The char of the line nearest `x`; past a wrapped row's end it stays on that row.
+    pub fn col_for(&self, x: Pixels) -> usize {
+        let byte = self.byte(self.chars.start) + self.shaped.closest_index_for_x(x - self.indent);
+        let end = if self.last {
+            self.chars.end
+        } else {
+            self.chars.end.saturating_sub(1).max(self.chars.start)
+        };
+        self.display
+            .char_for_byte(byte)
+            .clamp(self.chars.start, end)
+    }
+
+    /// The char of the line under `x`, if `x` is over text.
+    pub fn col_under(&self, x: Pixels) -> Option<usize> {
+        let index = self.shaped.index_for_x(x - self.indent)?;
+        Some(
+            self.display
+                .char_for_byte(self.byte(self.chars.start) + index),
+        )
+    }
+
+    /// Whether a caret at char `col` of the line is drawn on this row.
+    pub fn holds(&self, col: usize) -> bool {
+        self.chars.contains(&col) || (self.last && col == self.chars.end)
+    }
 }
 
 struct FindBar {
@@ -355,6 +427,9 @@ pub struct EditorView {
     pub(crate) column_select: Option<(usize, usize)>,
     /// The text Cmd+D last added an occurrence of, and whether it matches whole words only.
     pub(crate) occurrence: Option<(String, bool)>,
+    /// This tab's word wrap choice; `None` follows `wrap_default`.
+    pub(crate) wrap: Option<bool>,
+    pub(crate) wrap_default: bool,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -366,6 +441,8 @@ pub struct ViewState {
     pub top_line: usize,
     /// Folded regions as their first and last hidden line; the header is the line above.
     pub folds: Vec<(usize, usize)>,
+    /// This tab's word wrap choice; `None` follows the workspace default.
+    pub wrap: Option<bool>,
 }
 
 impl EventEmitter<EditorEvent> for EditorView {}
@@ -431,6 +508,8 @@ impl EditorView {
             pending_top: None,
             column_select: None,
             occurrence: None,
+            wrap: None,
+            wrap_default: false,
         }
     }
 
@@ -452,6 +531,7 @@ impl EditorView {
             cursor: b.utf16_position(self.cursor.head()),
             top_line,
             folds: self.display.folds().map(|f| (f.start, f.end)).collect(),
+            wrap: self.wrap,
         })
     }
 
@@ -462,6 +542,7 @@ impl EditorView {
             return;
         };
         self.follow_edits();
+        self.set_word_wrap(state.wrap, cx);
         self.display.clear();
         for &(start, end) in &state.folds {
             let fold = Fold { start, end };
@@ -529,10 +610,13 @@ impl EditorView {
             }
             None => {
                 self.display.clear();
+                self.display.reset_wrap();
                 self.cursor.follow(std::iter::empty(), b.len_chars());
             }
         }
         self.seen = b.version();
+        drop(b);
+        self.sync_wrap();
         true
     }
 
@@ -775,10 +859,7 @@ impl EditorView {
         let row = ((y / layout.line_height).floor().max(0.) as usize).min(rows.saturating_sub(1));
         let line = self.display.line_of(row);
         let x = position.x - layout.text_left + px(self.scroll.x);
-        let col = match layout.lines.iter().find(|(l, _, _)| *l == line) {
-            Some((_, display, shaped)) => display.char_for_byte(shaped.closest_index_for_x(x)),
-            None => 0,
-        };
+        let col = layout.row(row).map_or(0, |r| r.col_for(x));
         Some(buffer.char_at(line, col))
     }
 
@@ -883,7 +964,9 @@ impl EditorView {
             .map_or(1, |b| self.display.row_count(b.len_lines())) as f32;
         let max_y = ((lines - 1.) * f32::from(lh)).max(0.);
         self.scroll.y = (self.scroll.y - f32::from(delta.y)).clamp(0., max_y);
-        self.scroll.x = (self.scroll.x - f32::from(delta.x)).max(0.);
+        if self.display.wrap_cols().is_none() {
+            self.scroll.x = (self.scroll.x - f32::from(delta.x)).max(0.);
+        }
         self.autoscroll = false;
         self.hide_hover(cx);
         self.dismiss_completion(cx);
@@ -1270,6 +1353,7 @@ impl EditorView {
         )
         .on_action(cx.listener(|this, _: &AddCursorAbove, _, cx| this.add_caret_vertically(-1, cx)))
         .on_action(cx.listener(|this, _: &AddCursorBelow, _, cx| this.add_caret_vertically(1, cx)))
+        .on_action(cx.listener(|this, _: &ToggleWordWrap, _, cx| this.toggle_word_wrap(cx)))
     }
 }
 
@@ -1465,16 +1549,16 @@ impl Render for EditorView {
                         this.move_each(cx, |b, c| b.move_word(c, true, true))
                     }))
                     .on_action(cx.listener(|this, _: &MoveLineStart, _, cx| {
-                        this.move_each(cx, |b, c| b.move_line_start(c, false))
+                        this.move_to_row_edge(false, false, cx)
                     }))
                     .on_action(cx.listener(|this, _: &MoveLineEnd, _, cx| {
-                        this.move_each(cx, |b, c| b.move_line_end(c, false))
+                        this.move_to_row_edge(true, false, cx)
                     }))
                     .on_action(cx.listener(|this, _: &SelectLineStart, _, cx| {
-                        this.move_each(cx, |b, c| b.move_line_start(c, true))
+                        this.move_to_row_edge(false, true, cx)
                     }))
                     .on_action(cx.listener(|this, _: &SelectLineEnd, _, cx| {
-                        this.move_each(cx, |b, c| b.move_line_end(c, true))
+                        this.move_to_row_edge(true, true, cx)
                     }))
                     .on_action(cx.listener(|this, _: &MoveDocStart, _, cx| {
                         this.move_each(cx, |b, c| b.move_to(c, 0, false))
@@ -1665,6 +1749,24 @@ impl EditorView {
     /// Vertical moves count visual rows, so folded blocks are stepped over.
     fn move_rows(&mut self, rows: isize, extend: bool, cx: &mut Context<Self>) {
         self.follow_edits();
+        if self.display.wrap_cols().is_some() {
+            let Some(targets) = self.buf().map(|b| {
+                let all = self.cursor.all();
+                all.iter()
+                    .map(|c| self.row_target(&b, c, rows))
+                    .collect::<Vec<_>>()
+            }) else {
+                return;
+            };
+            let mut targets = targets.into_iter();
+            return self.move_each(cx, |b, c| match targets.next().flatten() {
+                Some((at, goal)) => {
+                    b.move_to(c, at, extend);
+                    c.goal_column = Some(goal);
+                }
+                None => b.move_to(c, if rows < 0 { 0 } else { usize::MAX }, extend),
+            });
+        }
         let Some(targets) = self.buf().map(|b| {
             let count = self.display.row_count(b.len_lines()) as isize;
             let all = self.cursor.all();
@@ -1686,6 +1788,24 @@ impl EditorView {
                 let len = b.len_lines() as isize;
                 b.move_vertical(c, if rows < 0 { -len } else { len }, extend)
             }
+        });
+    }
+
+    fn move_to_row_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
+        self.follow_edits();
+        let Some(targets) = self.buf().map(|b| {
+            let all = self.cursor.all();
+            all.iter()
+                .map(|c| self.row_edge(&b, c, end))
+                .collect::<Vec<_>>()
+        }) else {
+            return;
+        };
+        let mut targets = targets.into_iter();
+        self.move_each(cx, |b, c| match (targets.next().flatten(), end) {
+            (Some(at), _) => b.move_to(c, at, extend),
+            (None, true) => b.move_line_end(c, extend),
+            (None, false) => b.move_line_start(c, extend),
         });
     }
 
@@ -2098,23 +2218,9 @@ impl EntityInputHandler for EditorView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let layout = self.layout.as_ref()?;
-        let buffer = self.buf()?;
-        let head = self.cursor.head();
-        let line = buffer.line_of(head);
-        let (_, display, shaped) = layout.lines.iter().find(|(l, _, _)| *l == line)?;
-        // Another tab's edit can leave last frame's line shorter than the text is now.
-        let byte = display
-            .char_to_byte
-            .get(buffer.column_of(head))
-            .or(display.char_to_byte.last())?;
-        let x = layout.text_left + shaped.x_for_index(*byte) - px(self.scroll.x);
-        let row = self.display.row_of(line);
-        let y = layout.origin.y + layout.line_height * row as f32 - px(self.scroll.y);
-        Some(Bounds::new(
-            gpui::point(x, y),
-            gpui::size(px(2.), layout.line_height),
-        ))
+        let origin = self.char_origin(self.cursor.head())?;
+        let height = self.layout.as_ref()?.line_height;
+        Some(Bounds::new(origin, gpui::size(px(2.), height)))
     }
 
     fn character_index_for_point(

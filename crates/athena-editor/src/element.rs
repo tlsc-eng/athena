@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use athena_ui::{ActiveTheme, SyntaxColors};
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, Font, FontFeatures,
@@ -8,9 +10,9 @@ use gpui::{
 
 use crate::Lang;
 use crate::buffer::Buffer;
-use crate::display::{DisplayLine, Guides};
+use crate::display::{DisplayLine, Guides, wrap_breaks, wrap_indent};
 use crate::syntax::Token;
-use crate::view::{EditorLayout, EditorView};
+use crate::view::{EditorLayout, EditorView, LayoutRow};
 
 /// How a token is drawn: colour, weight and whether it is underlined.
 #[derive(Clone, Copy, PartialEq)]
@@ -205,18 +207,34 @@ impl Element for EditorElement {
             gutter_bg: theme.color.surface_sunken,
         };
 
-        // Keep the cursor's line on screen after edits and keyboard moves.
+        let gutter = |total: usize| {
+            let digits = total.to_string().len().max(3);
+            let numbers_right = bounds.left() + px(GUTTER_PAD) + cell * digits as f32;
+            let fold_column = (numbers_right, numbers_right + px(FOLD_COLUMN));
+            let text_left = fold_column.1 + px(TEXT_PAD);
+            (numbers_right, fold_column, text_left)
+        };
+
+        // Keep the cursor's row on screen after edits and keyboard moves.
         self.view.update(cx, |view, _| {
             view.viewport = bounds.size;
             view.follow_edits();
-            let Some(head_line) = view.buf().map(|b| b.line_of(view.cursor.head())) else {
+            let Some(total) = view.buf().map(|b| b.len_lines()) else {
                 return;
             };
+            let (_, _, text_left) = gutter(total);
+            let cols = ((bounds.right() - text_left - cell) / cell)
+                .floor()
+                .max(10.) as usize;
+            view.display.set_wrap(view.word_wrap().then_some(cols));
+            view.sync_wrap();
             if let Some(top) = view.pending_top.take() {
                 view.scroll.y = view.display.row_of(top) as f32 * f32::from(lh);
             }
             if view.autoscroll {
-                let row = view.display.row_of(head_line);
+                let Some(row) = view.buf().map(|b| view.caret_row(&b, view.cursor.head())) else {
+                    return;
+                };
                 let line = row as f32 * f32::from(lh);
                 let height = f32::from(bounds.size.height);
                 if std::mem::take(&mut view.center_cursor) {
@@ -235,11 +253,8 @@ impl Element for EditorElement {
         };
         let buffer = shared.buffer.borrow();
         let total = buffer.len_lines();
-        let digits = total.to_string().len().max(3);
-        let numbers_right = bounds.left() + px(GUTTER_PAD) + cell * digits as f32;
-        let fold_column = (numbers_right, numbers_right + px(FOLD_COLUMN));
+        let (numbers_right, fold_column, text_left) = gutter(total);
         let gutter_w = fold_column.1 - bounds.left();
-        let text_left = bounds.left() + gutter_w + px(TEXT_PAD);
         frame.gutter_bounds = Bounds::new(bounds.origin, size(gutter_w, bounds.size.height));
         frame.text_bounds = Bounds::from_corners(
             point(bounds.left() + gutter_w, bounds.top()),
@@ -249,7 +264,13 @@ impl Element for EditorElement {
         let first = (view.scroll.y / f32::from(lh)).floor().max(0.) as usize;
         let visible = (f32::from(bounds.size.height) / f32::from(lh)).ceil() as usize + 1;
         let last = (first + visible).min(view.display.row_count(total));
-        let shown: Vec<usize> = (first..last).map(|r| view.display.line_of(r)).collect();
+        let mut shown: Vec<usize> = Vec::new();
+        for row in first..last {
+            let line = view.display.line_of(row);
+            if shown.last() != Some(&line) {
+                shown.push(line);
+            }
+        }
         // One highlight query per unbroken run of lines, so folded text is never queried.
         let mut tokens = Vec::new();
         for run in shown.chunk_by(|a, b| a + 1 == *b) {
@@ -260,13 +281,14 @@ impl Element for EditorElement {
         let selection = view.cursor.selection().range();
         let head = view.cursor.head();
         let head_line = buffer.line_of(head);
+        let wrap = view.display.wrap_cols();
 
         // Horizontal autoscroll needs the cursor line shaped, so it is settled before painting.
-        let mut scroll_x = view.scroll.x;
-        let mut lines = Vec::new();
+        let mut scroll_x = if wrap.is_some() { 0. } else { view.scroll.x };
+        let mut rows: Vec<(usize, usize, LayoutRow)> = Vec::new();
         for &line in &shown {
             let raw = buffer.line(line);
-            let display = DisplayLine::new(&raw);
+            let display = Rc::new(DisplayLine::new(&raw));
             let start_char = buffer.line_start(line);
             let line_bytes = rope.line_to_byte(line)..rope.line_to_byte(line + 1);
             let n = raw.chars().count();
@@ -286,28 +308,54 @@ impl Element for EditorElement {
                     *s = style;
                 }
             }
-            let mut runs: Vec<(TextRun, TokenStyle)> = Vec::new();
-            for (i, style) in styles.iter().enumerate() {
-                let len = display.char_to_byte[i + 1] - display.char_to_byte[i];
-                match runs.last_mut() {
-                    Some((r, s)) if s == style => r.len += len,
-                    _ => runs.push((styled(len, *style), *style)),
+            let (breaks, indent) = match wrap {
+                Some(cols) => (
+                    wrap_breaks(&raw, cols),
+                    cell * wrap_indent(&raw, cols) as f32,
+                ),
+                None => (Vec::new(), px(0.)),
+            };
+            let top = view.display.row_of(line);
+            let starts = std::iter::once(0).chain(breaks.iter().copied());
+            let ends = breaks.iter().copied().chain(std::iter::once(n));
+            for (sub, (a, b)) in starts.zip(ends).enumerate() {
+                let row = top + sub;
+                if row < first || row >= last {
+                    continue;
                 }
+                let mut runs: Vec<(TextRun, TokenStyle)> = Vec::new();
+                for (i, style) in styles.iter().enumerate().take(b).skip(a) {
+                    let len = display.char_to_byte[i + 1] - display.char_to_byte[i];
+                    match runs.last_mut() {
+                        Some((r, s)) if s == style => r.len += len,
+                        _ => runs.push((styled(len, *style), *style)),
+                    }
+                }
+                let runs: Vec<TextRun> = runs.into_iter().map(|(r, _)| r).collect();
+                let text = &display.text[display.char_to_byte[a]..display.char_to_byte[b]];
+                let shaped = text_system.shape_line(
+                    SharedString::from(text.to_string()),
+                    font_size,
+                    &runs,
+                    None,
+                );
+                let layout = LayoutRow {
+                    line,
+                    row,
+                    chars: a..b,
+                    display: display.clone(),
+                    shaped,
+                    indent: if sub > 0 { indent } else { px(0.) },
+                    last: b == n,
+                };
+                rows.push((start_char, n, layout));
             }
-            let runs: Vec<TextRun> = runs.into_iter().map(|(r, _)| r).collect();
-            let shaped = text_system.shape_line(
-                SharedString::from(display.text.clone()),
-                font_size,
-                &runs,
-                None,
-            );
-            lines.push((line, start_char, n, display, shaped));
         }
         if view.autoscroll
-            && let Some((_, start, _, display, shaped)) =
-                lines.iter().find(|(l, ..)| *l == head_line)
+            && wrap.is_none()
+            && let Some((start, _, r)) = rows.iter().find(|(_, _, r)| r.line == head_line)
         {
-            let x = f32::from(shaped.x_for_index(display.char_to_byte[head - start]));
+            let x = f32::from(r.x_for(head - start));
             let width = f32::from(bounds.right() - text_left) - f32::from(cell) * 2.;
             if x < scroll_x {
                 scroll_x = (x - f32::from(cell) * 4.).max(0.);
@@ -335,9 +383,12 @@ impl Element for EditorElement {
         let guides = guides_for(&buffer, &shown, head_line);
         let guide_step = cell * buffer.indent.size() as f32;
         let mut tab_mark = None;
-        for (row, (line, start, n, display, shaped)) in lines.iter().enumerate() {
-            let y = bounds.top() + lh * (first + row) as f32 - px(view.scroll.y);
+        for (start, n, r) in &rows {
+            let line = &r.line;
+            let first_row = r.chars.start == 0;
+            let y = bounds.top() + lh * r.row as f32 - px(view.scroll.y);
             let end = start + n;
+            let (seg_start, seg_end) = (start + r.chars.start, start + r.chars.end);
             let folded = view.display.folded_at(*line);
             // Carets are sorted and apart, so the ones touching this line are a run.
             let from = carets.partition_point(|c| c.selection.range().end < *start);
@@ -345,6 +396,7 @@ impl Element for EditorElement {
                 .iter()
                 .take_while(|c| c.selection.range().start <= end);
             let heads_here = || here.clone().filter(|c| (*start..=end).contains(&c.head()));
+            let heads_on_row = || heads_here().filter(|c| r.holds(c.head() - start));
             if self.focused && heads_here().any(|c| c.selection.is_empty()) {
                 frame.backgrounds.push(fill(
                     Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh)),
@@ -362,16 +414,15 @@ impl Element for EditorElement {
                     .backgrounds
                     .push(fill(Bounds::new(point(x, y), size(px(1.), lh)), color));
             }
-            let span = |r: &std::ops::Range<usize>| -> Option<Bounds<Pixels>> {
-                let a = r.start.max(*start);
-                let b = r.end.min(end);
-                let past_end = r.end > end && r.start <= end;
+            let span = |range: &std::ops::Range<usize>| -> Option<Bounds<Pixels>> {
+                let a = range.start.max(seg_start);
+                let b = range.end.min(seg_end);
+                let past_end = r.last && range.end > end && range.start <= end;
                 if a > b || (a == b && !past_end) {
                     return None;
                 }
-                let xa = shaped.x_for_index(display.char_to_byte[a - start]);
-                let xb = shaped.x_for_index(display.char_to_byte[b - start])
-                    + if past_end { cell } else { px(0.) };
+                let xa = r.x_for(a - start);
+                let xb = r.x_for(b - start) + if past_end { cell } else { px(0.) };
                 Some(Bounds::new(point(x0 + xa, y), size(xb - xa, lh)))
             };
             for m in &finds {
@@ -379,8 +430,8 @@ impl Element for EditorElement {
                     frame.backgrounds.push(fill(b, theme.color.surface_active));
                 }
             }
-            for r in &brackets {
-                if let Some(b) = span(r) {
+            for range in &brackets {
+                if let Some(b) = span(range) {
                     frame.backgrounds.push(fill(b, syntax.bracket_match));
                 }
             }
@@ -391,12 +442,12 @@ impl Element for EditorElement {
                     frame.backgrounds.push(fill(b, theme.color.surface_accent));
                 }
             }
-            frame.text.push((point(x0, y), shaped.clone()));
+            frame.text.push((point(x0 + r.indent, y), r.shaped.clone()));
             // As VS Code's default `renderWhitespace: selection`: blanks show only where selected.
             for selection in here.clone().map(|c| c.selection.range()) {
-                let (a, b) = (selection.start.max(*start), selection.end.min(end));
+                let (a, b) = (selection.start.max(seg_start), selection.end.min(seg_end));
                 for (i, ch) in rope.slice(a.min(b)..b).chars().enumerate() {
-                    let x = x0 + shaped.x_for_index(display.char_to_byte[a + i - start]);
+                    let x = x0 + r.x_for(a + i - start);
                     match ch {
                         ' ' => frame.overlay.push(
                             fill(
@@ -423,10 +474,11 @@ impl Element for EditorElement {
                     }
                 }
             }
-            if folded.is_some() {
+            let row_end = x0 + r.indent + r.shaped.width;
+            if folded.is_some() && r.last {
                 let dots =
                     text_system.shape_line("⋯".into(), font_size, &[run(3, syntax.comment)], None);
-                let x = x0 + shaped.width + cell;
+                let x = row_end + cell;
                 let pad = cell / 2.;
                 frame.backgrounds.push(
                     fill(
@@ -450,13 +502,17 @@ impl Element for EditorElement {
                     continue;
                 }
                 worst = worst.min(Some(*severity)).or(Some(*severity));
-                if range.start > end {
+                if range.start > end || range.end < seg_start || range.start > seg_end {
                     continue;
                 }
-                let a = range.start.clamp(*start, end);
-                let b = range.end.clamp(*start, end);
-                let xa = shaped.x_for_index(display.char_to_byte[a - start]);
-                let xb = shaped.x_for_index(display.char_to_byte[b - start]);
+                let a = range.start.clamp(seg_start, seg_end);
+                let b = range.end.clamp(seg_start, seg_end);
+                // An empty mark is drawn once, on the row a caret there would be drawn on.
+                if a == b && (a != range.start || !r.holds(a - start)) {
+                    continue;
+                }
+                let xa = r.x_for(a - start);
+                let xb = r.x_for(b - start);
                 let width = if b > a { xb - xa } else { cell };
                 frame.overlay.push(fill(
                     Bounds::new(point(x0 + xa, y + lh - px(2.)), size(width, px(1.))),
@@ -464,29 +520,33 @@ impl Element for EditorElement {
                 ));
             }
 
-            let number = (line + 1).to_string();
-            let color = match worst {
-                Some(
-                    severity @ (crate::MarkerSeverity::Error | crate::MarkerSeverity::Warning),
-                ) => crate::view::marker_color(severity, &theme),
-                _ if heads_here().next().is_some() => syntax.line_number_active,
-                _ => syntax.line_number,
-            };
-            let label = text_system.shape_line(
-                number.clone().into(),
-                font_size,
-                &[run(number.len(), color)],
-                None,
-            );
-            let x = numbers_right - label.width;
-            frame.gutter.push((point(x, y), label));
-            if view.lightbulb == Some(*line) {
-                // A painted dot, because the editor font has no emoji fallback for 💡.
-                let d = px(6.);
-                let origin = point(bounds.left() + (px(GUTTER_PAD) - d) / 2., y + (lh - d) / 2.);
-                frame.gutter_marks.push(
-                    fill(Bounds::new(origin, size(d, d)), theme.color.warning).corner_radii(d / 2.),
+            if first_row {
+                let number = (line + 1).to_string();
+                let color = match worst {
+                    Some(
+                        severity @ (crate::MarkerSeverity::Error | crate::MarkerSeverity::Warning),
+                    ) => crate::view::marker_color(severity, &theme),
+                    _ if heads_here().next().is_some() => syntax.line_number_active,
+                    _ => syntax.line_number,
+                };
+                let label = text_system.shape_line(
+                    number.clone().into(),
+                    font_size,
+                    &[run(number.len(), color)],
+                    None,
                 );
+                let x = numbers_right - label.width;
+                frame.gutter.push((point(x, y), label));
+                if view.lightbulb == Some(*line) {
+                    // A painted dot, because the editor font has no emoji fallback for 💡.
+                    let d = px(6.);
+                    let origin =
+                        point(bounds.left() + (px(GUTTER_PAD) - d) / 2., y + (lh - d) / 2.);
+                    frame.gutter_marks.push(
+                        fill(Bounds::new(origin, size(d, d)), theme.color.warning)
+                            .corner_radii(d / 2.),
+                    );
+                }
             }
             // Marks come from the saved file, so unsaved line inserts shift them until the next save.
             for mark in &view.gutter_marks {
@@ -501,7 +561,7 @@ impl Element for EditorElement {
                     {
                         (y, lh, theme.color.warning)
                     }
-                    crate::GutterMark::Removed { before } if before == *line => {
+                    crate::GutterMark::Removed { before } if before == *line && first_row => {
                         (y - px(3.), px(6.), theme.color.danger)
                     }
                     _ => continue,
@@ -517,6 +577,7 @@ impl Element for EditorElement {
                 ));
             }
             let chevron = match folded {
+                _ if !first_row => None,
                 Some(_) => Some(("▸", syntax.line_number_active)),
                 None if view.gutter_hover && view.fold_at(*line).is_some() => {
                     Some(("▾", syntax.line_number))
@@ -538,7 +599,7 @@ impl Element for EditorElement {
                 .blame
                 .as_ref()
                 .filter(|(l, _)| *l == *line && *line == head_line && self.focused)
-                .filter(|_| folded.is_none())
+                .filter(|_| folded.is_none() && r.last)
             {
                 let text = text_system.shape_line(
                     caption.clone().into(),
@@ -546,14 +607,12 @@ impl Element for EditorElement {
                     &[run(caption.len(), syntax.comment)],
                     None,
                 );
-                frame
-                    .text
-                    .push((point(x0 + shaped.width + cell * 3., y), text));
+                frame.text.push((point(row_end + cell * 3., y), text));
             }
 
-            for caret in heads_here() {
+            for caret in heads_on_row() {
                 let at = caret.head();
-                let x = x0 + shaped.x_for_index(display.char_to_byte[at - start]);
+                let x = x0 + r.x_for(at - start);
                 if at == head
                     && let Some(marked) = &view.marked
                 {
@@ -582,10 +641,7 @@ impl Element for EditorElement {
             }
         }
 
-        let stored = lines
-            .into_iter()
-            .map(|(line, _, _, display, shaped)| (line, display, shaped))
-            .collect();
+        let stored = rows.into_iter().map(|(_, _, r)| r).collect();
         self.view.update(cx, |view, _| {
             view.scroll.x = scroll_x;
             view.autoscroll = false;
@@ -594,7 +650,7 @@ impl Element for EditorElement {
                 text_left,
                 line_height: lh,
                 cell,
-                lines: stored,
+                rows: stored,
                 fold_column,
             });
         });
