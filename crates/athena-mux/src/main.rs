@@ -25,6 +25,9 @@ fn run() -> Result<()> {
     unsafe {
         libc::setsid();
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        // Spawned from an AppKit app, which ignores SIGTERM; ignored signals survive exec.
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
     }
 
     let lock = OpenOptions::new()

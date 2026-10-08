@@ -11,3 +11,6 @@ athena-proto.workspace = true
 portable-pty.workspace = true
 anyhow.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+libc.workspace = true

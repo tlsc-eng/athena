@@ -183,3 +183,34 @@ fn shells_do_not_inherit_the_daemon_environment() {
     assert!(out.contains("secret=[]"), "secret leaked: {out}");
     assert!(out.contains(&format!("home=[{}]", daemon.home.display())));
 }
+
+#[test]
+fn sigterm_stops_the_daemon_even_if_the_parent_ignored_it() {
+    use std::os::unix::process::CommandExt;
+    let home = PathBuf::from(format!("/tmp/athena-t{}-term", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_athena-mux"));
+    cmd.env("HOME", &home);
+    // SAFETY: only async-signal-safe signal(2) between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().unwrap();
+    let mut daemon = Daemon { home, child };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !daemon.socket().exists() {
+        assert!(Instant::now() < deadline, "daemon did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: signalling our own child.
+    unsafe { libc::kill(daemon.child.id() as i32, libc::SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while daemon.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "SIGTERM was ignored");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
