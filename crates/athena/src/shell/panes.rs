@@ -856,6 +856,9 @@ impl Shell {
         .absolute()
         .size_full();
 
+        if self.ratio_anim.is_some() {
+            window.request_animation_frame();
+        }
         let dividers = if self.zoomed.is_some() || self.ratio_anim.is_some() {
             Vec::new()
         } else {
@@ -899,29 +902,24 @@ impl Shell {
                 let b = self.render_node(root, second, path, focused, cx);
                 path.pop();
                 let t = cx.theme();
-                let (border, reduced, fast) = (t.color.border, t.motion.reduced, t.motion.fast);
+                let (border, fast) = (t.color.border, t.motion.fast);
                 let horizontal = *axis == Axis::Horizontal;
+                // The one sanctioned size animation over live panes, interpolated here rather than
+                // through an animation wrapper, which would re-key both panes and replay their fades.
+                let ratio = match self.ratio_anim.as_ref().filter(|a| a.0 == *path) {
+                    Some(&(_, from, opening, _)) => {
+                        let d =
+                            (opening.since.elapsed().as_secs_f32() / fast.as_secs_f32()).min(1.);
+                        from + (*ratio - from) * motion::ease_standard()(d)
+                    }
+                    None => *ratio,
+                };
                 let first_box = div()
                     .flex_none()
                     .overflow_hidden()
-                    .when(horizontal, |el| el.h_full().w(relative(*ratio)))
-                    .when(!horizontal, |el| el.w_full().h(relative(*ratio)))
+                    .when(horizontal, |el| el.h_full().w(relative(ratio)))
+                    .when(!horizontal, |el| el.w_full().h(relative(ratio)))
                     .child(a);
-                let to = *ratio;
-                // The one sanctioned size animation over live panes: short, and only on double-click.
-                let first_box = match self.ratio_anim.as_ref().filter(|(p, _, _)| p == path) {
-                    Some(&(_, from, generation)) => motion::animate_if(
-                        reduced,
-                        first_box,
-                        ("split-center", generation),
-                        Animation::new(fast).with_easing(motion::ease_standard()),
-                        move |el, d| {
-                            let r = relative(from + (to - from) * d);
-                            if horizontal { el.w(r) } else { el.h(r) }
-                        },
-                    ),
-                    None => first_box.into_any_element(),
-                };
                 let line = div()
                     .flex_none()
                     .bg(border)
@@ -1261,12 +1259,12 @@ impl Shell {
         let reduced = cx.theme().motion.reduced;
         if !reduced && (from - 0.5).abs() > f32::EPSILON {
             let generation = self.next_generation();
-            self.ratio_anim = Some((path, from, generation));
+            self.ratio_anim = Some((path, from, motion::Opening::now(), generation));
             let delay = cx.theme().motion.fast;
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.ratio_anim.as_ref().is_some_and(|a| a.2 == generation) {
+                    if this.ratio_anim.as_ref().is_some_and(|a| a.3 == generation) {
                         this.ratio_anim = None;
                         cx.notify();
                     }
@@ -1475,6 +1473,7 @@ impl Shell {
 
     /// Hangs up every shell in a project that is being closed.
     pub(super) fn drop_project_items(&mut self, root: &Path, cx: &mut Context<Self>) {
+        self.tab_scroll.retain(|(r, _), _| r != root);
         let keys: Vec<_> = self
             .items
             .keys()
