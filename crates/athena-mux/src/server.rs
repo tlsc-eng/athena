@@ -99,14 +99,26 @@ impl Server {
             .spawn(move || {
                 loop {
                     thread::sleep(FOREGROUND_TICK);
+                    // Only the cheap ioctl runs under the lock; describing a process is three
+                    // syscalls per pane, and nobody needs it for a pane no client watches.
+                    let leaders: Vec<_> = self
+                        .lock()
+                        .panes
+                        .iter()
+                        .filter(|(_, p)| p.exit.is_none() && !p.attached.is_empty())
+                        .map(|(id, p)| (*id, p.leader()))
+                        .collect();
+                    let described: Vec<_> = leaders
+                        .into_iter()
+                        .map(|(id, leader)| (id, leader.and_then(process::describe)))
+                        .collect();
                     let updates: Vec<_> = {
                         let mut st = self.lock();
                         let State { panes, clients, .. } = &mut *st;
-                        panes
-                            .iter_mut()
-                            .filter(|(_, p)| p.exit.is_none())
-                            .filter_map(|(id, p)| {
-                                let now = p.leader().and_then(process::describe);
+                        described
+                            .into_iter()
+                            .filter_map(|(id, now)| {
+                                let p = panes.get_mut(&id)?;
                                 if now == p.foreground {
                                     return None;
                                 }
@@ -119,7 +131,7 @@ impl Server {
                                 Some((
                                     targets,
                                     ServerMsg::Foreground {
-                                        pane: *id,
+                                        pane: id,
                                         process: now,
                                     },
                                 ))
