@@ -12,6 +12,7 @@ pub const PANEL_IDS: u64 = 1 << 32;
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct Panel {
+    #[serde(deserialize_with = "crate::layout::known_items")]
     pub terminals: Vec<Item>,
     pub active: usize,
 }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Smallest pane edge, in pixels, that dragging or splitting may produce.
 pub const MIN_PANE: f32 = 120.;
@@ -130,8 +130,19 @@ pub struct ViewState {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Pane {
     pub id: PaneId,
+    #[serde(deserialize_with = "known_items")]
     pub items: Vec<Item>,
     pub active: usize,
+}
+
+/// Tabs this build cannot read, such as a kind a later release added, are left out rather than
+/// failing the whole workspace file.
+pub(crate) fn known_items<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Item>, D::Error> {
+    let values = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
 }
 
 impl Pane {

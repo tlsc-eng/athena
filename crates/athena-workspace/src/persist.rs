@@ -232,6 +232,39 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn tabs_of_kinds_a_later_release_added_are_dropped_and_the_rest_of_the_file_loads() {
+        let dir = std::env::temp_dir().join(format!("athena-unknown-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        let json = r#"{"projects":[{"root":"/a","layout":{"tree":{"Split":{
+            "axis":"Horizontal","ratio":0.5,
+            "first":{"Leaf":{"id":1,"items":[
+                {"id":2,"kind":{"Terminal":{"session":7}}},
+                {"id":3,"kind":{"Notebook":{"path":"/a/n.ipynb"}}},
+                {"id":4,"kind":"Welcome"},
+                {"id":5,"kind":{"Diff":{"path":"/a/x.rs","base":{"Stash":{"index":0}}}}}
+            ],"active":3}},
+            "second":{"Leaf":{"id":6,"items":[{"id":7,"kind":"Welcome"}],"active":0}}}},
+            "focused":6,"next_id":8},
+            "panel":{"terminals":[{"id":4294967296,"kind":{"Hologram":{}}},
+                {"id":4294967297,"kind":{"Terminal":{"session":8}}}],"active":1}}],
+            "active":0,"window":null,"recent":["/b"]}"#;
+        fs::write(&path, json).unwrap();
+        let w = load(&path).unwrap();
+        assert_eq!(w.recent, [PathBuf::from("/b")]);
+        let layout = w.projects[0].layout.as_ref().unwrap();
+        let kinds: Vec<_> = layout.items().map(|i| &i.kind).collect();
+        assert_eq!(kinds, [&ItemKind::Terminal { session: Some(7) }]);
+        assert_eq!(layout.panes().len(), 1, "a pane of unknown tabs goes");
+        assert_eq!(layout.panes()[0].active, 0);
+        assert_eq!(
+            w.projects[0].panel.active_item().map(|i| &i.kind),
+            Some(&ItemKind::Terminal { session: Some(8) })
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     const FIXTURES: [(&str, &str); 8] = [
         ("v0.2", include_str!("../fixtures/workspace-v0.2.json")),
         ("v0.3", include_str!("../fixtures/workspace-v0.3.json")),

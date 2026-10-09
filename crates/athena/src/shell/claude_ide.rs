@@ -60,6 +60,12 @@ fn never_saved(kind: &ItemKind) -> bool {
     )
 }
 
+/// Tabs workspace.json leaves out: those above, and the settings and shortcut editors, whose
+/// kinds a v0.9 build cannot read and would set the whole file aside for.
+fn not_on_disk(kind: &ItemKind) -> bool {
+    never_saved(kind) || matches!(kind, ItemKind::Settings | ItemKind::Shortcuts)
+}
+
 /// The file on disk as diff text, in the encoding the editor would read it in; a FIFO or device
 /// is refused before opening it would block.
 fn read_text(path: &Path) -> Result<String, String> {
@@ -113,11 +119,16 @@ fn proposal_target(roots: &[&Path], path: &Path) -> Option<(usize, PathBuf)> {
 
 /// A copy of `workspace` without proposal tabs, or `None` when it has none.
 pub(super) fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
+    without(workspace, never_saved)
+}
+
+/// A copy of `workspace` without the tabs `left_out` picks, or `None` when it has none.
+fn without(workspace: &Workspace, left_out: fn(&ItemKind) -> bool) -> Option<Workspace> {
     let any = workspace
         .projects
         .iter()
         .filter_map(|p| p.layout.as_ref())
-        .any(|l| l.items().any(|i| never_saved(&i.kind)));
+        .any(|l| l.items().any(|i| left_out(&i.kind)));
     if !any {
         return None;
     }
@@ -128,7 +139,7 @@ pub(super) fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
         };
         let ids: Vec<ItemId> = layout
             .items()
-            .filter(|i| never_saved(&i.kind))
+            .filter(|i| left_out(&i.kind))
             .map(|i| i.id)
             .collect();
         for id in ids {
@@ -285,7 +296,7 @@ impl Shell {
 
     /// The workspace as saved: a proposal cannot outlive the request that opened it.
     pub(super) fn persisted_workspace(&self) -> Cow<'_, Workspace> {
-        without_proposals(&self.workspace).map_or(Cow::Borrowed(&self.workspace), Cow::Owned)
+        without(&self.workspace, not_on_disk).map_or(Cow::Borrowed(&self.workspace), Cow::Owned)
     }
 
     pub(super) fn show_proposal(
@@ -686,6 +697,63 @@ mod tests {
             without_proposals(&alone).unwrap().projects[0]
                 .layout
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn the_saved_workspace_holds_only_tab_kinds_a_v0_9_build_can_read() {
+        use athena_workspace::Layout;
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        enum ItemKindOfV09 {
+            Terminal { session: Option<u64> },
+            Editor { path: PathBuf },
+            Preview { url: String },
+            Image { path: PathBuf },
+            Rendered { path: PathBuf },
+            Diff { path: PathBuf, base: DiffBase },
+        }
+        fn kinds(value: &Value, out: &mut Vec<Value>) {
+            match value {
+                Value::Object(map) => {
+                    out.extend(map.get("kind").cloned());
+                    map.values().for_each(|v| kinds(v, out));
+                }
+                Value::Array(list) => list.iter().for_each(|v| kinds(v, out)),
+                _ => {}
+            }
+        }
+
+        let mut workspace = Workspace::default();
+        workspace.add_project(PathBuf::from("/p"));
+        workspace.add_project(PathBuf::from("/q"));
+        let mut layout = Layout::new(ItemKind::Settings);
+        let pane = layout.focused;
+        for kind in [
+            ItemKind::Shortcuts,
+            ItemKind::Editor {
+                path: "/p/a.rs".into(),
+            },
+        ] {
+            layout.add_item(pane, kind).unwrap();
+        }
+        workspace.projects[0].layout = Some(layout);
+        workspace.projects[1].layout = Some(Layout::new(ItemKind::Shortcuts));
+
+        let saved = without(&workspace, not_on_disk).unwrap();
+        let mut found = Vec::new();
+        kinds(&serde_json::to_value(&saved).unwrap(), &mut found);
+        assert_eq!(found.len(), 1, "{found:?}");
+        for kind in found {
+            assert!(
+                serde_json::from_value::<ItemKindOfV09>(kind.clone()).is_ok(),
+                "{kind}"
+            );
+        }
+        assert_eq!(saved.projects[1].layout, None);
+        assert!(
+            without_proposals(&workspace).is_none(),
+            "a project moving to another window keeps them"
         );
     }
 
