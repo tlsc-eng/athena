@@ -11,7 +11,7 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
 - Release: v0.6.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.6.0 (tap `f79bd1b`, installed here)
 - Release: v0.7.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.7.0 (tap `e001a6b`, installed here)
 - Release: v0.8.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.8.0 (tap `2a0ce2a`, installed here)
-- Release: v0.9.0 — <link added at release>
+- Release: v0.9.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.9.0 (tap `fa17d03`, installed here)
 
 The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
 v0.5. For v0.6 the lanes ran GUI QA with synthetic keys only, while you were idle, so anything
