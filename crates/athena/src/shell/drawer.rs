@@ -104,6 +104,7 @@ impl Shell {
             self.mark_all_read(cx);
         }
         self.containers_visible(self.drawer == Some(DrawerTab::Containers), cx);
+        self.note_terminal_panel(cx);
         cx.notify();
     }
 

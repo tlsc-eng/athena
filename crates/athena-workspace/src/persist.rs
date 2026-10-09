@@ -98,6 +98,7 @@ mod tests {
             tree_width: 300.,
             drawer_height: 180.,
             tree_visible: false,
+            terminal_panel_open: true,
             font_zoom: -2,
             zoom_level: 3,
         };
@@ -240,6 +241,7 @@ mod tests {
         assert_eq!(ui.tree_width, 320.);
         assert_eq!(ui.drawer_height, 240.);
         assert!(ui.tree_visible);
+        assert!(!ui.terminal_panel_open);
         assert_eq!(ui.font_zoom, 0);
     }
 }

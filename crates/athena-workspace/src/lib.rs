@@ -82,6 +82,8 @@ pub struct UiState {
     pub tree_width: f32,
     pub drawer_height: f32,
     pub tree_visible: bool,
+    /// The drawer showed the terminal panel at the last quit.
+    pub terminal_panel_open: bool,
     /// Editor and terminal font size, in 1px steps from the default.
     pub font_zoom: i32,
     /// Interface size, in 10% steps from the default.
@@ -94,6 +96,7 @@ impl Default for UiState {
             tree_width: 240.,
             drawer_height: 240.,
             tree_visible: true,
+            terminal_panel_open: false,
             font_zoom: 0,
             zoom_level: 0,
         }

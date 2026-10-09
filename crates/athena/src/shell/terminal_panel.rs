@@ -57,6 +57,39 @@ impl Shell {
         true
     }
 
+    /// Attaches the terminals among `items` that have a session, so a restored tab shows its
+    /// session's title, program or folder before it is first opened.
+    pub(super) fn attach_terminals<'a>(
+        &mut self,
+        root: &Path,
+        items: impl IntoIterator<Item = &'a Item>,
+        cx: &mut Context<Self>,
+    ) {
+        for item in items {
+            if matches!(item.kind, ItemKind::Terminal { session: Some(_) }) {
+                self.item_view(root, item, cx);
+            }
+        }
+    }
+
+    /// Reopens the drawer on the terminal panel when it was showing at the last quit.
+    pub(super) fn restore_terminal_panel(&mut self) {
+        if self.workspace.ui.terminal_panel_open && self.panel().is_some_and(|p| !p.is_empty()) {
+            self.drawer = Some(DrawerTab::Terminal);
+            self.drawer_shown = self.drawer;
+            self.last_drawer_tab = DrawerTab::Terminal;
+        }
+    }
+
+    /// Remembers whether the terminal panel is showing, for the next launch.
+    pub(super) fn note_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        let open = self.drawer == Some(DrawerTab::Terminal);
+        if self.workspace.ui.terminal_panel_open != open {
+            self.workspace.ui.terminal_panel_open = open;
+            self.schedule_save(cx);
+        }
+    }
+
     fn panel(&self) -> Option<&Panel> {
         Some(&self.workspace.active_project()?.panel)
     }
@@ -328,6 +361,7 @@ impl Shell {
             return div().into_any_element();
         };
         let panel = self.panel().cloned().unwrap_or_default();
+        self.attach_terminals(&root, &panel.terminals, cx);
         let tint = t.color.accent.opacity(0.12);
         let body = match panel.active_item() {
             None => div()

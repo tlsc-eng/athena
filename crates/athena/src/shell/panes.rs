@@ -432,7 +432,7 @@ impl Shell {
     pub(super) fn item_label(&self, root: &Path, item: &Item, cx: &Context<Self>) -> String {
         match (self.items.get(&(root.to_path_buf(), item.id)), &item.kind) {
             (Some(view), _) => view.label(cx),
-            (None, ItemKind::Terminal { .. }) => "Terminal".into(),
+            (None, ItemKind::Terminal { .. }) => file_label(root),
             (None, ItemKind::Editor { path } | ItemKind::Image { path }) => file_label(path),
             (None, ItemKind::Preview { url }) => athena_preview::label_for(url),
             (None, ItemKind::Rendered { path }) => athena_preview::doc_label_for(path),
@@ -1408,6 +1408,7 @@ impl Shell {
         focused: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.attach_terminals(root, &pane.items, cx);
         let t = cx.theme().clone();
         let pane_id = pane.id;
         let tabs: Vec<AnyElement> = pane

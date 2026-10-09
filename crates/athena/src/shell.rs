@@ -314,6 +314,7 @@ impl Shell {
             // Closing the only window quits, so unsaved files get the same question as Cmd+Q.
             this.update(cx, |this, cx| this.quit(window, cx)).is_err()
         });
+        shell.restore_terminal_panel();
         shell.start_notices(window, cx);
         shell.announce_recovery(cx);
         shell.start_usage(window, cx);
