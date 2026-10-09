@@ -782,24 +782,28 @@ impl Buffer {
         let old_end_char = change.start + change.deleted.chars().count();
         let old_end_byte = self.rope.char_to_byte(old_end_char);
         let old_end_position = self.point(old_end_char);
+        let old_end_line = self.rope.char_to_line(old_end_char);
+        self.rope.remove(change.start..old_end_char);
+        self.rope.insert(change.start, &change.inserted);
+        let new_end_char = change.start + change.inserted.chars().count();
+        // Lines as the rope counts them (a lone CR breaks one); splitting or joining a CRLF
+        // moves the start line too.
+        let line = start_position.row.min(self.rope.char_to_line(change.start));
         if self.edits.len() == EDIT_LOG {
             self.edits.pop_front();
         }
         let edit = Edit {
             at: change.start,
             removed: old_end_char - change.start,
-            inserted: change.inserted.chars().count(),
-            line: start_position.row,
-            lines_removed: change.deleted.matches('\n').count(),
-            lines_inserted: change.inserted.matches('\n').count(),
+            inserted: new_end_char - change.start,
+            line,
+            lines_removed: old_end_line - line,
+            lines_inserted: self.rope.char_to_line(new_end_char) - line,
         };
         self.edits.push_back(edit);
         if let Some(batch) = self.batch.as_mut() {
             batch.edits.push(edit);
         }
-        self.rope.remove(change.start..old_end_char);
-        self.rope.insert(change.start, &change.inserted);
-        let new_end_char = change.start + change.inserted.chars().count();
         InputEdit {
             start_byte,
             old_end_byte,
@@ -2822,6 +2826,21 @@ mod tests {
         b.undo(&mut c);
         assert_eq!(lines(&b, seen), vec![(0, 0, 4)]);
         assert!(b.edits_since(b.version() + 1).is_none());
+
+        let mut b = buf("ab", "/x/a.txt");
+        let mut c = Cursor::at(1);
+        b.insert(&mut c, "\r");
+        assert_eq!(b.len_lines(), 2);
+        assert_eq!(lines(&b, 0), vec![(0, 0, 1)], "a lone CR breaks a line");
+        let mut b = buf("a\rX\nb", "/x/a.txt");
+        let mut c = select(2, 3);
+        b.backspace(&mut c);
+        assert_eq!(b.len_lines(), 2);
+        assert_eq!(
+            lines(&b, 0),
+            vec![(0, 1, 0)],
+            "joining CR and LF into one break merges lines"
+        );
     }
 
     #[test]
