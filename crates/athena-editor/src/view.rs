@@ -26,6 +26,7 @@ use crate::element::EditorElement;
 use crate::find::{self, FindOptions};
 use crate::hover::Hovering;
 use crate::line_jump::LineJump;
+use crate::lsp_ui::LinkedEdit;
 use crate::shared::{self, SharedBuffer};
 use crate::signature::Signing;
 
@@ -503,6 +504,10 @@ pub struct EditorView {
     pub(crate) coverage: Option<std::sync::Arc<crate::run_marks::Coverage>>,
     pub(crate) file_blame: crate::blame::FileBlame,
     pub(crate) peek: Option<crate::peek::Peek>,
+    pub(crate) smart: crate::smart_select::SmartSelect,
+    pub(crate) linked: crate::lsp_ui::Linked,
+    /// The Format Selection request in flight and the buffer version it was asked for.
+    pub(crate) range_format: Option<(u64, u64)>,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -598,6 +603,9 @@ impl EditorView {
             coverage: None,
             file_blame: Default::default(),
             peek: None,
+            smart: Default::default(),
+            linked: Default::default(),
+            range_format: None,
         }
     }
 
@@ -1700,6 +1708,7 @@ impl Render for EditorView {
         }
         self.schedule_occurrences(focused, cx);
         self.schedule_inlays(cx);
+        self.schedule_linked(focused, cx);
         let root = div()
             .id("editor")
             .size_full()
@@ -1826,7 +1835,7 @@ impl Render for EditorView {
                         let open = this.completion_open();
                         let signing = this.signing_shown();
                         this.typing = open || signing;
-                        this.edit_each(cx, |b, c| b.backspace(c));
+                        this.edit_linked(LinkedEdit::Backspace, cx, |b, c| b.backspace(c));
                         if open {
                             this.refilter_completion(cx);
                         }
@@ -1835,7 +1844,7 @@ impl Render for EditorView {
                         }
                     }))
                     .on_action(cx.listener(|this, _: &Delete, _, cx| {
-                        this.edit_each(cx, |b, c| b.delete_forward(c))
+                        this.edit_linked(LinkedEdit::Delete, cx, |b, c| b.delete_forward(c))
                     }))
                     .on_action(cx.listener(|this, _: &DeleteWordBack, _, cx| {
                         this.edit_each(cx, |b, c| b.delete_word_back(c))
@@ -1862,6 +1871,21 @@ impl Render for EditorView {
                         cx.listener(|this, _: &ShowCompletions, _, cx| this.complete_now(cx)),
                     )
                     .on_action(cx.listener(|this, _: &ShowHover, _, cx| this.hover_at_cursor(cx)))
+                    .on_action(cx.listener(
+                        |this, _: &crate::smart_select::ExpandSelection, _, cx| {
+                            this.expand_selection(cx)
+                        },
+                    ))
+                    .on_action(cx.listener(
+                        |this, _: &crate::smart_select::ShrinkSelection, _, cx| {
+                            this.shrink_selection(cx)
+                        },
+                    ))
+                    .on_action(
+                        cx.listener(|this, _: &crate::lsp_ui::FormatSelection, _, cx| {
+                            this.format_selection(cx)
+                        }),
+                    )
                     .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
                         this.with_buffer(cx, |b, c| {
                             c.collapse();
@@ -2442,8 +2466,10 @@ impl EntityInputHandler for EditorView {
             self.typing = true;
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
-                (Some(ch), None) => self.edit_each(cx, |b, c| b.type_char(c, ch)),
-                _ => self.edit_each(cx, |b, c| b.insert(c, &text)),
+                (Some(ch), None) => {
+                    self.edit_linked(LinkedEdit::Type(&text), cx, |b, c| b.type_char(c, ch))
+                }
+                _ => self.edit_linked(LinkedEdit::Type(&text), cx, |b, c| b.insert(c, &text)),
             }
             self.completion_after_typing(&text, cx);
             self.signature_after_typing(&text, cx);

@@ -253,6 +253,10 @@ fn server_edit(e: athena_lsp::TextEdit) -> ServerEdit {
     }
 }
 
+fn position((line, character): (u32, u32)) -> Position {
+    Position { line, character }
+}
+
 fn hover_blocks(blocks: Vec<MarkupBlock>) -> Vec<HoverBlock> {
     blocks
         .into_iter()
@@ -1458,7 +1462,157 @@ impl Shell {
             LspRequest::ResolveCompletion { request, index } => {
                 self.lsp_resolve_completion(editor, request, index, cx)
             }
+            LspRequest::SelectionRanges { request, positions } => {
+                self.lsp_selection_ranges(editor, request, positions, cx)
+            }
+            LspRequest::FormatSelection {
+                request,
+                start,
+                end,
+                tab_size,
+                insert_spaces,
+            } => {
+                let range = Range {
+                    start: position(start),
+                    end: position(end),
+                };
+                self.lsp_format_selection(editor, request, range, (tab_size, insert_spaces), cx)
+            }
+            LspRequest::LinkedEditing {
+                request,
+                line,
+                character,
+            } => self.lsp_linked_editing(editor, request, position((line, character)), cx),
         }
+    }
+
+    /// Asks the server for the ranges selection grows through; without one the editor grows by
+    /// words and lines.
+    fn lsp_selection_ranges(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        positions: Vec<(u32, u32)>,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let client = self
+            .document_client(&doc)
+            .filter(|c| c.supports("/selectionRangeProvider"));
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let positions: Vec<Position> = positions.into_iter().map(position).collect();
+            let chains = match client {
+                Some(client) => match client.selection_ranges(&doc, &positions).await {
+                    Ok(chains) => Some(chains),
+                    Err(why) => {
+                        tracing::debug!("selection ranges failed: {why}");
+                        None
+                    }
+                },
+                None => None,
+            };
+            let pos = |p: Position| (p.line, p.character);
+            let chains = chains.map(|all| {
+                all.into_iter()
+                    .map(|chain| {
+                        chain
+                            .into_iter()
+                            .map(|r| (pos(r.start), pos(r.end)))
+                            .collect()
+                    })
+                    .collect()
+            });
+            let _ = weak.update(cx, |e, cx| e.show_selection_ranges(request, chains, cx));
+        })
+        .detach();
+    }
+
+    /// Cmd+K Cmd+F: the server's edits for the selection, or a notice when it formats only
+    /// whole files.
+    fn lsp_format_selection(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        range: Range,
+        (tab_size, insert_spaces): (u32, bool),
+        cx: &mut Context<Self>,
+    ) {
+        const TITLE: &str = "Format Selection";
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let Some(client) = self.document_client(&doc) else {
+            return self.lsp_failed(TITLE, NO_SERVER.into(), cx);
+        };
+        if !client.supports("/documentRangeFormattingProvider") {
+            let program = self
+                .lsp
+                .documents
+                .get(&doc)
+                .map_or("The language server", |(_, kind)| kind.program());
+            return self.lsp_failed(
+                TITLE,
+                format!("{program} formats whole files only; ⌘S formats on save."),
+                cx,
+            );
+        }
+        let weak = editor.downgrade();
+        cx.spawn(async move |this, cx| {
+            match client
+                .range_formatting(&doc, range, tab_size, insert_spaces)
+                .await
+            {
+                Ok(edits) => {
+                    let edits = edits.into_iter().map(server_edit).collect();
+                    let _ = weak.update(cx, |e, cx| e.formatted_selection(request, edits, cx));
+                }
+                Err(why) => {
+                    let _ = this.update(cx, |this, cx| this.lsp_failed(TITLE, why, cx));
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The ranges typed together with the one at `at`, for linked editing.
+    fn lsp_linked_editing(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        at: Position,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let client = self
+            .document_client(&doc)
+            .filter(|c| c.supports("/linkedEditingRangeProvider"));
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let linked = match client {
+                Some(client) => {
+                    client
+                        .linked_editing_ranges(&doc, at)
+                        .await
+                        .unwrap_or_else(|why| {
+                            tracing::debug!("linked editing failed: {why}");
+                            Default::default()
+                        })
+                }
+                None => Default::default(),
+            };
+            let pos = |p: Position| (p.line, p.character);
+            let ranges = linked
+                .ranges
+                .into_iter()
+                .map(|r| (pos(r.start), pos(r.end)))
+                .collect();
+            let _ = weak.update(cx, |e, cx| {
+                e.show_linked_editing(request, ranges, linked.word_pattern, cx)
+            });
+        })
+        .detach();
     }
 
     fn lsp_resolve_completion(

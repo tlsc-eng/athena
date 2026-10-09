@@ -206,7 +206,19 @@ its shells running.
 - Call hierarchy (`shift-alt-h`, the editor menu or the palette): the callers of the function at
   the cursor in the References tab as a tree; Incoming / Outgoing in the tab's header switches to
   the functions it calls, a chevron (or a double click) loads the next level, and a row opens the
-  call site.
+  call site. **Show type hierarchy** (palette) does the same for the type at the cursor: its
+  subtypes, or with Supertypes in the header the types it extends or implements (gopls answers
+  for interfaces and the types implementing them).
+- Expand and shrink selection (`ctrl-shift-cmd-right` / `ctrl-shift-cmd-left`): every caret's
+  selection grows through the syntax around it as the language server sees it (gopls and
+  typescript-language-server), or by word, line text, line and file without one; shrinking steps
+  back through the same selections.
+- Format selection (`cmd-k cmd-f`) formats the selection, or the cursor's line, when the server
+  can format part of a file (typescript-language-server can; gopls formats whole files only and
+  says so).
+- Linked editing (`"editor": { "linked_editing": true }`, off by default as in VS Code): in TSX
+  and JSX, typing in an element's tag name renames its closing tag too, as one undo step; a space
+  or any character a tag name cannot hold ends it.
 - Go to symbol in the file (`cmd-shift-o`, or `@` in Go to file), previewing each one as the
   selection moves and going back on Escape, and in the workspace (`cmd-alt-o`, or `#`). `>` in Go
   to file switches to commands.
@@ -719,6 +731,8 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `cmd`-click | Go to definition |
 | `shift-f12`, `cmd-alt-r` | Find references |
 | `shift-alt-h` | Show call hierarchy |
+| `ctrl-shift-cmd-right` / `ctrl-shift-cmd-left` | Expand / shrink selection |
+| `cmd-k cmd-f` | Format selection |
 | `alt-f3` / `shift-alt-f3` | Quick diff peek at the next / previous change |
 | `alt-left` / `alt-right` | Move by word |
 | `cmd-left` / `cmd-right`, `home` / `end` | Line start / end |

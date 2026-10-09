@@ -961,6 +961,11 @@ impl Render for Shell {
                 }),
             )
             .on_action(
+                cx.listener(|this, _: &athena_editor::ShowTypeHierarchy, _, cx| {
+                    this.show_type_hierarchy(cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &athena_editor::ShowCodeActions, w, cx| {
                     this.show_code_actions(w, cx)
                 }),

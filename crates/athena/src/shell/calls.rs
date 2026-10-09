@@ -22,10 +22,13 @@ fn next_generation() -> u64 {
     GENERATIONS.fetch_add(1, Ordering::Relaxed)
 }
 
-/// The call hierarchy the References tab shows after Shift+Alt+H, as VS Code's Call Hierarchy view.
+/// The call hierarchy the References tab shows after Shift+Alt+H, as VS Code's Call Hierarchy view,
+/// or the type hierarchy, its supertypes and subtypes in place of callees and callers.
 pub(super) struct Calls {
     /// The project it was asked from; other projects show the tab empty.
     pub(super) root: PathBuf,
+    /// A type hierarchy, where incoming means subtypes and outgoing supertypes.
+    types: bool,
     incoming: bool,
     /// The function asked about first, then every caller or callee loaded so far.
     nodes: Vec<Node>,
@@ -51,10 +54,11 @@ enum Children {
 }
 
 impl Calls {
-    fn new(root: PathBuf, item: CallItem) -> Self {
+    fn new(root: PathBuf, item: CallItem, types: bool) -> Self {
         let sites_in = item.path.clone();
         Self {
             root,
+            types,
             incoming: true,
             nodes: vec![Node {
                 call: Call {
@@ -137,21 +141,39 @@ impl Calls {
 impl Shell {
     /// Shift+Alt+H: the callers of the function at the cursor, in the References tab.
     pub(super) fn show_call_hierarchy(&mut self, cx: &mut Context<Self>) {
-        const TITLE: &str = "No call hierarchy";
+        self.show_hierarchy(false, cx);
+    }
+
+    /// Show Type Hierarchy: the subtypes of the type at the cursor, in the References tab.
+    pub(super) fn show_type_hierarchy(&mut self, cx: &mut Context<Self>) {
+        self.show_hierarchy(true, cx);
+    }
+
+    fn show_hierarchy(&mut self, types: bool, cx: &mut Context<Self>) {
+        let (title, capability, offered, missing) = match types {
+            true => (
+                "No type hierarchy",
+                "/typeHierarchyProvider",
+                "This file's language server does not offer a type hierarchy.",
+                "No type is under the cursor.",
+            ),
+            false => (
+                "No call hierarchy",
+                "/callHierarchyProvider",
+                "This file's language server does not offer a call hierarchy.",
+                "No function or method is under the cursor.",
+            ),
+        };
         let Some(editor) = self.focused_editor() else {
             return;
         };
         let doc = document_key(editor.read(cx).path());
         self.flush_change(&doc, &editor, cx);
         let Some(client) = self.document_client(&doc) else {
-            return self.lsp_failed(TITLE, NO_SERVER.into(), cx);
+            return self.lsp_failed(title, NO_SERVER.into(), cx);
         };
-        if !client.supports("/callHierarchyProvider") {
-            return self.lsp_failed(
-                TITLE,
-                "This file's language server does not offer a call hierarchy.".into(),
-                cx,
-            );
+        if !client.supports(capability) {
+            return self.lsp_failed(title, offered.into(), cx);
         }
         let (Some((line, character)), Some(root)) =
             (editor.read(cx).cursor_utf16(), self.active_root())
@@ -159,25 +181,24 @@ impl Shell {
             return;
         };
         let at = Position { line, character };
-        tracing::debug!(path = %doc.display(), line, character, "call hierarchy");
+        tracing::debug!(path = %doc.display(), line, character, types, "hierarchy");
         cx.spawn(async move |this, cx| {
-            let found = client.prepare_call_hierarchy(&doc, at).await;
+            let found = match types {
+                true => client.prepare_type_hierarchy(&doc, at).await,
+                false => client.prepare_call_hierarchy(&doc, at).await,
+            };
             let _ = this.update(cx, |this, cx| match found {
                 Ok(items) => match items.into_iter().next() {
                     Some(item) => {
-                        this.lsp.calls = Some(Calls::new(root, item));
+                        this.lsp.calls = Some(Calls::new(root, item, types));
                         this.lsp.calls_client = Some(client);
                         this.lsp.showing_calls = true;
                         this.show_drawer_tab(DrawerTab::References, cx);
                         this.toggle_call(0, cx);
                     }
-                    None => this.lsp_failed(
-                        TITLE,
-                        "No function or method is under the cursor.".into(),
-                        cx,
-                    ),
+                    None => this.lsp_failed(title, missing.into(), cx),
                 },
-                Err(why) => this.lsp_failed(TITLE, why, cx),
+                Err(why) => this.lsp_failed(title, why, cx),
             });
         })
         .detach();
@@ -202,13 +223,26 @@ impl Shell {
             return;
         }
         node.children = Children::Loading;
-        let (item, incoming, generation) =
-            (node.call.item.clone(), calls.incoming, calls.generation);
+        let (item, incoming, generation, types) = (
+            node.call.item.clone(),
+            calls.incoming,
+            calls.generation,
+            calls.types,
+        );
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let found = match incoming {
-                true => client.incoming_calls(&item).await,
-                false => client.outgoing_calls(&item).await,
+            let found = match (types, incoming) {
+                (true, _) => client.type_hierarchy(&item, !incoming).await.map(|items| {
+                    items
+                        .into_iter()
+                        .map(|item| Call {
+                            item,
+                            ranges: Vec::new(),
+                        })
+                        .collect()
+                }),
+                (false, true) => client.incoming_calls(&item).await,
+                (false, false) => client.outgoing_calls(&item).await,
             };
             let _ = this.update(cx, |this, cx| {
                 if let Some(calls) = this.lsp.calls.as_mut() {
@@ -246,6 +280,11 @@ impl Shell {
     pub(super) fn render_calls_header(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let calls = self.active_calls()?;
         let t = cx.theme().clone();
+        let types = calls.types;
+        let (inward, outward) = match types {
+            true => ("Subtypes", "Supertypes"),
+            false => ("Incoming", "Outgoing"),
+        };
         let option = |id: &'static str, label: &'static str, incoming: bool| {
             let active = calls.incoming == incoming;
             div()
@@ -265,7 +304,10 @@ impl Shell {
                 .when(!active, |el| {
                     el.hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
                 })
-                .tooltip(move |_, cx| Tooltip::view(format!("Show {label} Calls"), cx))
+                .tooltip(move |_, cx| match types {
+                    true => Tooltip::view(format!("Show {label}"), cx),
+                    false => Tooltip::view(format!("Show {label} Calls"), cx),
+                })
                 .on_click(cx.listener(move |this, _, _, cx| this.set_call_direction(incoming, cx)))
                 .child(label)
         };
@@ -275,13 +317,15 @@ impl Shell {
                 .items_center()
                 .gap(px(4.))
                 .child(div().mr(px(6.)).text_color(t.color.content_muted).child(
-                    match calls.incoming {
-                        true => format!("Callers of {}", calls.nodes[0].call.item.name),
-                        false => format!("Calls from {}", calls.nodes[0].call.item.name),
+                    match (calls.types, calls.incoming) {
+                        (true, true) => format!("Subtypes of {}", calls.nodes[0].call.item.name),
+                        (true, false) => format!("Supertypes of {}", calls.nodes[0].call.item.name),
+                        (false, true) => format!("Callers of {}", calls.nodes[0].call.item.name),
+                        (false, false) => format!("Calls from {}", calls.nodes[0].call.item.name),
                     },
                 ))
-                .child(option("calls-incoming", "Incoming", true))
-                .child(option("calls-outgoing", "Outgoing", false))
+                .child(option("calls-incoming", inward, true))
+                .child(option("calls-outgoing", outward, false))
                 .into_any_element(),
         )
     }
@@ -298,9 +342,11 @@ impl Shell {
             .collect();
         let empty = match &calls.nodes[0].children {
             Children::Found(c) if c.is_empty() && calls.expanded.contains(&0) => {
-                Some(match calls.incoming {
-                    true => "No callers found.",
-                    false => "No calls found.",
+                Some(match (calls.types, calls.incoming) {
+                    (true, true) => "No subtypes found.",
+                    (true, false) => "No supertypes found.",
+                    (false, true) => "No callers found.",
+                    (false, false) => "No calls found.",
                 })
             }
             _ => None,
@@ -516,7 +562,7 @@ mod tests {
     }
 
     fn calls(incoming: bool) -> Calls {
-        let mut calls = Calls::new(PathBuf::from("/p"), item("helper", "/p/h.go", 3));
+        let mut calls = Calls::new(PathBuf::from("/p"), item("helper", "/p/h.go", 3), false);
         calls.incoming = incoming;
         calls
     }
@@ -528,12 +574,37 @@ mod tests {
         c.add_children(1, vec![call("run", "/p/run.go", &[2])]);
         c.add_children(2, vec![call("init", "/p/init.go", &[4])]);
         let asked = c.generation;
-        let mut c = Calls::new(PathBuf::from("/p"), item("other", "/p/o.go", 1));
+        let mut c = Calls::new(PathBuf::from("/p"), item("other", "/p/o.go", 1), false);
         c.answer(asked, 3, Ok(vec![call("late", "/p/late.go", &[1])]));
         c.answer(asked, 3, Err("gone".into()));
         assert_eq!(c.nodes.len(), 1);
         assert!(matches!(c.nodes[0].children, Children::Unasked));
         assert_eq!(c.target(3), None, "a row drawn before the tree changed");
+    }
+
+    #[test]
+    fn a_type_hierarchy_row_opens_the_type_itself() {
+        let mut c = Calls::new(PathBuf::from("/p"), item("Shape", "/p/s.go", 2), true);
+        c.answer(
+            c.generation,
+            0,
+            Ok(vec![Call {
+                item: item("Square", "/p/q.go", 7),
+                ranges: Vec::new(),
+            }]),
+        );
+        assert_eq!(
+            c.target(1),
+            Some((
+                PathBuf::from("/p/q.go"),
+                Position {
+                    line: 7,
+                    character: 5
+                }
+            ))
+        );
+        let row = RowView::of(&c, 1, &[PathBuf::from("/p")]);
+        assert_eq!((row.status, row.detail.as_str()), (None, "q.go:8"));
     }
 
     #[test]

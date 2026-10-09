@@ -22,6 +22,7 @@ mod run_marks;
 mod save;
 mod shared;
 mod signature;
+mod smart_select;
 mod snippet;
 mod sticky;
 mod syntax;
@@ -37,8 +38,8 @@ pub use diff_view::{DiffEvent, DiffView, HunkActions};
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
 pub use lsp_ui::{
-    ConfirmRename, GoToImplementation, GoToTypeDefinition, Inlay, LspRequest, Occurrence,
-    RenameSymbol, ShowCallHierarchy, ShowCodeActions,
+    ConfirmRename, FormatSelection, GoToImplementation, GoToTypeDefinition, Inlay, LspRequest,
+    Occurrence, RenameSymbol, ShowCallHierarchy, ShowCodeActions, ShowTypeHierarchy,
 };
 pub use merge_conflicts::{
     CompareMergeConflicts, ConflictBlock, Resolution, count_merge_conflicts, find_merge_conflicts,
@@ -48,6 +49,7 @@ pub use peek::{ShowNextChange, ShowPreviousChange};
 pub use run_marks::{Coverage, RunMark, RunState, RunTestAt, TestSymbol, find_tests, is_test_file};
 pub use save::{SaveSettings, Tidy, resolve_tidy};
 pub use signature::Signature;
+pub use smart_select::{ExpandSelection, ShrinkSelection};
 pub use syntax::{Lang, Token};
 pub use view::{
     AddCursorAbove, AddCursorBelow, AddNextOccurrence, CopyLinesDown, CopyLinesUp, EditorEvent,
@@ -62,5 +64,6 @@ pub fn init(cx: &mut gpui::App) {
     diff_view::init(cx);
     image::init(cx);
     lsp_ui::init(cx);
+    smart_select::init(cx);
     peek::init(cx);
 }

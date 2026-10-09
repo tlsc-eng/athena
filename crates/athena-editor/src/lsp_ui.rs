@@ -27,9 +27,15 @@ actions!(
         ShowCodeActions,
         GoToImplementation,
         GoToTypeDefinition,
-        ShowCallHierarchy
+        ShowCallHierarchy,
+        ShowTypeHierarchy
     ]
 );
+
+actions!(editor, [FormatSelection]);
+
+/// The cursor rests this long before the tag names edited with it are asked for.
+const LINKED_DELAY: Duration = Duration::from_millis(150);
 
 /// A question for the language server that the shell answers through the method each names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +43,99 @@ pub enum LspRequest {
     /// Fill in a suggestion of the list `request` brought; answer with
     /// [`EditorView::resolved_completion`].
     ResolveCompletion { request: u64, index: usize },
+    /// The ranges selection grows through around each caret's zero-based line and UTF-16
+    /// column; answer with [`EditorView::show_selection_ranges`].
+    SelectionRanges {
+        request: u64,
+        positions: Vec<(u32, u32)>,
+    },
+    /// Edits that format `start..end`; answer with [`EditorView::formatted_selection`].
+    FormatSelection {
+        request: u64,
+        start: (u32, u32),
+        end: (u32, u32),
+        tab_size: u32,
+        insert_spaces: bool,
+    },
+    /// The ranges typed together with the one at a position, such as a tag's closing name;
+    /// answer with [`EditorView::show_linked_editing`].
+    LinkedEditing {
+        request: u64,
+        line: u32,
+        character: u32,
+    },
+}
+
+/// An edit that linked editing repeats in the other ranges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkedEdit<'a> {
+    Type(&'a str),
+    Backspace,
+    Delete,
+}
+
+/// Ranges that are edited together, such as a JSX element's opening and closing tag names.
+#[derive(Default)]
+pub(crate) struct Linked {
+    enabled: bool,
+    shown: Anchored<()>,
+    /// What the text of every range must stay, from the server, else a tag name's characters.
+    pattern: Option<regex::Regex>,
+    /// The cursor and buffer version last asked about, or waited on.
+    asked: Option<(usize, u64)>,
+    /// The request in flight and the buffer version it was asked for.
+    pending: Option<(u64, u64)>,
+    requests: u64,
+    timer: Option<Task<()>>,
+}
+
+/// Where the carets mirroring `selection` go in the other `ranges`, if `edit` at it keeps every
+/// range the same text; empty when the selection is in none of them or the edit would leave one.
+fn mirrors(
+    b: &Buffer,
+    ranges: &[Range<usize>],
+    selection: crate::buffer::Selection,
+    edit: LinkedEdit,
+    pattern: Option<&regex::Regex>,
+) -> Vec<crate::buffer::Selection> {
+    let s = selection.range();
+    let Some(own) = ranges.iter().find(|r| r.start <= s.start && s.end <= r.end) else {
+        return Vec::new();
+    };
+    let text = b.text(own.clone());
+    if ranges.iter().any(|r| b.text(r.clone()) != text) {
+        return Vec::new();
+    }
+    let keeps = match edit {
+        // Removing the char before or after would reach past the name.
+        LinkedEdit::Backspace => !s.is_empty() || s.start > own.start,
+        LinkedEdit::Delete => !s.is_empty() || s.end < own.end,
+        LinkedEdit::Type(typed) => {
+            let at = s.start - own.start;
+            let mut after: String = text.chars().take(at).collect();
+            after.push_str(typed);
+            after.extend(text.chars().skip(s.end - own.start));
+            match pattern {
+                Some(re) => re
+                    .find(&after)
+                    .is_some_and(|m| m.range() == (0..after.len())),
+                None => after
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || "-_.:$".contains(c)),
+            }
+        }
+    };
+    if !keeps {
+        return Vec::new();
+    }
+    ranges
+        .iter()
+        .filter(|r| *r != own)
+        .map(|r| crate::buffer::Selection {
+            anchor: r.start + (selection.anchor - own.start),
+            head: r.start + (selection.head - own.start),
+        })
+        .collect()
 }
 
 /// The name typed into the rename field, sent up to the shell to rename with.
@@ -55,6 +154,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-.", ShowCodeActions, ctx),
         KeyBinding::new("cmd-f12", GoToImplementation, ctx),
         KeyBinding::new("shift-alt-h", ShowCallHierarchy, ctx),
+        KeyBinding::new("cmd-k cmd-f", FormatSelection, ctx),
     ]);
 }
 
@@ -176,6 +276,196 @@ pub(crate) struct RenameBox {
 }
 
 impl EditorView {
+    /// VS Code's `editor.linkedEditing`: typing in a tag name renames its matching tag.
+    pub fn set_linked_editing(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.linked.enabled != enabled {
+            self.linked = Linked {
+                enabled,
+                ..Linked::default()
+            };
+            cx.notify();
+        }
+    }
+
+    /// Asks, once the cursor rests outside the ranges already known, which ranges are typed
+    /// together with the one under it; called every frame.
+    pub(crate) fn schedule_linked(&mut self, focused: bool, cx: &mut Context<Self>) {
+        let tags = matches!(
+            self.lang(),
+            Some(crate::Lang::Tsx | crate::Lang::JavaScript | crate::Lang::Html)
+        );
+        if !self.linked.enabled || !focused || !tags || !self.completing_attached() {
+            return;
+        }
+        let Some(version) = self.version() else {
+            return;
+        };
+        let head = self.cursor.head();
+        let key = (head, version);
+        if self.linked.asked == Some(key) || self.cursor.is_multi() {
+            return;
+        }
+        self.linked.asked = Some(key);
+        let inside = self.buf().is_some_and(|b| {
+            self.linked
+                .shown
+                .now(&b)
+                .iter()
+                .any(|(r, _)| r.start <= head && head <= r.end)
+        });
+        if inside {
+            return;
+        }
+        self.linked.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LINKED_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.linked.timer = None;
+                let Some((line, character)) = this.cursor_utf16() else {
+                    return;
+                };
+                this.linked.requests += 1;
+                let request = this.linked.requests;
+                this.linked.pending = Some((request, version));
+                cx.emit(EditorEvent::Lsp(LspRequest::LinkedEditing {
+                    request,
+                    line,
+                    character,
+                }));
+            });
+        }));
+    }
+
+    /// The answer to [`LspRequest::LinkedEditing`]; dropped if the text changed since.
+    pub fn show_linked_editing(
+        &mut self,
+        request: u64,
+        ranges: Vec<((u32, u32), (u32, u32))>,
+        word_pattern: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((asked, version)) = self.linked.pending else {
+            return;
+        };
+        let Some(shared) = self.buffer.clone() else {
+            return;
+        };
+        let b = shared.buffer.borrow();
+        if asked != request || b.version() != version {
+            return;
+        }
+        self.linked.pending = None;
+        let items: Vec<(Range<usize>, ())> = match ranges.len() {
+            0 | 1 => Vec::new(),
+            _ => ranges
+                .into_iter()
+                .map(|(a, z)| (b.char_at_utf16(a.0, a.1)..b.char_at_utf16(z.0, z.1), ()))
+                .collect(),
+        };
+        self.linked.shown = Anchored::growing(&b, items);
+        self.linked.pattern = word_pattern.and_then(|p| regex::Regex::new(&p).ok());
+        cx.notify();
+    }
+
+    /// Runs a typing edit at every caret, and, with linked editing, at the same place in the
+    /// other ranges linked to the one it is in, as one undo step.
+    pub(crate) fn edit_linked(
+        &mut self,
+        edit: LinkedEdit,
+        cx: &mut Context<Self>,
+        op: impl FnMut(&mut Buffer, &mut crate::buffer::Cursor),
+    ) {
+        self.follow_edits();
+        let extra = match (self.linked.enabled, self.cursor.is_multi(), self.buf()) {
+            (true, false, Some(b)) => {
+                let ranges: Vec<Range<usize>> = self
+                    .linked
+                    .shown
+                    .now(&b)
+                    .into_iter()
+                    .map(|(r, _)| r)
+                    .collect();
+                mirrors(
+                    &b,
+                    &ranges,
+                    self.cursor.selection(),
+                    edit,
+                    self.linked.pattern.as_ref(),
+                )
+            }
+            _ => Vec::new(),
+        };
+        self.with_buffer(cx, |b, c| {
+            if extra.is_empty() {
+                return b.edit_each(c, op);
+            }
+            let mut all = vec![*c.primary()];
+            all.extend(extra.into_iter().map(|selection| crate::buffer::Cursor {
+                selection,
+                ..Default::default()
+            }));
+            c.set(all, 0);
+            b.edit_each(c, op);
+            c.collapse();
+        });
+    }
+
+    /// Cmd+K Cmd+F: asks the server to format the selection, or the cursor's line.
+    pub(crate) fn format_selection(&mut self, cx: &mut Context<Self>) {
+        let Some((version, start, end, indent)) = self.buf().map(|b| {
+            let s = self.cursor.selection().range();
+            let range = match s.is_empty() {
+                true => {
+                    let line = b.line_of(s.start);
+                    b.line_start(line)
+                        ..b.line_start(line)
+                            + b.line(line).trim_end_matches(['\n', '\r']).chars().count()
+                }
+                false => s,
+            };
+            (
+                b.version(),
+                b.utf16_position(range.start),
+                b.utf16_position(range.end),
+                b.indent,
+            )
+        }) else {
+            return;
+        };
+        self.format_requests += 1;
+        let request = self.format_requests;
+        self.range_format = Some((request, version));
+        let (tab_size, insert_spaces) = match indent {
+            crate::buffer::Indent::Tab => (crate::display::TAB_WIDTH as u32, false),
+            crate::buffer::Indent::Spaces(n) => (n as u32, true),
+        };
+        cx.emit(EditorEvent::Lsp(LspRequest::FormatSelection {
+            request,
+            start,
+            end,
+            tab_size,
+            insert_spaces,
+        }));
+    }
+
+    /// The answer to [`LspRequest::FormatSelection`]: applied as one undo step if the text has
+    /// not changed since it was asked.
+    pub fn formatted_selection(
+        &mut self,
+        request: u64,
+        edits: Vec<crate::ServerEdit>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.range_format.map(|(asked, _)| asked) != Some(request) {
+            return;
+        }
+        let Some((_, version)) = self.range_format.take() else {
+            return;
+        };
+        if self.version() == Some(version) {
+            self.apply_server_edits(&edits, cx);
+        }
+    }
+
     /// The word under the cursor: its zero-based line and UTF-16 start, and its text.
     pub fn word_at_cursor(&self) -> Option<((u32, u32), String)> {
         let b = self.buf()?;
@@ -512,7 +802,51 @@ impl EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Cursor;
+    use crate::buffer::{Cursor, Selection};
+
+    #[test]
+    fn typing_in_a_tag_name_reaches_its_partner_only_while_it_stays_a_name() {
+        let b = Buffer::new("<div>x</div>", None);
+        let ranges = [1..4, 8..11];
+        let at = |i| Selection { anchor: i, head: i };
+        assert_eq!(
+            mirrors(&b, &ranges, at(4), LinkedEdit::Type("x"), None),
+            [at(11)]
+        );
+        assert_eq!(
+            mirrors(&b, &ranges, at(9), LinkedEdit::Type("-"), None),
+            [at(2)]
+        );
+        assert!(
+            mirrors(&b, &ranges, at(4), LinkedEdit::Type(" "), None).is_empty(),
+            "a space ends the name"
+        );
+        assert!(
+            mirrors(&b, &ranges, at(1), LinkedEdit::Backspace, None).is_empty(),
+            "would delete the <"
+        );
+        assert_eq!(
+            mirrors(&b, &ranges, at(2), LinkedEdit::Backspace, None),
+            [at(9)]
+        );
+        assert!(mirrors(&b, &ranges, at(11), LinkedEdit::Delete, None).is_empty());
+        assert!(
+            mirrors(&b, &ranges, at(6), LinkedEdit::Type("y"), None).is_empty(),
+            "outside both"
+        );
+        let whole = Selection { anchor: 1, head: 4 };
+        assert_eq!(
+            mirrors(&b, &ranges, whole, LinkedEdit::Type("span"), None),
+            [Selection {
+                anchor: 8,
+                head: 11
+            }]
+        );
+        let digits = regex::Regex::new("[0-9]+").unwrap();
+        assert!(mirrors(&b, &ranges, at(4), LinkedEdit::Type("1"), Some(&digits)).is_empty());
+        let unequal = Buffer::new("<div>x</dvi>", None);
+        assert!(mirrors(&unequal, &ranges, at(4), LinkedEdit::Type("x"), None).is_empty());
+    }
 
     #[test]
     fn found_ranges_follow_edits_made_after_they_were_found() {
