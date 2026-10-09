@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use athena_ui::{ContextMenu, InputEvent, MenuItem, TextInput};
-use athena_workspace::{Axis, ItemId, ItemKind, PaneId};
+use athena_workspace::{Axis, DiffBase, ItemId, ItemKind, PaneId};
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, Focusable, Pixels, Point, PromptLevel, SharedString,
     Window, prelude::*,
@@ -122,9 +122,27 @@ impl Shell {
         items.extend(path_items(&root, &path));
         if !is_dir {
             items.push(MenuItem::separator());
-            items.push(shell_item("Open to the Side", cx, move |this, w, cx| {
-                this.open_file_beside(path.clone(), w, cx)
+            items.push(shell_item("Open to the Side", cx, {
+                let path = path.clone();
+                move |this, w, cx| this.open_file_beside(path.clone(), w, cx)
             }));
+            items.push(MenuItem::separator());
+            items.push(shell_item("Select for Compare", cx, {
+                let path = path.clone();
+                move |this, _, _| this.review.compare_with = Some(path.clone())
+            }));
+            if let Some(other) = self.review.compare_with.clone().filter(|o| *o != path) {
+                items.push(shell_item(
+                    "Compare with Selected",
+                    cx,
+                    move |this, w, cx| {
+                        let base = DiffBase::Files {
+                            other: other.clone(),
+                        };
+                        this.open_diff(path.clone(), base, w, cx)
+                    },
+                ));
+            }
         }
         self.open_context_menu(position, items, window, cx);
     }

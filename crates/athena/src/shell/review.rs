@@ -25,6 +25,8 @@ pub(super) struct ReviewState {
     edit_toasts: HashMap<PathBuf, u64>,
     loads: Loads,
     pub(super) timeline: super::timeline::TimelineState,
+    /// The file "Select for Compare" picked, the left side of the next Compare with Selected.
+    pub(super) compare_with: Option<PathBuf>,
 }
 
 /// One load per diff at a time; a reload asked for meanwhile runs once after it, so a late
