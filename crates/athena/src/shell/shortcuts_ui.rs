@@ -210,6 +210,23 @@ pub(super) fn reset(command: &str, entries: &[Option<String>]) -> Option<KeymapE
     (!found.is_empty()).then_some(KeymapEdit::Remove(found))
 }
 
+/// The edit the keys recorded for row `row` of `rows` make.
+fn recorded_edit(rows: &[Row], row: usize, adding: bool, key: &str) -> Option<KeymapEdit> {
+    let row = rows.get(row)?;
+    match adding {
+        true => add(row, key),
+        false => change(row, key),
+    }
+}
+
+/// Where `old`, a row of the table before keymap.json changed, is in `rows`; `None` once its
+/// binding is gone.
+fn follow(old: &Row, rows: &[Row]) -> Option<usize> {
+    let keys = |r: &Row| r.binding.as_ref().map(|b| (b.key.clone(), b.when.clone()));
+    rows.iter()
+        .position(|r| r.command == old.command && keys(r) == keys(old))
+}
+
 fn row_matches(row: &Row, query: &str) -> bool {
     let binding = row.binding.as_ref();
     let source = match binding.map(|b| b.entry.is_some()) {
@@ -355,6 +372,14 @@ impl ShortcutsView {
                 r.command == old.command && r.binding.is_some() == old.binding.is_some()
             })
         });
+        // Both hold row indices of the table being replaced.
+        self.menu = None;
+        if let Some(rec) = &mut self.recording {
+            match self.rows.get(rec.row).and_then(|old| follow(old, &rows)) {
+                Some(row) => rec.row = row,
+                None => self.recording = None,
+            }
+        }
         self.rows = Rc::new(rows);
         self.filter(cx);
     }
@@ -447,11 +472,7 @@ impl ShortcutsView {
                 if rec.recorder.problem().is_some() {
                     return;
                 }
-                let row = &self.rows[rec.row];
-                let edit = match rec.adding {
-                    true => add(row, &key),
-                    false => change(row, &key),
-                };
+                let edit = recorded_edit(&self.rows, rec.row, rec.adding, &key);
                 self.finish_recording(window, cx);
                 if let Some(edit) = edit {
                     cx.emit(ShortcutsEvent::Edit(edit));
@@ -503,7 +524,7 @@ impl ShortcutsView {
             items.push(MenuItem::new(
                 "Remove Keybinding",
                 act(|v, row, _, cx| {
-                    if let Some(edit) = remove(&v.rows[row]) {
+                    if let Some(edit) = v.rows.get(row).and_then(remove) {
                         cx.emit(ShortcutsEvent::Edit(edit));
                     }
                 }),
@@ -513,7 +534,7 @@ impl ShortcutsView {
             MenuItem::new(
                 "Reset Keybinding",
                 act(|v, row, _, cx| {
-                    if let Some(edit) = reset(v.rows[row].command, &v.entries) {
+                    if let Some(edit) = v.rows.get(row).and_then(|r| reset(r.command, &v.entries)) {
                         cx.emit(ShortcutsEvent::Edit(edit));
                     }
                 }),
@@ -662,7 +683,7 @@ impl ShortcutsView {
     fn render_recording(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rec = self.recording.as_ref()?;
         let t = cx.theme().clone();
-        let row = &self.rows[rec.row];
+        let row = self.rows.get(rec.row)?;
         let keys = rec.recorder.strokes();
         let shown = match keys.is_empty() {
             true => "Press keys…".to_string(),
@@ -1150,6 +1171,44 @@ mod tests {
         assert_eq!(
             reset("athena::NewTerminal", &keymap::entry_commands(&text)),
             None
+        );
+    }
+
+    #[test]
+    fn a_recording_follows_its_command_when_keymap_json_changes_under_it() {
+        let before = table(
+            r#"[{"key": "f7", "command": "QuickOpen"}, {"key": "f8", "command": "QuickOpen"}]"#,
+        );
+        let row = before
+            .iter()
+            .position(|r| r.command == "athena::SplitRight")
+            .unwrap();
+        let after = table("[]");
+        assert_eq!(
+            recorded_edit(&after, row, false, "f9"),
+            None,
+            "a stale row is not used"
+        );
+        let row = follow(&before[row], &after).unwrap();
+        let edit = recorded_edit(&after, row, false, "f9");
+        assert_eq!(
+            edit,
+            change(
+                after
+                    .iter()
+                    .find(|r| r.command == "athena::SplitRight")
+                    .unwrap(),
+                "f9"
+            )
+        );
+        let user = before
+            .iter()
+            .find(|r| r.command == "athena::QuickOpen")
+            .unwrap();
+        assert_eq!(
+            follow(user, &after),
+            None,
+            "its binding is gone, so recording ends"
         );
     }
 
