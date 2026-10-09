@@ -80,6 +80,28 @@ pub enum AppMsg {
         session: String,
         plan: String,
     },
+    /// Where the symbol at a 1-based line and UTF-16 column is defined, per the language server.
+    LspDefinition {
+        at: SourcePosition,
+    },
+    LspReferences {
+        at: SourcePosition,
+    },
+    DocumentSymbols {
+        path: PathBuf,
+    },
+    OpenEditors,
+    /// An open editor's text, unsaved changes included, cut off after `max_bytes`.
+    ReadBuffer {
+        path: PathBuf,
+        max_bytes: u32,
+    },
+    /// Starts tests in the caller's project: all, a file's or folder's, or one by name.
+    RunTests {
+        path: Option<PathBuf>,
+        name: Option<String>,
+    },
+    TestResults,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -95,6 +117,11 @@ pub enum AppReply {
         project: Option<PathBuf>,
     },
     Diagnostics(Vec<DiagnosticInfo>),
+    Locations(Vec<LocationInfo>),
+    Symbols(Vec<SymbolInfo>),
+    Editors(Vec<EditorInfo>),
+    Buffer(BufferInfo),
+    Tests(TestResultsInfo),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -103,6 +130,75 @@ pub struct TodoInfo {
     /// `pending`, `in_progress` or `completed`.
     pub status: String,
     pub active_form: Option<String>,
+}
+
+/// A place in a file as a person names it: 1-based line, and a 1-based UTF-16 column or the
+/// symbol's text on that line.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SourcePosition {
+    pub path: PathBuf,
+    pub line: u32,
+    pub column: Option<u32>,
+    pub symbol: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct LocationInfo {
+    pub path: PathBuf,
+    /// 1-based; columns count UTF-16 units.
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    /// The source line, trimmed and shortened.
+    pub text: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub kind: String,
+    pub container: Option<String>,
+    /// 1-based lines the symbol spans, body included.
+    pub line: u32,
+    pub end_line: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EditorInfo {
+    pub path: PathBuf,
+    pub project: PathBuf,
+    /// Has changes not yet saved to disk.
+    pub dirty: bool,
+    pub active: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BufferInfo {
+    pub path: PathBuf,
+    pub text: String,
+    pub dirty: bool,
+    /// Bytes in the whole buffer; more than `text` holds when it was cut off.
+    pub total_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TestResultsInfo {
+    pub project: PathBuf,
+    pub running: bool,
+    pub passed: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    /// Failed tests and suites that could not run, with their output shortened.
+    pub failures: Vec<TestFailureInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TestFailureInfo {
+    pub suite: String,
+    /// Empty when the suite itself could not run.
+    pub test: String,
+    pub output: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

@@ -106,6 +106,13 @@ impl Shell {
                 self.claude_plan_event(msg, caller, cx);
                 AppReply::Ok
             }
+            msg @ (AppMsg::LspDefinition { .. }
+            | AppMsg::LspReferences { .. }
+            | AppMsg::DocumentSymbols { .. }
+            | AppMsg::OpenEditors
+            | AppMsg::ReadBuffer { .. }
+            | AppMsg::RunTests { .. }
+            | AppMsg::TestResults) => self.answer_tool(msg, caller, cx),
         }
     }
 
@@ -197,7 +204,7 @@ impl Shell {
         .detach();
     }
 
-    fn session_root(&self, session: PaneId) -> Option<PathBuf> {
+    pub(super) fn session_root(&self, session: PaneId) -> Option<PathBuf> {
         self.workspace.projects.iter().find_map(|p| {
             p.items()
                 .any(|i| {

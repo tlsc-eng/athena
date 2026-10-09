@@ -19,6 +19,7 @@ mod git_view;
 mod history;
 mod item;
 mod lsp;
+mod mcp_tools;
 mod menus;
 mod notices;
 mod outline;
@@ -226,6 +227,9 @@ impl Shell {
                     } = request.msg
                     {
                         this.confirm_run(session, text, newline, caller, request.reply, window, cx);
+                        return;
+                    }
+                    if this.answer_later(&request.msg, &request.reply, cx) {
                         return;
                     }
                     let reply = this.handle_app(request.msg, caller, window, cx);

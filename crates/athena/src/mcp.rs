@@ -5,7 +5,8 @@
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use athena_proto::{AppMsg, AppReply};
+use athena_proto::{AppMsg, AppReply, SourcePosition};
+use athena_workspace::git;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
@@ -13,6 +14,8 @@ use serde::Deserialize;
 
 const DEFAULT_LINES: u32 = 200;
 const MAX_FILES: usize = 20_000;
+const MAX_STATUS: usize = 2_000;
+const DEFAULT_BUFFER: u32 = 256 * 1024;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OpenFileArgs {
@@ -60,6 +63,52 @@ struct ProjectFilesArgs {
     project: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PositionArgs {
+    /// Absolute path of a file open in Athena's editor.
+    path: String,
+    /// 1-based line.
+    line: u32,
+    /// The symbol's text on that line, such as `parseConfig`; preferred over `column`.
+    symbol: Option<String>,
+    /// 1-based column in UTF-16 units, when `symbol` is not given.
+    column: Option<u32>,
+}
+
+impl PositionArgs {
+    fn position(self) -> SourcePosition {
+        SourcePosition {
+            path: PathBuf::from(self.path),
+            line: self.line,
+            column: self.column,
+            symbol: self.symbol,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PathArgs {
+    /// Absolute path of a file open in Athena's editor.
+    path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReadBufferArgs {
+    /// Absolute path of a file open in Athena's editor.
+    path: String,
+    /// Return at most this many bytes of the text (default 262144, at most 524288).
+    max_bytes: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RunTestsArgs {
+    /// Absolute path of a Go package folder, a Go file (runs its package) or a JavaScript test
+    /// file; leave out to run all of the project's tests.
+    path: Option<String>,
+    /// One test to run: a Go test function or a Vitest/Jest test or describe title. Needs `path`.
+    name: Option<String>,
+}
+
 #[derive(Clone)]
 struct Bridge;
 
@@ -103,6 +152,65 @@ fn text(s: impl Into<String>) -> Result<CallToolResult, ErrorData> {
 
 fn unexpected() -> ErrorData {
     ErrorData::internal_error("unexpected reply from Athena", None)
+}
+
+/// The open project `asked` names (root path or name), else the caller's, else the active one.
+async fn project_root(asked: Option<String>) -> Result<PathBuf, ErrorData> {
+    let AppReply::Projects(projects) = ask(AppMsg::ListProjects).await? else {
+        return Err(unexpected());
+    };
+    match asked {
+        Some(p) => projects
+            .into_iter()
+            .find(|x| {
+                let asked = Path::new(&p);
+                x.root == asked || asked.canonicalize().is_ok_and(|c| c == x.root) || x.name == p
+            })
+            .map(|x| x.root),
+        None => match ask(AppMsg::WhoAmI).await? {
+            AppReply::Caller {
+                project: Some(p), ..
+            } => Some(p),
+            _ => projects.into_iter().find(|x| x.active).map(|x| x.root),
+        },
+    }
+    .ok_or_else(|| ErrorData::invalid_params("no such open project", None))
+}
+
+/// `git status` of the project at `root` as the tool returns it, paths relative to the root.
+fn git_status(root: &Path) -> Result<serde_json::Value, String> {
+    if !git::available() {
+        return Err("git needs the Xcode Command Line Tools (xcode-select --install)".into());
+    }
+    let prefix =
+        git::prefix(root).map_err(|_| format!("{} is not in a git repository", root.display()))?;
+    let snapshot = git::status(root, &prefix, true).map_err(|e| format!("{e:#}"))?;
+    let letter = |s: Option<git::FileStatus>| s.map(git::FileStatus::letter);
+    let changed: Vec<_> = snapshot
+        .entries
+        .iter()
+        .filter(|(_, e)| e.unstaged != Some(git::FileStatus::Ignored))
+        .collect();
+    let files: Vec<_> = changed
+        .iter()
+        .take(MAX_STATUS)
+        .map(|(path, e)| {
+            serde_json::json!({
+                "path": path.strip_prefix(root).unwrap_or(path),
+                "staged": letter(e.staged),
+                "unstaged": letter(e.unstaged),
+                "renamed_from": e.orig,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "branch": snapshot.branch,
+        "upstream": snapshot.tracking.as_ref().map(|t| &t.upstream),
+        "ahead": snapshot.tracking.as_ref().map(|t| t.ahead),
+        "behind": snapshot.tracking.as_ref().map(|t| t.behind),
+        "files": files,
+        "truncated": changed.len() > MAX_STATUS,
+    }))
 }
 
 #[tool_router]
@@ -225,27 +333,7 @@ impl Bridge {
         &self,
         Parameters(args): Parameters<ProjectFilesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let AppReply::Projects(projects) = ask(AppMsg::ListProjects).await? else {
-            return Err(unexpected());
-        };
-        let root = match args.project {
-            Some(p) => projects
-                .into_iter()
-                .find(|x| {
-                    let asked = Path::new(&p);
-                    x.root == asked
-                        || asked.canonicalize().is_ok_and(|c| c == x.root)
-                        || x.name == p
-                })
-                .map(|x| x.root),
-            None => match ask(AppMsg::WhoAmI).await? {
-                AppReply::Caller {
-                    project: Some(p), ..
-                } => Some(p),
-                _ => projects.into_iter().find(|x| x.active).map(|x| x.root),
-            },
-        }
-        .ok_or_else(|| ErrorData::invalid_params("no such open project", None))?;
+        let root = project_root(args.project).await?;
         let files = tokio::task::spawn_blocking(move || project_files(&root))
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
@@ -267,6 +355,125 @@ impl Bridge {
             return Err(unexpected());
         };
         json(&list)
+    }
+
+    #[tool(
+        description = "Where the symbol at a position is defined, from the language server that has the file open in Athena (unsaved edits included). Name the position by 1-based line plus the symbol's text on that line, or a 1-based UTF-16 column. Returns up to 200 locations with 1-based lines and columns and the source line."
+    )]
+    async fn lsp_definition(
+        &self,
+        Parameters(args): Parameters<PositionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let AppReply::Locations(list) = ask(AppMsg::LspDefinition {
+            at: args.position(),
+        })
+        .await?
+        else {
+            return Err(unexpected());
+        };
+        json(&list)
+    }
+
+    #[tool(
+        description = "Every reference to the symbol at a position, from the language server that has the file open in Athena (unsaved edits included). Same position arguments as lsp_definition; returns up to 200 locations."
+    )]
+    async fn lsp_references(
+        &self,
+        Parameters(args): Parameters<PositionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let AppReply::Locations(list) = ask(AppMsg::LspReferences {
+            at: args.position(),
+        })
+        .await?
+        else {
+            return Err(unexpected());
+        };
+        json(&list)
+    }
+
+    #[tool(
+        description = "The symbols (functions, types, methods, fields…) of a file open in Athena, as its language server sees the unsaved text: name, kind, container and the 1-based lines each spans. At most 2000."
+    )]
+    async fn document_symbols(
+        &self,
+        Parameters(args): Parameters<PathArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let msg = AppMsg::DocumentSymbols {
+            path: PathBuf::from(args.path),
+        };
+        let AppReply::Symbols(list) = ask(msg).await? else {
+            return Err(unexpected());
+        };
+        json(&list)
+    }
+
+    #[tool(
+        description = "Files open in Athena's editor tabs across all projects: path, project, whether it has unsaved changes (`dirty`) and whether it is the focused tab."
+    )]
+    async fn get_open_editors(&self) -> Result<CallToolResult, ErrorData> {
+        let AppReply::Editors(list) = ask(AppMsg::OpenEditors).await? else {
+            return Err(unexpected());
+        };
+        json(&list)
+    }
+
+    #[tool(
+        description = "The text of a file open in Athena's editor, including changes not saved to disk yet. Cut off after max_bytes; `total_bytes` gives the full size."
+    )]
+    async fn read_buffer(
+        &self,
+        Parameters(args): Parameters<ReadBufferArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let msg = AppMsg::ReadBuffer {
+            path: PathBuf::from(args.path),
+            max_bytes: args.max_bytes.unwrap_or(DEFAULT_BUFFER),
+        };
+        let AppReply::Buffer(buffer) = ask(msg).await? else {
+            return Err(unexpected());
+        };
+        json(&buffer)
+    }
+
+    #[tool(
+        description = "Start tests in Athena's Tests panel for this session's project: go test where go.mod is, Vitest or Jest from package.json. Returns at once; poll get_test_results until `running` is false."
+    )]
+    async fn run_tests(
+        &self,
+        Parameters(args): Parameters<RunTestsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let msg = AppMsg::RunTests {
+            path: args.path.map(PathBuf::from),
+            name: args.name,
+        };
+        let AppReply::Lines(lines) = ask(msg).await? else {
+            return Err(unexpected());
+        };
+        text(lines.join("\n"))
+    }
+
+    #[tool(
+        description = "Results of the tests run in Athena for this session's project, later runs folded into earlier ones: whether a run is still going, counts, and each failed test with its output (shortened)."
+    )]
+    async fn get_test_results(&self) -> Result<CallToolResult, ErrorData> {
+        let AppReply::Tests(results) = ask(AppMsg::TestResults).await? else {
+            return Err(unexpected());
+        };
+        json(&results)
+    }
+
+    #[tool(
+        description = "git status of an open project (default: the one this session runs in): branch, upstream with ahead/behind counts from the last fetch, and changed files with one-letter staged and unstaged states (M modified, A added, D deleted, R renamed, U untracked, ! conflict). Ignored files are left out; at most 2000 files."
+    )]
+    async fn git_status(
+        &self,
+        Parameters(args): Parameters<ProjectFilesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let root = project_root(args.project).await?;
+        let status = tokio::task::spawn_blocking(move || git_status(&root))
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
+        json(&status)
     }
 }
 
@@ -304,4 +511,111 @@ pub fn run() -> anyhow::Result<()> {
         server.waiting().await?;
         anyhow::Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_new_tools_are_listed_with_precise_schemas() {
+        let tools = Bridge::tool_router().list_all();
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is not listed"))
+        };
+        for name in [
+            "lsp_definition",
+            "lsp_references",
+            "document_symbols",
+            "get_open_editors",
+            "read_buffer",
+            "run_tests",
+            "get_test_results",
+            "git_status",
+        ] {
+            assert!(
+                tool(name)
+                    .description
+                    .as_ref()
+                    .is_some_and(|d| d.len() > 40)
+            );
+        }
+        let schema = serde_json::Value::Object((*tool("lsp_definition").input_schema).clone());
+        let mut required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        required.sort();
+        assert_eq!(required, ["line", "path"]);
+        for field in ["symbol", "column"] {
+            assert!(schema["properties"][field].is_object(), "{field}");
+        }
+        let read = serde_json::Value::Object((*tool("read_buffer").input_schema).clone());
+        assert!(read["properties"]["max_bytes"].is_object());
+        let run = serde_json::Value::Object((*tool("run_tests").input_schema).clone());
+        assert!(
+            run.get("required")
+                .is_none_or(|r| r.as_array().unwrap().is_empty())
+        );
+    }
+
+    #[test]
+    fn git_status_lists_changes_relative_to_the_project_without_ignored_files() {
+        if !git::available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-mcp-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let sh = |args: &[&str]| {
+            let ok = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.name=T", "-c", "user.email=t@x"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::write(dir.join("sub/a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+        sh(&["init", "-q", "-b", "main"]);
+        sh(&["add", "-A"]);
+        sh(&["commit", "-qm", "init"]);
+        std::fs::write(dir.join("sub/a.txt"), "two\n").unwrap();
+        std::fs::write(dir.join("sub/new.txt"), "x\n").unwrap();
+        std::fs::write(dir.join("sub/b.log"), "x\n").unwrap();
+        std::fs::write(dir.join("top.txt"), "x\n").unwrap();
+        sh(&["add", "top.txt"]);
+
+        let whole = git_status(&dir).unwrap();
+        assert_eq!(whole["branch"], "main");
+        let files = whole["files"].as_array().unwrap();
+        let find = |p: &str| files.iter().find(|f| f["path"] == p).cloned();
+        assert_eq!(find("sub/a.txt").unwrap()["unstaged"], "M");
+        assert_eq!(find("sub/new.txt").unwrap()["unstaged"], "U");
+        assert_eq!(find("top.txt").unwrap()["staged"], "A");
+        assert!(find("sub/b.log").is_none(), "ignored files are left out");
+
+        let sub = git_status(&dir.join("sub")).unwrap();
+        let paths: Vec<&str> = sub["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(paths.contains(&"a.txt") && paths.contains(&"new.txt"));
+        assert!(git_status(&std::env::temp_dir().join("athena-no-repo-here")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

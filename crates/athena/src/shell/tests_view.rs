@@ -1033,6 +1033,61 @@ pub(super) fn bind_test_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui:
     .on_action(cx.listener(|this, _: &actions::StopTests, _, cx| this.stop_tests(cx)))
 }
 
+impl Shell {
+    /// Starts tests for Claude's run_tests tool: all of the project's, a Go package's (named by
+    /// a folder or any file in it) or a JavaScript test file's, optionally one test by name.
+    pub(super) fn run_tests_for_claude(
+        &mut self,
+        root: PathBuf,
+        path: Option<PathBuf>,
+        name: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        if self.tests.run.is_some() {
+            return Err("Tests are already running; call get_test_results.".into());
+        }
+        let names: Vec<String> = name.iter().cloned().collect();
+        let planned: Vec<Planned> = match &path {
+            None if name.is_some() => {
+                return Err("Give the file or folder that holds the test.".into());
+            }
+            None => plan_all(&root),
+            Some(dir) if dir.is_dir() => plan_go(&root, dir, names).into_iter().collect(),
+            Some(file) if file.extension().is_some_and(|e| e == "go") => file
+                .parent()
+                .and_then(|dir| plan_go(&root, dir, names))
+                .into_iter()
+                .collect(),
+            Some(file) => plan_js(
+                &root,
+                file,
+                name.as_ref().map(|n| (std::slice::from_ref(n), true)),
+            )
+            .into_iter()
+            .collect(),
+        };
+        if planned.is_empty() {
+            return Err(
+                "No tests found there. Athena runs go test where go.mod is, and Vitest \
+                        or Jest from package.json."
+                    .into(),
+            );
+        }
+        let jobs = planned.len();
+        self.start_tests(root, planned, cx);
+        Ok(format!(
+            "Started {jobs} test run{}; call get_test_results for the outcome.",
+            if jobs == 1 { "" } else { "s" }
+        ))
+    }
+
+    /// Whether tests of the project at `root` are running, and its results so far.
+    pub(super) fn test_report_for_claude(&self, root: &Path) -> (bool, Option<&Report>) {
+        let running = self.tests.run.as_ref().is_some_and(|r| r.root == root);
+        (running, self.tests.reports.get(root))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
