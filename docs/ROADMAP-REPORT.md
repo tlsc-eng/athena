@@ -1,4 +1,4 @@
-# Roadmap report: v0.2.0, v0.3.0 and v0.4.0
+# Roadmap report: v0.2.0, v0.3.0, v0.4.0 and v0.5.0
 
 What happened while you were away, for the roadmap in `piped-orbiting-stearns.md` (Phases A–E).
 
@@ -7,10 +7,181 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
 - Release: v0.3.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.3.0 (tap `5f58c02`,
   installed here with `brew upgrade --cask athena`)
 - Release: v0.4.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.4.0 (tap `7aa6afb`, installed here)
+- Release: v0.5.0 — <link added at release>
 
-The screen was locked for most of the work after v0.2.0. Everything below marked
-**unverified on screen** is covered by unit tests, logs or synthetic-key runs, but nobody has
-looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
+v0.5. Everything below marked **unverified on screen** is covered by unit tests, logs or
+synthetic-key runs, but nobody has looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+
+## v0.5.0
+
+Plan: [plans/v0.5.md](plans/v0.5.md), three file-disjoint lanes (Claude Code IDE integration,
+multi-cursor and word wrap, workbench polish), `v0.4.0..main`, then a review pass and a keystroke
+performance follow-up. The v0.4.0 section follows this one.
+
+### What shipped
+
+**Claude Code IDE integration** (`742cfb8`, `ca861b0`, `0e6bf73`, `5c56709`, `293b4a4`, `d1f688c`)
+- An MCP server over a loopback WebSocket that Claude Code finds through
+  `~/.claude/ide/<port>.lock`, answering the four tools the CLI (2.1.295) calls: `openDiff`,
+  `close_tab`, `closeAllDiffTabs` and `getDiagnostics`. Off by default; **Toggle Claude Code
+  integration** in the palette or the File menu turns it on.
+- `openDiff` opens "main.rs (Claude's Proposal)", the file on disk against Claude's version, with
+  Accept (Cmd+Enter) and Reject (Cmd+Backspace, or closing the tab).
+- The focused editor's selection is sent as `selection_changed`; Cmd+Alt+K (**Send selection to
+  Claude**) sends an at-mention to the project's Claude session and focuses its terminal.
+- New terminals get `CLAUDE_CODE_SSE_PORT` through `<data dir>/ide.env`, which `athena-mux` reads
+  at each spawn, so the daemon protocol did not change.
+
+**Editor** (`83080a1`, `81c4398`, `28c05be`, `eb7f514`, `bbc9c29`, `8989eff`, `3bd051b`)
+- Multiple cursors: Cmd+D, Cmd+K Cmd+D, Cmd+Shift+L, Cmd+Alt+Up/Down, Alt+click, Shift+Alt+drag
+  column selection, Escape back to one caret. Every edit runs at each caret as one undo step, and
+  one keystroke at many carets costs one tree-sitter parse.
+- Soft word wrap (Alt+Z per tab; Markdown wraps by default) through the display map, so folds and
+  wrapped rows share one row mapping; Up/Down by visual row, Home/End at the row's edges first.
+- Sticky scroll: the headers of the scopes around the top line stay pinned, at most five and never
+  more than a third of the view; a click jumps to one.
+- A view state (cursor, top line, folds, wrap choice) the shell saves and restores.
+- Reparse off the UI thread: the UI thread's cost per keystroke in a 2k-line Rust file went from
+  7.2 ms average (p99 11.6 ms) to 0.15 ms (p99 0.24 ms); method and numbers in
+  [perf/2026-10-v0.5-reparse.md](perf/2026-10-v0.5-reparse.md). Keys that open a pair still parse
+  inline when the tree lags, since auto-closing depends on whether the caret is in a string.
+
+**Workbench** (`b778722`, `d649b4c`, `6b25ecf`, `bce268a`, `ec6ad9a`, `8f2be73`, `45f33fb`,
+`17a5653`, `d9c86da`, `49ca228`, `1f63eef`, `c00c614`)
+- Session restore keeps each editor tab's cursor, scroll line, folds and word wrap choice.
+- Open Recent: the last 20 closed project folders, from Ctrl+R (outside terminals), File > Open
+  Recent and the palette.
+- `keymap.json` in the data folder, VS Code-shaped (`key`, `command`, `when`, `args`), reloaded
+  when saved, with a leading `-` to remove a default binding, VS Code's key spelling accepted and
+  problems listed in a toast.
+- A light theme, and by default the theme follows the macOS appearance.
+- Terminal command marks from OSC 133 (and OSC 633): a dot per prompt for success, failure or
+  running, Cmd+Up/Down to jump between prompts, Copy Last Command Output; a bash snippet in the
+  README sends the same marks.
+- A word wrap default setting, a Selection menu, multi-cursor palette entries and a status bar
+  that reads "3 selections" with several carets.
+
+### Decisions made without you
+
+From the commit messages and the lane plans:
+- The IDE integration is off by default for this release, since the protocol is undocumented and
+  can change with any Claude Code release. Turning it off removes the lock file and `ide.env`.
+- Accept answers `FILE_SAVED` with the proposed text and Athena does not write the file: Claude
+  Code's Edit and Write tools write it after the permission prompt returns (read from the 2.1.295
+  bundle; claudecode.nvim does the same). Closing a proposal tab answers `DIFF_REJECTED`, because
+  `TAB_CLOSED` would count as accepting. Quitting, a crash and dropping the server reject pending
+  proposals and remove the lock.
+- Handshakes with an `Origin` header are refused (403), a wrong or missing token gets 401
+  (constant-time compare), and each connection is its own MCP session. The previous port is bound
+  again after a restart when it is free.
+- The port reaches shells through `ide.env` rather than a mux protocol change, so a v0.4 daemon
+  keeps working; its new terminals simply do not get the port until it is restarted (`/ide` works
+  meanwhile; the README says how).
+- Selections are checked every 150 ms while a session is connected and sent only to sessions in
+  that project's terminals (matched by pid through the process tree) or whose terminal is unknown.
+- In an editor, Cmd+D and Cmd+Alt+Up/Down are VS Code's multi-cursor keys and shadow Split Right
+  and Focus Pane Up/Down; terminals keep the pane keys, and Cmd+Alt+Left/Right still move focus
+  from an editor. Cmd+D from a bare caret matches whole words, case-sensitively, as VS Code does
+  with the find widget closed.
+- Carets are capped at 2048 so an edit at every caret still fits the edit log other tabs on the
+  file follow. Copy and Cut take whole lines only when no caret has a selection.
+- Word wrap is off by default except for Markdown; it never breaks inside a line's leading
+  indentation, and continuation rows keep the line's indent unless that leaves under half the
+  width. Horizontal scrolling is off while wrapping.
+- Sticky headers come from the existing fold regions, at most five and a third of the view.
+- Restored folds are stored as header lines and re-applied to whatever region heads there now; a
+  tab that was never drawn stores no scroll line and restores with the cursor centred.
+- Ctrl+R has the context `!Terminal`, so it stays the shell's reverse history search.
+- `keymap.json`: the user's entries come after Athena's; the folder is watched and the file
+  reloaded only when its bytes change, because FSEvents reports writes to `app.log` and
+  `workspace.json` as folder changes.
+- Theme: System is the default. Light terminal "white" and "bright white" are greys, as in VS Code,
+  so text printed in white stays readable; switching keeps font zoom and Reduce Motion.
+- Command marks: the terminal tags a prompt's line with a zero-width private-use character so the
+  mark moves with the text through scrollback and reflow; copied text has the tags removed. The
+  scanner keeps the first 32 bytes of any OSC body (zsh's C mark carries the command in base64),
+  never needs B, and forgets a prompt where nothing ran (Enter on an empty line, ^C).
+
+### Review fixes
+
+A review of `v0.4.0..main` found 15 issues (1 high, 7 medium, 7 low) and four performance notes.
+All 15 are fixed for v0.5.0, apart from two checks against the real CLI (see Known gaps); two of
+the performance notes are fixed and two remain:
+- Moving a selection that ended at the start of an unterminated last line down left it past the
+  text, and the next key panicked (high, present since v0.4) (`6cf2457`).
+- A fold whose header was already folded away was kept, hiding the header and, with wrap on,
+  underflowing the row count; session restore could reach it (`32efe73`).
+- Alt+click removing a caret left a drag armed; Cut with some carets selecting deleted the empty
+  carets' whole lines without copying them (`98ad0d9`, with `ea839cb` restoring Cut on an empty
+  last line).
+- Autoscroll let the caret hide under the sticky headers (`56e2a56`); edits counted line breaks
+  by LF only while the rope also breaks at a lone CR (`598393f`); a completion's extra edits
+  landed mid-word with several carets, and carets are now capped (`7b19854`).
+- Performance: a live resize re-wraps only lines too wide for the new width (`f1aca3f`); sticky
+  scroll measures indentation without copying lines (`5c03515`).
+- IDE integration: a panic on any thread stopped the IDE server for good, so later proposals were
+  rejected and Accept did nothing; it now reacts only to a main-thread panic (fix pending merge).
+  Connections get a handshake timeout and a cap before authentication, so a local process cannot
+  exhaust the window's file descriptors (fix pending merge). `file://` URIs are percent-decoded
+  and encoded (fix pending merge). A proposal for a file that is not a readable text file, or that
+  lies outside the open projects once the path is normalised, is no longer shown as one (fix
+  pending merge).
+- Keymap: an entry without `when` lost to Athena's contextual binding on the same key (Cmd+D in an
+  editor, say); it now takes the key in every context (fix pending merge).
+- Terminal: copying text stripped all of Unicode plane 15, which held Nerd Font icons, not just
+  Athena's prompt tags; mark offsets went off by one once the scrollback was full and were wrong
+  after a column reflow (fix pending merge).
+
+Before the review, within the lanes: the IDE server's shutdown now frees its port and the
+selection poll no longer copies a large selection every 150 ms (`293b4a4`); the selection getter
+reports the primary caret (`d1f688c`); and a batch of caret, wrap and fold fixes (`8989eff`).
+
+### Verification
+
+- Unit tests throughout, including a recorded-frame fake Claude Code client (handshake, 401/403,
+  accept and reject, `close_tab`, `closeAllDiffTabs`, diagnostics, disconnects, port reuse), a
+  daemon test for `ide.env`, keymap parsing and merging, WCAG contrast for both themes, the OSC 133
+  scanner fed byte by byte, and the multi-cursor, wrap and fold matrices.
+- An isolated QA app (`HOME=/tmp/athena-qa-x5-ide`) driven with the fake client: accept, reject,
+  Cmd+W and `closeAllDiffTabs` closed the tab with the right answer and left the file on disk
+  unchanged; selections and Cmd+Alt+K reached the client; Cmd+Q with a pending diff answered
+  `DIFF_REJECTED` and removed the lock.
+- Synthetic-key runs in the app for multi-cursor (Cmd+D three times with no split, carets below,
+  typing and undo), wrap (moving onto a wrapped row, End, toggling back) and restore (folds,
+  cursor and top line surviving a launch and quit), checking the saved files each time.
+- The screen became unlocked near the end, so some v0.5 screenshots exist, under the session's
+  scratchpad
+(`/private/tmp/claude-501/-Users-json-code-hobby-athena/60cc5e42-8a82-4a22-a06a-39cd285d51a8/scratchpad/qa/x5-follow/`,
+a debug build with a seeded workspace): a restored tab wrapped with
+  four carets on wrapped rows and the status bar reading "4 selections" (`02-carets.png`), `(`
+  typed inside a string and inside a comment left unclosed, in the build with the off-thread
+  reparse (`03-typed.png`), the palette's two word wrap commands (`04-palette.png`) and the "Word wrap is
+  on" notice (`05-default-on.png`).
+- **Unverified on screen**: sticky scroll (the screenshots stop just above a closing brace, where
+  nothing is pinned), the light theme, proposal tabs and their toolbar, the prompt dots, the
+  Selection and Open Recent menus, the keymap toast and column selection.
+
+### Known gaps
+
+- `openDiff` in the auto-accept permission modes was not tried against the real CLI; Claude Code's
+  code suggests those modes skip the proposal, which the README hedges.
+- The IDE protocol is undocumented and pinned to what 2.1.295 sends; a Claude Code release can
+  change it. Two details were checked only against recorded frames: the `DIFF_REJECTED` payload
+  shape and the `Origin` refusal against the real (Bun) client.
+- A symlinked `keymap.json` is not watched for changes.
+- Keys that open a pair still parse inline when a background parse has not landed, up to about
+  10 ms in the benchmark when typing faster than parses.
+- The terminal's command list drops forgotten prompts with a scan per prompt (a review note, not
+  measured as a problem).
+
+### Dependabot: `grid` 0.18
+
+GitHub flags `grid` 0.18.0 (a RUSTSEC/GHSA integer overflow in `Grid::expand_rows`, fixed in
+`grid` 1.0.1). It comes in through `taffy` 0.9.0, which `gpui` 0.2.2 uses, and `gpui` is pinned
+exactly (`=0.2.2`), so it cannot be updated without a `gpui` upgrade. Athena's layouts do not use
+CSS grid (the terminal's grid is alacritty's own type), so the overflowing code is not reached in
+practice and the risk is low. Revisit with the next `gpui` bump.
 
 ## v0.4.0
 
@@ -373,8 +544,9 @@ Still open:
 - Tree-row drag to move files and multiple windows are not built.
 - Rendering performance is unmeasured (see Performance).
 
-Backlog candidates from the plan: multi-cursor, word wrap, light theme, keymap file (rename symbol,
-document symbols, the problems panel, the diff viewer and the commit UI shipped in v0.4.0).
+Backlog candidates from the plan: none left; rename symbol, document symbols, the problems panel,
+the diff viewer and the commit UI shipped in v0.4.0, and multi-cursor, word wrap, the light theme
+and the keymap file in v0.5.0.
 
 ## What to check when you're back
 
@@ -412,3 +584,16 @@ For v0.4.0:
     guides and the status bar, and click its indentation and language.
 19. In a terminal run a failing `go test ./...` and Cmd+click the `_test.go:NN` line; open the
     Problems tab with Cmd+Shift+M and step with F8.
+
+For v0.5.0:
+
+20. Run **Toggle Claude Code integration**, open a new terminal and start `claude` (if the tab
+    belongs to a daemon from 0.4, type `/ide`). Ask for an edit in default permission mode: the
+    proposal tab opens; Cmd+Enter accepts and Claude writes the file, Cmd+Backspace rejects. Select
+    lines in an editor, then Cmd+Alt+K. Try once in an auto-accept mode and note what happens.
+21. In an editor: Cmd+D three times, Cmd+Shift+L, Cmd+Alt+Down, Alt+click, Shift+Alt+drag; type and
+    undo. Alt+Z on a long line; scroll a nested file and look for the pinned headers.
+22. Switch macOS to Light: Athena follows; check the terminal colours under Claude Code. Ctrl+R
+    outside a terminal; edit `keymap.json` with a bad entry and watch for the toast. In zsh, run a
+    failing command: red dot, Cmd+Up jumps to it.
+23. Quit with folds, a scrolled editor and wrap on in one tab, relaunch: all three come back.
