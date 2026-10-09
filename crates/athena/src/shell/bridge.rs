@@ -102,6 +102,10 @@ impl Shell {
                 session: caller,
                 project: caller.and_then(|s| self.session_root(s)),
             },
+            msg @ (AppMsg::ClaudeTodos { .. } | AppMsg::ClaudePlan { .. }) => {
+                self.claude_plan_event(msg, caller, cx);
+                AppReply::Ok
+            }
         }
     }
 

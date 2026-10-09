@@ -34,6 +34,19 @@ impl Shell {
             return;
         };
         self.workspace.projects[i].claude_command = Some(command.clone());
+        self.run_in_new_terminal(command, window, cx);
+    }
+
+    /// Opens a terminal tab in the active project and types `command` into it once it starts.
+    pub(super) fn run_in_new_terminal(
+        &mut self,
+        command: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(i) = self.workspace.active else {
+            return;
+        };
         self.new_terminal(window, cx);
         let project = &self.workspace.projects[i];
         let root = project.root.clone();
@@ -71,7 +84,7 @@ impl Shell {
         };
         let detail = format!(
             "Athena will edit {}, adding entries that run `athena notify` when Claude starts working, \
-             finishes, needs your input, or edits a file. Before Claude's first edit to a file in a \
+             finishes, needs your input, edits a file, or updates its todo list or plan. Before Claude's first edit to a file in a \
              session, a copy is kept in Application Support/athena/snapshots (pruned after 7 days) so \
              you can review the session's changes as one diff. Your other settings are kept. Claude \
              Code keeps this file out of version control.",

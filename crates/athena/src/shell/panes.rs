@@ -453,13 +453,19 @@ impl Shell {
             None if view.has_bell(cx) => (t.color.warning, None),
             None => return None,
         };
+        let todos = self.terminal_todos(view, cx);
         Some(
             div()
+                .id(("tab-badge", item.id.0))
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .child(div().size(px(6.)).bg(color))
                 .children(word.map(|w| div().text_color(color).child(w)))
+                .when_some(todos, |el, (done, list)| {
+                    el.child(div().text_color(t.color.content_muted).child(done))
+                        .tooltip(move |_, cx| athena_ui::Tooltip::view(list.clone(), cx))
+                })
                 .into_any_element(),
         )
     }

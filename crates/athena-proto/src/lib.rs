@@ -70,6 +70,16 @@ pub enum AppMsg {
         path: PathBuf,
         staged: bool,
     },
+    /// A Claude Code session's todo list, as its TodoWrite tool last wrote it.
+    ClaudeTodos {
+        session: String,
+        todos: Vec<TodoInfo>,
+    },
+    /// The plan a Claude Code session presented when it left plan mode.
+    ClaudePlan {
+        session: String,
+        plan: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -85,6 +95,14 @@ pub enum AppReply {
         project: Option<PathBuf>,
     },
     Diagnostics(Vec<DiagnosticInfo>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TodoInfo {
+    pub content: String,
+    /// `pending`, `in_progress` or `completed`.
+    pub status: String,
+    pub active_form: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

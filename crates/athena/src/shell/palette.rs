@@ -240,6 +240,18 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Send selection to Claude", Box::new(actions::SendToClaude)),
         (
+            "Claude: Show sessions",
+            Box::new(super::claude_sessions::ShowClaudeSessions),
+        ),
+        (
+            "Claude: Review next changed file",
+            Box::new(super::claude_sessions::ClaudeReviewNextFile),
+        ),
+        (
+            "Claude: Review previous changed file",
+            Box::new(super::claude_sessions::ClaudeReviewPreviousFile),
+        ),
+        (
             "Allow project linters (ESLint, Biome)",
             Box::new(super::lsp::AllowProjectLinters),
         ),

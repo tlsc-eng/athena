@@ -27,6 +27,7 @@ pub(super) struct ReviewState {
     pub(super) timeline: super::timeline::TimelineState,
     /// The file "Select for Compare" picked, the left side of the next Compare with Selected.
     pub(super) compare_with: Option<PathBuf>,
+    pub(super) sessions: super::claude_sessions::SessionsState,
 }
 
 /// One load per diff at a time; a reload asked for meanwhile runs once after it, so a late
@@ -491,6 +492,7 @@ impl Shell {
             return;
         };
         self.reload_diffs(&root, Some(&path), cx);
+        self.claude_sessions_stale(cx);
         let kept = snapshots::store()
             .map(|store| snapshots::read(&store, &session, &path) != Before::Unknown)
             .unwrap_or(false);

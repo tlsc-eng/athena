@@ -6,7 +6,7 @@ use std::process::Command;
 
 use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
 
-const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
+const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited|claude-plan> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
 
 /// Hook input past this is cut off; a Write of a file up to the snapshot limit fits easily.
 const MAX_HOOK_INPUT: u64 = 256 * 1024 * 1024;
@@ -18,12 +18,52 @@ struct HookInput {
     session_id: Option<String>,
     cwd: Option<String>,
     message: Option<String>,
+    tool_name: Option<String>,
     tool_input: Option<ToolInput>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct ToolInput {
     file_path: Option<String>,
+    todos: Option<Vec<Todo>>,
+    plan: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Todo {
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    status: String,
+    #[serde(rename = "activeForm")]
+    active_form: Option<String>,
+}
+
+/// What a TodoWrite or ExitPlanMode hook tells the window, if the input is one of those.
+fn plan_message(input: HookInput) -> Option<AppMsg> {
+    let session = input
+        .session_id
+        .filter(|s| crate::snapshots::valid_session(s))?;
+    let tool = input.tool_input?;
+    match input.tool_name.as_deref()? {
+        "TodoWrite" => Some(AppMsg::ClaudeTodos {
+            session,
+            todos: tool
+                .todos?
+                .into_iter()
+                .map(|t| athena_proto::TodoInfo {
+                    content: t.content,
+                    status: t.status,
+                    active_form: t.active_form,
+                })
+                .collect(),
+        }),
+        "ExitPlanMode" => Some(AppMsg::ClaudePlan {
+            session,
+            plan: tool.plan?,
+        }),
+        _ => None,
+    }
 }
 
 fn read_hook_input(input: impl Read) -> HookInput {
@@ -128,6 +168,12 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
             && let Some(session) = session
         {
             let _ = crate::snapshots::take(&store, &session, &path);
+        }
+        return Ok(());
+    }
+    if event.as_deref() == Some("claude-plan") {
+        if let Some(msg) = plan_message(hook_input()) {
+            let _ = tell_window(msg);
         }
         return Ok(());
     }
@@ -306,6 +352,46 @@ mod tests {
         let (path, _) = edited_file(&input, Some("/x/y.go".into())).unwrap();
         assert_eq!(path, PathBuf::from("/x/y.go"));
         assert!(edited_file(&hook_input(serde_json::json!({})), None).is_none());
+    }
+
+    #[test]
+    fn todo_and_plan_hooks_become_window_messages() {
+        let todos = hook_input(serde_json::json!({
+            "session_id": "abc-123",
+            "tool_name": "TodoWrite",
+            "tool_input": { "todos": [
+                { "content": "Parse transcripts", "status": "completed", "activeForm": "Parsing transcripts" },
+                { "content": "Draw the tab", "status": "in_progress" }
+            ] },
+            "tool_response": { "oldTodos": [] }
+        }));
+        let Some(AppMsg::ClaudeTodos { session, todos }) = plan_message(todos) else {
+            panic!("expected todos");
+        };
+        assert_eq!(session, "abc-123");
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].active_form.as_deref(), Some("Parsing transcripts"));
+        assert_eq!(todos[1].status, "in_progress");
+
+        let plan = hook_input(serde_json::json!({
+            "session_id": "abc-123",
+            "tool_name": "ExitPlanMode",
+            "tool_input": { "plan": "# Plan\n1. do it", "planFilePath": "/x/plan.md" }
+        }));
+        assert_eq!(
+            plan_message(plan),
+            Some(AppMsg::ClaudePlan {
+                session: "abc-123".into(),
+                plan: "# Plan\n1. do it".into()
+            })
+        );
+        for odd in [
+            serde_json::json!({ "session_id": "../x", "tool_name": "ExitPlanMode", "tool_input": { "plan": "p" } }),
+            serde_json::json!({ "session_id": "s", "tool_name": "Bash", "tool_input": { "command": "ls" } }),
+            serde_json::json!({ "session_id": "s", "tool_name": "TodoWrite", "tool_input": {} }),
+        ] {
+            assert_eq!(plan_message(hook_input(odd)), None);
+        }
     }
 
     #[test]

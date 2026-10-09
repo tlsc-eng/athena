@@ -19,8 +19,10 @@ pub fn settings_path(root: &Path) -> PathBuf {
 
 /// Claude's file-writing tools; their hook input names the file in `tool_input.file_path`.
 const EDIT_TOOLS: &str = "Edit|MultiEdit|Write";
+/// Tools whose input is the session's todo list or its plan.
+const PLAN_TOOLS: &str = "TodoWrite|ExitPlanMode";
 
-fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 5] {
+fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 6] {
     let cmd = |event: &str| format!("\"{}\" notify --event {event}", athena.display());
     [
         ("UserPromptSubmit", None, cmd("claude-running")),
@@ -33,6 +35,7 @@ fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 5] {
         // Before the first edit, to keep the file as it was; after each, to offer the diff.
         ("PreToolUse", Some(EDIT_TOOLS), cmd("claude-will-edit")),
         ("PostToolUse", Some(EDIT_TOOLS), cmd("claude-edited")),
+        ("PostToolUse", Some(PLAN_TOOLS), cmd("claude-plan")),
     ]
 }
 
@@ -58,7 +61,10 @@ pub fn merge(mut settings: Value, athena: &Path, enable: bool) -> Result<Value> 
         Value::Object(m) => m,
         _ => bail!("\"hooks\" is not a JSON object"),
     };
-    for (event, matcher, command) in hooks(athena) {
+    let ours = hooks(athena);
+    let mut events: Vec<&str> = ours.iter().map(|(event, ..)| *event).collect();
+    events.dedup();
+    for event in events {
         let had_event = all_hooks.contains_key(event);
         let mut stripped = false;
         let entries = match all_hooks.entry(event).or_insert_with(|| json!([])) {
@@ -77,11 +83,13 @@ pub fn merge(mut settings: Value, athena: &Path, enable: bool) -> Result<Value> 
             },
         );
         if enable {
-            let mut entry = json!({ "hooks": [{ "type": "command", "command": command }] });
-            if let Some(m) = matcher {
-                entry["matcher"] = json!(m);
+            for (_, matcher, command) in ours.iter().filter(|(e, ..)| *e == event) {
+                let mut entry = json!({ "hooks": [{ "type": "command", "command": command }] });
+                if let Some(m) = matcher {
+                    entry["matcher"] = json!(m);
+                }
+                entries.push(entry);
             }
-            entries.push(entry);
         }
         if entries.is_empty() && (stripped || !had_event) {
             all_hooks.shift_remove(event);
@@ -288,6 +296,53 @@ mod tests {
             merge(again, Path::new(ATHENA), false).unwrap(),
             user_settings()
         );
+    }
+
+    #[test]
+    fn the_plan_hook_sits_beside_the_edit_hook_and_both_survive_enabling_twice() {
+        let out = merge(user_settings(), Path::new(ATHENA), true).unwrap();
+        let post = out["hooks"]["PostToolUse"].as_array().unwrap();
+        let matchers: Vec<&str> = post
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            matchers,
+            [
+                "Edit|Write",
+                "Edit|MultiEdit|Write",
+                "TodoWrite|ExitPlanMode"
+            ]
+        );
+        assert_eq!(
+            post[2]["hooks"][0]["command"],
+            "\"/opt/homebrew/bin/athena\" notify --event claude-plan"
+        );
+        assert_eq!(merge(out.clone(), Path::new(ATHENA), true).unwrap(), out);
+        assert_eq!(
+            merge(out, Path::new(ATHENA), false).unwrap(),
+            user_settings()
+        );
+    }
+
+    #[test]
+    fn an_install_without_the_plan_hook_is_upgraded_without_duplicating_the_edit_hook() {
+        let dir = temp("plan-upgrade");
+        let mut old = merge(user_settings(), Path::new(ATHENA), true).unwrap();
+        old["hooks"]["PostToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|e| e["matcher"] != PLAN_TOOLS);
+        fs::write(settings_path(&dir), old.to_string()).unwrap();
+        assert!(!enabled(&dir) && installed(&dir));
+        write(&dir, Path::new(ATHENA), true).unwrap();
+        assert!(enabled(&dir));
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
+        let post = written["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 3, "{post:?}");
+        assert_eq!(post.iter().filter(|e| is_ours(e)).count(), 2);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
