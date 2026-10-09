@@ -386,6 +386,8 @@ impl EditKind {
 struct Batch {
     changes: Vec<Change>,
     kind: Option<EditKind>,
+    /// Every edit applied in the batch, which the edit log may be too short to keep.
+    edits: Vec<Edit>,
 }
 
 #[derive(Clone, Debug)]
@@ -762,14 +764,18 @@ impl Buffer {
         if self.edits.len() == EDIT_LOG {
             self.edits.pop_front();
         }
-        self.edits.push_back(Edit {
+        let edit = Edit {
             at: change.start,
             removed: old_end_char - change.start,
             inserted: change.inserted.chars().count(),
             line: start_position.row,
             lines_removed: change.deleted.matches('\n').count(),
             lines_inserted: change.inserted.matches('\n').count(),
-        });
+        };
+        self.edits.push_back(edit);
+        if let Some(batch) = self.batch.as_mut() {
+            batch.edits.push(edit);
+        }
         self.rope.remove(change.start..old_end_char);
         self.rope.insert(change.start, &change.inserted);
         let new_end_char = change.start + change.inserted.chars().count();
@@ -902,33 +908,34 @@ impl Buffer {
         let len = self.len_chars();
         let clamp = |r: &Range<usize>| r.start.min(len)..r.end.min(len).max(r.start.min(len));
         let main = clamp(main);
-        let mut order: Vec<(Range<usize>, &str)> = vec![(main.clone(), main_text)];
+        let mut order: Vec<(Range<usize>, &str, bool)> = vec![(main.clone(), main_text, true)];
         for (range, text) in &edits[1..] {
             let range = clamp(range);
             if range.end <= main.start || range.start >= main.end {
-                order.push((range, text));
+                order.push((range, text, false));
             }
         }
         // Later edits first, so each one's offsets still hold when it is applied.
-        order.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+        order.sort_by_key(|(r, _, _)| std::cmp::Reverse(r.start));
         // An edit reaching into one applied after it would remove text that is no longer there.
         let mut floor = usize::MAX;
-        order.retain(|(r, _)| {
-            let fits = r.end <= floor || *r == main;
+        order.retain(|(r, _, is_main)| {
+            let fits = r.end <= floor || *is_main;
             if fits {
                 floor = r.start;
             }
             fits
         });
+        // An insert at the main edit's start is applied after it, so it lands in front of it.
         let shift: isize = order
             .iter()
-            .filter(|(r, _)| r.start < main.start)
-            .map(|(r, t)| t.chars().count() as isize - r.len() as isize)
+            .filter(|(r, _, is_main)| r.start < main.start || (r.start == main.start && !is_main))
+            .map(|(r, t, _)| t.chars().count() as isize - r.len() as isize)
             .sum();
         let before = c.selection;
         let changes = self.parse_once(|b| {
             let mut changes = Vec::new();
-            for (range, text) in order {
+            for (range, text, _) in order {
                 let change = Change {
                     start: range.start,
                     deleted: b.rope.slice(range).to_string(),
@@ -1567,10 +1574,10 @@ impl Buffer {
                         c.map_edit(e);
                     }
                 }
-                let version = b.version;
+                let done = b.batch.as_ref().map_or(0, |batch| batch.edits.len());
                 op(b, c, i);
-                if let Some(new) = b.edits_since(version) {
-                    for e in new {
+                if let Some(batch) = b.batch.as_ref() {
+                    for e in &batch.edits[done..] {
                         lowest = lowest.min(e.at);
                         edits.push(*e);
                     }
@@ -3412,5 +3419,34 @@ mod tests {
             "a caret just after a word picks it"
         );
         assert_eq!(b.word_around(20), Some(20..23));
+    }
+
+    #[test]
+    fn an_insert_at_the_main_edit_start_keeps_the_caret_after_the_main_text() {
+        let mut b = buf("ab", "/x/a.txt");
+        let mut c = Cursor::at(2);
+        let edits = vec![(2..2, "cd".to_string()), (2..2, "X".to_string())];
+        b.apply_edits(&mut c, &edits, None);
+        assert_eq!(b.full_text(), "abXcd");
+        assert_eq!(c.head(), 5);
+    }
+
+    #[test]
+    fn carets_follow_a_primary_edit_longer_than_the_edit_log() {
+        let mut b = buf(&"a".repeat(5000), "/x/a.txt");
+        let len = b.len_chars();
+        let mut cs = carets(&[(0, 0), (len, len)]);
+        cs.add(Cursor::at(0));
+        let edits: Vec<_> = (0..5000)
+            .rev()
+            .map(|i| (i..i + 1, "bb".to_string()))
+            .collect();
+        b.edit_primary(&mut cs, |b, c| b.apply_edits(c, &edits, None));
+        assert_eq!(b.len_chars(), 10_000);
+        assert_eq!(
+            cs.all().last().unwrap().head(),
+            10_000,
+            "the far caret followed every edit"
+        );
     }
 }

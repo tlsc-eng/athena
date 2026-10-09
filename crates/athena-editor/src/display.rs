@@ -41,7 +41,13 @@ impl DisplayLine {
 
 /// The char of `line` whose start is nearest column `col` (tabs expanded), or its end past it.
 pub fn char_at_column(line: &str, col: usize) -> usize {
-    let mut at = 0;
+    char_at_column_from(line, 0, col)
+}
+
+/// As [`char_at_column`] for text starting at column `from` of its line, so tabs keep their stops.
+pub fn char_at_column_from(line: &str, from: usize, col: usize) -> usize {
+    let col = col + from;
+    let mut at = from;
     for (i, c) in line.chars().enumerate() {
         let width = if c == '\t' {
             TAB_WIDTH - at % TAB_WIDTH
@@ -135,13 +141,15 @@ pub fn wrap_breaks(line: &str, cols: usize) -> Vec<usize> {
     if col <= cols {
         return breaks;
     }
+    // Breaking inside the leading indentation would leave a row of nothing but blanks.
+    let lead = chars.iter().take_while(|c| c.is_whitespace()).count();
     let (mut start, mut room) = (0, cols);
     let mut blank_end = None;
     let mut i = 0;
     while i < chars.len() {
         // Blanks may hang past the edge, so a row never starts with the blank it broke at.
         if at[i + 1] - at[start] > room && i > start && !chars[i].is_whitespace() {
-            let at_break = blank_end.filter(|&b| b > start).unwrap_or(i);
+            let at_break = blank_end.filter(|&b| b > start.max(lead)).unwrap_or(i);
             breaks.push(at_break);
             (start, room) = (at_break, cols.saturating_sub(indent).max(1));
             blank_end = None;
@@ -305,7 +313,8 @@ impl DisplayMap {
             return;
         }
         self.folds
-            .retain(|f| f.end < fold.start || f.start > fold.end);
+            // A fold whose header the new one hides goes with it.
+            .retain(|f| f.end < fold.start || f.start > fold.end + 1);
         let at = self.folds.partition_point(|f| f.start < fold.start);
         self.folds.insert(at, fold);
     }
@@ -622,6 +631,35 @@ mod tests {
             "wide chars take two columns"
         );
         assert_eq!(column_width("\t日a"), 7);
+        let deep = format!("    {}", "a".repeat(14));
+        assert_eq!(
+            wrap_breaks(&deep, 10),
+            [10, 16],
+            "never a row of indentation alone"
+        );
+        assert_eq!(
+            char_at_column_from("\tb", 2, 2),
+            1,
+            "a tab two columns in reaches column 4"
+        );
+    }
+
+    #[test]
+    fn folding_over_a_header_takes_its_fold_along() {
+        let mut map = DisplayMap::default();
+        map.fold(fold(6, 8));
+        map.fold(fold(2, 5));
+        assert_eq!(map.folds, vec![fold(2, 5)], "line 5 headed the fold below");
+        map.set_wrap(Some(4));
+        map.sync_wrap(10, |l| {
+            if l == 5 {
+                "aaaa ".repeat(6)
+            } else {
+                "a".into()
+            }
+        });
+        assert_eq!(map.row_of(5), 1);
+        assert_eq!(map.row_count(10), 6);
     }
 
     #[test]

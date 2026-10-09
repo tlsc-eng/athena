@@ -2,7 +2,7 @@ use gpui::Context;
 
 use crate::Lang;
 use crate::buffer::{Buffer, Cursor};
-use crate::display::{DisplayMap, char_at_column, column_width, wrap_breaks, wrap_indent};
+use crate::display::{DisplayMap, char_at_column_from, column_width, wrap_breaks, wrap_indent};
 use crate::view::EditorView;
 
 /// The rows a wrapped line is cut into, as char ranges of the line.
@@ -102,12 +102,11 @@ fn row_target(display: &DisplayMap, b: &Buffer, c: &Cursor, rows: isize) -> Opti
     let segs = segments(&text, cols);
     let sub = segs.iter().rposition(|&(s, _)| s <= col).unwrap_or(0);
     let lead = if sub > 0 { wrap_indent(&text, cols) } else { 0 };
-    let before: String = text
-        .chars()
-        .skip(segs[sub].0)
-        .take(col - segs[sub].0)
-        .collect();
-    let goal = c.goal_column.unwrap_or(lead + column_width(&before));
+    // Tabs expand from the line's start, so a row's columns count from where it starts.
+    let upto = |n: usize| column_width(&text.chars().take(n).collect::<String>());
+    let goal = c
+        .goal_column
+        .unwrap_or(lead + upto(col) - upto(segs[sub].0));
     let row = (display.row_of(line) + sub) as isize + rows;
     if row < 0 || row as usize >= display.row_count(b.len_lines()) {
         return None;
@@ -123,7 +122,8 @@ fn row_target(display: &DisplayMap, b: &Buffer, c: &Cursor, rows: isize) -> Opti
         0
     };
     let piece: String = ttext.chars().skip(s).take(e - s).collect();
-    let mut at = s + char_at_column(&piece, goal.saturating_sub(lead));
+    let base = column_width(&ttext.chars().take(s).collect::<String>());
+    let mut at = s + char_at_column_from(&piece, base, goal.saturating_sub(lead));
     // A caret at a wrap point is drawn on the next row, so this row ends a char sooner.
     if tsub + 1 < tsegs.len() {
         at = at.min(e.saturating_sub(1)).max(s);
@@ -179,6 +179,22 @@ mod tests {
         let (up, _) = row_target(&d, &b, &c, -2).unwrap();
         assert_eq!(up, 2);
         assert_eq!(row_target(&d, &b, &c, 1), None, "past the last row");
+    }
+
+    #[test]
+    fn tabs_on_a_continuation_row_keep_their_stops() {
+        // The second row is "c\tdd" from column 10, so its tab spans one column, not three.
+        let (b, d) = wrapped("aaaa bbbb c\tdd\naaaaaaaaaaaaaaaaa", 10);
+        let c = Cursor::at(13);
+        assert_eq!(caret_row(&d, &b, 13), 1);
+        let (at, goal) = row_target(&d, &b, &c, 1).unwrap();
+        assert_eq!(goal, 3, "the screen column of the second d");
+        assert_eq!(at, b.line_start(1) + 3);
+        let back = Cursor {
+            goal_column: Some(goal),
+            ..Cursor::at(at)
+        };
+        assert_eq!(row_target(&d, &b, &back, -1).unwrap().0, 13);
     }
 
     #[test]

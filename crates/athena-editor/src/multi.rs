@@ -40,7 +40,14 @@ impl EditorView {
             self.occurrence = Some((b.text(word), true));
             self.cursor.set(all.collect(), self.cursor.primary_index());
         } else {
-            let query = b.selected_text(self.cursor.primary());
+            // A bare primary caret, as Cmd+Alt+Up/Down leaves, searches the latest selection.
+            let Some(query) = std::iter::once(self.cursor.primary())
+                .chain(self.cursor.all().iter().rev())
+                .map(|c| b.selected_text(c))
+                .find(|s| !s.is_empty())
+            else {
+                return;
+            };
             // As in VS Code, a search started from a bare caret matches whole words, and one
             // started with the find bar closed matches case.
             let word = self
@@ -163,6 +170,8 @@ impl EditorView {
             return;
         };
         let b = shared.buffer.borrow();
+        // The text may have shrunk since the drag started.
+        let from_line = from_line.min(b.len_lines().saturating_sub(1));
         let to_line = b.line_of(at);
         let mut all = Vec::new();
         let mut primary = 0;
@@ -172,7 +181,7 @@ impl EditorView {
             }
             let text = b.line(line);
             let start = b.line_start(line);
-            if line == to_line {
+            if line <= to_line {
                 primary = all.len();
             }
             all.push(Cursor {
