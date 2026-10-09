@@ -27,8 +27,6 @@ const SLOW_STATUS: Duration = Duration::from_secs(1);
 const ROW_HEIGHT: f32 = 24.;
 /// VS Code's `git.autofetchPeriod`.
 const AUTOFETCH_EVERY: Duration = Duration::from_secs(180);
-/// VS Code's `git.autofetch` default; a settings file can pass its own value to `set_autofetch`.
-const AUTOFETCH_DEFAULT: bool = false;
 
 #[derive(Default)]
 struct Repo {
@@ -212,7 +210,7 @@ impl Shell {
             },
         ));
         self.git.commit_input = Some(input);
-        self.set_autofetch(AUTOFETCH_DEFAULT, window, cx);
+        self.set_autofetch(self.settings.file.git_autofetch(), window, cx);
         // The window is not active yet while it is being built, so the first run is kicked.
         self.git_kick(cx);
         self.git.poll = Some(cx.spawn_in(window, async move |this, cx| {

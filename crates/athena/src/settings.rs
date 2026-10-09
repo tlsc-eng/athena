@@ -28,6 +28,8 @@ pub struct Settings {
     pub languages: HashMap<String, EditorSettings>,
     pub theme: Option<ThemeChoice>,
     pub ide_integration: Option<bool>,
+    /// VS Code's `git.autofetch`: fetch the active project every three minutes.
+    pub autofetch: Option<bool>,
     /// Each language server's settings by program name, sent as it starts and when they change.
     pub lsp: HashMap<String, Value>,
 }
@@ -101,6 +103,10 @@ impl EditorSettings {
 }
 
 impl Settings {
+    pub fn git_autofetch(&self) -> bool {
+        self.autofetch.unwrap_or(false)
+    }
+
     /// The editor settings for files of `lang`, its language block applied.
     pub fn editor_for(&self, lang: Option<Lang>) -> EditorSettings {
         match lang.and_then(|l| self.languages.get(language_id(l))) {
@@ -264,6 +270,13 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 .map(|on| settings.ide_integration = Some(on))
                 .ok_or_else(|| "must be true or false".to_string()),
             "editor" => editor_block(&mut settings.editor, value, key, &mut problems),
+            "git" => match value.get("autofetch").map(Value::as_bool) {
+                Some(Some(on)) => {
+                    settings.autofetch = Some(on);
+                    Ok(())
+                }
+                _ => Err("must be {\"autofetch\": true or false}".into()),
+            },
             "lsp" => match value.as_object() {
                 Some(servers) => {
                     for (name, config) in servers {
@@ -284,6 +297,10 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
             }
             k => match k.split_once('.') {
                 Some(("editor" | "files", rest)) => settings.editor.set(rest, value),
+                Some(("git", "autofetch")) => value
+                    .as_bool()
+                    .map(|on| settings.autofetch = Some(on))
+                    .ok_or_else(|| "must be true or false".to_string()),
                 Some(("lsp", name)) => {
                     settings.lsp.insert(server_name(name).into(), value.clone());
                     Ok(())
@@ -659,7 +676,14 @@ mod tests {
         assert_eq!(s.editor.tab_size, Some(4));
         assert_eq!(s.theme, Some(ThemeChoice::System));
         assert!(s.lsp.contains_key("gopls"));
+        assert!(s.git_autofetch());
         assert_eq!(parse(TEMPLATE).unwrap().0, Settings::default());
+        assert!(
+            !Settings::default().git_autofetch(),
+            "off by default, as in VS Code"
+        );
+        let (dotted, _) = parse(r#"{"git.autofetch": true}"#).unwrap();
+        assert!(dotted.git_autofetch());
     }
 
     #[test]

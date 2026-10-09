@@ -614,6 +614,7 @@ as soon as you save:
   "[markdown]": { "trim_trailing_whitespace": false },   // per language, by VS Code's id
   "theme": "system",                 // "system", "light" or "dark"
   "ide_integration": false,
+  "git": { "autofetch": true },      // fetch every three minutes; off by default, as in VS Code
   "lsp": {
     "gopls": { "staticcheck": true, "hints": { "parameterNames": true } },
     "typescript-language-server": { "preferences": { "importModuleSpecifierPreference": "relative" } }

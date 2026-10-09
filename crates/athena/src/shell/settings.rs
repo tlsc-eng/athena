@@ -22,7 +22,8 @@ pub(super) struct SettingsState {
     fallback: Preferences,
     /// What the file had wrong when it was read at launch; `Err` when none of it could be used.
     problems: Result<Vec<String>, Vec<String>>,
-    /// The theme or Claude Code integration changed while no window was at hand to apply it.
+    /// Settings were put in force without a window, so those that need one (the theme, Claude
+    /// Code integration, git autofetch) wait for the watcher's next read.
     unapplied: bool,
     toast: Option<u64>,
 }
@@ -143,9 +144,8 @@ impl Shell {
         let old = std::mem::replace(&mut self.settings.file, file);
         let before = self.workspace.preferences();
         let mut now = self.settings.file.over(self.settings.fallback);
-        self.settings.unapplied = window.is_none()
-            && (now.theme != before.theme || now.ide_integration != before.ide_integration);
-        if self.settings.unapplied {
+        self.settings.unapplied = window.is_none();
+        if window.is_none() {
             // The watcher reads the file again in a moment, with the window.
             now.theme = before.theme;
             now.ide_integration = before.ide_integration;
@@ -161,6 +161,7 @@ impl Shell {
                     false => self.stop_ide(window, cx),
                 }
             }
+            self.set_autofetch(self.settings.file.git_autofetch(), window, cx);
         }
         let font_size = self.settings.file.editor.font_size;
         if font_size != old.editor.font_size
