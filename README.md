@@ -936,7 +936,8 @@ knows from the project's `.vscode/settings.json`, so a repository set up for VS 
 `editor.codeActionsOnSave`, `gopls`, `go.toolsEnvVars` (gopls's `env`), `typescript.tsdk` and the
 `typescript.*` / `javascript.*` preferences; anything else there, an extension's keys or a value
 Athena cannot use, is ignored silently. `.athena/settings.json` beats `.vscode/settings.json`.
-App-wide settings (`theme`, `window`, `git`, `explorer`, `ide_integration`, `editor.font_size`)
+App-wide settings (`theme`, `window`, `git`, `explorer`, `ide_integration`, `claude`,
+`editor.font_size`)
 apply only in the global file; set in a project file they are reported and ignored. Both files
 apply as soon as they are saved in Athena, or when the next file of the project opens.
 

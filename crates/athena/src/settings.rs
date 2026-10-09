@@ -346,6 +346,10 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
         ),
         ("window.zoom_level", s.zoom_level.take().is_some()),
         ("editor.font_size", s.editor.font_size.take().is_some()),
+        (
+            "claude.prices",
+            !std::mem::take(&mut s.claude_prices).is_empty(),
+        ),
     ];
     for (key, set) in app_wide {
         if set {
@@ -1564,11 +1568,13 @@ mod tests {
             r#"{"editor": {"tab_size": 2, "word_wrap": false, "format_on_save": true},
                 "[go]": {"format_on_save": false},
                 "lsp": {"gopls": {"hints": {"assignVariableTypes": true}}},
-                "theme": "dark", "window.zoom_level": 2}"#,
+                "theme": "dark", "window.zoom_level": 2,
+                "claude": {"prices": {"claude-x": {"input": 1, "output": 2}}}}"#,
         )
         .unwrap();
-        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 3, "{problems:?}");
         assert_eq!(project.theme, None);
+        assert!(project.claude_prices.is_empty());
         let both = user.overlaid(&project);
         assert_eq!(both.editor.tab_size, Some(2));
         let go = both.editor_for(Some(Lang::Go));

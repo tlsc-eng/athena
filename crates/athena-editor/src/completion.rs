@@ -643,7 +643,8 @@ impl EditorView {
                     .id("completion-docs")
                     .occlude()
                     .w(px(DOCS_WIDTH))
-                    .max_h(height)
+                    // As tall as a full list, so a short list still shows the documentation.
+                    .max_h(px(MAX_ROWS as f32 * ROW_HEIGHT + 10.))
                     .overflow_y_scroll()
                     .py(px(4.))
                     .flex()
