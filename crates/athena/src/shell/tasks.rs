@@ -30,9 +30,17 @@ fn package_runner(root: &Path) -> &'static str {
     .map_or("npm", |(_, runner)| runner)
 }
 
+/// Whether a script or target name can be typed into the terminal as one argument: a control
+/// character would act as a keystroke even inside quotes, and a leading `-` reads as an option.
+fn typeable(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('-') && !name.chars().any(char::is_control)
+}
+
 /// Quotes a word for the shell only when it needs it.
 fn quote(word: &str) -> String {
+    // zsh expands a leading `=` to a command's path.
     let plain = !word.is_empty()
+        && !word.starts_with('=')
         && word
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "-_./:@+=".contains(c));
@@ -49,6 +57,7 @@ pub(super) fn package_scripts(package: &Value, runner: &str) -> Vec<Task> {
         .as_object()
         .into_iter()
         .flatten()
+        .filter(|(name, _)| typeable(name))
         .filter_map(|(name, script)| {
             Some(Task {
                 label: format!("{runner}: {name}"),
@@ -85,7 +94,8 @@ pub(super) fn makefile_targets(text: &str) -> Vec<String> {
             continue;
         }
         for target in line[..colon].split_whitespace() {
-            let usable = !target.starts_with('.')
+            let usable = typeable(target)
+                && !target.starts_with('.')
                 && !target.contains(['%', '$', '(', ')'])
                 && !out.iter().any(|t| t == target);
             if usable {
@@ -114,7 +124,7 @@ pub(super) fn discover(root: &Path) -> Vec<Task> {
         tasks.extend(makefile_targets(&text).into_iter().map(|t| Task {
             label: format!("make: {t}"),
             detail: name.to_string(),
-            command: format!("make {}", quote(&t)),
+            command: format!("make -- {}", quote(&t)),
         }));
     }
     tasks
@@ -208,6 +218,48 @@ build: again
     }
 
     #[test]
+    fn names_that_would_type_keystrokes_or_options_are_not_offered() {
+        let package = json!({ "scripts": {
+            "ok": "x",
+            "evil\rrm -rf ~\r": "x",
+            "esc\u{1b}[2J": "x",
+            "--version": "x",
+            "=ls": "x",
+        }});
+        let commands: Vec<String> = package_scripts(&package, "npm")
+            .into_iter()
+            .map(|t| t.command)
+            .collect();
+        assert_eq!(commands, ["npm run ok", "npm run '=ls'"]);
+        let text = "-include: deps.mk\n-n: y\nbad\u{7}: z\nok: a\n";
+        assert_eq!(makefile_targets(text), ["ok"]);
+    }
+
+    #[test]
+    fn quoted_names_reach_the_command_unchanged_in_sh_and_zsh() {
+        let names = [
+            "build:prod",
+            "it's",
+            "a b;$(x)`y`",
+            "=ls",
+            "~/x",
+            "!!",
+            "*.o",
+            "x\\y\"z",
+            "über",
+        ];
+        for shell in ["/bin/sh", "/bin/zsh"] {
+            for name in names {
+                let out = std::process::Command::new(shell)
+                    .args(["-c", &format!("printf '%s' {}", quote(name))])
+                    .output()
+                    .unwrap();
+                assert_eq!(String::from_utf8_lossy(&out.stdout), name, "{shell}");
+            }
+        }
+    }
+
+    #[test]
     fn the_lockfile_picks_the_runner_and_odd_names_are_quoted() {
         let dir = std::env::temp_dir().join(format!("athena-tasks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -219,7 +271,7 @@ build: again
         std::fs::write(dir.join("Makefile"), "all:\n\ttrue\n").unwrap();
         let tasks = discover(&dir);
         let commands: Vec<&str> = tasks.iter().map(|t| t.command.as_str()).collect();
-        assert_eq!(commands, [r"yarn run 'it'\''s'", "make all"]);
+        assert_eq!(commands, [r"yarn run 'it'\''s'", "make -- all"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
