@@ -195,9 +195,7 @@ impl Shell {
 
     fn session_root(&self, session: PaneId) -> Option<PathBuf> {
         self.workspace.projects.iter().find_map(|p| {
-            p.layout
-                .as_ref()?
-                .items()
+            p.items()
                 .any(|i| {
                     i.kind
                         == ItemKind::Terminal {
@@ -282,10 +280,7 @@ impl Shell {
     fn terminals(&self, cx: &Context<Self>) -> Vec<TerminalInfo> {
         let mut out = Vec::new();
         for project in &self.workspace.projects {
-            let Some(layout) = &project.layout else {
-                continue;
-            };
-            for item in layout.items() {
+            for item in project.items() {
                 let ItemKind::Terminal { session } = item.kind else {
                     continue;
                 };

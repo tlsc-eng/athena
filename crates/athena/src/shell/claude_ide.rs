@@ -639,6 +639,10 @@ impl Shell {
             .find_map(|pid| self.claude_terminal(pid, cx))
             .filter(|(r, _)| *r == root);
         if let Some((_, item)) = terminal
+            && athena_workspace::Panel::holds(item)
+        {
+            self.activate_panel_terminal(item, window, cx);
+        } else if let Some((_, item)) = terminal
             && let Some((pane, index)) = self
                 .workspace
                 .active_project()

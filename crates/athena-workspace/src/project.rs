@@ -119,6 +119,14 @@ impl Project {
         }
     }
 
+    /// Every tab: the editor area's, then the bottom panel's terminals.
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        self.layout
+            .iter()
+            .flat_map(|l| l.items())
+            .chain(&self.panel.terminals)
+    }
+
     pub fn name(&self) -> String {
         self.root
             .file_name()
@@ -257,6 +265,11 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.panel, p.panel);
+        assert_eq!(
+            p.items().count(),
+            2,
+            "the layout's terminal and the panel's"
+        );
         let old: Project = serde_json::from_str(r#"{"root":"/n/a"}"#).unwrap();
         assert!(old.panel.is_empty());
         let mut stale = p.panel.clone();
