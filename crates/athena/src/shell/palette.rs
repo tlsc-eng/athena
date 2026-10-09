@@ -296,11 +296,11 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::claude_sessions::ClaudeReviewPreviousFile),
         ),
         (
-            "Allow project linters (ESLint, Biome)",
+            "Allow project code (linters, TypeScript, project settings)",
             Box::new(super::lsp::AllowProjectLinters),
         ),
         (
-            "Disallow project linters (ESLint, Biome)",
+            "Disallow project code (linters, TypeScript, project settings)",
             Box::new(super::lsp::DisallowProjectLinters),
         ),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
