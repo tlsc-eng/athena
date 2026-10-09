@@ -12,6 +12,7 @@ use super::Shell;
 use super::edits::AskedAt;
 use super::lsp::{NO_SERVER, document_key};
 use crate::actions::ApplyCodeAction;
+use crate::settings::Lightbulb;
 
 /// The cursor rests this long before the server is asked whether its line has a quick fix.
 const LIGHTBULB_DELAY: Duration = Duration::from_millis(250);
@@ -124,8 +125,8 @@ impl Shell {
             .insert(editor.entity_id(), (editor.downgrade(), subscription));
     }
 
-    /// Asks again, once the cursor rests, whether its line has a quick fix; diagnostics that
-    /// change under it ask too.
+    /// Asks again, once the cursor rests, whether its line has a quick fix, or with
+    /// `editor.lightbulb` set to `"all"` any refactoring; diagnostics that change under it ask too.
     pub(super) fn schedule_lightbulb(
         &mut self,
         editor: &Entity<EditorView>,
@@ -133,6 +134,17 @@ impl Shell {
     ) {
         let doc = document_key(editor.read(cx).path());
         let line = editor.read(cx).cursor_line() as u32;
+        let lightbulb = {
+            let root = self.project_root_of(editor.read(cx).path());
+            self.settings_for(root.as_deref())
+                .editor_for(editor.read(cx).lang())
+                .lightbulb
+                .unwrap_or(Lightbulb::QuickFixes)
+        };
+        let kinds: &'static [&'static str] = match lightbulb {
+            Lightbulb::All => &["quickfix", "refactor"],
+            _ => &["quickfix"],
+        };
         let servers: Vec<(Rc<Client>, Vec<serde_json::Value>)> = self
             .document_servers(&doc)
             .into_iter()
@@ -144,9 +156,10 @@ impl Shell {
                     .collect::<Vec<_>>();
                 (client, on_line)
             })
-            .filter(|(_, on_line)| !on_line.is_empty())
+            // Quick fixes answer diagnostics; refactorings are worth asking for anywhere.
+            .filter(|(_, on_line)| lightbulb == Lightbulb::All || !on_line.is_empty())
             .collect();
-        if servers.is_empty() {
+        if servers.is_empty() || lightbulb == Lightbulb::Off {
             self.code_actions.lightbulb_task = None;
             editor.update(cx, |e, cx| e.set_lightbulb(None, cx));
             return;
@@ -172,7 +185,7 @@ impl Shell {
                 let doc = doc.clone();
                 async move {
                     client
-                        .code_actions(&doc, range, diagnostics, Some(&["quickfix"]))
+                        .code_actions(&doc, range, diagnostics, Some(kinds))
                         .await
                         .unwrap_or_default()
                 }
