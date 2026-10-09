@@ -104,7 +104,7 @@ pub(super) struct LspState {
     /// Projects whose own TypeScript waits for trust with no global one to run meanwhile.
     held_back: HashSet<PathBuf>,
     /// Each editor's last suggestions as the server sent them, to resolve one on request.
-    completions: HashMap<EntityId, (u64, Rc<Client>, Vec<CompletionItem>)>,
+    completions: HashMap<EntityId, (u64, Weak<Client>, Vec<CompletionItem>)>,
     /// Each document's semantic tokens as its server last sent them, which a delta builds on.
     semantic: HashMap<PathBuf, SemanticDoc>,
     /// Each editor's last few code lens answers, newest last, by request, to run a clicked one.
@@ -1668,7 +1668,9 @@ impl Shell {
                 .collect();
             if resolves {
                 let _ = this.update(cx, |this, _| {
-                    this.lsp.completions.insert(id, (request, client, list));
+                    this.lsp
+                        .completions
+                        .insert(id, (request, Rc::downgrade(&client), list));
                 });
             }
             let _ = weak.update(cx, |e, cx| {
@@ -1862,7 +1864,9 @@ impl Shell {
         let Some(item) = items.get(index).filter(|_| *asked == request).cloned() else {
             return;
         };
-        let client = client.clone();
+        let Some(client) = client.upgrade() else {
+            return;
+        };
         let weak = editor.downgrade();
         cx.spawn(async move |_, cx| {
             let item = match client.resolve_completion(&item).await {
