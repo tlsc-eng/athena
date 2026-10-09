@@ -101,7 +101,7 @@ pub(super) struct TestsState {
 
 /// How the tests under a mark did: failed if any failed, passed if any passed.
 fn symbol_state(titles: &[String], tests: &[TestCase]) -> Option<RunState> {
-    let mut found = tests.iter().filter(|t| t.titles.starts_with(titles));
+    let mut found = tests.iter().filter(|t| runs_under(&t.titles, titles));
     let first = found.next()?;
     let mut state = outcome_state(first.outcome);
     for t in found {
@@ -112,6 +112,18 @@ fn symbol_state(titles: &[String], tests: &[TestCase]) -> Option<RunState> {
         };
     }
     Some(state)
+}
+
+/// Whether test `titles` is the mark's test or inside it; `go test` names a subtest run again at
+/// its level `x#01`, `x#02`, … and those belong to the mark on `x`.
+fn runs_under(titles: &[String], mark: &[String]) -> bool {
+    titles.len() >= mark.len()
+        && titles.iter().zip(mark).all(|(t, m)| {
+            t == m
+                || t.strip_prefix(m.as_str())
+                    .and_then(|rest| rest.strip_prefix('#'))
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 fn outcome_state(outcome: Outcome) -> RunState {
@@ -1296,6 +1308,20 @@ mod tests {
             Some(RunState::Skipped)
         );
         assert_eq!(symbol_state(&strings(&["TestNew"]), &tests), None);
+        let looped = [
+            case(&["TestLoop", "x"], Outcome::Passed),
+            case(&["TestLoop", "x#01"], Outcome::Failed),
+            case(&["TestLoop", "x#"], Outcome::Passed),
+            case(&["TestLoop", "xy"], Outcome::Failed),
+        ];
+        assert_eq!(
+            symbol_state(&strings(&["TestLoop", "x"]), &looped),
+            Some(RunState::Failed)
+        );
+        assert_eq!(
+            symbol_state(&strings(&["TestLoop", "x#"]), &looped),
+            Some(RunState::Passed)
+        );
     }
 
     #[test]
@@ -1379,7 +1405,13 @@ mod tests {
         let one_sub = plan_file(&dir, &file, Some((&sub, false)), &symbols).unwrap();
         assert_eq!(
             one_sub.job.args,
-            ["test", "-json", "-run", r"^TestA$/^adds_1\+1$", "./svc"]
+            [
+                "test",
+                "-json",
+                "-run",
+                r"^TestA$/^adds_1\+1(#[0-9]+)?$",
+                "./svc"
+            ]
         );
         assert!(one_sub.scope.covers(&file, &strings(&["TestA"])));
         assert!(one_sub.scope.covers(&file, &sub));

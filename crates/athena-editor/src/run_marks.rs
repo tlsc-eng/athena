@@ -272,11 +272,46 @@ fn go_subtest_name(name: &str) -> String {
             c if c.is_control() && (c as u32) < 0x80 => {
                 out.push_str(&format!("\\x{:02x}", c as u32))
             }
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() || unprintable(c) => match c as u32 {
+                n @ ..0x10000 => out.push_str(&format!("\\u{n:04x}")),
+                n => out.push_str(&format!("\\U{n:08x}")),
+            },
             c => out.push(c),
         }
     }
     out
+}
+
+/// Format and private-use characters, which Go's `strconv.IsPrint` refuses beside controls and
+/// spaces; unassigned code points are left as they are.
+fn unprintable(c: char) -> bool {
+    const RANGES: &[(u32, u32)] = &[
+        (0xad, 0xad),
+        (0x600, 0x605),
+        (0x61c, 0x61c),
+        (0x6dd, 0x6dd),
+        (0x70f, 0x70f),
+        (0x890, 0x891),
+        (0x8e2, 0x8e2),
+        (0x180e, 0x180e),
+        (0x200b, 0x200f),
+        (0x202a, 0x202e),
+        (0x2060, 0x2064),
+        (0x2066, 0x206f),
+        (0xe000, 0xf8ff),
+        (0xfeff, 0xfeff),
+        (0xfff9, 0xfffb),
+        (0x110bd, 0x110bd),
+        (0x110cd, 0x110cd),
+        (0x13430, 0x1343f),
+        (0x1bca0, 0x1bca3),
+        (0x1d173, 0x1d17a),
+        (0xe0001, 0xe0001),
+        (0xe0020, 0xe007f),
+        (0xf0000, 0x10ffff),
+    ];
+    let n = c as u32;
+    RANGES.iter().any(|&(lo, hi)| (lo..=hi).contains(&n))
 }
 
 /// `describe("x", …)`, `it.only("y", …)` and the like: whether it groups, and its title.
@@ -523,6 +558,10 @@ mod tests {
         assert_eq!(go_unescape(r"\xff"), None);
         assert_eq!(go_subtest_name("two words\there"), "two_words_here");
         assert_eq!(go_subtest_name("bell\u{7}nul\u{0}"), "bell\\anul\\x00");
+        // As `go test -v` prints them.
+        assert_eq!(go_subtest_name("zero\u{200b}width"), "zero\\u200bwidth");
+        assert_eq!(go_subtest_name("tag\u{e0001}"), "tag\\U000e0001");
+        assert_eq!(go_subtest_name("café ✓"), "café_✓");
     }
 
     #[test]

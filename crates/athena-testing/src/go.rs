@@ -71,11 +71,16 @@ pub fn go_run_pattern(names: &[String]) -> String {
     }
 }
 
-/// `^TestA$/^sub$` for one subtest: `go test` matches each `/`-separated part against one level.
+/// `^TestA$/^sub(#[0-9]+)?$` for one subtest: `go test` matches each `/`-separated part against
+/// one level, and numbers a name repeated at its level (`t.Run` in a loop) `sub#01`, `sub#02`, ….
 pub fn go_subtest_pattern(titles: &[String]) -> String {
     titles
         .iter()
-        .map(|t| format!("^{}$", regex::escape(t)))
+        .enumerate()
+        .map(|(level, t)| match level {
+            0 => format!("^{}$", regex::escape(t)),
+            _ => format!("^{}(#[0-9]+)?$", regex::escape(t)),
+        })
         .collect::<Vec<_>>()
         .join("/")
 }
@@ -458,7 +463,7 @@ mod tests {
         );
         assert_eq!(
             go_subtest_pattern(&["TestA".into(), "adds_1+1".into(), "(x)".into()]),
-            r"^TestA$/^adds_1\+1$/^\(x\)$"
+            r"^TestA$/^adds_1\+1(#[0-9]+)?$/^\(x\)(#[0-9]+)?$"
         );
         let job = go_job(&module(), &["./sub".into()], Some("^TestA$".into()));
         assert_eq!(job.args, ["test", "-json", "-run", "^TestA$", "./sub"]);
