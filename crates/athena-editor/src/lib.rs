@@ -11,6 +11,7 @@ pub mod find;
 mod format;
 mod hover;
 mod image;
+mod large;
 mod line_jump;
 mod lines;
 mod lsp_ui;
@@ -39,6 +40,7 @@ pub use diff_view::{DiffEvent, DiffView, HunkActions};
 pub use encoding::FileEncoding;
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
+pub use large::{LargeFileView, is_large_file};
 pub use lsp_ui::{
     ConfirmRename, FormatSelection, GoToImplementation, GoToTypeDefinition, Inlay, LspRequest,
     Occurrence, RenameSymbol, ShowCallHierarchy, ShowCodeActions, ShowTypeHierarchy,
@@ -65,6 +67,7 @@ pub fn init(cx: &mut gpui::App) {
     view::init(cx);
     diff_view::init(cx);
     image::init(cx);
+    large::init(cx);
     lsp_ui::init(cx);
     smart_select::init(cx);
     peek::init(cx);

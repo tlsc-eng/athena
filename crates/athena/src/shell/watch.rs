@@ -110,6 +110,9 @@ impl Shell {
                 ItemView::Image(image) if touched(image.read(cx).path()) => {
                     image.update(cx, |v, cx| v.reload_if_changed(cx))
                 }
+                ItemView::Large(large) if touched(large.read(cx).path()) => {
+                    large.update(cx, |v, cx| v.reload_if_changed(cx))
+                }
                 ItemView::Doc(doc) if touched(doc.read(cx).path()) => {
                     doc.update(cx, |v, cx| v.refresh(cx))
                 }

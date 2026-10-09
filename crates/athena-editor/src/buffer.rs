@@ -18,7 +18,7 @@ use crate::syntax::{Lang, ParseJob, Parsed, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
 pub(crate) const UNDO_GROUP: Duration = Duration::from_millis(500);
-const MAX_FILE: u64 = 50 * 1024 * 1024;
+pub(crate) const MAX_FILE: u64 = 50 * 1024 * 1024;
 /// Changes kept for views that have not caught up; one further behind starts over.
 const EDIT_LOG: usize = 4096;
 /// Carets a view keeps at most, so one edit at each (two, for surrounding a selection) still fits

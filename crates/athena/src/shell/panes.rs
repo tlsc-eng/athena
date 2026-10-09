@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use athena_editor::{EditorEvent, EditorView, ImageView, is_image_path};
+use athena_editor::{
+    EditorEvent, EditorView, ImageView, LargeFileView, is_image_path, is_large_file,
+};
 use athena_preview::{DocEvent, DocView, PreviewEvent, PreviewView, is_document_path};
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
@@ -217,6 +219,10 @@ impl Shell {
                 })
                 .detach();
                 ItemView::Terminal(view)
+            }
+            // Past the editor's limit a file opens read-only, with no language server or git gutter.
+            ItemKind::Editor { path } if is_large_file(path) => {
+                ItemView::Large(cx.new(|cx| LargeFileView::open(path.clone(), cx)))
             }
             ItemKind::Editor { path } => {
                 let view = cx.new(|cx| EditorView::open(path.clone(), cx));
@@ -2010,6 +2016,7 @@ impl Shell {
             match view {
                 ItemView::Editor(editor) => editor.update(cx, |v, cx| v.check_disk(cx)),
                 ItemView::Image(image) => image.update(cx, |v, cx| v.reload_if_changed(cx)),
+                ItemView::Large(large) => large.update(cx, |v, cx| v.reload_if_changed(cx)),
                 ItemView::Doc(doc) => doc.update(cx, |v, cx| v.refresh(cx)),
                 _ => {}
             }
