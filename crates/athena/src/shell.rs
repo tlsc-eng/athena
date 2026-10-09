@@ -16,6 +16,7 @@ mod fileops;
 mod fuzzy;
 mod git_gutter;
 mod git_view;
+mod github;
 mod history;
 mod item;
 mod lsp;
@@ -770,6 +771,7 @@ impl Render for Shell {
         let root = conflicts::bind_conflict_actions(tasks::bind_run_actions(root, cx), cx);
         let root = tests_view::bind_test_actions(root, cx);
         let root = claude_sessions::bind_claude_actions(root, cx);
+        let root = github::bind_github_actions(root, cx);
         root.track_focus(&self.focus)
             .key_context("Shell")
             .on_action(cx.listener(Self::add_project))

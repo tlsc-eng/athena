@@ -1,3 +1,4 @@
+pub mod gh;
 pub mod git;
 mod layout;
 mod persist;

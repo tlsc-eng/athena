@@ -83,6 +83,7 @@ pub(super) struct GitState {
     /// Editors followed for saves that resolve a file's last conflict.
     pub(super) conflict_watch: HashMap<gpui::EntityId, Subscription>,
     pub(super) gutters: super::git_gutter::GutterState,
+    pub(super) github: super::github::GithubState,
 }
 
 impl GitState {
@@ -239,6 +240,7 @@ impl Shell {
         ));
         self.git.commit_input = Some(input);
         self.set_autofetch(self.settings.file.git_autofetch(), window, cx);
+        self.start_github(window, cx);
         // The window is not active yet while it is being built, so the first run is kicked.
         self.git_kick(cx);
         self.git.poll = Some(cx.spawn_in(window, async move |this, cx| {
@@ -380,9 +382,10 @@ impl Shell {
                         this.transient_notice("Pulled", "The branch is up to date.", cx)
                     }
                     Ok(()) if op == Remote::Push => {
-                        this.transient_notice("Pushed", "The remote branch is up to date.", cx)
+                        this.transient_notice("Pushed", "The remote branch is up to date.", cx);
+                        this.refresh_ci(root.clone(), cx);
                     }
-                    Ok(()) => {}
+                    Ok(()) => this.refresh_ci(root.clone(), cx),
                 }
                 this.tree.invalidate();
                 this.git_kick(cx);
@@ -669,6 +672,7 @@ impl Shell {
         }
         self.reload_diffs(root, None, cx);
         self.sync_gutters(root, cx);
+        self.ci_branch_seen(root, cx);
     }
 
     fn git_finished(&mut self, cx: &mut Context<Self>) {

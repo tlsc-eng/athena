@@ -1,5 +1,6 @@
 use athena_editor::{EditorView, Indent, Lang, LineEnding};
 use athena_ui::{ActiveTheme, MenuItem, Tooltip};
+use athena_workspace::gh::CiState;
 use athena_workspace::git;
 use gpui::{
     ClickEvent, Context, Entity, Focusable, IntoElement, SharedString, WeakEntity, Window, div,
@@ -107,6 +108,7 @@ impl Shell {
         let tracking = root.as_deref().and_then(|r| self.cached_tracking(r));
         let busy = self.git.remote_busy;
         let checked = root.as_deref().is_some_and(|r| self.git_checked(r));
+        let ci = root.as_deref().and_then(|r| self.ci_run(r)).cloned();
         let left = branch.map(|branch| {
             let sync = sync_label(tracking.as_ref(), busy);
             div()
@@ -128,6 +130,30 @@ impl Shell {
                         ),
                     )
                 })
+                .children(ci.map(|run| {
+                    let color = match run.state {
+                        CiState::Pending => t.color.warning,
+                        CiState::Passed => t.color.success,
+                        CiState::Failed => t.color.danger,
+                        CiState::Neutral => t.color.content_disabled,
+                    };
+                    let tip = super::github::ci_tooltip(&run);
+                    div()
+                        .id("status-ci")
+                        .h_full()
+                        .px(t.ui(8.))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.color.surface_hover))
+                        .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
+                        .on_click(move |_, _, cx| {
+                            if run.url.starts_with("https://") {
+                                cx.open_url(&run.url);
+                            }
+                        })
+                        .child(div().size(px(6.)).rounded_full().bg(color))
+                }))
         });
         let right = status.zip(editor).map(|(status, editor)| {
             let position =

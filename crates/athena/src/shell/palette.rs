@@ -34,6 +34,8 @@ pub(super) enum Target {
     Folder(PathBuf),
     /// A shell command Run Task starts in a new terminal.
     Task(String),
+    /// A web page, such as a pull request check's run.
+    Link(String),
 }
 
 impl Clone for Target {
@@ -46,6 +48,7 @@ impl Clone for Target {
             Self::Symbol(path, at) => Self::Symbol(path.clone(), *at),
             Self::Folder(path) => Self::Folder(path.clone()),
             Self::Task(command) => Self::Task(command.clone()),
+            Self::Link(url) => Self::Link(url.clone()),
         }
     }
 }
@@ -71,6 +74,8 @@ pub(super) enum Mode {
     /// Branches a new worktree can check out.
     NewWorktree,
     RemoveWorktree,
+    /// The current branch's pull request checks.
+    Checks,
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -91,6 +96,7 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Tasks => "No matching tasks",
         Mode::Worktrees | Mode::RemoveWorktree => "No matching worktrees",
         Mode::NewWorktree => "Type a name for a new branch",
+        Mode::Checks => "No matching checks",
         _ => "No matching commands",
     }
 }
@@ -225,6 +231,14 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Git: Open timeline", Box::new(actions::GitOpenTimeline)),
         ("Switch branch…", Box::new(actions::SwitchBranch)),
+        (
+            "GitHub: Create pull request",
+            Box::new(super::github::CreatePullRequest),
+        ),
+        (
+            "GitHub: View pull request checks",
+            Box::new(super::github::ViewPullRequestChecks),
+        ),
         ("Git: Fetch", Box::new(actions::GitFetch)),
         ("Git: Pull", Box::new(actions::GitPull)),
         ("Git: Push", Box::new(actions::GitPush)),
@@ -386,6 +400,7 @@ impl Shell {
             Mode::Worktrees => "Open a worktree…",
             Mode::NewWorktree => "Pick a branch for the new worktree, or type a new branch name…",
             Mode::RemoveWorktree => "Delete a worktree…",
+            Mode::Checks => "Open a pull request check…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -414,6 +429,7 @@ impl Shell {
             Mode::Commands => self.command_entries(window, cx),
             Mode::Recent => self.recent_entries(),
             Mode::Tasks => self.task_entries(),
+            Mode::Checks => self.check_entries(),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
@@ -480,9 +496,12 @@ impl Shell {
             })
             .map(|(label, action)| Entry {
                 kind: None,
-                detail: window
-                    .highest_precedence_binding_for_action(action.as_ref())
-                    .map(|b| keystrokes(&b)),
+                detail: match self.gh_unavailable() {
+                    Some(why) if label.starts_with("GitHub:") => Some(why.to_string()),
+                    _ => window
+                        .highest_precedence_binding_for_action(action.as_ref())
+                        .map(|b| keystrokes(&b)),
+                },
                 key: label.to_string(),
                 label: label.to_string(),
                 target: Target::Command(action),
@@ -501,6 +520,34 @@ impl Shell {
             .and_then(|p| p.active_item());
         item.and_then(|item| self.items.get(&(project.root.clone(), item.id)))
             .is_some_and(|view| matches!(view, super::item::ItemView::Terminal(_)))
+    }
+
+    fn check_entries(&self) -> Vec<Entry> {
+        self.git
+            .github
+            .checks
+            .iter()
+            .map(|check| {
+                let glyph = match check.state {
+                    athena_workspace::gh::CiState::Passed => "✓",
+                    athena_workspace::gh::CiState::Failed => "✗",
+                    athena_workspace::gh::CiState::Pending => "●",
+                    athena_workspace::gh::CiState::Neutral => "–",
+                };
+                let label = format!("{glyph} {}", check.name);
+                let mut detail = super::github::state_word(check.state).to_string();
+                if !check.workflow.is_empty() {
+                    detail.push_str(&format!(" · {}", check.workflow));
+                }
+                Entry {
+                    key: label.clone(),
+                    label,
+                    detail: Some(detail),
+                    kind: None,
+                    target: Target::Link(check.link.clone()),
+                }
+            })
+            .collect()
     }
 
     fn task_entries(&self) -> Vec<Entry> {
@@ -906,6 +953,8 @@ impl Shell {
             Some(Target::Symbol(path, at)) => self.lsp.jump = Some((path, at)),
             Some(Target::Folder(root)) => self.open_folder(root, cx),
             Some(Target::Task(command)) => self.run_task(command, window, cx),
+            Some(Target::Link(url)) if url.starts_with("https://") => cx.open_url(&url),
+            Some(Target::Link(_)) => {}
             None => {}
         }
         cx.notify();
@@ -979,6 +1028,7 @@ impl Shell {
                                         | Target::Branch(_)
                                         | Target::Symbol(..)
                                         | Target::Folder(_)
+                                        | Target::Link(_)
                                 )
                                 .then(|| entry.detail.clone())
                                 .flatten()

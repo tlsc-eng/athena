@@ -421,6 +421,11 @@ fn never_prompt(cmd: &mut Command, ssh_configured: bool) {
     if !ssh_configured {
         cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
+    new_session(cmd);
+}
+
+/// Starts the command in its own session, without a controlling terminal to prompt on.
+pub(crate) fn new_session(cmd: &mut Command) {
     // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
     unsafe {
         cmd.pre_exec(|| match libc::setsid() {
@@ -515,19 +520,52 @@ fn run_within(cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<Vec<
 }
 
 fn run_until(
-    mut cmd: Command,
+    cmd: Command,
     stdin: Option<&str>,
     limit: Duration,
     cancel: &Cancel,
 ) -> Result<Vec<u8>> {
+    let out = run_output(cmd, stdin, limit, cancel)?;
+    if !out.status.success() {
+        // `git commit` with nothing staged explains itself on stdout.
+        let said = [out.stderr, out.stdout]
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+            .find(|s| !s.is_empty());
+        bail!(
+            "{}",
+            said.unwrap_or_else(|| format!("git failed ({})", out.status))
+        );
+    }
+    Ok(out.stdout)
+}
+
+/// How a command run to its end exited, and what it printed; stderr is read only on failure.
+pub(crate) struct Output {
+    pub status: std::process::ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Runs `cmd` to its end within `limit`, killing it and its session on time out or cancel.
+pub(crate) fn run_output(
+    mut cmd: Command,
+    stdin: Option<&str>,
+    limit: Duration,
+    cancel: &Cancel,
+) -> Result<Output> {
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     }
+    let program = Path::new(cmd.get_program())
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("could not run git")?;
+        .with_context(|| format!("could not run {program}"))?;
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
         let text = text.to_owned();
         // A failed write shows up as git's own error below; a git that never reads hits the limit.
@@ -575,20 +613,11 @@ fn run_until(
         kill_all(&mut child);
     }
     let status = child.wait()?;
-    let stdout = stdout?;
-    if let Some(stderr) = stderr {
-        let stderr = stderr?;
-        // `git commit` with nothing staged explains itself on stdout.
-        let said = [stderr, stdout]
-            .into_iter()
-            .map(|b| String::from_utf8_lossy(&b).trim().to_string())
-            .find(|s| !s.is_empty());
-        bail!(
-            "{}",
-            said.unwrap_or_else(|| format!("git failed ({status})"))
-        );
-    }
-    Ok(stdout)
+    Ok(Output {
+        status,
+        stdout: stdout?,
+        stderr: stderr.transpose()?.unwrap_or_default(),
+    })
 }
 
 /// The project root's path inside its repository ("" at the top, "sub/dir/" below it).
