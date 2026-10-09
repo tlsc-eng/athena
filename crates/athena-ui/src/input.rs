@@ -69,8 +69,13 @@ pub struct TextInput {
     marked: Option<Range<usize>>,
     placeholder: SharedString,
     focus: FocusHandle,
-    layout: Option<ShapedLine>,
+    /// Each drawn line with the byte its text starts at.
+    layout: Vec<(usize, ShapedLine)>,
     bounds: Option<Bounds<Pixels>>,
+    /// Set for a box that takes several lines and grows to this many rows before it scrolls.
+    max_rows: Option<usize>,
+    /// The first line shown when the text has more lines than the box has rows.
+    scroll_row: usize,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -90,9 +95,48 @@ impl TextInput {
             marked: None,
             placeholder: placeholder.into(),
             focus: cx.focus_handle(),
-            layout: None,
+            layout: Vec::new(),
             bounds: None,
+            max_rows: None,
+            scroll_row: 0,
         }
+    }
+
+    /// Makes the box take several lines: Enter breaks the line, Cmd+Enter submits, and the box
+    /// grows to `max_rows` rows before it scrolls.
+    pub fn multiline(mut self, max_rows: usize) -> Self {
+        self.max_rows = Some(max_rows.max(1));
+        self
+    }
+
+    /// Byte ranges of the text's lines, without their line breaks.
+    fn lines(&self) -> Vec<Range<usize>> {
+        line_ranges(&self.text, self.max_rows.is_some())
+    }
+
+    /// The line holding byte `at`, and `at`'s char column in it.
+    fn line_at(&self, at: usize) -> (usize, usize) {
+        let lines = self.lines();
+        let i = lines.iter().rposition(|l| l.start <= at).unwrap_or(0);
+        (i, self.text[lines[i].start..at].chars().count())
+    }
+
+    /// Moves to the line above or below, keeping the char column where the line is long enough.
+    fn move_line(&mut self, down: bool, cx: &mut Context<Self>) {
+        self.deselect(cx);
+        let lines = self.lines();
+        let (line, col) = self.line_at(self.cursor);
+        let target = match down {
+            true if line + 1 < lines.len() => line + 1,
+            false if line > 0 => line - 1,
+            _ => return,
+        };
+        let r = lines[target].clone();
+        self.cursor = self.text[r.clone()]
+            .char_indices()
+            .nth(col)
+            .map_or(r.end, |(i, _)| r.start + i);
+        cx.notify();
     }
 
     pub fn text(&self) -> &str {
@@ -212,12 +256,14 @@ impl Render for TextInput {
             }))
             .on_action(cx.listener(|this, _: &Home, _, cx| {
                 this.deselect(cx);
-                this.cursor = 0;
+                let lines = this.lines();
+                this.cursor = lines[this.line_at(this.cursor).0].start;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &End, _, cx| {
                 this.deselect(cx);
-                this.cursor = this.text.len();
+                let lines = this.lines();
+                this.cursor = lines[this.line_at(this.cursor).0].end;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
@@ -226,15 +272,27 @@ impl Render for TextInput {
                     .read_from_clipboard()
                     .and_then(|c: ClipboardItem| c.text())
                 {
-                    let line = text.lines().next().unwrap_or_default().to_string();
-                    this.edit(this.at_cursor(), &line, cx);
+                    let pasted = match this.max_rows {
+                        Some(_) => text.replace("\r\n", "\n"),
+                        None => text.lines().next().unwrap_or_default().to_string(),
+                    };
+                    this.edit(this.at_cursor(), &pasted, cx);
                 }
             }))
-            .on_action(cx.listener(|_, _: &Submit, _, cx| cx.emit(InputEvent::Submit)))
+            .on_action(cx.listener(|this, _: &Submit, _, cx| match this.max_rows {
+                Some(_) => this.edit(this.at_cursor(), "\n", cx),
+                None => cx.emit(InputEvent::Submit),
+            }))
             .on_action(cx.listener(|_, _: &SubmitBeside, _, cx| cx.emit(InputEvent::SubmitBeside)))
             .on_action(cx.listener(|_, _: &Cancel, _, cx| cx.emit(InputEvent::Cancel)))
-            .on_action(cx.listener(|_, _: &Up, _, cx| cx.emit(InputEvent::Up)))
-            .on_action(cx.listener(|_, _: &Down, _, cx| cx.emit(InputEvent::Down)))
+            .on_action(cx.listener(|this, _: &Up, _, cx| match this.max_rows {
+                Some(_) => this.move_line(false, cx),
+                None => cx.emit(InputEvent::Up),
+            }))
+            .on_action(cx.listener(|this, _: &Down, _, cx| match this.max_rows {
+                Some(_) => this.move_line(true, cx),
+                None => cx.emit(InputEvent::Down),
+            }))
             .w_full()
             .child(InputElement { input: cx.entity() })
     }
@@ -245,9 +303,36 @@ struct InputElement {
 }
 
 struct InputFrame {
-    line: ShapedLine,
+    lines: Vec<(usize, ShapedLine)>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    selection: Vec<PaintQuad>,
+    scroll_row: usize,
+}
+
+/// Byte ranges of `text`'s lines without their breaks; a single-line box has one line.
+fn line_ranges(text: &str, multiline: bool) -> Vec<Range<usize>> {
+    if !multiline {
+        return std::iter::once(0..text.len()).collect();
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, _) in text.match_indices('\n') {
+        out.push(start..i);
+        start = i + 1;
+    }
+    out.push(start..text.len());
+    out
+}
+
+/// The first row to show so that `line` is in view in a box of `rows` rows.
+fn scrolled_to(scroll: usize, line: usize, rows: usize) -> usize {
+    if line < scroll {
+        line
+    } else if line >= scroll + rows {
+        line + 1 - rows
+    } else {
+        scroll
+    }
 }
 
 impl IntoElement for InputElement {
@@ -277,9 +362,14 @@ impl Element for InputElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
+        let input = self.input.read(cx);
+        let rows = match input.max_rows {
+            Some(max) => input.lines().len().clamp(1, max),
+            None => 1,
+        };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
+        style.size.height = (window.line_height() * rows as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -295,76 +385,95 @@ impl Element for InputElement {
         let input = self.input.read(cx);
         let theme = cx.theme();
         let style = window.text_style();
-        let (text, color) = if input.text.is_empty() {
-            (input.placeholder.to_string(), theme.color.content_disabled)
-        } else {
-            (input.text.clone(), theme.color.content)
-        };
-        let base = TextRun {
-            len: text.len(),
-            font: style.font(),
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let runs = match &input.marked {
-            Some(m) if !input.text.is_empty() => {
-                let underline = gpui::UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(color),
-                    wavy: false,
-                };
-                vec![
-                    TextRun {
-                        len: m.start,
-                        ..base.clone()
-                    },
-                    TextRun {
-                        len: m.end - m.start,
-                        underline: Some(underline),
-                        ..base.clone()
-                    },
-                    TextRun {
-                        len: text.len() - m.end,
-                        ..base
-                    },
-                ]
-                .into_iter()
-                .filter(|r| r.len > 0)
-                .collect()
-            }
-            _ => vec![base],
-        };
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(text.into(), font_size, &runs, None);
-        let cursor_x = if input.text.is_empty() {
-            px(0.)
-        } else {
-            line.x_for_index(input.cursor)
-        };
+        let lh = window.line_height();
         let focused = input.focus.is_focused(window);
-        let selection = (focused && input.all_selected).then(|| {
-            fill(
-                Bounds::new(bounds.origin, size(line.width, bounds.size.height)),
-                theme.color.surface_accent,
-            )
-        });
-        let cursor = focused.then(|| {
-            fill(
-                Bounds::new(
-                    point(bounds.left() + cursor_x, bounds.top()),
-                    size(px(1.), bounds.size.height),
-                ),
-                theme.color.accent,
-            )
-        });
+        let ranges = match input.text.is_empty() {
+            true => std::iter::once(0..0).collect(),
+            false => input.lines(),
+        };
+        let rows = input.max_rows.unwrap_or(1);
+        let (cursor_line, _) = input.line_at(input.cursor);
+        let scroll_row = scrolled_to(input.scroll_row, cursor_line, rows);
+        let mut lines = Vec::new();
+        let mut selection = Vec::new();
+        let mut cursor = None;
+        for (i, range) in ranges.iter().enumerate() {
+            let (text, color) = if input.text.is_empty() {
+                (input.placeholder.to_string(), theme.color.content_disabled)
+            } else {
+                (input.text[range.clone()].to_string(), theme.color.content)
+            };
+            let base = TextRun {
+                len: text.len(),
+                font: style.font(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let marked = input
+                .marked
+                .as_ref()
+                .filter(|m| !input.text.is_empty() && m.start >= range.start && m.end <= range.end)
+                .map(|m| m.start - range.start..m.end - range.start);
+            let runs = match marked {
+                Some(m) => {
+                    let underline = gpui::UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(color),
+                        wavy: false,
+                    };
+                    vec![
+                        TextRun {
+                            len: m.start,
+                            ..base.clone()
+                        },
+                        TextRun {
+                            len: m.end - m.start,
+                            underline: Some(underline),
+                            ..base.clone()
+                        },
+                        TextRun {
+                            len: text.len() - m.end,
+                            ..base
+                        },
+                    ]
+                    .into_iter()
+                    .filter(|r| r.len > 0)
+                    .collect()
+                }
+                None => vec![base],
+            };
+            let line = window
+                .text_system()
+                .shape_line(text.into(), font_size, &runs, None);
+            let top = bounds.top() + lh * (i as f32 - scroll_row as f32);
+            if (scroll_row..scroll_row + rows).contains(&i) {
+                if focused && input.all_selected {
+                    selection.push(fill(
+                        Bounds::new(point(bounds.left(), top), size(line.width, lh)),
+                        theme.color.surface_accent,
+                    ));
+                }
+                if focused && i == cursor_line {
+                    let x = match input.text.is_empty() {
+                        true => px(0.),
+                        false => line.x_for_index(input.cursor - range.start),
+                    };
+                    cursor = Some(fill(
+                        Bounds::new(point(bounds.left() + x, top), size(px(1.), lh)),
+                        theme.color.accent,
+                    ));
+                }
+            }
+            lines.push((range.start, line));
+        }
         InputFrame {
-            line,
+            lines,
             cursor,
             selection,
+            scroll_row,
         }
     }
 
@@ -384,18 +493,25 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = frame.selection.take() {
-            window.paint_quad(selection);
+        for quad in frame.selection.drain(..) {
+            window.paint_quad(quad);
         }
-        let _ = frame
-            .line
-            .paint(bounds.origin, window.line_height(), window, cx);
+        let lh = window.line_height();
+        // Only a multi-line box clips: its scrolled-out lines sit above and below it.
+        let mask = (frame.lines.len() > 1).then_some(gpui::ContentMask { bounds });
+        window.with_content_mask(mask, |window| {
+            for (i, (_, line)) in frame.lines.iter().enumerate() {
+                let top = bounds.top() + lh * (i as f32 - frame.scroll_row as f32);
+                let _ = line.paint(point(bounds.left(), top), lh, window, cx);
+            }
+        });
         if let Some(cursor) = frame.cursor.take() {
             window.paint_quad(cursor);
         }
-        let line = frame.line.clone();
+        let (lines, scroll_row) = (std::mem::take(&mut frame.lines), frame.scroll_row);
         self.input.update(cx, |input, _| {
-            input.layout = Some(line);
+            input.layout = lines;
+            input.scroll_row = scroll_row;
             input.bounds = Some(bounds);
         });
     }
@@ -476,12 +592,19 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let line = self.layout.as_ref()?;
-        let start = line.x_for_index(self.offset_from_utf16(range.start));
-        let end = line.x_for_index(self.offset_from_utf16(range.end));
+        let (start, end) = (
+            self.offset_from_utf16(range.start),
+            self.offset_from_utf16(range.end),
+        );
+        let row = self.layout.iter().rposition(|(at, _)| *at <= start)?;
+        let (at, line) = &self.layout[row];
+        let rows = self.layout.len().clamp(1, self.max_rows.unwrap_or(1));
+        let lh = bounds.size.height / rows as f32;
+        let top = bounds.top() + lh * (row as f32 - self.scroll_row as f32);
+        let x = |b: usize| line.x_for_index(b.saturating_sub(*at).min(line.len()));
         Some(Bounds::from_corners(
-            point(bounds.left() + start, bounds.top()),
-            point(bounds.left() + end, bounds.bottom()),
+            point(bounds.left() + x(start), top),
+            point(bounds.left() + x(end), top + lh),
         ))
     }
 
@@ -492,5 +615,20 @@ impl EntityInputHandler for TextInput {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_multiline_box_splits_at_breaks_and_scrolls_the_cursor_into_view() {
+        assert_eq!(line_ranges("ab\n\ncd", true), vec![0..2, 3..3, 4..6]);
+        assert_eq!(line_ranges("ab\ncd", false), vec![0..5]);
+        assert_eq!(line_ranges("", true), vec![0..0]);
+        assert_eq!(scrolled_to(0, 7, 6), 2);
+        assert_eq!(scrolled_to(4, 1, 6), 1);
+        assert_eq!(scrolled_to(2, 5, 6), 2);
     }
 }

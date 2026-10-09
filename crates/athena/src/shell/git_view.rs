@@ -66,8 +66,6 @@ pub(super) struct GitState {
     amend: bool,
     /// The message typed before Amend filled in the last commit's, put back when it is turned off.
     before_amend: Option<String>,
-    /// The last commit's body while amending; the box shows only its subject line.
-    amend_body: Option<String>,
     /// The commit Amend filled the box from, so a commit made since is not rewritten with it.
     amend_head: Option<String>,
     committing: bool,
@@ -225,7 +223,7 @@ fn rel_to(root: &Path, path: &Path) -> PathBuf {
 impl Shell {
     /// Polls the active project's status every few seconds while the window is in front.
     pub(super) fn start_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| TextInput::new("Message (⌘↩ to commit)", cx));
+        let input = cx.new(|cx| TextInput::new("Message (⌘↩ to commit)", cx).multiline(6));
         self.git._commit_events = Some(cx.subscribe_in(
             &input,
             window,
@@ -1002,10 +1000,6 @@ impl Shell {
         let Some(root) = self.active_root() else {
             return;
         };
-        let message = match self.git.amend_body.as_deref().filter(|_| amend) {
-            Some(body) => with_body(&message, body),
-            None => message,
-        };
         let amend_head = self.git.amend_head.clone().filter(|_| amend);
         self.git.committing = true;
         cx.notify();
@@ -1034,7 +1028,6 @@ impl Shell {
                     Ok(()) => {
                         this.git.amend = false;
                         this.git.before_amend = None;
-                        this.git.amend_body = None;
                         this.git.amend_head = None;
                         if let Some(input) = this.git.commit_input.clone() {
                             input.update(cx, |i, cx| i.set_text("", cx));
@@ -1064,7 +1057,6 @@ impl Shell {
         self.git.amend = !self.git.amend;
         cx.notify();
         if !self.git.amend {
-            self.git.amend_body = None;
             self.git.amend_head = None;
             if let Some(before) = self.git.before_amend.take() {
                 input.update(cx, |i, cx| i.set_text(before, cx));
@@ -1089,11 +1081,7 @@ impl Shell {
                 this.git.amend_head = Some(head);
                 let typed = input.read(cx).text().to_string();
                 this.git.before_amend = Some(typed);
-                // The box holds one line, so the body waits aside and is sent back with it.
-                let (subject, body) = last.split_once('\n').unwrap_or((&last, ""));
-                let body = body.trim_matches('\n');
-                this.git.amend_body = (!body.is_empty()).then(|| body.to_string());
-                input.update(cx, |i, cx| i.set_text(subject.trim().to_string(), cx));
+                input.update(cx, |i, cx| i.set_text(last.trim().to_string(), cx));
             });
         })
         .detach();
@@ -1182,10 +1170,11 @@ impl Shell {
         Some(
             div()
                 .flex_none()
-                .h(px(40.))
+                .min_h(px(40.))
                 .px(px(12.))
+                .py(px(7.))
                 .flex()
-                .items_center()
+                .items_start()
                 .gap(px(8.))
                 .border_b_1()
                 .border_color(t.color.border)
@@ -1215,8 +1204,9 @@ impl Shell {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .h(px(26.))
+                        .min_h(px(26.))
                         .px(px(8.))
+                        .py(px(3.))
                         .flex()
                         .items_center()
                         .rounded(t.shape.radius_control)
@@ -1229,6 +1219,7 @@ impl Shell {
                 .child(
                     div()
                         .id("git-amend")
+                        .h(px(26.))
                         .flex()
                         .flex_none()
                         .items_center()
@@ -1545,11 +1536,6 @@ fn publish_remote(remotes: &[String]) -> Option<String> {
     }
 }
 
-/// A commit message from the one-line box plus the body kept aside while amending.
-fn with_body(subject: &str, body: &str) -> String {
-    format!("{}\n\n{body}", subject.trim_end())
-}
-
 fn change_rows(root: &Path, prefix: &str, entries: &[(PathBuf, Entry)]) -> Vec<Row> {
     let mut groups: [(Group, Vec<Row>); 3] = [
         (Group::Staged, Vec::new()),
@@ -1648,16 +1634,6 @@ mod tests {
         );
         assert_eq!(publish_remote(&list(&["a", "b"])), None);
         assert_eq!(publish_remote(&[]), None);
-    }
-
-    #[test]
-    fn amending_sends_the_kept_body_back_after_the_subject() {
-        let last = "Fix the parser\n\nIt dropped the last token.\nSecond line.";
-        let (subject, body) = last.split_once('\n').unwrap();
-        assert_eq!(
-            with_body(subject, body.trim_matches('\n')),
-            "Fix the parser\n\nIt dropped the last token.\nSecond line."
-        );
     }
 
     #[test]
