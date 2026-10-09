@@ -43,12 +43,16 @@ fn login_env() -> &'static [(String, String)] {
 }
 
 /// The environment a language server runs with; `project_local` for one from the project's
-/// node_modules.
-pub fn server_env(project_local: bool) -> Vec<(String, String)> {
-    filter_env(login_env(), project_local)
+/// node_modules. `toolchain` is the GOTOOLCHAIN the user's settings chose, if any.
+pub fn server_env(project_local: bool, toolchain: Option<&str>) -> Vec<(String, String)> {
+    filter_env(login_env(), project_local, toolchain)
 }
 
-fn filter_env(login: &[(String, String)], project_local: bool) -> Vec<(String, String)> {
+fn filter_env(
+    login: &[(String, String)],
+    project_local: bool,
+    toolchain: Option<&str>,
+) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = login
         .iter()
         .filter(|(k, _)| {
@@ -59,7 +63,7 @@ fn filter_env(login: &[(String, String)], project_local: bool) -> Vec<(String, S
         .cloned()
         .collect();
     // go.mod's `toolchain` line would otherwise make gopls download and run another Go.
-    env.push(("GOTOOLCHAIN".into(), "local".into()));
+    env.push(("GOTOOLCHAIN".into(), toolchain.unwrap_or("local").into()));
     env
 }
 
@@ -83,8 +87,11 @@ mod tests {
 
     #[test]
     fn server_env_pins_the_go_toolchain_and_drops_secrets() {
-        let env = server_env(false);
+        let env = server_env(false, None);
         assert!(env.contains(&("GOTOOLCHAIN".into(), "local".into())));
+        let chosen = server_env(false, Some("auto"));
+        assert!(chosen.contains(&("GOTOOLCHAIN".into(), "auto".into())));
+        assert_eq!(chosen.iter().filter(|(k, _)| k == "GOTOOLCHAIN").count(), 1);
         assert!(
             env.iter()
                 .all(|(k, _)| !k.starts_with("CLAUDE") && !k.ends_with("_TOKEN"))
@@ -106,7 +113,7 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .into();
         let names = |local| -> Vec<String> {
-            filter_env(&login, local)
+            filter_env(&login, local, None)
                 .into_iter()
                 .map(|(k, _)| k)
                 .collect()

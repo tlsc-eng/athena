@@ -532,6 +532,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "globset",
  "libc",
  "serde",
  "serde_json",

@@ -28,6 +28,46 @@ pub fn project_server(root: &Path, kind: ServerKind) -> Option<PathBuf> {
     (real.starts_with(&real_modules) && is_executable(&real)).then_some(real)
 }
 
+/// The project's own TypeScript server, `<root>/node_modules/typescript/lib/tsserver.js`, held
+/// to the same rule as [`project_server`]: it must resolve inside the project's `node_modules`.
+pub fn project_typescript(root: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let real_modules = root.join("node_modules").canonicalize().ok()?;
+    if !real_modules.starts_with(&root) {
+        return None;
+    }
+    let real = real_modules
+        .join("typescript/lib/tsserver.js")
+        .canonicalize()
+        .ok()?;
+    (real.starts_with(&real_modules) && real.is_file()).then_some(real)
+}
+
+/// The TypeScript installed beside typescript-language-server, or with `tsc`, outside the
+/// project at `root`: what tsserver runs on while the project's own copy is not trusted.
+pub fn global_typescript(root: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    ["typescript-language-server", "tsc"]
+        .into_iter()
+        .filter_map(crate::env::find_program)
+        .find_map(|program| typescript_near(&program, &root))
+}
+
+/// A `tsserver.js` in a `node_modules` that `program` (symlinks followed) sits in or beside.
+fn typescript_near(program: &Path, root: &Path) -> Option<PathBuf> {
+    let real = program.canonicalize().ok()?;
+    real.ancestors().skip(1).find_map(|dir| {
+        let mut candidates = vec![dir.join("node_modules/typescript/lib/tsserver.js")];
+        if dir.file_name().is_some_and(|n| n == "typescript") {
+            candidates.push(dir.join("lib/tsserver.js"));
+        }
+        candidates
+            .into_iter()
+            .filter_map(|c| c.canonicalize().ok())
+            .find(|c| c.is_file() && !c.starts_with(root))
+    })
+}
+
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
@@ -170,6 +210,46 @@ mod tests {
         assert!(project_server(&outside, ServerKind::Biome).is_some());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn typescript_is_found_in_the_project_only_inside_its_own_node_modules() {
+        let root = project("ts-local");
+        assert_eq!(project_typescript(&root), None);
+        let tsserver = root.join("node_modules/typescript/lib/tsserver.js");
+        std::fs::create_dir_all(tsserver.parent().unwrap()).unwrap();
+        std::fs::write(&tsserver, "").unwrap();
+        assert_eq!(project_typescript(&root), Some(tsserver));
+        let child = root.join("packages/web");
+        std::fs::create_dir_all(&child).unwrap();
+        assert_eq!(project_typescript(&child), None, "the parent's");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn global_typescript_is_found_beside_the_server_or_tsc_and_never_in_the_project() {
+        let global = project("ts-global");
+        let tls = global.join("node_modules/typescript-language-server/lib/cli.mjs");
+        script(&tls);
+        let bin = global.join("bin/typescript-language-server");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        symlink(&tls, &bin).unwrap();
+        let elsewhere = project("ts-elsewhere");
+        assert_eq!(typescript_near(&bin, &elsewhere), None, "not installed");
+        let tsserver = global.join("node_modules/typescript/lib/tsserver.js");
+        std::fs::create_dir_all(tsserver.parent().unwrap()).unwrap();
+        std::fs::write(&tsserver, "").unwrap();
+        assert_eq!(typescript_near(&bin, &elsewhere), Some(tsserver.clone()));
+        let tsc = global.join("node_modules/typescript/bin/tsc");
+        script(&tsc);
+        assert_eq!(typescript_near(&tsc, &elsewhere), Some(tsserver));
+        assert_eq!(
+            typescript_near(&bin, &global),
+            None,
+            "inside the project asking"
+        );
+        let _ = std::fs::remove_dir_all(&global);
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
     #[test]

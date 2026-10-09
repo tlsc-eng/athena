@@ -13,10 +13,14 @@ use serde_json::{Value, json};
 
 use crate::call::{Call, CallItem, parse_calls, parse_items};
 use crate::code_action::{self, CodeAction, parse_code_action, parse_code_actions};
-use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
+use crate::completion::{
+    CompletionItem, CompletionList, TextEdit, parse_completions, parse_text_edits,
+};
 use crate::edit::{WorkspaceEdit, parse_workspace_edit};
+use crate::file_ops;
 use crate::markup::{Hover, parse_hover};
 use crate::protocol::{self, Diagnostic, Highlight, InlayHint, Location, Position, Range};
+use crate::ranges::{LinkedRanges, parse_linked_ranges, parse_selection_ranges};
 use crate::signature::{SignatureHelp, parse_signature_help};
 use crate::symbol::{Symbol, parse_symbols};
 use crate::{ServerKind, env};
@@ -561,6 +565,123 @@ impl Client {
         );
         Ok(parse_completions(&answer(reply).await?))
     }
+
+    /// Fills in what the server left out of a suggestion, such as its documentation or the
+    /// import TypeScript adds with it; the item comes back unchanged if it resolves nothing.
+    pub async fn resolve_completion(
+        &self,
+        item: &CompletionItem,
+    ) -> Result<CompletionItem, String> {
+        if !self.supports("/completionProvider/resolveProvider") {
+            return Ok(item.clone());
+        }
+        let reply = self.request("completionItem/resolve", item.raw.clone());
+        Ok(item.resolved_with(&answer(reply).await?))
+    }
+
+    /// Whether the server asked to hear of a rename of `path`: before it happens (`will`), so it
+    /// can answer with edits such as updated imports, or after.
+    pub fn wants_rename(&self, will: bool, path: &Path, is_dir: bool) -> bool {
+        let pointer = match will {
+            true => "/workspace/fileOperations/willRename/filters",
+            false => "/workspace/fileOperations/didRename/filters",
+        };
+        self.capabilities
+            .get()
+            .and_then(|c| c.pointer(pointer))
+            .is_some_and(|filters| file_ops::matches_filters(filters, path, is_dir))
+    }
+
+    /// The edit to make before `renames` (from, to) happen on disk.
+    pub async fn will_rename_files(
+        &self,
+        renames: &[(PathBuf, PathBuf)],
+    ) -> Result<WorkspaceEdit, String> {
+        let reply = self.request(
+            "workspace/willRenameFiles",
+            file_ops::rename_params(renames),
+        );
+        let result = answer(reply).await?;
+        if result.is_null() {
+            return Ok(WorkspaceEdit::default());
+        }
+        parse_workspace_edit(&result).ok_or_else(|| "the server sent an unreadable edit".into())
+    }
+
+    /// Tells the server files were renamed on disk.
+    pub fn did_rename_files(&self, renames: &[(PathBuf, PathBuf)]) {
+        self.notify("workspace/didRenameFiles", file_ops::rename_params(renames));
+    }
+
+    /// The type at `at`, to ask for its supertypes and subtypes.
+    pub async fn prepare_type_hierarchy(
+        &self,
+        path: &Path,
+        at: Position,
+    ) -> Result<Vec<CallItem>, String> {
+        let reply = self.request(
+            "textDocument/prepareTypeHierarchy",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        Ok(parse_items(&answer(reply).await?))
+    }
+
+    /// The types `item` extends or implements (`supertypes`), or those extending it.
+    pub async fn type_hierarchy(
+        &self,
+        item: &CallItem,
+        supertypes: bool,
+    ) -> Result<Vec<CallItem>, String> {
+        let method = match supertypes {
+            true => "typeHierarchy/supertypes",
+            false => "typeHierarchy/subtypes",
+        };
+        let reply = self.request(method, json!({"item": item.raw}));
+        Ok(parse_items(&answer(reply).await?))
+    }
+
+    /// For each of `positions`, the ranges around it that selection grows through, innermost
+    /// first.
+    pub async fn selection_ranges(
+        &self,
+        path: &Path,
+        positions: &[Position],
+    ) -> Result<Vec<Vec<Range>>, String> {
+        let reply = self.request(
+            "textDocument/selectionRange",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "positions": positions}),
+        );
+        Ok(parse_selection_ranges(&answer(reply).await?))
+    }
+
+    /// The edits that format `range` of the document.
+    pub async fn range_formatting(
+        &self,
+        path: &Path,
+        range: Range,
+        tab_size: u32,
+        insert_spaces: bool,
+    ) -> Result<Vec<TextEdit>, String> {
+        let reply = self.request(
+            "textDocument/rangeFormatting",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "range": range,
+                   "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}),
+        );
+        Ok(parse_text_edits(&answer(reply).await?))
+    }
+
+    /// The ranges edited together with the one at `at`, such as a tag's matching tag name.
+    pub async fn linked_editing_ranges(
+        &self,
+        path: &Path,
+        at: Position,
+    ) -> Result<LinkedRanges, String> {
+        let reply = self.request(
+            "textDocument/linkedEditingRange",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        Ok(parse_linked_ranges(&answer(reply).await?))
+    }
 }
 
 impl Drop for Client {
@@ -612,7 +733,10 @@ impl Session {
         let mut child = Command::new(&program)
             .args(self.kind.args())
             .env_clear()
-            .envs(env::server_env(self.program.is_some()))
+            .envs(env::server_env(
+                self.program.is_some(),
+                self.toolchain().as_deref(),
+            ))
             .current_dir(&self.root)
             .process_group(0)
             .stdin(Stdio::piped())
@@ -624,6 +748,15 @@ impl Session {
         let stdout = child.stdout.take().context("no stdout")?;
         *self.child.lock().expect("child lock") = Some(child);
         self.serve(stdin, stdout)
+    }
+
+    /// The Go toolchain gopls runs with when its settings choose one, as `env.GOTOOLCHAIN`.
+    fn toolchain(&self) -> Option<String> {
+        if self.kind != ServerKind::Go {
+            return None;
+        }
+        let config = self.config.read().ok()?;
+        Some(config.pointer("/env/GOTOOLCHAIN")?.as_str()?.to_string())
     }
 
     fn serve(
@@ -726,7 +859,8 @@ impl Session {
                     "executeCommand": {},
                     "inlayHint": {"refreshSupport": true},
                     "symbol": {},
-                    "didChangeWatchedFiles": {}
+                    "didChangeWatchedFiles": {},
+                    "fileOperations": {"willRename": true, "didRename": true}
                 },
                 "textDocument": {
                     "synchronization": {"didSave": true},
@@ -740,6 +874,10 @@ impl Session {
                     "rename": {"prepareSupport": true},
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                     "callHierarchy": {},
+                    "typeHierarchy": {},
+                    "selectionRange": {},
+                    "rangeFormatting": {},
+                    "linkedEditingRange": {},
                     "codeAction": {
                         "codeActionLiteralSupport": {
                             "codeActionKind": {"valueSet": [
@@ -762,7 +900,13 @@ impl Session {
                         }
                     },
                     "completion": {
-                        "completionItem": {"snippetSupport": true},
+                        "completionItem": {
+                            "snippetSupport": true,
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "resolveSupport": {
+                                "properties": ["documentation", "detail", "additionalTextEdits"]
+                            }
+                        },
                         "contextSupport": true
                     }
                 }
@@ -1100,6 +1244,237 @@ mod tests {
         assert!(
             done.recv_timeout(Duration::from_secs(20)).is_ok(),
             "client and server deadlocked"
+        );
+    }
+
+    /// A client wired to a scripted server: `answer` replies to each request by method, and every
+    /// message the client sends after `initialized` is passed on to the returned channel.
+    fn scripted(
+        capabilities: Value,
+        answer: impl Fn(&str, &Value) -> Value + Send + 'static,
+    ) -> (Client, mpsc::Receiver<Value>) {
+        let (client_end, server_end) = UnixStream::pair().unwrap();
+        let (out_tx, out_rx) = async_channel::unbounded();
+        let (events_tx, events) = async_channel::unbounded();
+        let pending: Pending = Arc::default();
+        let capabilities_slot: Arc<OnceLock<Value>> = Arc::default();
+        let session = Session {
+            kind: ServerKind::TypeScript,
+            program: None,
+            root: PathBuf::from("/tmp"),
+            config: Config::default(),
+            outgoing: out_rx,
+            events: events_tx,
+            pending: pending.clone(),
+            child: Arc::default(),
+            triggers: Arc::default(),
+            signature_triggers: Arc::default(),
+            capabilities: capabilities_slot.clone(),
+        };
+        let stdin = client_end.try_clone().unwrap();
+        thread::spawn(move || session.serve(stdin, client_end));
+        let (seen_tx, seen) = mpsc::channel();
+        thread::spawn(move || {
+            let mut input = BufReader::new(server_end.try_clone().unwrap());
+            let mut output = server_end;
+            let init = read_message(&mut input).unwrap().unwrap();
+            let _ = seen_tx.send(init.clone());
+            write_message(
+                &mut output,
+                &json!({"jsonrpc": "2.0", "id": init["id"], "result": {"capabilities": capabilities}}),
+            );
+            while let Ok(Some(message)) = read_message(&mut input) {
+                if let (Some(method), Some(id)) = (message["method"].as_str(), message.get("id")) {
+                    let result = answer(method, &message["params"]);
+                    write_message(
+                        &mut output,
+                        &json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    );
+                }
+                let _ = seen_tx.send(message);
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !matches!(events.try_recv(), Ok(Event::Ready)) {
+            assert!(Instant::now() < deadline, "never became ready");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let client = Client {
+            outgoing: out_tx,
+            pending,
+            next_id: AtomicI64::new(1),
+            child: Arc::default(),
+            triggers: Arc::default(),
+            signature_triggers: Arc::default(),
+            capabilities: capabilities_slot,
+        };
+        (client, seen)
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Wake, Waker};
+        struct Unpark(thread::Thread);
+        impl Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = Waker::from(Arc::new(Unpark(thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Poll::Ready(out) = future.as_mut().poll(&mut cx) {
+                return out;
+            }
+            thread::park_timeout(Duration::from_millis(50));
+        }
+    }
+
+    fn sent(seen: &mpsc::Receiver<Value>, method: &str) -> Value {
+        loop {
+            let message = seen
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("{method} never sent"));
+            if message["method"] == method {
+                return message;
+            }
+        }
+    }
+
+    fn range(a: (u32, u32), b: (u32, u32)) -> Value {
+        json!({"start": {"line": a.0, "character": a.1}, "end": {"line": b.0, "character": b.1}})
+    }
+
+    #[test]
+    fn the_client_offers_the_newer_features_it_handles() {
+        let (_client, seen) = scripted(json!({}), |_, _| Value::Null);
+        let init = sent(&seen, "initialize");
+        let caps = &init["params"]["capabilities"];
+        assert_eq!(caps["workspace"]["fileOperations"]["willRename"], true);
+        assert_eq!(caps["workspace"]["fileOperations"]["didRename"], true);
+        for feature in [
+            "typeHierarchy",
+            "selectionRange",
+            "rangeFormatting",
+            "linkedEditingRange",
+        ] {
+            assert!(caps["textDocument"][feature].is_object(), "{feature}");
+        }
+        let completion = &caps["textDocument"]["completion"]["completionItem"];
+        assert_eq!(
+            completion["resolveSupport"]["properties"],
+            json!(["documentation", "detail", "additionalTextEdits"])
+        );
+    }
+
+    #[test]
+    fn renames_reach_only_servers_whose_filters_match_and_their_edit_comes_back() {
+        let filters = json!({"workspace": {"fileOperations": {
+            "willRename": {"filters": [{"scheme": "file", "pattern": {"glob": "**/*.ts"}}]},
+            "didRename": {"filters": [{"pattern": {"glob": "**", "matches": "folder"}}]}
+        }}});
+        let (client, seen) = scripted(filters, |method, params| match method {
+            "workspace/willRenameFiles" => {
+                assert_eq!(params["files"][0]["oldUri"], "file:///p/a.ts");
+                json!({"changes": {"file:///p/main.ts": [
+                    {"range": range((0, 20), (0, 23)), "newText": "./b"}
+                ]}})
+            }
+            _ => Value::Null,
+        });
+        assert!(client.wants_rename(true, Path::new("/p/a.ts"), false));
+        assert!(!client.wants_rename(true, Path::new("/p/a.go"), false));
+        assert!(!client.wants_rename(false, Path::new("/p/a.ts"), false));
+        assert!(client.wants_rename(false, Path::new("/p/src"), true));
+        let renames = [(PathBuf::from("/p/a.ts"), PathBuf::from("/p/b.ts"))];
+        let edit = block_on(client.will_rename_files(&renames)).unwrap();
+        assert_eq!(edit.changes.len(), 1);
+        assert!(
+            matches!(&edit.changes[0], crate::FileChange::Edit { path, .. } if path == Path::new("/p/main.ts"))
+        );
+        client.did_rename_files(&renames);
+        let note = sent(&seen, "workspace/didRenameFiles");
+        assert_eq!(note["params"]["files"][0]["newUri"], "file:///p/b.ts");
+        assert!(note.get("id").is_none(), "a notification");
+    }
+
+    #[test]
+    fn completion_resolve_selection_and_range_formatting_and_linked_ranges_round_trip() {
+        let caps = json!({"completionProvider": {"resolveProvider": true}});
+        let (client, seen) = scripted(caps, |method, params| match method {
+            "completionItem/resolve" => {
+                assert_eq!(params["data"], json!({"id": 7}), "the item as sent");
+                json!({"label": "useState", "documentation": "Returns state.",
+                       "additionalTextEdits": [{"range": range((0, 0), (0, 0)),
+                                                "newText": "import { useState } from 'react';\n"}]})
+            }
+            "textDocument/selectionRange" => {
+                assert_eq!(params["positions"].as_array().unwrap().len(), 2);
+                json!([{"range": range((1, 2), (1, 5)), "parent": {"range": range((1, 0), (1, 9))}},
+                       {"range": range((3, 0), (3, 1))}])
+            }
+            "textDocument/rangeFormatting" => {
+                assert_eq!(params["range"], range((1, 0), (2, 0)));
+                assert_eq!(params["options"]["tabSize"], 2);
+                json!([{"range": range((1, 0), (1, 4)), "newText": "  "}])
+            }
+            "textDocument/linkedEditingRange" => {
+                json!({"ranges": [range((0, 1), (0, 4)), range((0, 8), (0, 11))]})
+            }
+            "textDocument/prepareTypeHierarchy" => json!([{"name": "Shape", "kind": 11,
+                "uri": "file:///p/s.go", "range": range((2, 0), (4, 1)),
+                "selectionRange": range((2, 5), (2, 10)), "data": 1}]),
+            "typeHierarchy/subtypes" => {
+                assert_eq!(params["item"]["data"], 1);
+                json!([{"name": "Square", "kind": 23, "uri": "file:///p/q.go",
+                        "range": range((0, 0), (1, 0)), "selectionRange": range((0, 5), (0, 11))}])
+            }
+            _ => Value::Null,
+        });
+        let list = crate::completion::parse_completions(
+            &json!([{"label": "useState", "kind": 3, "data": {"id": 7}}]),
+        );
+        let item = block_on(client.resolve_completion(&list.items[0])).unwrap();
+        assert_eq!(item.additional_edits.len(), 1);
+        assert_eq!(
+            item.documentation,
+            [crate::MarkupBlock::Text("Returns state.".into())]
+        );
+
+        let doc = Path::new("/p/a.tsx");
+        let at = |line, character| Position { line, character };
+        let chains = block_on(client.selection_ranges(doc, &[at(1, 3), at(3, 0)])).unwrap();
+        assert_eq!(chains.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
+
+        let whole_lines = Range {
+            start: at(1, 0),
+            end: at(2, 0),
+        };
+        let edits = block_on(client.range_formatting(doc, whole_lines, 2, true)).unwrap();
+        assert_eq!(edits[0].text, "  ");
+
+        let linked = block_on(client.linked_editing_ranges(doc, at(0, 2))).unwrap();
+        assert_eq!(linked.ranges.len(), 2);
+
+        let types = block_on(client.prepare_type_hierarchy(doc, at(2, 6))).unwrap();
+        assert_eq!(types[0].name, "Shape");
+        let subtypes = block_on(client.type_hierarchy(&types[0], false)).unwrap();
+        assert_eq!(subtypes[0].name, "Square");
+        assert_eq!(
+            sent(&seen, "typeHierarchy/subtypes")["params"]["item"]["name"],
+            "Shape"
+        );
+    }
+
+    #[test]
+    fn a_server_without_resolve_is_not_asked_and_the_item_stays() {
+        let (client, _seen) = scripted(json!({"completionProvider": {}}), |method, _| {
+            panic!("{method} should not be sent")
+        });
+        let list = crate::completion::parse_completions(&json!([{"label": "x", "data": 1}]));
+        assert_eq!(
+            block_on(client.resolve_completion(&list.items[0])).unwrap(),
+            list.items[0]
         );
     }
 

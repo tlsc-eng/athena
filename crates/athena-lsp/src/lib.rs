@@ -7,9 +7,11 @@ mod code_action;
 mod completion;
 mod edit;
 mod env;
+mod file_ops;
 mod local;
 mod markup;
 mod protocol;
+mod ranges;
 mod signature;
 mod symbol;
 
@@ -19,12 +21,13 @@ pub use code_action::{CodeAction, Command};
 pub use completion::{CompletionItem, CompletionList, TextEdit};
 pub use edit::{EditError, FileChange, WorkspaceEdit, apply_text_edits};
 pub use env::{find_program, server_env};
-pub use local::{eslint_settings, project_server};
+pub use local::{eslint_settings, global_typescript, project_server, project_typescript};
 pub use markup::{Hover, MarkupBlock, expand_snippet, markdown_blocks, snippet_stops};
 pub use protocol::{
     Diagnostic, Highlight, InlayHint, Location, Position, Range, Severity, path_from_uri,
     uri_from_path,
 };
+pub use ranges::LinkedRanges;
 pub use signature::SignatureHelp;
 pub use symbol::{Symbol, symbol_kind_label};
 

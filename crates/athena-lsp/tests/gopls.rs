@@ -434,6 +434,96 @@ fn gopls_lists_the_callers_and_callees_of_a_function() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn gopls_grows_a_selection_through_the_syntax_around_each_cursor() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let source = "package main\n\nfunc main() {\n\tx := add(1, 2)\n\t_ = x\n}\n\nfunc add(a, b int) int { return a + b }\n";
+    let Opened {
+        client, dir, file, ..
+    } = open_go("selection", source, serde_json::Value::Null);
+    assert!(client.supports("/selectionRangeProvider"));
+    let in_args = Position {
+        line: 3,
+        character: 10,
+    };
+    let in_return = Position {
+        line: 7,
+        character: 34,
+    };
+    let chains =
+        futures_lite_block_on(client.selection_ranges(&file, &[in_args, in_return])).unwrap();
+    assert_eq!(chains.len(), 2, "one chain per cursor");
+    for chain in &chains {
+        assert!(chain.len() > 2, "{chain:?}");
+        for pair in chain.windows(2) {
+            assert!(
+                pair[1].start <= pair[0].start && pair[0].end <= pair[1].end,
+                "each range holds the one before: {chain:?}"
+            );
+        }
+    }
+    let first = chains[0][0];
+    assert_eq!(
+        (first.start.line, first.start.character),
+        (3, 10),
+        "the literal 1"
+    );
+    assert!(
+        chains[0].iter().any(|r| r.start
+            == Position {
+                line: 3,
+                character: 6
+            }
+            && r.end.character == 15),
+        "the call add(1, 2): {:?}",
+        chains[0]
+    );
+    // gopls does not take part in renames; the tree renames files without asking it.
+    assert!(!client.wants_rename(true, &file, false));
+    assert!(!client.supports("/documentRangeFormattingProvider"));
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gopls_lists_the_types_implementing_an_interface_and_the_interfaces_a_type_implements() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let source = "package main\n\ntype Shape interface{ Area() int }\n\ntype Square struct{ n int }\n\nfunc (s Square) Area() int { return s.n * s.n }\n\nfunc main() { var _ Shape = Square{} }\n";
+    let Opened {
+        client, dir, file, ..
+    } = open_go("types", source, serde_json::Value::Null);
+    assert!(client.supports("/typeHierarchyProvider"));
+    let on_shape = Position {
+        line: 2,
+        character: 6,
+    };
+    let items = futures_lite_block_on(client.prepare_type_hierarchy(&file, on_shape)).unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].name, "Shape");
+    let subtypes = futures_lite_block_on(client.type_hierarchy(&items[0], false)).unwrap();
+    assert!(
+        subtypes
+            .iter()
+            .any(|t| t.name == "Square" && t.path == file),
+        "{subtypes:?}"
+    );
+    let square = subtypes.iter().find(|t| t.name == "Square").unwrap();
+    assert_eq!(square.selection.start.line, 4);
+    let supertypes = futures_lite_block_on(client.type_hierarchy(square, true)).unwrap();
+    assert!(
+        supertypes.iter().any(|t| t.name == "Shape"),
+        "{supertypes:?}"
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A minimal executor: the definition future only waits on a channel the reader thread fills.
 /// Opens `source` as main.go in a new module and waits for gopls to have read it.
 fn open_go(name: &str, source: &str, config: serde_json::Value) -> Opened {

@@ -2,7 +2,7 @@ use std::ops::Range as Span;
 
 use serde_json::Value;
 
-use crate::markup::{first_stop, snippet_stops};
+use crate::markup::{MarkupBlock, first_stop, hover_blocks, snippet_stops};
 use crate::protocol::Range;
 
 /// Text to put in place of a range of the document.
@@ -13,7 +13,7 @@ pub struct TextEdit {
 }
 
 /// One suggestion, with any snippet already reduced to plain text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompletionItem {
     pub label: String,
     /// The protocol's CompletionItemKind number.
@@ -31,13 +31,39 @@ pub struct CompletionItem {
     /// Edits elsewhere in the file, such as an import gopls adds.
     pub additional_edits: Vec<TextEdit>,
     pub preselect: bool,
+    /// What the server says about the item; often sent only once it is resolved.
+    pub documentation: Vec<MarkupBlock>,
+    /// The item as the server sent it, for `completionItem/resolve`.
+    pub raw: Value,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompletionList {
     pub items: Vec<CompletionItem>,
     /// The server filtered for the current word; typing more should ask again.
     pub incomplete: bool,
+}
+
+impl CompletionItem {
+    /// This item with what `completionItem/resolve` answered filled in; what it inserts stays,
+    /// as servers resolve only the properties left out of the list.
+    pub(crate) fn resolved_with(&self, reply: &Value) -> Self {
+        let mut item = self.clone();
+        let Some(resolved) = parse_item(reply) else {
+            return item;
+        };
+        if resolved.detail.is_some() {
+            item.detail = resolved.detail;
+        }
+        if !resolved.documentation.is_empty() {
+            item.documentation = resolved.documentation;
+        }
+        if reply.get("additionalTextEdits").is_some() {
+            item.additional_edits = resolved.additional_edits;
+        }
+        item.raw = reply.clone();
+        item
+    }
 }
 
 pub(crate) fn parse_completions(result: &Value) -> CompletionList {
@@ -74,7 +100,7 @@ pub(crate) fn text_edit(e: &Value) -> Option<TextEdit> {
     })
 }
 
-fn parse_item(item: &Value) -> Option<CompletionItem> {
+pub(crate) fn parse_item(item: &Value) -> Option<CompletionItem> {
     let str_of = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_string);
     let label = str_of("label")?;
     let edit = item.get("textEdit");
@@ -119,6 +145,11 @@ fn parse_item(item: &Value) -> Option<CompletionItem> {
             .get("preselect")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        documentation: item
+            .get("documentation")
+            .map(hover_blocks)
+            .unwrap_or_default(),
+        raw: item.clone(),
         label,
     })
 }
@@ -170,6 +201,34 @@ mod tests {
         );
         assert_eq!(len.filter_text, "len");
         assert_eq!(list.items[2].range.unwrap().end, pos(0, 2));
+
+        let list = parse_completions(&json!([
+            {"label": "useState", "kind": 3, "data": {"file": "/p/a.tsx"},
+             "documentation": {"kind": "markdown", "value": "Returns a stateful value."}}
+        ]));
+        let item = &list.items[0];
+        assert_eq!(
+            item.documentation,
+            [MarkupBlock::Text("Returns a stateful value.".into())]
+        );
+        let resolved = item.resolved_with(&json!({
+            "label": "useState", "kind": 3, "detail": "function useState<S>(): S",
+            "additionalTextEdits": [{"range": {"start": {"line": 0, "character": 0},
+                                               "end": {"line": 0, "character": 0}},
+                                     "newText": "import { useState } from \"react\";\n"}]
+        }));
+        assert_eq!(
+            resolved.detail.as_deref(),
+            Some("function useState<S>(): S")
+        );
+        assert_eq!(resolved.additional_edits.len(), 1, "the auto-import");
+        assert_eq!(resolved.documentation, item.documentation, "kept");
+        assert_eq!(resolved.text, "useState");
+        assert_eq!(
+            item.resolved_with(&json!(null)),
+            *item,
+            "an unreadable reply changes nothing"
+        );
 
         let bare = parse_completions(&json!([{"label": "a"}]));
         assert_eq!(bare.items[0].text, "a");
