@@ -239,7 +239,9 @@ pub(super) fn store(window: AnyWindowHandle, workspace: Workspace, cx: &mut App)
     };
     open.saved = workspace.clone();
     let all: Vec<Workspace> = windows.open.iter().map(|o| o.saved.clone()).collect();
-    let file = Workspace::join(&workspace, &all, &windows.parked);
+    let mut file = Workspace::join(&workspace, &all, &windows.parked);
+    // A window's first copy and parked projects can still hold tabs the file leaves out.
+    super::claude_ide::leave_out_of_file(&mut file);
     if let Err(err) = athena_workspace::save(&windows.path, &file) {
         tracing::error!("could not save the workspace: {err:#}");
     }

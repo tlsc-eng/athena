@@ -147,7 +147,18 @@ fn without(workspace: &Workspace, left_out: fn(&ItemKind) -> bool) -> Option<Wor
         return None;
     }
     let mut saved = workspace.clone();
-    for project in &mut saved.projects {
+    close_tabs(&mut saved.projects, left_out);
+    Some(saved)
+}
+
+/// Takes the tabs workspace.json leaves out from every project in `file`, parked ones included.
+pub(super) fn leave_out_of_file(file: &mut Workspace) {
+    close_tabs(&mut file.projects, not_on_disk);
+    close_tabs(&mut file.parked, not_on_disk);
+}
+
+fn close_tabs(projects: &mut [Project], left_out: fn(&ItemKind) -> bool) {
+    for project in projects {
         let Some(layout) = project.layout.as_mut() else {
             continue;
         };
@@ -163,7 +174,6 @@ fn without(workspace: &Workspace, left_out: fn(&ItemKind) -> bool) -> Option<Wor
             }
         }
     }
-    Some(saved)
 }
 
 /// `selection_changed` as VS Code sends it; Claude Code reads the 0-based lines and the text.
@@ -795,6 +805,12 @@ mod tests {
             );
         }
         assert_eq!(saved.projects[1].layout, None);
+        let mut file = workspace.clone();
+        file.parked = std::mem::take(&mut file.projects);
+        leave_out_of_file(&mut file);
+        let mut found = Vec::new();
+        kinds(&serde_json::to_value(&file).unwrap(), &mut found);
+        assert_eq!(found.len(), 1, "parked projects too: {found:?}");
         assert!(
             without_proposals(&workspace).is_none(),
             "a project moving to another window keeps them"
