@@ -438,7 +438,7 @@ impl Shell {
         let project = self.workspace.active_project();
         div()
             .id("title-bar")
-            .h(px(TITLE_BAR_HEIGHT))
+            .h(t.ui(TITLE_BAR_HEIGHT))
             .flex_none()
             .flex()
             .items_center()
@@ -509,8 +509,8 @@ impl Shell {
         let t = cx.theme();
         div()
             .id(id)
-            .h(px(24.))
-            .px(px(8.))
+            .h(t.ui(24.))
+            .px(t.ui(8.))
             .flex()
             .items_center()
             .gap(px(6.))
@@ -540,7 +540,7 @@ impl Shell {
                 let root = project.root.display().to_string();
                 div()
                     .id(("rail-item", i))
-                    .size(px(RAIL_ITEM))
+                    .size(t.ui(RAIL_ITEM))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -575,15 +575,17 @@ impl Shell {
             });
 
         let indicator = active.map(|to| {
-            let y =
-                |i: usize| RAIL_TOP + i as f32 * (RAIL_ITEM + RAIL_GAP) + (RAIL_ITEM - 20.) / 2.;
+            let s = t.ui_scale;
+            let y = |i: usize| {
+                s * (RAIL_TOP + i as f32 * (RAIL_ITEM + RAIL_GAP) + (RAIL_ITEM - 20.) / 2.)
+            };
             let (from_y, to_y) = (y(self.rail_from), y(to));
             let bar = div()
                 .absolute()
                 .left_0()
                 .top(px(to_y))
                 .w(px(2.))
-                .h(px(20.))
+                .h(t.ui(20.))
                 .bg(t.color.accent);
             motion::animate_if(
                 t.motion.reduced || from_y == to_y,
@@ -597,22 +599,22 @@ impl Shell {
         let drop_tint = t.color.surface_accent;
         div()
             .relative()
-            .w(px(RAIL_WIDTH))
+            .w(t.ui(RAIL_WIDTH))
             .flex_none()
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_tint))
             .flex()
             .flex_col()
             .items_center()
             .justify_between()
-            .py(px(RAIL_TOP))
+            .py(t.ui(RAIL_TOP))
             .bg(t.color.surface)
             .border_r_1()
             .border_color(t.color.border)
-            .child(div().flex().flex_col().gap(px(RAIL_GAP)).children(items))
+            .child(div().flex().flex_col().gap(t.ui(RAIL_GAP)).children(items))
             .child(
                 div()
                     .id("rail-add")
-                    .size(px(RAIL_ITEM))
+                    .size(t.ui(RAIL_ITEM))
                     .flex()
                     .items_center()
                     .justify_center()

@@ -189,14 +189,17 @@ impl Render for ContextMenu {
             return div().into_any_element();
         }
         let t = cx.theme().clone();
-        let menu = size(px(WIDTH), menu_height(&self.items, t.shape.hairline));
+        let menu = size(
+            t.ui(WIDTH),
+            menu_height(&self.items, t.shape.hairline, t.ui_scale),
+        );
         let corner = anchor_corner(self.position, menu, window.viewport_size());
         let rows =
             self.items.iter().enumerate().map(|(i, item)| match item {
                 MenuItem::Separator => div()
                     .h(px(1.))
-                    .my(px((SEPARATOR - 1.) / 2.))
-                    .mx(px(PADDING))
+                    .my(t.ui((SEPARATOR - 1.) / 2.))
+                    .mx(t.ui(PADDING))
                     .bg(t.color.border)
                     .into_any_element(),
                 MenuItem::Entry {
@@ -209,12 +212,12 @@ impl Render for ContextMenu {
                     let disabled = *disabled;
                     div()
                         .id(("menu-row", i))
-                        .h(px(ROW))
-                        .mx(px(PADDING))
-                        .px(px(8.))
+                        .h(t.ui(ROW))
+                        .mx(t.ui(PADDING))
+                        .px(t.ui(8.))
                         .flex()
                         .items_center()
-                        .gap(px(16.))
+                        .gap(t.ui(16.))
                         .rounded(t.shape.radius_control)
                         .text_color(if disabled {
                             t.color.content_disabled
@@ -265,7 +268,7 @@ impl Render for ContextMenu {
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close(window, cx)))
                 .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                 .min_w(menu.width)
-                .py(px(PADDING))
+                .py(t.ui(PADDING))
                 .flex()
                 .flex_col()
                 .bg(t.color.surface)
@@ -295,7 +298,7 @@ impl Render for ContextMenu {
     }
 }
 
-fn menu_height(items: &[MenuItem], border: Pixels) -> Pixels {
+fn menu_height(items: &[MenuItem], border: Pixels, scale: f32) -> Pixels {
     let rows: f32 = items
         .iter()
         .map(|item| match item {
@@ -303,7 +306,7 @@ fn menu_height(items: &[MenuItem], border: Pixels) -> Pixels {
             MenuItem::Entry { .. } => ROW,
         })
         .sum();
-    px(rows + 2. * PADDING) + border * 2.
+    px((rows + 2. * PADDING) * scale) + border * 2.
 }
 
 /// Opens away from the cursor on each axis where the menu would cross the window edge, like macOS menus.
@@ -371,8 +374,13 @@ mod tests {
     #[test]
     fn height_counts_rows_separators_padding_and_border() {
         assert_eq!(
-            menu_height(&items(), px(1.)),
+            menu_height(&items(), px(1.), 1.),
             px(4. * ROW + SEPARATOR + 8. + 2.)
+        );
+        assert_eq!(
+            menu_height(&items(), px(1.), 1.5),
+            px((4. * ROW + SEPARATOR + 8.) * 1.5 + 2.),
+            "window zoom scales the rows, not the hairline border"
         );
     }
 

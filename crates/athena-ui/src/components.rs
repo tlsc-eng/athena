@@ -45,8 +45,8 @@ impl RenderOnce for Button {
         let c = &t.color;
         let base = div()
             .id(self.id)
-            .h(px(28.))
-            .px(px(12.))
+            .h(t.ui(28.))
+            .px(t.ui(12.))
             .flex()
             .items_center()
             .justify_center()
@@ -100,8 +100,8 @@ impl Render for Tooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         div()
-            .px(px(8.))
-            .py(px(4.))
+            .px(t.ui(8.))
+            .py(t.ui(4.))
             .rounded(t.shape.radius_control)
             .bg(t.color.tooltip_bg)
             .text_color(t.color.tooltip_fg)
@@ -120,7 +120,7 @@ pub fn empty_state(
 ) -> gpui::Div {
     let t = cx.theme();
     div()
-        .max_w(px(360.))
+        .max_w(t.ui(360.))
         .flex()
         .flex_col()
         .items_center()

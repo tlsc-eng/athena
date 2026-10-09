@@ -136,7 +136,7 @@ impl Shell {
                 .id(candidate.label())
                 .relative()
                 .h_full()
-                .px(px(12.))
+                .px(t.ui(12.))
                 .flex()
                 .items_center()
                 .cursor_pointer()

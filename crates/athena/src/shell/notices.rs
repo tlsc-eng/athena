@@ -541,7 +541,7 @@ impl Shell {
             .map(|(id, closing, title, body, color, action)| {
                 let card = div()
                     .id(("toast", id))
-                    .w(px(360.))
+                    .w(t.ui(360.))
                     .flex()
                     .bg(t.color.surface)
                     .border_1()
@@ -557,7 +557,7 @@ impl Shell {
                     .child(
                         div()
                             .flex_1()
-                            .p(px(12.))
+                            .p(t.ui(12.))
                             .flex()
                             .flex_col()
                             .gap(px(2.))

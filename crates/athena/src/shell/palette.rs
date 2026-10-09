@@ -877,12 +877,12 @@ impl Shell {
                     .collect();
                 div()
                     .id(("palette-row", row))
-                    .h(px(32.))
-                    .px(px(12.))
+                    .h(t.ui(32.))
+                    .px(t.ui(12.))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(12.))
+                    .gap(t.ui(12.))
                     .cursor_pointer()
                     .text_color(if selected {
                         t.color.accent
@@ -897,7 +897,7 @@ impl Shell {
                         div()
                             .flex()
                             .items_baseline()
-                            .gap(px(8.))
+                            .gap(t.ui(8.))
                             .min_w_0()
                             .overflow_hidden()
                             .child(
@@ -943,8 +943,8 @@ impl Shell {
         let message = palette.status.or(empty.then_some(palette.placeholder_hint));
         let panel = div()
             .id("palette")
-            .w(px(560.))
-            .max_h(px(44. + 32. * 8.5))
+            .w(t.ui(560.))
+            .max_h(t.ui(44. + 32. * 8.5))
             .flex()
             .flex_col()
             .bg(t.color.surface)
@@ -959,9 +959,9 @@ impl Shell {
             })
             .child(
                 div()
-                    .h(px(44.))
+                    .h(t.ui(44.))
                     .flex_none()
-                    .px(px(14.))
+                    .px(t.ui(14.))
                     .flex()
                     .items_center()
                     .border_b_1()
@@ -974,12 +974,12 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .py(px(4.))
+                    .py(t.ui(4.))
                     .when(palette.status.is_none(), |el| el.children(rows))
                     .children(message.map(|message| {
                         div()
-                            .h(px(32.))
-                            .px(px(12.))
+                            .h(t.ui(32.))
+                            .px(t.ui(12.))
                             .flex()
                             .items_center()
                             .text_color(t.color.content_muted)

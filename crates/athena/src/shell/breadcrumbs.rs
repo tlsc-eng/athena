@@ -218,7 +218,7 @@ impl Shell {
         };
         let mut row = div()
             .flex_none()
-            .h(px(ROW_HEIGHT))
+            .h(t.ui(ROW_HEIGHT))
             .px(px(8.))
             .flex()
             .items_center()
