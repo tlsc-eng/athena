@@ -98,6 +98,7 @@ const EDITOR_COMMANDS: &[(&str, &str)] = &[
     ("Select all occurrences", "editor::SelectAllOccurrences"),
     ("Add cursor above", "editor::AddCursorAbove"),
     ("Add cursor below", "editor::AddCursorBelow"),
+    ("Toggle word wrap", "editor::ToggleWordWrap"),
 ];
 
 /// Terminal actions the palette offers while a terminal is focused.
@@ -157,6 +158,10 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         (
             "Toggle format on save",
             Box::new(actions::ToggleFormatOnSave),
+        ),
+        (
+            "Toggle word wrap by default",
+            Box::new(actions::ToggleWordWrapDefault),
         ),
         ("Zoom pane", Box::new(actions::TogglePaneZoom)),
         ("Next tab", Box::new(actions::NextTab)),
@@ -1024,14 +1029,15 @@ mod tests {
     use athena_lsp::Range;
 
     #[test]
-    fn multi_cursor_commands_name_real_editor_actions() {
+    fn multi_cursor_and_wrap_commands_name_real_editor_actions() {
         use athena_editor as editor;
-        let actions: [Box<dyn Action>; 5] = [
+        let actions: [Box<dyn Action>; 6] = [
             Box::new(editor::AddNextOccurrence),
             Box::new(editor::SkipOccurrence),
             Box::new(editor::SelectAllOccurrences),
             Box::new(editor::AddCursorAbove),
             Box::new(editor::AddCursorBelow),
+            Box::new(editor::ToggleWordWrap),
         ];
         for action in actions {
             assert!(

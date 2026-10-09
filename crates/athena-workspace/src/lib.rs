@@ -31,6 +31,9 @@ pub struct Workspace {
     /// Cmd+S formats through the language server first; `None` does so for Go only.
     #[serde(default)]
     pub format_on_save: Option<bool>,
+    /// Long lines wrap in editor tabs that have not chosen; Markdown wraps either way.
+    #[serde(default)]
+    pub word_wrap: bool,
     /// Claude Code may connect to Athena as its IDE, to show proposed edits and read diagnostics.
     #[serde(default)]
     pub ide_integration: bool,
@@ -108,6 +111,7 @@ impl Default for Workspace {
             usage_indicator: false,
             autosave_delay_ms: DEFAULT_AUTOSAVE_DELAY_MS,
             format_on_save: None,
+            word_wrap: false,
             ide_integration: false,
             ui: UiState::default(),
             recent: Vec::new(),
@@ -373,6 +377,7 @@ mod tests {
         let w: Workspace = serde_json::from_str(old).unwrap();
         assert_eq!(w.autosave_delay_ms, 1000);
         assert_eq!(w.format_on_save, None);
+        assert!(!w.word_wrap);
         assert_eq!(Workspace::default().autosave_delay_ms, 1000);
         let off = r#"{"projects":[],"active":null,"window":null,"autosave_delay_ms":0}"#;
         assert_eq!(

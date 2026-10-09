@@ -215,9 +215,11 @@ impl Shell {
                 let view = cx.new(|cx| EditorView::open(path.clone(), cx));
                 let delay = self.autosave_delay();
                 let format_on_save = self.workspace.format_on_save;
+                let word_wrap = self.workspace.word_wrap;
                 view.update(cx, |v, cx| {
                     v.set_autosave(delay, cx);
                     v.set_format_on_save(format_on_save);
+                    v.set_word_wrap_default(word_wrap, cx);
                     if let Some(state) = &item.view {
                         restore_view_state(v, state, cx);
                     }
@@ -1949,6 +1951,29 @@ impl Shell {
         self.schedule_save(cx);
     }
 
+    /// Turns word wrap on or off for every editor tab that has not chosen with Alt+Z.
+    pub(super) fn toggle_word_wrap_default(&mut self, cx: &mut Context<Self>) {
+        let on = !self.workspace.word_wrap;
+        self.workspace.word_wrap = on;
+        for view in self.items.values() {
+            if let ItemView::Editor(editor) = view {
+                editor.update(cx, |v, cx| v.set_word_wrap_default(on, cx));
+            }
+        }
+        let (title, body) = match on {
+            true => (
+                "Word wrap is on",
+                "Long lines wrap at the window's edge. ⌥Z toggles one tab.",
+            ),
+            false => (
+                "Word wrap is off",
+                "Long lines scroll sideways, Markdown still wraps. ⌥Z toggles one tab.",
+            ),
+        };
+        self.transient_notice(title, body.to_string(), cx);
+        self.schedule_save(cx);
+    }
+
     /// Cmd+Shift+S: writes the focused editor to a new file and keeps editing it there.
     pub(super) fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else {
@@ -2195,6 +2220,7 @@ fn view_state(editor: &EditorView) -> Option<ViewState> {
         cursor: state.cursor,
         scroll_top: state.top_line.map(|l| l as u32),
         folds: state.folds.iter().map(|&l| l as u32).collect(),
+        wrap: state.wrap,
     })
 }
 
@@ -2203,7 +2229,7 @@ fn restore_view_state(editor: &mut EditorView, state: &ViewState, cx: &mut Conte
         cursor: state.cursor,
         top_line: state.scroll_top.map(|l| l as usize),
         folds: state.folds.iter().map(|&l| l as usize).collect(),
-        wrap: None,
+        wrap: state.wrap,
     };
     editor.restore_view_state(&state, cx);
 }

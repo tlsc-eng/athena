@@ -210,6 +210,7 @@ mod tests {
             cursor: (41, 7),
             scroll_top: Some(30),
             folds: vec![3, 12],
+            wrap: Some(true),
         };
         layout.item_mut(ItemId(2)).unwrap().view = Some(state.clone());
         save(&path, &w).unwrap();

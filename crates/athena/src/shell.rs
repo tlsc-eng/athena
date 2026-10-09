@@ -54,7 +54,7 @@ use crate::actions::{
     NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SaveAs,
     SelectProject, SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight,
     ToggleAutoSave, ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen, ToggleNotifications,
-    TogglePaneZoom, TogglePreview, Zoom,
+    TogglePaneZoom, TogglePreview, ToggleWordWrapDefault, Zoom,
 };
 use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, GoToSymbol, GoToWorkspaceSymbol,
@@ -746,6 +746,9 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &ToggleFormatOnSave, _, cx| this.toggle_format_on_save(cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleWordWrapDefault, _, cx| {
+                this.toggle_word_wrap_default(cx)
+            }))
             .on_action(cx.listener(|this, _: &NextTab, w, cx| this.cycle_tab(1, w, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, w, cx| this.cycle_tab(-1, w, cx)))
             .on_action(

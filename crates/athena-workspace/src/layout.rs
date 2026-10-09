@@ -101,6 +101,9 @@ pub struct ViewState {
     /// First lines of folded regions.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub folds: Vec<u32>,
+    /// The tab's own word wrap choice; `None` follows the workspace's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -650,6 +653,19 @@ mod tests {
 
     fn ids(l: &Layout) -> Vec<u64> {
         l.panes().iter().map(|p| p.id.0).collect()
+    }
+
+    #[test]
+    fn a_tab_that_follows_the_wrap_default_writes_no_wrap_field() {
+        let state = ViewState::default();
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("wrap"), "{json}");
+        let chosen = ViewState {
+            wrap: Some(false),
+            ..ViewState::default()
+        };
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert_eq!(serde_json::from_str::<ViewState>(&json).unwrap(), chosen);
     }
 
     #[test]
