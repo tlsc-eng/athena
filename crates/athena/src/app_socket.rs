@@ -105,6 +105,14 @@ fn shrink(reply: AppReply) -> AppReply {
             list.truncate(list.len() * 3 / 4);
             AppReply::Diagnostics(list)
         }
+        AppReply::Symbols(mut list) if list.len() > 1 => {
+            list.truncate(list.len() * 3 / 4);
+            AppReply::Symbols(list)
+        }
+        AppReply::Locations(mut list) if list.len() > 1 => {
+            list.truncate(list.len() * 3 / 4);
+            AppReply::Locations(list)
+        }
         _ => AppReply::Error("the answer is too large to send".into()),
     }
 }
@@ -120,6 +128,8 @@ fn same_user(stream: &UnixStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_proto::{LocationInfo, SymbolInfo};
+    use std::path::PathBuf;
 
     #[test]
     fn a_reply_over_the_frame_limit_is_trimmed_to_its_newest_lines() {
@@ -134,5 +144,50 @@ mod tests {
         };
         assert!((800..2000).contains(&sent.len()), "{} lines", sent.len());
         assert!(sent.last().unwrap().starts_with("1999"));
+    }
+
+    #[test]
+    fn symbols_and_locations_over_the_frame_limit_keep_their_first_entries() {
+        let symbols: Vec<SymbolInfo> = (0..2000)
+            .map(|i| SymbolInfo {
+                name: format!("{i:04}{}", "s".repeat(996)),
+                kind: "function".into(),
+                container: None,
+                line: i,
+                end_line: i,
+            })
+            .collect();
+        let mut out = Vec::new();
+        send_reply(&mut out, AppReply::Symbols(symbols)).unwrap();
+        let Some(AppReply::Symbols(sent)) = athena_proto::read_frame(&mut out.as_slice()).unwrap()
+        else {
+            panic!("expected symbols")
+        };
+        assert!((500..2000).contains(&sent.len()), "{} symbols", sent.len());
+        assert_eq!(sent[0].line, 0);
+
+        let locations: Vec<LocationInfo> = (0..2000)
+            .map(|i| LocationInfo {
+                path: PathBuf::from(format!("/{i:04}{}", "p".repeat(996))),
+                line: i,
+                column: 1,
+                end_line: i,
+                end_column: 1,
+                text: None,
+            })
+            .collect();
+        let mut out = Vec::new();
+        send_reply(&mut out, AppReply::Locations(locations)).unwrap();
+        let Some(AppReply::Locations(sent)) =
+            athena_proto::read_frame(&mut out.as_slice()).unwrap()
+        else {
+            panic!("expected locations")
+        };
+        assert!(
+            (500..2000).contains(&sent.len()),
+            "{} locations",
+            sent.len()
+        );
+        assert_eq!(sent[0].line, 0);
     }
 }

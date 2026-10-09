@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 
 use athena_editor::EditorView;
-use athena_lsp::{Location, Position, symbol_kind_label};
+use athena_lsp::{Location, Position, Symbol, symbol_kind_label};
 use athena_proto::{
     AppMsg, AppReply, BufferInfo, EditorInfo, LocationInfo, PaneId, SourcePosition, SymbolInfo,
     TestFailureInfo, TestResultsInfo,
@@ -48,6 +48,17 @@ fn cut(text: &str, max: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// A symbol as the tool shows it, with names cut so a list of them fits one frame.
+fn symbol_info(s: Symbol) -> SymbolInfo {
+    SymbolInfo {
+        kind: symbol_kind_label(s.kind).to_string(),
+        name: cut(&s.name, SNIPPET).to_string(),
+        container: s.container.map(|c| cut(&c, SNIPPET).to_string()),
+        line: s.scope.start.line + 1,
+        end_line: s.scope.end.line + 1,
+    }
 }
 
 /// Locations as the tool shows them, with the source line where the file is shared with Claude.
@@ -237,13 +248,7 @@ impl Shell {
                             symbols
                                 .into_iter()
                                 .take(MAX_SYMBOLS)
-                                .map(|s| SymbolInfo {
-                                    kind: symbol_kind_label(s.kind).to_string(),
-                                    name: s.name,
-                                    container: s.container,
-                                    line: s.scope.start.line + 1,
-                                    end_line: s.scope.end.line + 1,
-                                })
+                                .map(symbol_info)
                                 .collect(),
                         ),
                         Err(e) => AppReply::Error(e),
@@ -389,6 +394,32 @@ mod tests {
         assert_eq!(list[0].text.as_deref(), Some("func A() {}"));
         assert_eq!(list[1].text, None, "secrets are never quoted");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn symbol_names_are_cut_to_a_snippet() {
+        let span = Range {
+            start: Position {
+                line: 4,
+                character: 0,
+            },
+            end: Position {
+                line: 9,
+                character: 1,
+            },
+        };
+        let info = symbol_info(Symbol {
+            name: "n".repeat(5000),
+            kind: 12,
+            container: Some("c".repeat(5000)),
+            path: PathBuf::from("/a.ts"),
+            range: span,
+            scope: span,
+            parent: None,
+        });
+        assert_eq!(info.name.len(), SNIPPET);
+        assert_eq!(info.container.map(|c| c.len()), Some(SNIPPET));
+        assert_eq!((info.line, info.end_line), (5, 10));
     }
 
     #[test]
