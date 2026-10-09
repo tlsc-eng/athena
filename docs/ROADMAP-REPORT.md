@@ -1,4 +1,4 @@
-# Roadmap report: v0.2.0 to v0.9.0
+# Roadmap report: v0.2.0 to v0.10.0
 
 What happened while you were away, for the roadmap in `piped-orbiting-stearns.md` (Phases A–E).
 
@@ -12,6 +12,7 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
 - Release: v0.7.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.7.0 (tap `e001a6b`, installed here)
 - Release: v0.8.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.8.0 (tap `2a0ce2a`, installed here)
 - Release: v0.9.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.9.0 (tap `fa17d03`, installed here)
+- Release: v0.10.0 — <link added at release>
 
 The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
 v0.5. For v0.6 the lanes ran GUI QA with synthetic keys only, while you were idle, so anything
@@ -21,8 +22,205 @@ until its last two captures. v0.8's lanes and fix sweep ran their QA apps in iso
 with synthetic keys while you were idle and captured them on screen, and the installed v0.7.0 got
 a visual QA sweep of its own. v0.9's lanes ran their QA apps the same way, but the screen was
 locked for most of them, so few GUI checks happened, and Delve never ran a program end to end on
-this Mac (see the v0.9.0 incident). Everything below marked **unverified on screen** is
-covered by unit tests, logs or synthetic-key runs, but nobody has looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+this Mac (see the v0.9.0 incident). v0.10's lanes ran while you were active at the machine, so
+its idle-gated GUI sweep never ran. Everything below marked **unverified on screen** is
+covered by unit tests, logs or synthetic-key runs, but nobody has looked at it. v0.10.0 is the
+roadmap's last milestone: start with the [handover](#handover-where-things-stand-after-v010),
+then [What to check when you're back](#what-to-check-when-youre-back).
+
+## Handover: where things stand after v0.10
+
+The autonomous roadmap ends with v0.10.0; the checking is yours from here. Each release added:
+- v0.2: one session daemon on cold launch, stale sessions, logs, OSC titles, find references.
+- v0.3: 12 more languages, hover and completion, animations, menus, drag and drop, git colours.
+- v0.4: indent and auto-pairs, rename, symbols, Problems, code actions, diff tabs, commit box.
+- v0.5: Claude Code IDE integration, multi-cursor, word wrap, light theme, keymap.json.
+- v0.6: settings.json, find options, inlay hints, breadcrumbs, tests, tasks, conflicts, push/pull.
+- v0.7: terminal panel, tree moves, bracket colours, interface zoom, diff peek, blame, outline.
+- v0.8: Claude tab, project trust answer, worktrees, GitHub CI and PRs, coverage, project settings.
+- v0.9: Go debugger on Delve, semantic tokens, code lens, snippets, encodings, minimap.
+- v0.10: several windows, Settings and Keyboard Shortcuts tabs, checks for Athena's JSON files.
+
+Check by hand first, in this order (numbers are [check list](#what-to-check-when-youre-back) items):
+1. The trust prompt with a real keyboard: Return does nothing, Escape is Don't Allow (42).
+2. Developer Mode on and Delve installed, then debug a Go test end to end (51, 52).
+3. Several windows: move, merge, close one with a running shell, quit and relaunch (58, 59).
+4. Drag and drop and right-click menus: tabs, panes, tree rows, a Finder drop, the rail (3, 4, 33).
+5. The light theme everywhere, and the terminal under Claude Code in it (22).
+6. The Settings and Keyboard Shortcuts tabs, and the JSON checks (60 to 62).
+7. Claude Code integration on, with a real Claude session: accept and reject a proposal (20).
+8. **GitHub: Create pull request** on a real repository (45).
+
+Ready-to-run QA scripts (idle-gated, isolated `HOME`, synthetic keys) are in a temporary folder
+that may be gone: `qa/x10-qa/burstA.sh`…`burstE.sh` and `qa/vqa/` helpers under
+`/private/tmp/claude-501/-Users-json-code-hobby-athena/60cc5e42-8a82-4a22-a06a-39cd285d51a8/scratchpad/`.
+
+Known open gaps (details in each release's section):
+- Never seen working here: Delve end to end, Return on the trust prompt, typescript-language-server
+  on a real server, a real Jest run, `openDiff` in auto-accept modes, the 𝑥 glyph, render cost.
+- Windows: Settings and Shortcuts tabs are not restored; moving a project ends its debug session
+  and restarts its servers; a v0.9 build forgets closed windows' projects (their shells run on).
+- No debugger attach; lenses sit after the line; only Japanese legacy encodings are detected; no
+  selection in the large-file view; filter drivers inside submodules stay on; cross-volume tree
+  moves block the UI; the diff peek covers lines; Timeline stops at 500 commits.
+
+Incidents, whole run: a synthetic click landed in your window and `athena-trash-test.txt` was left
+in your Trash (v0.2/v0.3); the trust prompt's Return/Escape run may have met a click of yours
+(v0.8); a Delve probe raised the administrator-password dialog, dismissed with Escape, nothing
+typed or authorised (v0.9). None in v0.10.
+
+## v0.10.0
+
+Plan: [plans/v0.10.md](plans/v0.10.md), two feature lanes (several windows; settings and shortcut
+editors) and a QA lane (performance re-baseline and small known gaps), `v0.9.0..main`, then a
+review pass and one fix sweep. This is the roadmap's last milestone. The v0.9.0 section follows
+this one.
+
+### What shipped
+
+**Several windows** (`fad570a`, `5018242`, `6cfeef7`, `204af9f`)
+- Each window has its own rail, layout and drawer. New Window (Cmd+Shift+N), Open Project in New
+  Window…, Move Project to New Window (also on the rail's right-click menu), Merge All Windows and
+  Close Window, in the menus and the palette. A project is open in one window at a time; opening
+  it again (Open, Open Recent, `athena <folder>`, a drop) brings that window forward.
+- An app-level coordinator owns what the windows share: the app socket (CLI and MCP requests go to
+  the window holding the file, session or caller's project, and lists are joined from every
+  window), the daemon's notices and banner clicks, the Claude Code IDE server with one lock file
+  listing every window's folders, the Notifications list, and `workspace.json`.
+- Moving a project keeps its terminals' shells and its editors' unsaved text. Closing a window
+  that is not the last parks its projects with their tabs and running shells and lists them in
+  Open Recent, where reopening reattaches them; closing the last window quits as before, and
+  quitting asks each window about its unsaved files in turn.
+- `workspace.json` gains a `windows` list and parked projects; the top-level fields repeat the
+  first window's, so a single-window file keeps the old shape and v0.9 still sees every project.
+  Fixtures written by the real `save()` of every release from v0.2 to v0.9 open as one window and
+  save back byte-identical.
+
+**Settings and Keyboard Shortcuts tabs** (`7701743`, `d174138`, `c86b898`)
+- One schema (`settings/schema.rs`) describes each setting: title, description, control, default,
+  VS Code spellings and whether only the user's file may set it. It generates settings.json's
+  JSON Schema, and tests hold it to the commented template and to what Athena does by default.
+- Cmd+, opens a Settings tab: every setting with a checkbox, number field, dropdown or a link to
+  the JSON for structured ones, searchable, with Modified markers, Reset, and User and Project
+  scopes; the Project scope leaves out app-wide settings. Writes go through the comment-keeping
+  writer, project ones to `.athena/settings.json`.
+- Cmd+K Cmd+S (outside terminals) and File > Keyboard Shortcuts open a Keyboard Shortcuts tab:
+  every command with its keys, context and source, searchable. Double-click, Return or the
+  right-click menu records up to two keystrokes and shows the commands already on them; Remove,
+  Reset and Copy Command ID are in the menu, and keymap.json's unusable entries are listed above
+  the table.
+- settings.json, a project's `.athena/settings.json` and keymap.json show Athena's own problems in
+  their editors as they are edited. When `vscode-json-language-server` is on the login `PATH`
+  (optional, never installed), JSON files open in it and those three get generated schemas.
+
+**QA lane** (`4d98fef`, `058f29a`, `1dd6dca`, `23b2644`, `83a4173`, `e7e870d`)
+- The performance re-baseline below, recorded in
+  [perf/2026-10-v0.10.md](perf/2026-10-v0.10.md).
+- Small known gaps closed: a Claude Proposal diff reads the file on disk in its own encoding
+  (`1dd6dca`); a long completion detail is cut at its right edge (`23b2644`); a language server
+  replaced by Allow or Disallow project code exits at once instead of living on while editors held
+  its code lens answers or last suggestions, and lenses come back from the restarted server
+  (`83a4173`, `e7e870d`).
+
+Screenshots from the UI lane's isolated QA run: [the Settings tab](screenshots/v0.10/01-settings.png),
+[the Keyboard Shortcuts tab with an entry Athena cannot use](screenshots/v0.10/02-shortcuts.png),
+and [settings.json's problems in the light theme](screenshots/v0.10/03-json-problems.png) (the
+window was in the background, hence dimmed).
+
+### Decisions made without you
+
+- **One window per project**, as VS Code does: opening a project another window has focuses that
+  window instead of opening a second copy.
+- **Settings and Keyboard Shortcuts tabs are not saved.** VS Code restores its settings editor, but
+  a v0.9 build reading those tab kinds set the whole `workspace.json` aside and started empty, so
+  downgrade safety won. This build also drops tab kinds it does not know instead of failing the
+  file, so later releases can add kinds without the same problem.
+- **Closed windows' projects keep their shells** (Claude Code sessions included) until they are
+  reopened, their folder is gone at launch, or you clear Open Recent, which asks first ("Clear and
+  End Terminals"). Parking is not tied to Open Recent's 20 entries.
+- **Moving a project starts its tools afresh in the new window**: it ends its debug session,
+  rejects Claude's pending proposals for it and restarts its language servers; merging or closing
+  a window also stops its debug session and test run. Each window owns its debugger and servers,
+  so carrying them across was left out; the README says so.
+- Daemon terminals and the Claude Code IDE server are shared app-wide. Parked projects are left
+  out of the IDE lock file's folders, since nothing in Athena shows them.
+- The JSON server is optional and never installed, and a missing one is not reported. Programs
+  are now looked for only in absolute `PATH` folders, for every server and Delve (`4df615a`).
+- App-wide settings are hidden in the Project scope, and a project write of one is refused
+  (`9a22d54`).
+- Keymap edits follow VS Code: a changed default becomes a new binding plus a `-` removal. Each
+  edit finds its entry again by key, command and `when` before writing (`b0fa31d`).
+- Cmd+K Cmd+S is bound outside terminals only, so Cmd+K in a terminal still clears at once.
+- settings.json and keymap.json now share one folder watcher (`94d2bc6`), the follow-up the
+  performance notes left for after this release's settings work.
+
+### Review fixes
+
+A review of `v0.9.0..204af9f` found 11 issues (2 high, 3 medium, 6 low, the last a bundle of four
+small ones). All are fixed on main:
+- High: Settings and Keyboard Shortcuts tab kinds made a v0.9 build set `workspace.json` aside and
+  start empty; those tabs are no longer saved and unknown kinds are dropped on load (`1136faa`),
+  including the copies the first fix missed, a window's first save and parked projects
+  (`80bbdbe`).
+- High: every window loaded and saved every project's breakpoints, so a breakpoint deleted in one
+  window came back from another's stale copy and the entry for files outside any project
+  ping-ponged; each window now loads its own projects' and writes only what it changed
+  (`55ded64`, after the lane's `6cfeef7`).
+- Medium: removing the last setting or keymap entry deleted the comments before it (`554a9fd`);
+  Clear Recently Opened, or 20 newer closed folders, killed parked shells without asking
+  (`2a9984b`); a keymap.json reload during a recording panicked or recorded onto another command
+  (`dad43fa`).
+- Low: a moved project's source window saved late, so a crash could list it in both windows; a new
+  window that failed to open dropped the project's unsaved text; proposals with no open tab got no
+  answer (all `33242e6`). Parked projects pruned at launch kept their shells (`2a9984b`). What
+  Move, Merge and Close Window end was undocumented (`9863729`). The bundle: the IDE lock's
+  folders lagged up to 500 ms behind (`aa943a7`), keymap edits used a stale entry index
+  (`b0fa31d`), relative `PATH` entries could run a project's own binary as a server (`4df615a`),
+  and project writes of app-wide settings were not refused (`9a22d54`).
+
+After the review: windows restored without saved bounds cascade instead of opening on top of each
+other (`ab73801`).
+
+### Performance
+
+The QA lane repeated the E0 protocol on the installed v0.9.0, with the v0.2 build as a same-day
+control, and added a 30-minute load (a clone of this repository, ten terminals, one printing
+Claude-like output, 2 000- and 10 000-line Go editors with gopls, inlay hints, minimap and
+semantic tokens): [perf/2026-10-v0.10.md](perf/2026-10-v0.10.md). Nothing in CPU time, dirty
+memory, file descriptors or the editor benchmarks was more than 20 % worse, so no performance
+change was made. Dirty memory is about 8 % above the control; RSS is 27 % higher at the end of the
+idle phase, which is clean pages from a binary twice v0.2's size. Six more threads are folder
+watchers, two of which `94d2bc6` removes. Under the 30-minute load memory, threads and files stay
+flat (footprint 83 to 84 MB), and `git_status` through MCP answers in 59 ms. These numbers
+measure v0.9.0, not v0.10's window and settings code, and rendering is still unmeasured: the
+hidden QA window drew no frames after launch.
+
+### Verification
+
+- Unit and fixture tests throughout: `workspace.json` fixtures from every release, a two-window
+  split with a parked project, routing and reply-merging, breakpoints saved by two windows in
+  turn, parked shells kept past 21 folders, schema against template and defaults, unsets and
+  removals across 3000 random files keeping every comment, the recorder and conflicts, keymap
+  edits finding their entry after an insertion, and unknown tab kinds dropped on load.
+- Against an isolated `HOME`: `list_projects` and `get_open_editors` joined across two windows,
+  `open_file` landing in the window holding the file, `athena <folder>` focusing the window that
+  has it, the IDE lock file listing all three folders of two windows, and three saved windows
+  without bounds cascading. The UI lane drew both tabs in both themes (screenshots above), and
+  with the JSON server on `PATH` it flagged `window.zoom_level` over its maximum.
+- **No idle-gated GUI sweep ran this milestone.** You were active at the machine throughout, so
+  the QA lane's visual sweep of the check list (plan item 1) never got its 300 s idle window and
+  took no captures. Nothing marked unverified in earlier releases was looked at, and none of these
+  have been seen on screen: moving, merging and closing windows with the mouse, the rail's menu,
+  the Clear Recently Opened prompt, recording a shortcut with a real keyboard. The new window
+  failure path cannot be triggered from tests.
+
+### Known gaps
+
+- Settings and Keyboard Shortcuts tabs are not restored on launch.
+- Moving a project ends its debug session and restarts its language servers.
+- A v0.9 build opening this `workspace.json` forgets closed windows' projects; their shells keep
+  running until `athena mux stop`.
+- Rendering cost is still unmeasured.
 
 ## v0.9.0
 
@@ -1460,3 +1658,23 @@ For v0.9.0:
 57. **Snippets: configure snippets for this language** in a Go file, add one using
     `$TM_FILENAME_BASE` and `${1:/upcase}`, save, then type its prefix. Turn on word wrap and
     inlay hints on a long call.
+
+For v0.10.0:
+
+58. Cmd+Shift+N and open a second project in the new window; then open the first project again
+    from Open Recent or `athena <folder>`: its window comes forward. Right-click a project in the
+    rail, Move Project to New Window: its terminals keep running and unsaved text stays. Merge All
+    Windows.
+59. With two windows, start `top` in one and close it with the red button: Open Recent lists its
+    projects, and reopening one finds `top` still running. Close a window again, then Clear
+    Recently Opened: Cancel / Clear and End Terminals. Quit with two windows and relaunch: both
+    come back where they were.
+60. Cmd+,: search "tab size", change it under User and under Project; watch Modified, Reset and
+    "Also set …", and check settings.json keeps its comments. The Project scope has no Color Theme.
+61. Cmd+K Cmd+S outside a terminal: double-click Split right, press Cmd+Shift+D (it should say it
+    is also bound to Split down), Escape; record Cmd+K Cmd+T for New terminal and press Return,
+    then look at keymap.json. Remove and Reset from the right-click menu. Add a bad entry to
+    keymap.json: it is listed above the table and marked in its editor.
+62. In settings.json type `"tab_sise": 2` and `"window": {"zoom_level": 9}`: warnings on both
+    keys as you type. With `npm install -g vscode-langservers-extracted`, reopen it: the JSON
+    server's messages appear too.
