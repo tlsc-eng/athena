@@ -181,9 +181,11 @@ fn completion(item: CompletionItem) -> Completion {
 fn push_triggers(editor: &Entity<EditorView>, client: &Client, cx: &mut Context<Shell>) {
     let completion = client.completion_triggers().to_vec();
     let signature = client.signature_triggers().to_vec();
-    editor.update(cx, |e, _| {
+    editor.update(cx, |e, cx| {
         e.set_completion_triggers(Some(completion));
         e.set_signature_triggers(signature);
+        // A file shown before its server was ready asks for its hints now.
+        e.refresh_inlay_hints(cx);
     });
 }
 
