@@ -435,7 +435,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Start tests in Athena's Tests panel for this session's project: go test where go.mod is, Vitest or Jest from package.json. Returns at once; poll get_test_results until `running` is false."
+        description = "Start tests in Athena's Tests panel for this session's project: go test where go.mod is, Vitest or Jest from package.json (only once the user has allowed the project's code). `path` must lie in this session's project. Returns at once; poll get_test_results until `running` is false."
     )]
     async fn run_tests(
         &self,

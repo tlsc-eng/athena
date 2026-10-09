@@ -11,6 +11,7 @@ use athena_testing::{
     parse_coverprofile, with_coverage,
 };
 use athena_ui::{ActiveTheme, ButtonKind, Theme, empty_state};
+use athena_workspace::LinterTrust;
 use gpui::{
     AnyElement, Context, Entity, EntityId, FontWeight, Hsla, Subscription, Task, WeakEntity,
     Window, actions, div, prelude::*, px,
@@ -195,6 +196,16 @@ fn plan_go(root: &Path, dir: &Path, mut wanted: Vec<Vec<String>>) -> Option<Plan
         scope: Scope::Dir(dir.to_path_buf(), wanted),
         coverage: None,
     })
+}
+
+const UNTRUSTED_RUNNERS: &str = "Vitest and Jest run from the project's node_modules, so they run \
+     for Claude only once the user allows the project (command palette: Allow project code)";
+
+/// Drops the Vitest and Jest runs unless the project is trusted, returning how many it dropped.
+fn hold_back_project_runners(planned: &mut Vec<Planned>, trusted: bool) -> usize {
+    let before = planned.len();
+    planned.retain(|p| trusted || p.job.framework == Framework::Go);
+    before - planned.len()
 }
 
 /// Vitest or Jest for the test file, limited to the test or group `titles` names.
@@ -1216,10 +1227,20 @@ impl Shell {
                     .into(),
             );
         }
+        let mut planned = planned;
+        let trusted = self.linter_trust(&root) == Some(LinterTrust::Allowed);
+        let held = hold_back_project_runners(&mut planned, trusted);
+        if planned.is_empty() {
+            return Err(format!("{UNTRUSTED_RUNNERS}."));
+        }
         let jobs = planned.len();
         self.start_tests(root, planned, cx);
+        let note = match held {
+            0 => String::new(),
+            _ => format!(" Skipped Vitest/Jest: {UNTRUSTED_RUNNERS}."),
+        };
         Ok(format!(
-            "Started {jobs} test run{}; call get_test_results for the outcome.",
+            "Started {jobs} test run{}; call get_test_results for the outcome.{note}",
             if jobs == 1 { "" } else { "s" }
         ))
     }
@@ -1310,6 +1331,25 @@ mod tests {
         assert_eq!(symbol_at(&symbols, 3).unwrap().titles, ["math", "adds"]);
         assert_eq!(symbol_at(&symbols, 6).unwrap().titles, ["math"]);
         assert!(symbol_at(&symbols, 11).is_none());
+    }
+
+    #[test]
+    fn claude_runs_vitest_or_jest_only_in_a_trusted_project() {
+        let dir = std::env::temp_dir().join(format!("athena-plan-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "module example.com/m\n").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devDependencies":{"vitest":"3"}}"#,
+        )
+        .unwrap();
+        let mut planned = plan_all(&dir);
+        assert_eq!(planned.len(), 2);
+        assert_eq!(hold_back_project_runners(&mut planned, true), 0);
+        assert_eq!(hold_back_project_runners(&mut planned, false), 1);
+        assert_eq!(planned[0].job.framework, Framework::Go);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

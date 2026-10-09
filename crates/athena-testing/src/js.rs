@@ -29,6 +29,7 @@ pub fn js_framework(package: &Value) -> Option<Framework> {
 
 /// The nearest package at or above `from` (no higher than `stop`) that runs Vitest or Jest.
 pub fn find_js_package(from: &Path, stop: &Path) -> Option<(PathBuf, Framework)> {
+    let (from, stop) = crate::within(from, stop)?;
     for dir in from.ancestors() {
         let framework = std::fs::read_to_string(dir.join("package.json"))
             .ok()
@@ -241,6 +242,11 @@ mod tests {
         assert_eq!(
             find_js_package(&dir.join("packages/ui/src"), &dir.join("packages")),
             None
+        );
+        assert_eq!(
+            find_js_package(&dir.join("packages/ui/src"), &dir.join("apps")),
+            None,
+            "outside the project, never climbing to /"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

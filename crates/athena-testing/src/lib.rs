@@ -203,6 +203,16 @@ pub fn links(line: &str) -> Vec<Link> {
         .collect()
 }
 
+/// `from` and `stop` spelled alike when `from` lies at or under `stop`, through symlinks if need
+/// be, so a walk up from `from` meets `stop` and goes no higher.
+pub(crate) fn within(from: &Path, stop: &Path) -> Option<(PathBuf, PathBuf)> {
+    if from.starts_with(stop) {
+        return Some((from.to_path_buf(), stop.to_path_buf()));
+    }
+    let (from, stop) = (from.canonicalize().ok()?, stop.canonicalize().ok()?);
+    from.starts_with(&stop).then_some((from, stop))
+}
+
 /// A link's file: absolute as printed, or relative to the suite's folder.
 pub fn resolve(dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -263,6 +273,25 @@ pub fn report(job: &Job, finished: &Finished, module: Option<&GoModule>) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_is_within_a_project_opened_through_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("athena-within-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real/src")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let real = dir.join("real").canonicalize().unwrap();
+        assert_eq!(
+            within(&real.join("src"), &dir.join("link")),
+            Some((real.join("src"), real.clone()))
+        );
+        assert_eq!(
+            within(&dir.join("link/src"), &dir.join("link")),
+            Some((dir.join("link/src"), dir.join("link")))
+        );
+        assert_eq!(within(&dir, &dir.join("link")), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn case(name: &str, outcome: Outcome) -> TestCase {
         TestCase {

@@ -42,6 +42,7 @@ impl GoModule {
 
 /// The module `from` belongs to, looking no higher than `stop`.
 pub fn find_go_module(from: &Path, stop: &Path) -> Option<GoModule> {
+    let (from, stop) = crate::within(from, stop)?;
     for dir in from.ancestors() {
         if let Ok(text) = std::fs::read_to_string(dir.join("go.mod")) {
             let path = text.lines().find_map(|l| {
@@ -406,6 +407,12 @@ mod tests {
         assert_eq!(
             find_go_module(&dir.join("svc/api"), &dir.join("svc/api")),
             None
+        );
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        assert_eq!(
+            find_go_module(&dir.join("svc/api"), &dir.join("other")),
+            None,
+            "outside the project, never climbing to /"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

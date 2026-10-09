@@ -283,7 +283,7 @@ impl Shell {
                 let Some(root) = self.caller_root(caller) else {
                     return AppReply::Error("no project is open".into());
                 };
-                let path = match path.map(|p| resolve_in_roots(&p, &self.open_roots())) {
+                let path = match path.map(|p| resolve_in_roots(&p, std::slice::from_ref(&root))) {
                     Some(Err(e)) => return AppReply::Error(e),
                     Some(Ok(p)) => Some(self.project_spelling(&p)),
                     None => None,
