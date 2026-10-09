@@ -1662,13 +1662,13 @@ For v0.9.0:
 For v0.10.0:
 
 58. Cmd+Shift+N and open a second project in the new window; then open the first project again
-    from Open Recent or `athena <folder>`: its window comes forward. Right-click a project in the
+    with Cmd+O or `athena <folder>`: its window comes forward. Right-click a project in the
     rail, Move Project to New Window: its terminals keep running and unsaved text stays. Merge All
     Windows.
 59. With two windows, start `top` in one and close it with the red button: Open Recent lists its
-    projects, and reopening one finds `top` still running. Close a window again, then Clear
-    Recently Opened: Cancel / Clear and End Terminals. Quit with two windows and relaunch: both
-    come back where they were.
+    projects, and reopening one finds `top` still running. Cmd+Shift+N, open another project,
+    start a shell there and close that window, then Clear Recently Opened: Cancel / Clear and End
+    Terminals. Quit with two windows and relaunch: both come back where they were.
 60. Cmd+,: search "tab size", change it under User and under Project; watch Modified, Reset and
     "Also set …", and check settings.json keeps its comments. The Project scope has no Color Theme.
 61. Cmd+K Cmd+S outside a terminal: double-click Split right, press Cmd+Shift+D (it should say it
@@ -1676,5 +1676,5 @@ For v0.10.0:
     then look at keymap.json. Remove and Reset from the right-click menu. Add a bad entry to
     keymap.json: it is listed above the table and marked in its editor.
 62. In settings.json type `"tab_sise": 2` and `"window": {"zoom_level": 9}`: warnings on both
-    keys as you type. With `npm install -g vscode-langservers-extracted`, reopen it: the JSON
-    server's messages appear too.
+    keys as you type. With `npm install -g vscode-langservers-extracted`, quit and relaunch Athena
+    and reopen it: the JSON server's messages appear too.

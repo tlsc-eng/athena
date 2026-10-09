@@ -1196,8 +1196,9 @@ While settings.json, a project's `.athena/settings.json` or keymap.json is open 
 Athena checks it as you type and shows each problem beside the language servers' diagnostics: a
 warning on the key or entry it is about, an error on the line where the JSON stops parsing. If
 VS Code's JSON server, `vscode-json-language-server`, is on your login shell's `PATH` (`npm
-install -g vscode-langservers-extracted`), every JSON file opens in it, and it checks those three
-files against JSON schemas Athena generates from its settings and its commands. It is optional: Athena never installs it, does not mention it when it
+install -g vscode-langservers-extracted`) when Athena or a new window starts, every JSON file
+opens in it, and it checks those three files against JSON schemas Athena generates from its
+settings and its commands. It is optional: Athena never installs it, does not mention it when it
 is missing, and looks for it only in absolute `PATH` folders, so a project's own binary is never
 picked up.
 
