@@ -1,5 +1,6 @@
-// Athena keyboard shortcuts; these apply after the defaults, so they win.
-// "when" takes a context such as "Editor" or "Terminal"; "-command" removes a default.
+// Athena keyboard shortcuts. One without "when" replaces Athena's bindings on its keys.
+// "when" limits one to a context such as "Editor" or "Terminal", where it wins over Athena's
+// unless theirs names a context nested inside it. "-command" removes a default.
 // {"key": "cmd-k cmd-t", "command": "athena::NewTerminal"},
 // {"key": "cmd-d", "command": "-athena::SplitRight"},
 // {"key": "f5", "command": "athena::ShowProblems", "when": "Editor"}

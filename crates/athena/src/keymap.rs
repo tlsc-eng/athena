@@ -208,14 +208,20 @@ fn binding(
     .map_err(|e| anyhow!("\"{key}\": {e}"))
 }
 
-/// Athena's bindings minus the ones the user removed, then the user's, which win at equal depth
-/// because they come later.
+/// Athena's bindings minus the ones the user removed or rebound everywhere, then the user's,
+/// which win at equal depth because they come later.
 pub fn merge(defaults: &[KeyBinding], rules: Vec<Rule>) -> Vec<KeyBinding> {
     let mut out: Vec<KeyBinding> = defaults.to_vec();
     let mut added = Vec::new();
     for rule in rules {
         match rule {
-            Rule::Bind(binding) => added.push(binding),
+            Rule::Bind(binding) => {
+                // gpui falls through to later matches when one is unhandled; VS Code never does.
+                if binding.predicate().is_none() {
+                    out.retain(|b| b.keystrokes() != binding.keystrokes());
+                }
+                added.push(binding);
+            }
             Rule::Unbind { command, key, when } => out.retain(|b| {
                 !(b.action().name() == command
                     && key
@@ -440,6 +446,35 @@ mod tests {
         let shell = [KeyContext::parse("Shell").unwrap()];
         let (found, _) = keymap.bindings_for_input(&typed, &shell);
         assert_eq!(found[0].action().name(), "athena::QuickOpen");
+    }
+
+    #[test]
+    fn a_user_binding_without_when_beats_a_default_in_a_deeper_context() {
+        let (rules, _) = parse(
+            r#"[{"key": "cmd-t", "command": "athena::QuickOpen"},
+                {"key": "cmd-d", "command": "athena::NewTerminal", "when": "Editor"}]"#,
+            build,
+        );
+        let keymap = gpui::Keymap::new(merge(&defaults(), rules));
+        let editor = [
+            KeyContext::parse("Shell").unwrap(),
+            KeyContext::parse("Editor").unwrap(),
+        ];
+        let actions = |keys: &str| -> Vec<&'static str> {
+            let typed = [Keystroke::parse(keys).unwrap()];
+            let (found, _) = keymap.bindings_for_input(&typed, &editor);
+            found.iter().map(|b| b.action().name()).collect()
+        };
+        assert_eq!(actions("cmd-t"), ["athena::QuickOpen"]);
+        assert_eq!(
+            actions("cmd-d")[0],
+            "athena::NewTerminal",
+            "one with when wins in its context"
+        );
+        let shell = [KeyContext::parse("Shell").unwrap()];
+        let typed = [Keystroke::parse("cmd-d").unwrap()];
+        let (found, _) = keymap.bindings_for_input(&typed, &shell);
+        assert_eq!(found[0].action().name(), "athena::SplitRight");
     }
 
     #[test]
