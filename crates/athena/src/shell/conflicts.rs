@@ -9,14 +9,14 @@ use gpui::{Context, Entity, InteractiveElement};
 use super::Shell;
 use super::notices::ToastAction;
 
-/// Conflicted files and the conflict blocks left in them, read from disk.
+/// Conflicted files and the conflicts left in them, read from disk.
 pub(super) fn count_conflicts(entries: &[(PathBuf, Entry)]) -> (usize, usize) {
     let blocks: Vec<usize> = entries
         .iter()
         .filter(|(_, e)| e.unstaged == Some(FileStatus::Conflict))
         .map(|(path, _)| {
             std::fs::read_to_string(path)
-                .map(|t| athena_editor::find_merge_conflicts(&t).len())
+                .map(|t| athena_editor::count_merge_conflicts(&t))
                 .unwrap_or(0)
         })
         .collect();
@@ -128,6 +128,7 @@ mod tests {
         let block = "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n";
         std::fs::write(dir.join("c.txt"), format!("{block}mid\n{block}")).unwrap();
         std::fs::write(dir.join("m.txt"), block).unwrap();
+        std::fs::write(dir.join("s.txt"), format!("<<<<<<< stray\n{block}")).unwrap();
         let entry = |path: &str, status: FileStatus| {
             (
                 dir.join(path),
@@ -144,6 +145,8 @@ mod tests {
             entry("m.txt", FileStatus::Modified),
         ];
         assert_eq!(count_conflicts(&entries), (1, 2));
+        let stray = [entry("s.txt", FileStatus::Conflict)];
+        assert_eq!(count_conflicts(&stray), (1, 1));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

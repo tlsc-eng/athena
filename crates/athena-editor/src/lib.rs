@@ -38,7 +38,8 @@ pub use lsp_ui::{
     ShowCodeActions,
 };
 pub use merge_conflicts::{
-    CompareMergeConflicts, ConflictBlock, Resolution, find_merge_conflicts, resolve_all,
+    CompareMergeConflicts, ConflictBlock, Resolution, count_merge_conflicts, find_merge_conflicts,
+    resolve_all,
 };
 pub use run_marks::{RunMark, RunState, RunTestAt, TestSymbol, find_tests, is_test_file};
 pub use save::{SaveSettings, Tidy, resolve_tidy, save_defaults};

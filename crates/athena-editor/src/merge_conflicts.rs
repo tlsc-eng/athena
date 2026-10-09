@@ -2,6 +2,7 @@
 //! with VS Code's Accept and Compare actions.
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -112,17 +113,37 @@ fn blocks(markers: impl IntoIterator<Item = (usize, Marker)>) -> Vec<ConflictBlo
     out
 }
 
-/// The conflict blocks in `text`.
-pub fn find_merge_conflicts(text: &str) -> Vec<ConflictBlock> {
-    blocks(
-        text.split_inclusive('\n')
-            .enumerate()
-            .filter_map(|(i, l)| Some((i, marker(l)?))),
-    )
+/// Blocks from markers, and whether a `<<<<<<<`, `|||||||` or `>>>>>>>` line is left outside them.
+/// A lone `=======` does not count: Markdown and reStructuredText underline headings with it.
+fn scan(markers: impl IntoIterator<Item = (usize, Marker)>) -> (Vec<ConflictBlock>, bool) {
+    let markers: Vec<(usize, Marker)> = markers.into_iter().collect();
+    let found = blocks(markers.iter().copied());
+    let stray = markers.iter().any(|&(line, kind)| {
+        kind != Marker::Separator && !found.iter().any(|b| (b.start..=b.end).contains(&line))
+    });
+    (found, stray)
 }
 
-fn rope_conflicts(rope: &Rope) -> Vec<ConflictBlock> {
-    blocks(rope.lines().enumerate().filter_map(|(i, line)| {
+fn text_markers(text: &str) -> impl Iterator<Item = (usize, Marker)> + '_ {
+    text.split_inclusive('\n')
+        .enumerate()
+        .filter_map(|(i, l)| Some((i, marker(l)?)))
+}
+
+/// The conflict blocks in `text`.
+pub fn find_merge_conflicts(text: &str) -> Vec<ConflictBlock> {
+    blocks(text_markers(text))
+}
+
+/// How many conflicts `text` still has: its blocks, plus one if marker lines are left outside
+/// them, so an unclosed `<<<<<<<` never reads as resolved.
+pub fn count_merge_conflicts(text: &str) -> usize {
+    let (found, stray) = scan(text_markers(text));
+    found.len() + usize::from(stray)
+}
+
+fn rope_conflicts(rope: &Rope) -> (Vec<ConflictBlock>, bool) {
+    scan(rope.lines().enumerate().filter_map(|(i, line)| {
         let first = line.chars().next()?;
         if !"<|=>".contains(first) || line.chars().take(7).any(|c| c != first) {
             return None;
@@ -142,14 +163,34 @@ pub fn resolve_block(lines: &[&str], block: &ConflictBlock, how: Resolution) -> 
     };
     let mut out = kept.concat();
     // A block at the very end of a file without a final line break keeps it that way.
-    if !lines[block.end].ends_with('\n') {
+    if !lines[block.end].ends_with(['\n', '\r']) {
         if out.ends_with("\r\n") {
             out.truncate(out.len() - 2);
-        } else if out.ends_with('\n') {
+        } else if out.ends_with(['\n', '\r']) {
             out.pop();
         }
     }
     out
+}
+
+/// The char range a block covers in `rope` and the text that replaces it.
+fn resolve_in_rope(rope: &Rope, block: &ConflictBlock, how: Resolution) -> (Range<usize>, String) {
+    let from = rope.line_to_char(block.start);
+    let to = if block.end + 1 < rope.len_lines() {
+        rope.line_to_char(block.end + 1)
+    } else {
+        rope.len_chars()
+    };
+    // The rope's own lines, so a lone `\r` counts as a break here as it did when finding blocks.
+    let owned: Vec<String> = rope.slice(from..to).lines().map(String::from).collect();
+    let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let local = ConflictBlock {
+        start: 0,
+        base: block.base.map(|l| l - block.start),
+        separator: block.separator - block.start,
+        end: block.end - block.start,
+    };
+    (from..to, resolve_block(&lines, &local, how))
 }
 
 /// `text` with every block resolved the same way, for comparing the two sides whole.
@@ -192,30 +233,38 @@ fn band(blocks: &[ConflictBlock], line: usize) -> Option<Band> {
     })
 }
 
-/// Blocks found in one version of the buffer.
+/// Blocks found in one version of the buffer, and whether stray markers were left outside them.
 #[derive(Default)]
-pub(crate) struct MergeCache(RefCell<Option<(u64, Rc<Vec<ConflictBlock>>)>>);
+pub(crate) struct MergeCache(RefCell<Option<(u64, Scan)>>);
+
+type Scan = (Rc<Vec<ConflictBlock>>, bool);
 
 impl EditorView {
-    pub(crate) fn merge_blocks(&self) -> Rc<Vec<ConflictBlock>> {
+    fn merge_scan(&self) -> Scan {
         let Some(b) = self.buf() else {
-            return Rc::default();
+            return Default::default();
         };
         let version = b.version();
         let mut cache = self.merge.0.borrow_mut();
         match cache.as_ref() {
-            Some((v, blocks)) if *v == version => blocks.clone(),
+            Some((v, scan)) if *v == version => scan.clone(),
             _ => {
-                let blocks = Rc::new(rope_conflicts(b.rope()));
-                *cache = Some((version, blocks.clone()));
-                blocks
+                let (blocks, stray) = rope_conflicts(b.rope());
+                let scan = (Rc::new(blocks), stray);
+                *cache = Some((version, scan.clone()));
+                scan
             }
         }
     }
 
-    /// How many conflict blocks the text has now.
+    pub(crate) fn merge_blocks(&self) -> Rc<Vec<ConflictBlock>> {
+        self.merge_scan().0
+    }
+
+    /// How many conflicts the text has now, counted as [`count_merge_conflicts`] does.
     pub fn merge_conflict_count(&self) -> usize {
-        self.merge_blocks().len()
+        let (blocks, stray) = self.merge_scan();
+        blocks.len() + usize::from(stray)
     }
 
     /// The tint behind a line inside a conflict: current changes green, incoming blue, the
@@ -248,22 +297,8 @@ impl EditorView {
             return;
         };
         self.with_buffer(cx, |b, c| {
-            let from = b.line_start(block.start);
-            let to = if block.end + 1 < b.len_lines() {
-                b.line_start(block.end + 1)
-            } else {
-                b.len_chars()
-            };
-            let text = b.rope().slice(from..to).to_string();
-            let lines: Vec<&str> = text.split_inclusive('\n').collect();
-            let local = ConflictBlock {
-                start: 0,
-                base: block.base.map(|l| l - block.start),
-                separator: block.separator - block.start,
-                end: block.end - block.start,
-            };
-            let resolved = resolve_block(&lines, &local, how);
-            b.edit_primary(c, |b, c| b.replace_range(c, from..to, &resolved));
+            let (range, resolved) = resolve_in_rope(b.rope(), &block, how);
+            b.edit_primary(c, |b, c| b.replace_range(c, range, &resolved));
         });
     }
 
@@ -378,7 +413,7 @@ mod tests {
         assert_eq!(find_merge_conflicts(diff3)[0].base, Some(2));
         assert_eq!(
             find_merge_conflicts(&Rope::from_str(diff3).to_string()),
-            rope_conflicts(&Rope::from_str(diff3))
+            rope_conflicts(&Rope::from_str(diff3)).0
         );
     }
 
@@ -454,5 +489,35 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn a_lone_carriage_return_inside_a_block_is_a_line_of_its_own() {
+        let rope = Rope::from_str("<<<<<<< HEAD\nmine\rmore\n=======\ntheirs\n>>>>>>> x\nz\n");
+        let block = rope_conflicts(&rope).0[0];
+        let (range, text) = resolve_in_rope(&rope, &block, Resolution::Incoming);
+        assert_eq!((range, text.as_str()), (0..48, "theirs\n"));
+        let (_, text) = resolve_in_rope(&rope, &block, Resolution::Current);
+        assert_eq!(text, "mine\rmore\n");
+        let tail = Rope::from_str("<<<<<<< HEAD\nmine\n=======\ntheirs\r>>>>>>> x");
+        let block = rope_conflicts(&tail).0[0];
+        assert_eq!(
+            resolve_in_rope(&tail, &block, Resolution::Incoming).1,
+            "theirs"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_marker_keeps_the_file_unresolved() {
+        let text = "<<<<<<< stray\nfoo\n<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n";
+        assert!(find_merge_conflicts(text).is_empty());
+        assert_eq!(count_merge_conflicts(text), 1);
+        assert_eq!(rope_conflicts(&Rope::from_str(text)), (Vec::new(), true));
+        assert_eq!(
+            count_merge_conflicts(&format!("{TWO_WAY}>>>>>>> left\n")),
+            2
+        );
+        assert_eq!(count_merge_conflicts(TWO_WAY), 1);
+        assert_eq!(count_merge_conflicts("Title\n=======\n\nbody\n"), 0);
     }
 }
