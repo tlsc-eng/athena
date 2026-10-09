@@ -1185,7 +1185,11 @@ impl Shell {
         if self.tests.run.is_some() {
             return Err("Tests are already running; call get_test_results.".into());
         }
-        let names: Vec<String> = name.iter().cloned().collect();
+        // A Go name may be `TestX/sub`, one title per level as go test reports them.
+        let names: Vec<Vec<String>> = name
+            .iter()
+            .map(|n| n.split('/').map(String::from).collect())
+            .collect();
         let planned: Vec<Planned> = match &path {
             None if name.is_some() => {
                 return Err("Give the file or folder that holds the test.".into());
