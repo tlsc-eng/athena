@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use super::Shell;
 use super::item::ItemView;
 use super::notices::ToastAction;
-use super::review::diff_title;
+use super::review::{self, diff_title};
 use crate::ide::{self, DiffKey, Event, Verdict};
 
 /// How often the focused editor's selection is checked while Claude Code is connected; this
@@ -64,12 +64,20 @@ fn is_proposal(kind: &ItemKind) -> bool {
     )
 }
 
+/// The file on disk as diff text; a FIFO or device is refused before opening it would block.
 fn read_text(path: &Path) -> Result<String, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|_| "This file is not UTF-8 text.".into()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!("Could not read {}: {e}", path.display())),
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
+        Ok(meta) if !meta.is_file() => return Err("This is not a regular file.".into()),
+        Ok(meta) if meta.len() > review::MAX_DIFF_BYTES as u64 => {
+            return Err("The file is larger than 20 MB.".into());
+        }
+        Ok(_) => {}
     }
+    review::read_file(path)
+        .and_then(review::text)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// A copy of `workspace` without proposal tabs, or `None` when it has none.
@@ -694,6 +702,30 @@ mod tests {
             mention_json(path, (2, 1), (2, 6)),
             json!({"filePath": "/p/a.rs", "lineStart": 2, "lineEnd": 2})
         );
+    }
+
+    #[test]
+    fn the_file_on_disk_is_read_only_when_it_is_small_regular_text() {
+        let dir = std::env::temp_dir().join(format!("athena-ide-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str| dir.join(name);
+        assert_eq!(read_text(&file("missing.rs")), Ok(String::new()));
+        std::fs::write(file("a.rs"), "fn a() {}\n").unwrap();
+        assert_eq!(read_text(&file("a.rs")).as_deref(), Ok("fn a() {}\n"));
+        std::fs::write(file("a.png"), [0x89, b'P', 0, 1]).unwrap();
+        assert!(read_text(&file("a.png")).unwrap_err().contains("binary"));
+
+        let fifo =
+            std::ffi::CString::new(file("pipe").into_os_string().into_encoded_bytes()).unwrap();
+        // SAFETY: fifo is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(read_text(&file("pipe")).unwrap_err().contains("regular"));
+        assert!(read_text(&dir).unwrap_err().contains("regular"));
+
+        let big = std::fs::File::create(file("big.log")).unwrap();
+        big.set_len(review::MAX_DIFF_BYTES as u64 + 1).unwrap();
+        assert!(read_text(&file("big.log")).unwrap_err().contains("20 MB"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

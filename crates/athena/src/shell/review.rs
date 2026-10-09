@@ -15,7 +15,7 @@ use super::notices::ToastAction;
 use crate::snapshots::{self, Before};
 
 /// Bigger files are not diffed; shaping and highlighting them would stall the window.
-const MAX_DIFF_BYTES: usize = 20 * 1024 * 1024;
+pub(super) const MAX_DIFF_BYTES: usize = 20 * 1024 * 1024;
 /// Copies kept by revert and discard are deleted after this long.
 const KEEP_COPIES: Duration = Duration::from_secs(30 * 24 * 3600);
 
@@ -98,7 +98,7 @@ fn sides(base: &DiffBase) -> (&'static str, &'static str, HunkActions) {
 }
 
 /// Text for one side of a diff; a file that is not there is empty.
-fn text(bytes: Option<Vec<u8>>) -> Result<String> {
+pub(super) fn text(bytes: Option<Vec<u8>>) -> Result<String> {
     let bytes = bytes.unwrap_or_default();
     if bytes.len() > MAX_DIFF_BYTES {
         bail!("The file is larger than 20 MB.");
@@ -109,7 +109,7 @@ fn text(bytes: Option<Vec<u8>>) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("This file is not UTF-8 text."))
 }
 
-fn read_file(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_file(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
