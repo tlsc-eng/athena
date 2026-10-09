@@ -1448,7 +1448,8 @@ impl std::error::Error for Dirty {}
 /// `git worktree remove`; without `force` a worktree with changes is refused with [`Dirty`].
 /// The branch it had checked out stays.
 pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
-    if !force {
+    // A worktree whose folder is gone has no changes to lose, and git status cannot run there.
+    if !force && path.exists() {
         let mut status = git(path);
         status.args(["status", "--porcelain", "--untracked-files=normal"]);
         if !run(status, None)?.trim_ascii().is_empty() {
@@ -2486,6 +2487,11 @@ mod tests {
         assert!(!old.exists());
         remove_worktree(&dir, &new, true).unwrap();
         assert!(!new.exists());
+        let gone = dir.with_extension("gone");
+        let _ = std::fs::remove_dir_all(&gone);
+        add_worktree(&dir, &gone, &NewWorktree::Create("gone".into())).unwrap();
+        std::fs::remove_dir_all(&gone).unwrap();
+        remove_worktree(&dir, &gone, false).unwrap();
         assert_eq!(worktrees(&dir).unwrap().len(), 1);
         assert!(branches(&dir).unwrap().iter().any(|b| b.name == "feat"));
         std::fs::remove_dir_all(&dir).unwrap();
