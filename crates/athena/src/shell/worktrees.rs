@@ -5,6 +5,7 @@ use gpui::{Context, PromptLevel, Window, actions};
 
 use super::Shell;
 use super::branches::{BranchEntry, BranchPick};
+use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::palette::Mode;
 use crate::actions::display_path;
@@ -259,13 +260,22 @@ impl Shell {
         let Some(root) = self.active_root() else {
             return;
         };
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if self.workspace.projects.iter().any(|p| p.root == canonical) {
-            return self.transient_notice(
-                "The worktree is open",
-                "Close its project first, then delete the worktree.",
-                cx,
-            );
+        let roots: Vec<PathBuf> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .collect();
+        let cwds: Vec<PathBuf> = self
+            .items
+            .values()
+            .filter_map(|item| match item {
+                ItemView::Terminal(v) => v.read(cx).foreground()?.1,
+                _ => None,
+            })
+            .collect();
+        if let Some((title, body)) = worktree_in_use(&path, &roots, &cwds) {
+            return self.transient_notice(title, body, cx);
         }
         cx.spawn_in(window, async move |this, cx| {
             let target = path.clone();
@@ -361,6 +371,29 @@ fn rail_order(roots: &[PathBuf], main_of: impl Fn(&Path) -> Option<PathBuf>) -> 
     order
 }
 
+/// Why the worktree at `path` cannot be deleted now: a project open in it, or a terminal there.
+fn worktree_in_use(
+    path: &Path,
+    roots: &[PathBuf],
+    cwds: &[PathBuf],
+) -> Option<(&'static str, &'static str)> {
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let path = real(path);
+    if roots.iter().any(|r| real(r).starts_with(&path)) {
+        return Some((
+            "The worktree is open",
+            "Close its project first, then delete the worktree.",
+        ));
+    }
+    if cwds.iter().any(|c| real(c).starts_with(&path)) {
+        return Some((
+            "A terminal is in the worktree",
+            "Leave the folder or close the terminal first, then delete the worktree.",
+        ));
+    }
+    None
+}
+
 fn roots_index(projects: &[athena_workspace::Project], root: &Path) -> Option<usize> {
     projects.iter().position(|p| p.root == root)
 }
@@ -388,6 +421,31 @@ mod tests {
             when: "1 day ago".into(),
             subject: "Work".into(),
         }
+    }
+
+    #[test]
+    fn a_worktree_with_a_project_or_terminal_inside_it_is_in_use() {
+        let dir = std::env::temp_dir().join(format!("athena-wt-use-{}", std::process::id()));
+        let (wt, sub, other) = (
+            dir.join("repo-feat"),
+            dir.join("repo-feat/src"),
+            dir.join("b"),
+        );
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let real = |p: &Path| p.canonicalize().unwrap();
+        let others = std::slice::from_ref(&other);
+        assert_eq!(worktree_in_use(&wt, others, others), None);
+        let open = worktree_in_use(&wt, &[other.clone(), real(&sub)], &[]).unwrap();
+        assert_eq!(open.0, "The worktree is open");
+        let shell = worktree_in_use(&real(&wt), &[], std::slice::from_ref(&sub)).unwrap();
+        assert_eq!(shell.0, "A terminal is in the worktree");
+        // A sibling whose name only starts the same is not inside it.
+        assert_eq!(
+            worktree_in_use(&dir.join("repo"), std::slice::from_ref(&wt), &[]),
+            None
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
