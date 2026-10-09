@@ -566,6 +566,21 @@ impl Element for EditorElement {
                 );
                 let x = numbers_right - label.width;
                 frame.gutter.push((point(x, y), label));
+                if let Some(state) = view
+                    .run_mark(*line)
+                    .filter(|_| view.lightbulb != Some(*line))
+                {
+                    run_mark(
+                        &mut frame,
+                        state,
+                        bounds.left(),
+                        y,
+                        lh,
+                        font_size,
+                        &theme,
+                        window,
+                    );
+                }
                 if view.lightbulb == Some(*line) {
                     // A painted dot, because the editor font has no emoji fallback for 💡.
                     let d = px(6.);
@@ -801,6 +816,54 @@ impl Element for EditorElement {
             }
         });
     }
+}
+
+/// A test's mark in the gutter's left margin: a run arrow until it has run, then a dot coloured
+/// by how it did.
+#[allow(clippy::too_many_arguments)]
+fn run_mark(
+    frame: &mut Frame,
+    state: crate::RunState,
+    left: Pixels,
+    y: Pixels,
+    lh: Pixels,
+    font_size: Pixels,
+    theme: &athena_ui::Theme,
+    window: &mut Window,
+) {
+    let color = match state {
+        crate::RunState::Idle => theme.color.success,
+        crate::RunState::Running => theme.color.warning,
+        crate::RunState::Passed => theme.color.success,
+        crate::RunState::Failed => theme.color.danger,
+        crate::RunState::Skipped => theme.color.content_disabled,
+    };
+    if state == crate::RunState::Idle {
+        let size = font_size * 0.7;
+        let glyph = window.text_system().shape_line(
+            "▶".into(),
+            size,
+            &[TextRun {
+                len: "▶".len(),
+                font: gpui::font(theme.typography.mono.clone()),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+        let x = left + (px(GUTTER_PAD) - glyph.width) / 2.;
+        frame
+            .gutter
+            .push((point(x, y + (lh - size) / 2. - px(1.)), glyph));
+        return;
+    }
+    let d = px(7.);
+    let origin = point(left + (px(GUTTER_PAD) - d) / 2., y + (lh - d) / 2.);
+    frame
+        .gutter_marks
+        .push(fill(Bounds::new(origin, size(d, d)), color).corner_radii(d / 2.));
 }
 
 /// How many scope headers may stick: at most a third of the view, so they never crowd out the text.

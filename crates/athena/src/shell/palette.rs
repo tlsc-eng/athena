@@ -187,6 +187,21 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Find in project", Box::new(actions::FindInProject)),
         ("Run task…", Box::new(actions::RunTask)),
+        ("Tests", Box::new(actions::ShowTests)),
+        (
+            "Tests: run test at cursor",
+            Box::new(actions::RunTestAtCursor),
+        ),
+        (
+            "Tests: run tests in current file",
+            Box::new(actions::RunTestsInFile),
+        ),
+        ("Tests: run all tests", Box::new(actions::RunAllTests)),
+        (
+            "Tests: re-run failed tests",
+            Box::new(actions::RerunFailedTests),
+        ),
+        ("Tests: stop", Box::new(actions::StopTests)),
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),
         ("Switch branch…", Box::new(actions::SwitchBranch)),

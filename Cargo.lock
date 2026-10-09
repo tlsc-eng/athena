@@ -456,6 +456,7 @@ dependencies = [
  "athena-preview",
  "athena-proto",
  "athena-term",
+ "athena-testing",
  "athena-ui",
  "athena-workspace",
  "block2",

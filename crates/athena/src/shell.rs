@@ -28,6 +28,7 @@ mod search;
 mod shortcuts;
 mod status_bar;
 mod tasks;
+mod tests_view;
 mod tree;
 mod usage_view;
 mod watch;
@@ -101,6 +102,7 @@ pub struct Shell {
     last_drawer_tab: drawer::DrawerTab,
     containers: containers_view::ContainersState,
     playwright: playwright_view::PlaywrightState,
+    tests: tests_view::TestsState,
     lsp: lsp::LspState,
     problems: problems::ProblemsState,
     code_actions: code_actions::CodeActionState,
@@ -247,6 +249,7 @@ impl Shell {
             last_drawer_tab: drawer::DrawerTab::Notifications,
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
+            tests: tests_view::TestsState::default(),
             lsp: lsp::LspState::default(),
             problems: problems::ProblemsState::default(),
             code_actions: code_actions::CodeActionState::default(),
@@ -712,6 +715,7 @@ impl Render for Shell {
 
         let root = git_view::bind_git_actions(div(), cx);
         let root = conflicts::bind_conflict_actions(tasks::bind_run_actions(root, cx), cx);
+        let root = tests_view::bind_test_actions(root, cx);
         root.track_focus(&self.focus)
             .key_context("Shell")
             .on_action(cx.listener(Self::add_project))

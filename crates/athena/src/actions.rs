@@ -84,6 +84,12 @@ actions!(
         GitStashIncludeUntracked,
         GitPopStash,
         RunTask,
+        ShowTests,
+        RunTestAtCursor,
+        RunTestsInFile,
+        RunAllTests,
+        RerunFailedTests,
+        StopTests,
     ]
 );
 

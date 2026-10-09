@@ -474,6 +474,7 @@ pub struct EditorView {
     pub(crate) wrap: Option<bool>,
     pub(crate) wrap_default: bool,
     pub(crate) merge: crate::merge_conflicts::MergeCache,
+    pub(crate) run_marks: Vec<crate::run_marks::RunMark>,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -560,6 +561,7 @@ impl EditorView {
             wrap: None,
             wrap_default: false,
             merge: Default::default(),
+            run_marks: Vec::new(),
         }
     }
 
@@ -934,6 +936,9 @@ impl EditorView {
             return;
         }
         if self.click_lightbulb(event.position, window, cx) {
+            return;
+        }
+        if self.click_run_mark(event.position, window, cx) {
             return;
         }
         if self.click_fold_column(event.position, cx) {

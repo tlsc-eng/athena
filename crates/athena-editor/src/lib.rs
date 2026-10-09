@@ -16,6 +16,7 @@ mod merge_conflicts;
 mod multi;
 mod pairs;
 pub mod recovery;
+mod run_marks;
 mod save;
 mod shared;
 mod signature;
@@ -37,6 +38,7 @@ pub use lsp_ui::{
 pub use merge_conflicts::{
     CompareMergeConflicts, ConflictBlock, Resolution, find_merge_conflicts, resolve_all,
 };
+pub use run_marks::{RunMark, RunState, RunTestAt, TestSymbol, find_tests, is_test_file};
 pub use save::{SaveSettings, Tidy, resolve_tidy, save_defaults};
 pub use signature::Signature;
 pub use syntax::{Lang, Token};

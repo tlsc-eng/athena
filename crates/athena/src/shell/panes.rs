@@ -297,6 +297,7 @@ impl Shell {
                 .detach();
                 self.lsp_opened(root, &view, cx);
                 self.git_opened(&view, cx);
+                self.watch_tests(&view, cx);
                 ItemView::Editor(view)
             }
             ItemKind::Image { path } => {
