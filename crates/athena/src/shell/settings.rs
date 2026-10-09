@@ -1,9 +1,12 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use athena_editor::{EditorView, Indent, Lang, SaveSettings};
 use athena_ui::{CODE_SIZE, CODE_ZOOM, Theme};
-use athena_workspace::{Preferences, Workspace};
+use athena_workspace::{LinterTrust, Preferences, Workspace};
 use gpui::{Context, Entity, Window};
 use serde_json::Value;
 
@@ -26,6 +29,35 @@ pub(super) struct SettingsState {
     /// Code integration, git autofetch) wait for the watcher's next read.
     unapplied: bool,
     toast: Option<u64>,
+    /// Each project's `.vscode/settings.json` with its `.athena/settings.json` laid over it.
+    pub(super) projects: HashMap<PathBuf, ProjectSettings>,
+    project_toast: Option<u64>,
+}
+
+pub(super) struct ProjectSettings {
+    settings: Settings,
+    /// The two files' modification times when read, `None` for a missing one.
+    stamps: [Option<SystemTime>; 2],
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Reads a project's settings files; problems in its `.athena/settings.json` are returned to
+/// report, while `.vscode/settings.json` is read leniently as VS Code's extensions share it.
+fn read_project(root: &Path) -> (Settings, Vec<String>) {
+    let vscode = std::fs::read_to_string(root.join(settings::VSCODE_FILE))
+        .map(|text| settings::parse_vscode(&text, root))
+        .unwrap_or_default();
+    let (own, problems) = match std::fs::read_to_string(root.join(settings::PROJECT_FILE)) {
+        Ok(text) => match settings::parse_project(&text) {
+            Ok(parsed) => parsed,
+            Err(why) => (Settings::default(), vec![why]),
+        },
+        Err(_) => Default::default(),
+    };
+    (vscode.overlaid(&own), problems)
 }
 
 impl SettingsState {
@@ -46,6 +78,8 @@ impl SettingsState {
             problems,
             unapplied: false,
             toast: None,
+            projects: HashMap::new(),
+            project_toast: None,
         }
     }
 
@@ -187,6 +221,119 @@ impl Shell {
         cx.notify();
     }
 
+    /// The project holding `path`, the innermost when projects nest.
+    pub(super) fn project_root_of(&self, path: &Path) -> Option<PathBuf> {
+        self.workspace
+            .projects
+            .iter()
+            .map(|p| &p.root)
+            .filter(|root| {
+                path.starts_with(root) || path.starts_with(super::lsp::document_key(root))
+            })
+            .max_by_key(|root| root.as_os_str().len())
+            .cloned()
+    }
+
+    /// The settings in force for files of the project at `root`: settings.json with the
+    /// project's own laid over it, those choosing what runs only once the project is trusted.
+    pub(super) fn settings_for(&self, root: Option<&Path>) -> Cow<'_, Settings> {
+        let Some((root, project)) = root.and_then(|r| Some((r, self.settings.projects.get(r)?)))
+        else {
+            return Cow::Borrowed(&self.settings.file);
+        };
+        Cow::Owned(match self.linter_trust(root) {
+            Some(LinterTrust::Allowed) => self.settings.file.overlaid(&project.settings),
+            _ => self
+                .settings
+                .file
+                .overlaid(&project.settings.without_programs()),
+        })
+    }
+
+    /// Whether the project at `root` has settings that wait for it to be trusted.
+    pub(super) fn project_changes_programs(&self, root: &Path) -> bool {
+        self.settings
+            .projects
+            .get(root)
+            .is_some_and(|p| p.settings.changes_programs())
+    }
+
+    /// Reads the project's settings files again if they changed since; true if they had.
+    fn refresh_project_settings(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
+        let stamps = [
+            modified(&root.join(settings::VSCODE_FILE)),
+            modified(&root.join(settings::PROJECT_FILE)),
+        ];
+        if self
+            .settings
+            .projects
+            .get(root)
+            .is_some_and(|p| p.stamps == stamps)
+        {
+            return false;
+        }
+        let (settings, problems) = read_project(root);
+        if let Some(id) = self.settings.project_toast.take() {
+            self.dismiss_toast(id, cx);
+        }
+        if !problems.is_empty() {
+            for problem in &problems {
+                tracing::warn!("{}: {problem}", root.join(settings::PROJECT_FILE).display());
+            }
+            let title = match problems.len() {
+                1 => ".athena/settings.json has a problem; the other settings apply".to_string(),
+                n => format!(".athena/settings.json has {n} problems; the other settings apply"),
+            };
+            let path = root.join(settings::PROJECT_FILE);
+            let action = ToastAction {
+                label: "Open .athena/settings.json",
+                run: Rc::new(move |this: &mut Shell, window, cx| {
+                    this.open_file(path.clone(), window, cx)
+                }),
+            };
+            let body: Vec<String> = problems.into_iter().take(SHOWN_PROBLEMS).collect();
+            self.settings.project_toast =
+                Some(self.action_toast(title, body.join("\n"), action, cx));
+        }
+        let asks =
+            settings.changes_programs() && self.linter_trust(root) == Some(LinterTrust::NotAsked);
+        self.settings
+            .projects
+            .insert(root.to_path_buf(), ProjectSettings { settings, stamps });
+        if asks {
+            self.ask_project_trust(root, cx);
+        }
+        true
+    }
+
+    /// Puts the project's settings in force again: its editors and running servers follow.
+    pub(super) fn project_settings_changed(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let editors: Vec<Entity<EditorView>> = self
+            .items
+            .iter()
+            .filter(|((r, _), _)| r == root)
+            .filter_map(|(_, view)| match view {
+                ItemView::Editor(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        for editor in &editors {
+            self.apply_editor_settings(editor, cx);
+        }
+        self.lsp_settings_changed(cx);
+    }
+
+    /// A saved file that is one of a project's settings files puts it in force.
+    pub(super) fn project_settings_saved(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let ours = path.ends_with(settings::PROJECT_FILE) || path.ends_with(settings::VSCODE_FILE);
+        let Some(root) = self.project_root_of(path).filter(|_| ours) else {
+            return;
+        };
+        if self.refresh_project_settings(&root, cx) {
+            self.project_settings_changed(&root, cx);
+        }
+    }
+
     /// Format on save, whitespace tidying, word wrap, auto save and inlay hints for `editor`,
     /// by its language; an `.editorconfig` still wins over the tidying settings.
     pub(super) fn apply_editor_settings(
@@ -195,20 +342,19 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let lang = editor.read(cx).lang();
-        let e = self.settings.file.editor_for(lang);
-        let eslint_fixes = self.settings.file.eslint_fix_on_save()
-            && matches!(lang, Some(Lang::TypeScript | Lang::Tsx | Lang::JavaScript));
-        let format = match eslint_fixes {
+        let root = self.project_root_of(editor.read(cx).path());
+        let file = self.settings_for(root.as_deref());
+        let e = file.editor_for(lang);
+        let script = matches!(lang, Some(Lang::TypeScript | Lang::Tsx | Lang::JavaScript));
+        let eslint_fixes = script && e.fix_all_on_save.unwrap_or(file.eslint_fix_on_save());
+        let organize =
+            e.organize_imports_on_save == Some(true) && (lang == Some(Lang::Go) || script);
+        let format = match eslint_fixes || organize {
             true => Some(true),
             false => e.format_on_save.or(self.workspace.format_on_save),
         };
-        let wrap = self
-            .settings
-            .file
-            .editor
-            .word_wrap
-            .unwrap_or(self.workspace.word_wrap);
-        let wrap_language = self.settings.file.language_word_wrap(lang);
+        let wrap = file.editor.word_wrap.unwrap_or(self.workspace.word_wrap);
+        let wrap_language = file.language_word_wrap(lang);
         let ms = e
             .autosave_delay_ms
             .unwrap_or(self.workspace.autosave_delay_ms);
@@ -233,13 +379,17 @@ impl Shell {
     /// Settings a newly opened editor takes once: those above, and `tab_size` for a file whose
     /// indentation shows no style of its own.
     pub(super) fn editor_settings_opened(
-        &self,
+        &mut self,
         editor: &Entity<EditorView>,
         cx: &mut Context<Self>,
     ) {
+        let root = self.project_root_of(editor.read(cx).path());
+        if let Some(root) = &root {
+            self.refresh_project_settings(root, cx);
+        }
         self.apply_editor_settings(editor, cx);
         let lang = editor.read(cx).lang();
-        let Some(size) = self.settings.file.editor_for(lang).tab_size else {
+        let Some(size) = self.settings_for(root.as_deref()).editor_for(lang).tab_size else {
             return;
         };
         let undetectable = lang != Some(Lang::Go)

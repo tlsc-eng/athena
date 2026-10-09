@@ -87,8 +87,10 @@ pub(super) struct LspState {
     pub(super) showing_calls: bool,
     pub(super) calls: Option<super::calls::Calls>,
     pub(super) calls_client: Option<Rc<Client>>,
-    /// Project roots whose "Run this project's linters?" question is on screen.
+    /// Project roots whose "Run this project's code?" question is on screen.
     asking_trust: HashSet<PathBuf>,
+    /// Projects whose own TypeScript waits for trust with no global one to run meanwhile.
+    held_back: HashSet<PathBuf>,
 }
 
 impl LspState {
@@ -179,20 +181,51 @@ fn linter_name(kind: ServerKind) -> &'static str {
     }
 }
 
-/// `over` laid onto `base`, objects merged key by key.
-fn merge_settings(base: &mut serde_json::Value, over: &serde_json::Value) {
-    match (base.as_object_mut(), over.as_object()) {
-        (Some(base), Some(over)) => {
-            for (key, value) in over {
-                merge_settings(
-                    base.entry(key.clone()).or_insert(serde_json::Value::Null),
-                    value,
-                );
-            }
-        }
-        _ if !over.is_null() => *base = over.clone(),
-        _ => {}
+/// Settings a server reads only as it starts: which TypeScript and plugins tsserver loads, and
+/// the Go toolchain gopls runs with.
+fn needs_restart(kind: ServerKind, old: &serde_json::Value, new: &serde_json::Value) -> bool {
+    let pointers: &[&str] = match kind {
+        ServerKind::TypeScript => &["/tsserver", "/plugins"],
+        ServerKind::Go => &["/env/GOTOOLCHAIN"],
+        _ => &[],
+    };
+    pointers.iter().any(|p| old.pointer(p) != new.pointer(p))
+}
+
+fn project_name(root: &Path) -> String {
+    root.file_name().map_or_else(
+        || root.display().to_string(),
+        |n| n.to_string_lossy().into(),
+    )
+}
+
+/// The question and its detail for a project bringing `found` (ESLint, Biome, TypeScript) and,
+/// with `settings`, settings that choose what language servers run.
+fn trust_question(project: &str, found: &[&str], settings: bool) -> (String, String) {
+    let names = match found {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let message = match found.is_empty() {
+        true => format!("Use {project}'s language server settings?"),
+        false => format!("Run {names} from {project}?"),
+    };
+    let mut brings = Vec::new();
+    if !found.is_empty() {
+        brings.push(format!("installs {names} in node_modules"));
     }
+    if settings {
+        brings.push("has settings that choose what its language servers run".to_string());
+    }
+    let detail = format!(
+        "{project} {}. Allowing runs the project's own code, with its config and plugins, on \
+         this Mac; allow it only for a project you trust. Until then TypeScript uses your global \
+         install and the project's editor settings still apply. The command palette can change \
+         this later.",
+        brings.join(" and ")
+    );
+    (message, detail)
 }
 
 fn server_for(lang: Lang) -> Option<(ServerKind, &'static str)> {
@@ -345,14 +378,29 @@ impl Shell {
             .collect()
     }
 
-    /// The settings a server starts with and is sent again when settings.json changes: the
-    /// user's `lsp.<program>` section, laid over what ESLint needs to run at all.
+    /// The settings a server starts with and is sent again when settings change: the user's
+    /// `lsp.<program>` section with the project's laid over it, on top of what ESLint needs to
+    /// run at all; TypeScript is pinned to a global install until the project is trusted.
     fn server_settings(&self, key: &ServerKey) -> serde_json::Value {
-        let user = self.settings.file.server_config(key.1.program());
+        let user = self
+            .settings_for(Some(&key.0))
+            .server_config(key.1.program());
         match key.1 {
             ServerKind::Eslint => {
                 let mut settings = athena_lsp::eslint_settings(&document_key(&key.0));
-                merge_settings(&mut settings, &user);
+                crate::settings::merge_json(&mut settings, &user);
+                settings
+            }
+            ServerKind::TypeScript if self.linter_trust(&key.0) != Some(LinterTrust::Allowed) => {
+                let mut settings = user;
+                // typescript-language-server would load the project's node_modules/typescript,
+                // or one in a folder above it, and the tsconfig plugins beside it.
+                if let Some(global) = athena_lsp::global_typescript(&key.0) {
+                    crate::settings::merge_json(
+                        &mut settings,
+                        &serde_json::json!({"tsserver": {"path": global}}),
+                    );
+                }
                 settings
             }
             _ => user,
@@ -414,7 +462,7 @@ impl Shell {
                 match self.linter_trust(&key.0)? {
                     LinterTrust::Allowed => Some(program),
                     LinterTrust::NotAsked => {
-                        self.ask_linter_trust(&key.0, cx);
+                        self.ask_project_trust(&key.0, cx);
                         return None;
                     }
                     LinterTrust::Denied => return None,
@@ -422,6 +470,9 @@ impl Shell {
             }
             false => None,
         };
+        if key.1 == ServerKind::TypeScript && !self.typescript_may_start(&key.0, cx) {
+            return None;
+        }
         tracing::info!(root = %key.0.display(), ?local, "starting {}", key.1.program());
         let config: Config = Arc::new(RwLock::new(self.server_settings(key)));
         let root = document_key(&key.0);
@@ -454,35 +505,57 @@ impl Shell {
         Some(client)
     }
 
-    fn linter_trust(&self, root: &Path) -> Option<LinterTrust> {
+    pub(super) fn linter_trust(&self, root: &Path) -> Option<LinterTrust> {
         let project = self.workspace.projects.iter().find(|p| p.root == root)?;
         Some(project.linters)
     }
 
-    /// Asks once per project whether the linters it installs may run, as VS Code asks before
-    /// running a workspace's ESLint.
-    fn ask_linter_trust(&mut self, root: &Path, cx: &mut Context<Self>) {
+    /// Whether typescript-language-server may start for the project at `root`: always once the
+    /// project is trusted, else only when a global TypeScript can stand in for the project's own.
+    fn typescript_may_start(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
+        let trust = self.linter_trust(root);
+        if trust == Some(LinterTrust::Allowed) || athena_lsp::project_typescript(root).is_none() {
+            return true;
+        }
+        if trust == Some(LinterTrust::NotAsked) {
+            self.ask_project_trust(root, cx);
+        }
+        if athena_lsp::global_typescript(root).is_some() {
+            return true;
+        }
+        if self.lsp.held_back.insert(root.to_path_buf()) {
+            let name = project_name(root);
+            self.transient_notice(
+                "TypeScript waits for this project to be allowed",
+                format!(
+                    "{name} has its own TypeScript, which runs only once {name} is allowed. \
+                     Install one for Athena to use meanwhile: npm install -g typescript"
+                ),
+                cx,
+            );
+        }
+        false
+    }
+
+    /// Asks once per project whether the code it brings may run: the linters and TypeScript it
+    /// installs, and settings that choose what language servers run, as VS Code asks before
+    /// trusting a workspace.
+    pub(super) fn ask_project_trust(&mut self, root: &Path, cx: &mut Context<Self>) {
         if !self.lsp.asking_trust.insert(root.to_path_buf()) {
             return;
         }
-        let found: Vec<&str> = PROJECT_LINTERS
+        let mut found: Vec<&str> = PROJECT_LINTERS
             .into_iter()
             .filter(|&kind| athena_lsp::project_server(root, kind).is_some())
             .map(linter_name)
             .collect();
-        let names = found.join(" and ");
-        let project = root.file_name().map_or_else(
-            || root.display().to_string(),
-            |n| n.to_string_lossy().into(),
-        );
-        let message = format!("Run {names} from {project}?");
-        let detail = format!(
-            "{project} installs {names} in node_modules. Running {} runs the project's own code, \
-             with its config and plugins, on this Mac. Allow it only for a project you trust; \
-             the command palette can change this later.",
-            if found.len() > 1 { "them" } else { "it" }
-        );
-        tracing::info!(root = %root.display(), "asking whether {names} may run");
+        if athena_lsp::project_typescript(root).is_some() {
+            found.push("TypeScript");
+        }
+        let settings = self.project_changes_programs(root);
+        let project = project_name(root);
+        let (message, detail) = trust_question(&project, &found, settings);
+        tracing::info!(root = %root.display(), "asking whether {project}'s code may run");
         let shell = cx.entity();
         let root = root.to_path_buf();
         // Deferred: files restored at launch open before the window exists.
@@ -526,13 +599,20 @@ impl Shell {
         });
     }
 
-    /// Records the answer for the project at `root`, then starts or stops its linters to match.
+    /// Records the answer for the project at `root`, then starts or stops its linters and
+    /// TypeScript, and applies or withholds its server settings, to match.
     fn set_linter_trust(&mut self, root: &Path, trust: LinterTrust, cx: &mut Context<Self>) {
         let Some(project) = self.workspace.projects.iter_mut().find(|p| p.root == root) else {
             return;
         };
         project.linters = trust;
         self.schedule_save(cx);
+        self.lsp.held_back.remove(root);
+        self.project_settings_changed(root, cx);
+        let typescript = (root.to_path_buf(), ServerKind::TypeScript);
+        if !self.lsp.servers.contains_key(&typescript) {
+            self.restart_lsp(&typescript, cx);
+        }
         if trust != LinterTrust::Allowed {
             return self.stop_project_linters(root, cx);
         }
@@ -577,13 +657,19 @@ impl Shell {
         let (trust, title, body) = match allow {
             true => (
                 LinterTrust::Allowed,
-                "Project linters allowed",
-                format!("ESLint and Biome from {name}'s node_modules run for its files."),
+                "Project code allowed",
+                format!(
+                    "ESLint, Biome and TypeScript from {name}'s node_modules run for its files, \
+                     and its settings choose what language servers run."
+                ),
             ),
             false => (
                 LinterTrust::Denied,
-                "Project linters disallowed",
-                format!("Athena no longer runs ESLint or Biome from {name}'s node_modules."),
+                "Project code disallowed",
+                format!(
+                    "Athena no longer runs ESLint, Biome or TypeScript from {name}'s \
+                     node_modules, nor its settings for language servers."
+                ),
             ),
         };
         self.set_linter_trust(&root, trust, cx);
@@ -692,18 +778,28 @@ impl Shell {
     /// its editors for inlay hints again.
     pub(super) fn lsp_settings_changed(&mut self, cx: &mut Context<Self>) {
         let mut changed = Vec::new();
+        let mut restart = Vec::new();
         for (key, server) in &self.lsp.servers {
             let config = self.server_settings(key);
             let Ok(mut current) = server.config.write() else {
                 continue;
             };
-            if *current != config {
-                *current = config.clone();
-                drop(current);
-                tracing::info!("{} settings changed", key.1.program());
-                server.client.did_change_configuration(config);
-                changed.push(key.clone());
+            if *current == config {
+                continue;
             }
+            if needs_restart(key.1, &current, &config) {
+                restart.push(key.clone());
+                continue;
+            }
+            *current = config.clone();
+            drop(current);
+            tracing::info!("{} settings changed", key.1.program());
+            server.client.did_change_configuration(config);
+            changed.push(key.clone());
+        }
+        for key in &restart {
+            tracing::info!("{} restarts for its new settings", key.1.program());
+            self.replace_server(key, cx);
         }
         if changed.is_empty() {
             return;
@@ -717,6 +813,20 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Stops a running server and starts it again for the files it had open.
+    fn replace_server(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        if self.lsp.servers.remove(key).is_none() {
+            return;
+        }
+        self.lsp.documents.retain(|_, k| k != key);
+        self.lsp.linters.retain(|_, keys| {
+            keys.retain(|k| k != key);
+            !keys.is_empty()
+        });
+        self.clear_diagnostics(key, cx);
+        self.restart_lsp(key, cx);
     }
 
     fn refresh_inlay_hints(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
@@ -945,6 +1055,8 @@ impl Shell {
                 server.client.did_save(&doc);
             }
         }
+        let path = editor.read(cx).path().to_path_buf();
+        self.project_settings_saved(&path, cx);
     }
 
     pub(super) fn lsp_definition(
@@ -1177,9 +1289,9 @@ impl Shell {
         .detach();
     }
 
-    /// Asks the server to format the file before Cmd+S saves it, and ESLint to fix it when
-    /// `eslint.fixOnSave` is on; the editor always gets an answer, empty when the servers are
-    /// missing, fail or are too slow.
+    /// Asks the server to format the file before Cmd+S saves it, to organize its imports when
+    /// `editor.codeActionsOnSave` asks, and ESLint to fix it when `eslint.fixOnSave` is on; the
+    /// editor always gets an answer, empty when the servers are missing, fail or are too slow.
     pub(super) fn lsp_format(
         &mut self,
         editor: &Entity<EditorView>,
@@ -1190,18 +1302,21 @@ impl Shell {
         let doc = document_key(editor.read(cx).path());
         self.flush_change(&doc, editor, cx);
         let lang = editor.read(cx).lang();
-        // Fix on save routes every save here, so formatting still follows its own setting.
-        let wants_format = self
-            .settings
-            .file
-            .editor_for(lang)
-            .format_on_save
-            .or(self.workspace.format_on_save)
-            .unwrap_or(lang == Some(Lang::Go));
-        let eslint = self
-            .settings
-            .file
-            .eslint_fix_on_save()
+        let root = self.project_root_of(editor.read(cx).path());
+        let (wants_format, organize, fix_all) = {
+            let file = self.settings_for(root.as_deref());
+            let e = file.editor_for(lang);
+            // Fix on save and organize imports route every save here, so formatting still
+            // follows its own setting.
+            (
+                e.format_on_save
+                    .or(self.workspace.format_on_save)
+                    .unwrap_or(lang == Some(Lang::Go)),
+                e.organize_imports_on_save == Some(true),
+                e.fix_all_on_save.unwrap_or(file.eslint_fix_on_save()),
+            )
+        };
+        let eslint = fix_all
             .then(|| {
                 let key = self
                     .lsp
@@ -1212,17 +1327,13 @@ impl Shell {
                 Some(self.lsp.servers.get(key)?.client.clone())
             })
             .flatten();
-        let client = self.document_client(&doc).filter(|_| wants_format);
-        if client.is_none() && eslint.is_none() {
+        let main = self.document_client(&doc);
+        let client = main.clone().filter(|_| wants_format);
+        let organizer = main.filter(|_| organize);
+        if client.is_none() && organizer.is_none() && eslint.is_none() {
             editor.update(cx, |e, cx| e.format_and_save(request, Vec::new(), cx));
             return;
         }
-        // Go files have their imports organized as they are formatted, as VS Code's Go setup does.
-        let organize = self
-            .lsp
-            .documents
-            .get(&doc)
-            .is_some_and(|(_, kind)| *kind == ServerKind::Go);
         let weak = editor.downgrade();
         let late = weak.clone();
         cx.spawn(async move |_, cx| {
@@ -1242,10 +1353,7 @@ impl Shell {
                     }
                 }
             };
-            let imports = source(
-                client.clone().filter(|_| organize),
-                "source.organizeImports",
-            );
+            let imports = source(organizer, "source.organizeImports");
             let fixes = source(eslint, "source.fixAll.eslint");
             let formatting = async {
                 match &client {
@@ -1612,6 +1720,8 @@ impl Shell {
             self.lsp.calls_client = None;
         }
         self.lsp.servers.retain(|(r, _), _| r != root);
+        self.lsp.held_back.remove(root);
+        self.settings.projects.remove(root);
         self.lsp.failed.retain(|(r, _), _| r != root);
         self.lsp.documents.retain(|_, (r, _)| r != root);
         self.lsp.linters.retain(|_, keys| {
@@ -1726,6 +1836,48 @@ mod tests {
             !lsp.answer_is_current(&key, &restarted, &doc),
             "the file closed"
         );
+    }
+
+    #[test]
+    fn the_trust_question_names_what_the_project_brings() {
+        let (message, detail) = trust_question("web", &["ESLint", "Biome", "TypeScript"], true);
+        assert_eq!(message, "Run ESLint, Biome and TypeScript from web?");
+        assert!(
+            detail.starts_with(
+                "web installs ESLint, Biome and TypeScript in node_modules and has settings"
+            ),
+            "{detail}"
+        );
+        let (message, detail) = trust_question("api", &["ESLint"], false);
+        assert_eq!(message, "Run ESLint from api?");
+        assert!(!detail.contains("settings that"), "{detail}");
+        let (message, detail) = trust_question("go-svc", &[], true);
+        assert_eq!(message, "Use go-svc's language server settings?");
+        assert!(detail.starts_with("go-svc has settings"), "{detail}");
+    }
+
+    #[test]
+    fn only_settings_read_at_start_restart_a_server() {
+        use serde_json::json;
+        let pinned =
+            json!({"tsserver": {"path": "/g/typescript/lib/tsserver.js"}, "preferences": {}});
+        let project = json!({"preferences": {"quoteStyle": "single"}});
+        assert!(needs_restart(ServerKind::TypeScript, &pinned, &project));
+        assert!(!needs_restart(
+            ServerKind::TypeScript,
+            &project,
+            &json!({"preferences": {}})
+        ));
+        assert!(needs_restart(
+            ServerKind::Go,
+            &json!({}),
+            &json!({"env": {"GOTOOLCHAIN": "auto"}})
+        ));
+        assert!(!needs_restart(
+            ServerKind::Go,
+            &json!({}),
+            &json!({"staticcheck": true})
+        ));
     }
 
     #[test]

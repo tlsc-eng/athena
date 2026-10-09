@@ -53,6 +53,22 @@ pub struct EditorSettings {
     pub autosave_delay_ms: Option<u64>,
     pub inlay_hints: Option<bool>,
     pub bracket_pair_colorization: Option<bool>,
+    /// From VS Code's `editor.codeActionsOnSave`: `source.organizeImports` on Cmd+S.
+    pub organize_imports_on_save: Option<bool>,
+    /// From `editor.codeActionsOnSave`: `source.fixAll.eslint` on Cmd+S.
+    pub fix_all_on_save: Option<bool>,
+    pub lightbulb: Option<Lightbulb>,
+    /// VS Code's `editor.linkedEditing`: typing in a tag name renames its matching tag.
+    pub linked_editing: Option<bool>,
+}
+
+/// Which code actions put a lightbulb beside the cursor's line; the rest wait for Cmd+.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lightbulb {
+    Off,
+    QuickFixes,
+    /// Refactorings too, as VS Code's `"editor.lightbulb.enabled": "onCode"`.
+    All,
 }
 
 impl EditorSettings {
@@ -72,6 +88,12 @@ impl EditorSettings {
             bracket_pair_colorization: over
                 .bracket_pair_colorization
                 .or(self.bracket_pair_colorization),
+            organize_imports_on_save: over
+                .organize_imports_on_save
+                .or(self.organize_imports_on_save),
+            fix_all_on_save: over.fix_all_on_save.or(self.fix_all_on_save),
+            lightbulb: over.lightbulb.or(self.lightbulb),
+            linked_editing: over.linked_editing.or(self.linked_editing),
         }
     }
 
@@ -81,7 +103,28 @@ impl EditorSettings {
             "format_on_save" => self.format_on_save = Some(flag()?),
             "trim_trailing_whitespace" => self.trim_trailing_whitespace = Some(flag()?),
             "insert_final_newline" => self.insert_final_newline = Some(flag()?),
-            "word_wrap" => self.word_wrap = Some(flag()?),
+            // VS Code spells it "on", "off", "wordWrapColumn" or "bounded".
+            "word_wrap" => {
+                self.word_wrap = Some(match value.as_str() {
+                    Some("off") => false,
+                    Some("on" | "wordWrapColumn" | "bounded") => true,
+                    _ => flag()?,
+                });
+            }
+            "linked_editing" => self.linked_editing = Some(flag()?),
+            "lightbulb" => {
+                self.lightbulb = Some(match (value.as_str(), value.as_bool()) {
+                    (Some("off"), _) | (_, Some(false)) => Lightbulb::Off,
+                    (Some("quickfix"), _) => Lightbulb::QuickFixes,
+                    (Some("all" | "onCode" | "on"), _) | (_, Some(true)) => Lightbulb::All,
+                    _ => return Err("must be \"off\", \"quickfix\" or \"all\"".into()),
+                });
+            }
+            "code_actions_on_save" => {
+                let (organize, fix_all) = code_actions_on_save(value)?;
+                self.organize_imports_on_save = Some(organize);
+                self.fix_all_on_save = Some(fix_all);
+            }
             "inlay_hints" => self.inlay_hints = Some(flag()?),
             "bracket_pair_colorization" => self.bracket_pair_colorization = Some(flag()?),
             "font_size" => {
@@ -117,8 +160,35 @@ fn editor_key(key: &str) -> &str {
         "bracketPairColorization" | "bracketPairColorization.enabled" => {
             "bracket_pair_colorization"
         }
+        "wordWrap" => "word_wrap",
+        "linkedEditing" => "linked_editing",
+        "lightbulb.enabled" => "lightbulb",
+        "codeActionsOnSave" => "code_actions_on_save",
         other => other,
     }
+}
+
+/// The `editor.codeActionsOnSave` kinds Athena runs: organize imports and ESLint's fix-all.
+/// VS Code takes a list of kinds, or an object of kinds to `true`, `"explicit"`, `"always"`
+/// or `false`/`"never"`; Cmd+S is an explicit save, so all but the off values turn a kind on.
+fn code_actions_on_save(value: &Value) -> Result<(bool, bool), String> {
+    let on: Vec<&str> = match value {
+        Value::Array(kinds) => kinds.iter().filter_map(Value::as_str).collect(),
+        Value::Object(kinds) => kinds
+            .iter()
+            .filter(|(_, v)| !matches!(v, Value::Bool(false)) && v.as_str() != Some("never"))
+            .map(|(k, _)| k.as_str())
+            .collect(),
+        _ => return Err("must be an object of code action kinds".into()),
+    };
+    let wants = |kind: &str| {
+        on.iter()
+            .any(|k| *k == kind || kind.starts_with(&format!("{k}.")))
+    };
+    Ok((
+        wants("source.organizeImports"),
+        wants("source.fixAll.eslint"),
+    ))
 }
 
 impl Settings {
@@ -210,6 +280,146 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// These settings with a project's laid over them: its editor and language blocks win key by
+    /// key and its `lsp` entries merge into these; app-wide settings stay these.
+    pub fn overlaid(&self, project: &Settings) -> Settings {
+        let mut out = self.clone();
+        out.editor = self.editor.overlaid(&project.editor);
+        for (id, block) in &project.languages {
+            let merged = match self.languages.get(id) {
+                Some(base) => base.overlaid(block),
+                None => block.clone(),
+            };
+            out.languages.insert(id.clone(), merged);
+        }
+        for (server, config) in &project.lsp {
+            merge_json(out.lsp.entry(server.clone()).or_insert(Value::Null), config);
+        }
+        out.eslint_fix_on_save = project.eslint_fix_on_save.or(self.eslint_fix_on_save);
+        out
+    }
+
+    /// Whether these project settings choose what language servers run or load, which only a
+    /// trusted project may: server settings can name programs, plugins, flags and toolchains.
+    pub fn changes_programs(&self) -> bool {
+        !self.lsp.is_empty()
+    }
+
+    /// These settings without what [`Self::changes_programs`] covers.
+    pub fn without_programs(&self) -> Settings {
+        Settings {
+            lsp: HashMap::new(),
+            ..self.clone()
+        }
+    }
+}
+
+/// `over` laid onto `base`, objects merged key by key.
+pub fn merge_json(base: &mut Value, over: &Value) {
+    match (base.as_object_mut(), over.as_object()) {
+        (Some(base), Some(over)) => {
+            for (key, value) in over {
+                merge_json(base.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+        _ if !over.is_null() => *base = over.clone(),
+        _ => {}
+    }
+}
+
+/// Where a project keeps its own settings, beside VS Code's.
+pub const PROJECT_FILE: &str = ".athena/settings.json";
+pub const VSCODE_FILE: &str = ".vscode/settings.json";
+
+/// A project's `.athena/settings.json`, read like the global file; settings that are app-wide
+/// (theme, zoom, autofetch and the like) are reported and left out.
+pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
+    let (mut s, mut problems) = parse(text)?;
+    let app_wide = [
+        ("theme", s.theme.take().is_some()),
+        ("ide_integration", s.ide_integration.take().is_some()),
+        ("git.autofetch", s.autofetch.take().is_some()),
+        (
+            "explorer.confirmDragAndDrop",
+            s.confirm_drag_and_drop.take().is_some(),
+        ),
+        ("window.zoom_level", s.zoom_level.take().is_some()),
+        ("editor.font_size", s.editor.font_size.take().is_some()),
+    ];
+    for (key, set) in app_wide {
+        if set {
+            problems.push(format!(
+                "\"{key}\" applies only in the global settings.json"
+            ));
+        }
+    }
+    Ok((s, problems))
+}
+
+/// The settings Athena understands in a project's `.vscode/settings.json`: editor and `[lang]`
+/// keys, `editor.codeActionsOnSave`, `gopls`, `go.toolsEnvVars` (gopls's `env`),
+/// `typescript.tsdk` and the `typescript.*` / `javascript.*` preferences typescript-language-server
+/// reads. Everything else, and any value Athena cannot use, is ignored, as the file is shared
+/// with VS Code and its extensions.
+pub fn parse_vscode(text: &str, root: &Path) -> Settings {
+    let mut settings = Settings::default();
+    let json = crate::keymap::strip_jsonc(text);
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&json) else {
+        return settings;
+    };
+    const TS: &str = "typescript-language-server";
+    for (key, value) in &map {
+        match key.as_str() {
+            k if k.len() > 2 && k.starts_with('[') && k.ends_with(']') => {
+                let block = settings
+                    .languages
+                    .entry(k[1..k.len() - 1].into())
+                    .or_default();
+                for (inner, value) in value.as_object().into_iter().flatten() {
+                    if let Some(rest) = inner
+                        .strip_prefix("editor.")
+                        .or_else(|| inner.strip_prefix("files."))
+                    {
+                        let _ = block.set(rest, value);
+                    }
+                }
+            }
+            "gopls" if value.is_object() => {
+                merge_json(
+                    settings.lsp.entry("gopls".into()).or_insert(Value::Null),
+                    value,
+                );
+            }
+            "go.toolsEnvVars" if value.is_object() => {
+                let gopls = settings.lsp.entry("gopls".into()).or_insert(json!({}));
+                merge_json(gopls, &json!({ "env": value }));
+            }
+            "typescript.tsdk" => {
+                if let Some(dir) = value.as_str().filter(|d| !d.is_empty()) {
+                    let dir = root.join(dir);
+                    let ts = settings.lsp.entry(TS.into()).or_insert(json!({}));
+                    set_pointer(ts, "/tsserver/path", json!(dir));
+                }
+            }
+            k if k.starts_with("typescript.") || k.starts_with("javascript.") => {
+                let ts = settings.lsp.entry(TS.into()).or_insert(json!({}));
+                set_pointer(ts, &format!("/{}", k.replace('.', "/")), value.clone());
+            }
+            k => {
+                if let Some(rest) = k
+                    .strip_prefix("editor.")
+                    .or_else(|| k.strip_prefix("files."))
+                {
+                    let _ = settings.editor.set(rest, value);
+                }
+            }
+        }
+    }
+    settings.editor.font_size = None;
+    settings
+}
+
 fn set_pointer(root: &mut Value, pointer: &str, value: Value) {
     let mut at = root;
     let keys: Vec<&str> = pointer.trim_start_matches('/').split('/').collect();
@@ -235,8 +445,10 @@ fn language_defaults(lang: Lang) -> EditorSettings {
             trim_trailing_whitespace: Some(false),
             ..EditorSettings::default()
         },
+        // VS Code's Go extension also sets `codeActionsOnSave` to organize imports.
         Lang::Go => EditorSettings {
             format_on_save: Some(true),
+            organize_imports_on_save: Some(true),
             ..EditorSettings::default()
         },
         _ => EditorSettings::default(),
@@ -1295,6 +1507,137 @@ mod tests {
         assert_eq!(p.theme, ThemeChoice::Dark);
         assert_eq!(p.format_on_save, Some(true));
         assert!(p.ide_integration);
+    }
+
+    #[test]
+    fn code_actions_on_save_lightbulb_wrap_and_linked_editing_read_vs_codes_spellings() {
+        let (s, problems) = parse(
+            r#"{"editor.codeActionsOnSave": {"source.organizeImports": "explicit",
+                                             "source.fixAll": "never"},
+                "editor.lightbulb.enabled": "onCode",
+                "editor.wordWrap": "on",
+                "editor.linkedEditing": true,
+                "[typescript]": {"editor.codeActionsOnSave": ["source.fixAll"]}}"#,
+        )
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.editor.organize_imports_on_save, Some(true));
+        assert_eq!(s.editor.fix_all_on_save, Some(false));
+        assert_eq!(s.editor.lightbulb, Some(Lightbulb::All));
+        assert_eq!(s.editor.word_wrap, Some(true));
+        assert_eq!(s.editor.linked_editing, Some(true));
+        let ts = s.editor_for(Some(Lang::TypeScript));
+        assert_eq!(
+            (ts.organize_imports_on_save, ts.fix_all_on_save),
+            (Some(false), Some(true)),
+            "source.fixAll covers ESLint's fix-all"
+        );
+        let (s, problems) = parse(
+            r#"{"editor": {"lightbulb": "quickfix", "codeActionsOnSave": {"source.organizeImports": true}}}"#,
+        )
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.editor.lightbulb, Some(Lightbulb::QuickFixes));
+        assert_eq!(s.editor.organize_imports_on_save, Some(true));
+        let (_, problems) =
+            parse(r#"{"editor.lightbulb.enabled": "sometimes", "editor.codeActionsOnSave": 1}"#)
+                .unwrap();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        let go = Settings::default().editor_for(Some(Lang::Go));
+        assert_eq!(
+            go.organize_imports_on_save,
+            Some(true),
+            "as VS Code's Go setup"
+        );
+        assert_eq!(Settings::default().editor.lightbulb, None);
+    }
+
+    #[test]
+    fn project_settings_beat_the_users_and_language_blocks_beat_both_as_in_vs_code() {
+        let (user, _) = parse(
+            r#"{"editor": {"tab_size": 8, "format_on_save": false},
+                "[go]": {"word_wrap": true},
+                "lsp": {"gopls": {"staticcheck": true, "hints": {"parameterNames": true}}}}"#,
+        )
+        .unwrap();
+        let (project, problems) = parse_project(
+            r#"{"editor": {"tab_size": 2, "word_wrap": false, "format_on_save": true},
+                "[go]": {"format_on_save": false},
+                "lsp": {"gopls": {"hints": {"assignVariableTypes": true}}},
+                "theme": "dark", "window.zoom_level": 2}"#,
+        )
+        .unwrap();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(project.theme, None);
+        let both = user.overlaid(&project);
+        assert_eq!(both.editor.tab_size, Some(2));
+        let go = both.editor_for(Some(Lang::Go));
+        assert_eq!(
+            go.word_wrap,
+            Some(true),
+            "the user's [go] beats the project's editor"
+        );
+        assert_eq!(
+            go.format_on_save,
+            Some(false),
+            "the project's [go] beats both"
+        );
+        assert_eq!(both.editor_for(Some(Lang::Rust)).format_on_save, Some(true));
+        assert_eq!(
+            both.lsp["gopls"],
+            json!({"staticcheck": true, "hints": {"parameterNames": true, "assignVariableTypes": true}})
+        );
+        assert!(project.changes_programs());
+        let untrusted = user.overlaid(&project.without_programs());
+        assert_eq!(untrusted.lsp, user.lsp, "server settings wait for trust");
+        assert_eq!(untrusted.editor.tab_size, Some(2), "editor settings do not");
+    }
+
+    #[test]
+    fn a_vscode_settings_file_gives_athena_the_keys_it_knows_and_nothing_else() {
+        let root = Path::new("/p/app");
+        let s = parse_vscode(
+            r#"{
+              // VS Code's own file, with an extension's keys
+              "editor.formatOnSave": true,
+              "editor.wordWrap": "off",
+              "editor.fontSize": 20,
+              "editor.defaultFormatter": "esbenp.prettier-vscode",
+              "files.insertFinalNewline": true,
+              "[typescriptreact]": {"editor.tabSize": 2, "editor.defaultFormatter": "x"},
+              "editor.codeActionsOnSave": {"source.organizeImports": "explicit"},
+              "gopls": {"ui.semanticTokens": true},
+              "go.toolsEnvVars": {"GOTOOLCHAIN": "auto"},
+              "typescript.tsdk": "node_modules/typescript/lib",
+              "typescript.preferences.importModuleSpecifier": "relative",
+              "prettier.semi": false,
+              "editor.tabSize": "wide",
+            }"#,
+            root,
+        );
+        assert_eq!(s.editor.format_on_save, Some(true));
+        assert_eq!(s.editor.word_wrap, Some(false));
+        assert_eq!(s.editor.font_size, None, "app-wide");
+        assert_eq!(s.editor.insert_final_newline, Some(true));
+        assert_eq!(
+            s.editor.tab_size, None,
+            "a value Athena cannot use is skipped"
+        );
+        assert_eq!(s.languages["typescriptreact"].tab_size, Some(2));
+        assert_eq!(s.editor.organize_imports_on_save, Some(true));
+        assert_eq!(
+            s.lsp["gopls"],
+            json!({"ui.semanticTokens": true, "env": {"GOTOOLCHAIN": "auto"}})
+        );
+        let ts = &s.lsp["typescript-language-server"];
+        assert_eq!(ts["tsserver"]["path"], "/p/app/node_modules/typescript/lib");
+        assert_eq!(
+            ts["typescript"]["preferences"]["importModuleSpecifier"],
+            "relative"
+        );
+        assert!(s.changes_programs());
+        assert_eq!(parse_vscode("not json", root), Settings::default());
+        assert!(!parse_vscode(r#"{"editor.tabSize": 2}"#, root).changes_programs());
     }
 
     #[test]

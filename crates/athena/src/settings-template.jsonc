@@ -1,6 +1,8 @@
 // Athena settings. Comments and trailing commas are allowed, as in VS Code. A setting left out
 // keeps its default, or the choice last made from the command palette or the File menu.
 // Uncomment and edit any of these; Athena applies them as soon as the file is saved.
+// A project's own .athena/settings.json (and the keys Athena knows in .vscode/settings.json)
+// is laid over this file for its files; its "lsp" entries apply once the project is allowed.
 {
   // "editor": {
   //   "format_on_save": true,          // ⌘S formats through the language server first
@@ -11,7 +13,10 @@
   //   "tab_size": 4,                   // for files whose indentation cannot be detected
   //   "autosave_delay_ms": 1000,       // 0 turns auto save off
   //   "inlay_hints": true,             // off hides them; on also turns on a curated set
-  //   "bracket_pair_colorization": true // colour brackets by nesting depth
+  //   "bracket_pair_colorization": true, // colour brackets by nesting depth
+  //   "lightbulb": "quickfix",         // "all" adds refactorings, "off" hides it; ⌘. lists both
+  //   "linked_editing": true,          // typing in a JSX tag name renames its closing tag
+  //   "codeActionsOnSave": { "source.organizeImports": "explicit" } // ⌘S organizes imports
   // },
   // // Built in, as in VS Code: Markdown wraps and keeps trailing blanks, Go formats on save.
   // // These beat the "editor" block above, and a language block like this one beats them.
@@ -28,7 +33,8 @@
   // "claude": { "prices": { "claude-sonnet-5": { "input": 3, "output": 15, "cache_read": 0.3 } } },
   // "lsp": {
   //   // Sent to each server as it starts and whenever this file changes.
-  //   "gopls": { "hints": { "parameterNames": true }, "staticcheck": true },
+  //   // gopls runs with GOTOOLCHAIN=local unless its "env" names another toolchain.
+  //   "gopls": { "hints": { "parameterNames": true }, "staticcheck": true, "env": { "GOTOOLCHAIN": "auto" } },
   //   "typescript-language-server": {
   //     "preferences": { "includeInlayParameterNameHints": "all" }
   //   }

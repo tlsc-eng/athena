@@ -486,14 +486,25 @@ fixes join the `cmd-.` menu. `"eslint": { "fixOnSave": true }` makes `cmd-s` app
 fix-all first (off by default).
 
 Since running them runs the project's code, Athena asks once per project folder before the first
-start: "Run ESLint and Biome from proj?" (naming only the ones it installs) with **Allow** and
-**Don't Allow** (Escape). Only a project that installs one of them is asked, nothing starts
-until it is allowed, and the answer is kept with the project in `workspace.json`. **Allow project linters (ESLint, Biome)** and
-**Disallow project linters (ESLint, Biome)** in the palette change it for the active project:
-allowing starts them for its open files, disallowing stops them and clears what they reported.
+start: "Run ESLint, Biome and TypeScript from proj?" (naming only what it installs) with **Allow**
+and **Don't Allow** (Escape). One answer covers everything the project brings: its linters, its
+own TypeScript, and project settings that choose what language servers run (below). Only a
+project that brings one of them is asked, and the answer is kept with the project in
+`workspace.json`. **Allow project linters (ESLint, Biome)** and **Disallow project linters
+(ESLint, Biome)** in the palette change it for the active project: allowing starts them for its
+open files, disallowing stops them and clears what they reported.
 They start without `SSH_AUTH_SOCK`, `NODE_OPTIONS` and `NODE_PATH` from your environment, ESLint
 resolves its library only from the project's own `node_modules`, and each server's whole process
 group is stopped with it (Biome's background daemon exits once its proxy is gone).
+
+typescript-language-server would otherwise load the project's `node_modules/typescript` (or one
+in a folder above it) and the tsconfig plugins beside it, so until the project is allowed Athena
+points it at the TypeScript installed beside the server or with `tsc` (`npm install -g
+typescript`); once allowed it uses the project's own, as VS Code's "Use Workspace Version" does.
+A project with its own TypeScript and no global one to stand in waits, with a notice, until it is
+allowed. gopls runs with `GOTOOLCHAIN=local`, so a `toolchain` line in `go.mod` never downloads
+and runs another Go, unless its settings name one: `"lsp": { "gopls": { "env": { "GOTOOLCHAIN":
+"auto" } } }` (VS Code's `go.toolsEnvVars` in a project's `.vscode/settings.json` reads the same).
 
 ## Claude Code integration
 
@@ -889,6 +900,37 @@ and keeps trailing whitespace, Go formats on save (and indents with tabs). So a 
 `vscode-eslint-language-server`, `biome`; `tsserver` is read as `typescript-language-server`); the
 ESLint entry is laid over the settings the server needs (`validate`, `run`, `workingDirectory`
 and the rest, as the VS Code extension sends them).
+
+#### Project settings
+
+A project can keep its own settings in `.athena/settings.json` at its root, written like the global
+file; for that project's files they are laid over the global ones, key by key, and a `"[lang]"`
+block beats an `"editor"` setting from either file, as in VS Code. Athena also reads the keys it
+knows from the project's `.vscode/settings.json`, so a repository set up for VS Code works as is:
+`editor.*` and `files.*` settings (`"editor.wordWrap": "on"` included), `"[lang]"` blocks,
+`editor.codeActionsOnSave`, `gopls`, `go.toolsEnvVars` (gopls's `env`), `typescript.tsdk` and the
+`typescript.*` / `javascript.*` preferences; anything else there, an extension's keys or a value
+Athena cannot use, is ignored silently. `.athena/settings.json` beats `.vscode/settings.json`.
+App-wide settings (`theme`, `window`, `git`, `explorer`, `ide_integration`, `editor.font_size`)
+apply only in the global file; set in a project file they are reported and ignored. Both files
+apply as soon as they are saved in Athena, or when the next file of the project opens.
+
+Server settings can name programs, plugins, build flags and toolchains, so a project's `lsp`
+entries (and `gopls`, `go.toolsEnvVars`, `typescript.*` from `.vscode`) apply only once the
+project is allowed; a project that has them asks the same once-per-project question as its
+linters. Its editor settings apply either way. Settings a server reads only as it starts (which
+TypeScript and plugins tsserver loads, gopls's `GOTOOLCHAIN`) restart that server when they
+change; the rest are sent to it as they change.
+
+#### Code actions
+
+The lightbulb beside the cursor's line shows when a quick fix is there; `"editor": {
+"lightbulb": "all" }` (or VS Code's `"editor.lightbulb.enabled": "onCode"`) shows it for
+refactorings too, and `"off"` hides it. `cmd-.` lists quick fixes, refactorings and source
+actions either way. `"editor.codeActionsOnSave"` runs `source.organizeImports` and
+`source.fixAll.eslint` on `cmd-s`, in VS Code's shapes (`{"source.organizeImports": "explicit"}`,
+`true`, `"always"`, or a list of kinds); Go organizes its imports on save by default, as VS Code's
+Go extension sets up, and `"[go]": { "codeActionsOnSave": {} }` turns that off.
 
 Inlay hints (parameter names before arguments, inferred types after names) are drawn in muted
 text inside the line whenever the language server sends them. As with VS Code's Go extension,
