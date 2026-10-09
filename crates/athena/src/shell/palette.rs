@@ -93,6 +93,11 @@ const EDITOR_COMMANDS: &[(&str, &str)] = &[
     ("Quick fix", "editor::ShowCodeActions"),
     ("Go to implementations", "editor::GoToImplementation"),
     ("Go to type definition", "editor::GoToTypeDefinition"),
+    ("Add next occurrence", "editor::AddNextOccurrence"),
+    ("Skip to next occurrence", "editor::SkipOccurrence"),
+    ("Select all occurrences", "editor::SelectAllOccurrences"),
+    ("Add cursor above", "editor::AddCursorAbove"),
+    ("Add cursor below", "editor::AddCursorBelow"),
 ];
 
 /// Terminal actions the palette offers while a terminal is focused.
@@ -1017,6 +1022,25 @@ fn claude_entries(query: &str) -> Vec<Entry> {
 mod tests {
     use super::*;
     use athena_lsp::Range;
+
+    #[test]
+    fn multi_cursor_commands_name_real_editor_actions() {
+        use athena_editor as editor;
+        let actions: [Box<dyn Action>; 5] = [
+            Box::new(editor::AddNextOccurrence),
+            Box::new(editor::SkipOccurrence),
+            Box::new(editor::SelectAllOccurrences),
+            Box::new(editor::AddCursorAbove),
+            Box::new(editor::AddCursorBelow),
+        ];
+        for action in actions {
+            assert!(
+                EDITOR_COMMANDS.iter().any(|(_, n)| *n == action.name()),
+                "{}",
+                action.name()
+            );
+        }
+    }
 
     #[test]
     fn the_first_character_picks_what_go_to_file_lists() {

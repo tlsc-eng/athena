@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use athena_editor as editor;
 use gpui::{Action, App, Global, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
 
 actions!(
@@ -240,6 +241,23 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
             ],
         },
         Menu {
+            name: "Selection".into(),
+            items: vec![
+                MenuItem::action("Select All", editor::SelectAll),
+                MenuItem::separator(),
+                MenuItem::action("Copy Line Up", editor::CopyLinesUp),
+                MenuItem::action("Copy Line Down", editor::CopyLinesDown),
+                MenuItem::action("Move Line Up", editor::MoveLinesUp),
+                MenuItem::action("Move Line Down", editor::MoveLinesDown),
+                MenuItem::separator(),
+                MenuItem::action("Add Cursor Above", editor::AddCursorAbove),
+                MenuItem::action("Add Cursor Below", editor::AddCursorBelow),
+                MenuItem::action("Add Next Occurrence", editor::AddNextOccurrence),
+                MenuItem::action("Skip to Next Occurrence", editor::SkipOccurrence),
+                MenuItem::action("Select All Occurrences", editor::SelectAllOccurrences),
+            ],
+        },
+        Menu {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Command Palette", CommandPalette),
@@ -300,7 +318,7 @@ mod tests {
 
     use gpui::{KeyBindingContextPredicate, KeyContext, Keystroke};
 
-    use super::display_path;
+    use super::{display_path, menus};
 
     #[test]
     fn navigation_keystrokes_parse() {
@@ -354,6 +372,30 @@ mod tests {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
         assert_eq!(display_path(&home.join("code/x")), "~/code/x");
         assert_eq!(display_path(Path::new("/opt/x")), "/opt/x");
+    }
+
+    #[test]
+    fn the_selection_menu_sits_between_file_and_view_with_the_multi_cursor_commands() {
+        let menus = menus(&[]);
+        let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
+        assert_eq!(names, ["Athena", "File", "Selection", "View", "Window"]);
+        let selection: Vec<&str> = menus[2]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                gpui::MenuItem::Action { name, .. } => Some(name.as_ref()),
+                _ => None,
+            })
+            .collect();
+        for name in [
+            "Add Cursor Above",
+            "Add Cursor Below",
+            "Add Next Occurrence",
+            "Skip to Next Occurrence",
+            "Select All Occurrences",
+        ] {
+            assert!(selection.contains(&name), "{name}");
+        }
     }
 
     #[test]
