@@ -102,6 +102,8 @@ pub enum AppMsg {
         name: Option<String>,
     },
     TestResults,
+    /// Where the caller's project's debug session is paused, its stack and top-frame locals.
+    DebugState,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -122,6 +124,7 @@ pub enum AppReply {
     Editors(Vec<EditorInfo>),
     Buffer(BufferInfo),
     Tests(TestResultsInfo),
+    Debug(Box<DebugStateInfo>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -191,6 +194,42 @@ pub struct TestResultsInfo {
     pub skipped: u32,
     /// Failed tests and suites that could not run, with their output shortened.
     pub failures: Vec<TestFailureInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct DebugStateInfo {
+    pub project: PathBuf,
+    /// `not_debugging`, `starting`, `running` or `paused`.
+    pub status: String,
+    pub configuration: Option<String>,
+    pub program: Option<PathBuf>,
+    /// Why it paused: `breakpoint`, `step`, `pause`, `exception`, …
+    pub reason: Option<String>,
+    pub description: Option<String>,
+    pub thread: Option<String>,
+    /// The frame shown in the editor, which variables belong to.
+    pub location: Option<DebugFrameInfo>,
+    pub stack: Vec<DebugFrameInfo>,
+    pub frames_total: u32,
+    pub locals: Vec<DebugVariableInfo>,
+    pub locals_total: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DebugFrameInfo {
+    pub name: String,
+    pub path: Option<PathBuf>,
+    /// 1-based.
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DebugVariableInfo {
+    pub name: String,
+    /// Shortened to 200 characters.
+    pub value: String,
+    pub type_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

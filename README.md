@@ -500,6 +500,8 @@ information rather than triggering the install dialog).
   slices and maps as needed; expansion is kept across steps), Watch (expressions evaluated at
   each stop, kept per project) and the Debug Console, which shows the program's output and
   evaluates what you type in the selected frame.
+- Claude Code's `debug_state` tool reads where the program is paused, its stack and the selected
+  frame's locals.
 
 **Claude Code**
 
@@ -650,6 +652,7 @@ that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB
 | `read_buffer` | An open file's text including unsaved changes: 256 KiB unless `max_bytes` asks for more, never over 512 KiB, with the full size. |
 | `run_tests`, `get_test_results` | Start go test or Vitest/Jest in the Tests panel (all, a package or file, or one test or `TestX/subtest` by name), then read counts and failures. The path must lie in the session's own project. Vitest and Jest run the project's `node_modules`, so for Claude they run only once the project's code is allowed; a Go and JavaScript run keeps its go test and says what was skipped. |
 | `git_status` | Branch, ahead/behind and changed files of a project; ignored files left out. |
+| `debug_state` | Read-only: whether the session's project is being debugged and, while paused, why, where (file and 1-based line), the call stack (up to 20 frames) and the selected frame's locals (up to 50, values cut at 200 characters). |
 
 ### Hooks
 

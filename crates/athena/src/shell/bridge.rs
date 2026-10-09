@@ -112,7 +112,8 @@ impl Shell {
             | AppMsg::OpenEditors
             | AppMsg::ReadBuffer { .. }
             | AppMsg::RunTests { .. }
-            | AppMsg::TestResults) => self.answer_tool(msg, caller, cx),
+            | AppMsg::TestResults
+            | AppMsg::DebugState) => self.answer_tool(msg, caller, cx),
         }
     }
 

@@ -10,6 +10,7 @@ use athena_editor::{
     Breakpoint, DebugTestAt, EditorEvent, EditorView, EnableBreakpointAt, HoverBlock,
     SetBreakpointAt, ToggleBreakpointAt,
 };
+use athena_proto::{DebugFrameInfo, DebugStateInfo, DebugVariableInfo};
 use athena_ui::motion::Opening;
 use athena_ui::{InputEvent, TextInput};
 use athena_workspace::LinterTrust;
@@ -29,6 +30,10 @@ const STACK_DEPTH: u32 = 50;
 const CONSOLE_LINES: usize = 5000;
 /// Expanded variables are fetched again after each stop down to this depth.
 const EXPAND_DEPTH: usize = 6;
+/// What debug_state hands Claude, so a deep stack or a huge struct cannot flood it.
+const CLAUDE_FRAMES: usize = 20;
+const CLAUDE_LOCALS: usize = 50;
+const CLAUDE_VALUE: usize = 200;
 
 /// A breakpoint as breakpoints.json keeps it, with a one-based line.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -262,6 +267,13 @@ fn first_frame_with_source(frames: &[StackFrame]) -> Option<&StackFrame> {
         .iter()
         .find(|f| f.path.as_ref().is_some_and(|p| p.exists()))
         .or(frames.first())
+}
+
+fn shorten(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
 }
 
 /// The key a variable's expansion is remembered by.
@@ -1373,6 +1385,68 @@ impl Shell {
         }
         self.open_file(path, window, cx);
     }
+
+    /// The debugger's state for Claude's debug_state tool, for the project at `root`.
+    pub(super) fn debug_state_for_claude(&self, root: &Path) -> DebugStateInfo {
+        let mut info = DebugStateInfo {
+            project: root.to_path_buf(),
+            status: "not_debugging".into(),
+            ..DebugStateInfo::default()
+        };
+        let Some(session) = self.debug.session.as_ref().filter(|s| s.root == root) else {
+            return info;
+        };
+        info.configuration = Some(session.launch.name.clone());
+        info.program = Some(session.launch.program.clone());
+        info.status = match session.phase {
+            Phase::Starting => "starting",
+            Phase::Running => "running",
+            Phase::Stopped(_) => "paused",
+        }
+        .into();
+        let Some(stopped) = session.stopped() else {
+            return info;
+        };
+        info.reason = Some(stopped.reason.clone());
+        info.description = stopped.description.clone().or(stopped.text.clone());
+        info.thread = session
+            .threads
+            .iter()
+            .find(|t| Some(t.id) == session.thread)
+            .map(|t| t.name.clone());
+        let frame_info = |f: &StackFrame| DebugFrameInfo {
+            name: f.name.clone(),
+            path: f.path.clone(),
+            line: f.line,
+            column: f.column,
+        };
+        info.stack = session
+            .frames
+            .iter()
+            .take(CLAUDE_FRAMES)
+            .map(frame_info)
+            .collect();
+        info.frames_total = session.frames.len() as u32;
+        info.location = session.top_frame().map(frame_info);
+        let locals: Vec<&Variable> = session
+            .scopes
+            .iter()
+            .filter(|s| !s.expensive)
+            .filter_map(|s| session.children.get(&s.variables_reference))
+            .flatten()
+            .collect();
+        info.locals_total = locals.len() as u32;
+        info.locals = locals
+            .into_iter()
+            .take(CLAUDE_LOCALS)
+            .map(|v| DebugVariableInfo {
+                name: v.name.clone(),
+                value: shorten(&v.value, CLAUDE_VALUE),
+                type_name: v.type_name.as_deref().map(|t| shorten(t, CLAUDE_VALUE)),
+            })
+            .collect();
+        info
+    }
 }
 
 /// The Go test on `line` of a test file, as a Delve test launch of its package.
@@ -1481,6 +1555,41 @@ mod tests {
     }
 
     #[test]
+    fn claude_s_debug_state_fits_one_app_socket_frame_and_reads_back() {
+        let long = "x".repeat(5000);
+        let frame = DebugFrameInfo {
+            name: "main.main".into(),
+            path: Some("/p/main.go".into()),
+            line: 12,
+            column: 3,
+        };
+        let info = DebugStateInfo {
+            project: "/p".into(),
+            status: "paused".into(),
+            reason: Some("breakpoint".into()),
+            location: Some(frame.clone()),
+            stack: vec![frame; CLAUDE_FRAMES],
+            frames_total: 50,
+            locals: (0..CLAUDE_LOCALS)
+                .map(|i| DebugVariableInfo {
+                    name: format!("v{i}"),
+                    value: shorten(&long, CLAUDE_VALUE),
+                    type_name: Some(shorten(&long, CLAUDE_VALUE)),
+                })
+                .collect(),
+            locals_total: 400,
+            ..DebugStateInfo::default()
+        };
+        let reply = athena_proto::AppReply::Debug(Box::new(info));
+        let mut out = Vec::new();
+        athena_proto::write_frame(&mut out, &reply).unwrap();
+        assert!(out.len() < 64 * 1024, "{} bytes", out.len());
+        let back: Option<athena_proto::AppReply> =
+            athena_proto::read_frame(&mut out.as_slice()).unwrap();
+        assert_eq!(back, Some(reply));
+    }
+
+    #[test]
     fn a_stop_in_the_runtime_shows_the_first_frame_with_source() {
         let frame = |id: i64, path: Option<&str>| StackFrame {
             id,
@@ -1498,5 +1607,7 @@ mod tests {
         ];
         assert_eq!(first_frame_with_source(&frames).map(|f| f.id), Some(3));
         assert_eq!(first_frame_with_source(&frames[..2]).map(|f| f.id), Some(1));
+        assert_eq!(shorten("abcdef", 3), "abc…");
+        assert_eq!(shorten("ab", 3), "ab");
     }
 }

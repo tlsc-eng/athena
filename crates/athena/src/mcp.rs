@@ -462,6 +462,16 @@ impl Bridge {
     }
 
     #[tool(
+        description = "Read-only state of the debugger in Athena for this session's project: whether a Go program is being debugged (status not_debugging, starting, running or paused) and, while paused, why it stopped, where (file and 1-based line of the selected frame), the call stack (up to 20 frames) and that frame's local variables (up to 50, values shortened to 200 characters). Use it to help the user while their program is paused at a breakpoint."
+    )]
+    async fn debug_state(&self) -> Result<CallToolResult, ErrorData> {
+        let AppReply::Debug(state) = ask(AppMsg::DebugState).await? else {
+            return Err(unexpected());
+        };
+        json(&state)
+    }
+
+    #[tool(
         description = "git status of an open project (default: the one this session runs in): branch, upstream with ahead/behind counts from the last fetch, and changed files with one-letter staged and unstaged states (M modified, A added, D deleted, R renamed, U untracked, ! conflict). Ignored files are left out; at most 2000 files."
     )]
     async fn git_status(
@@ -535,6 +545,7 @@ mod tests {
             "run_tests",
             "get_test_results",
             "git_status",
+            "debug_state",
         ] {
             assert!(
                 tool(name)

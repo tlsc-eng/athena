@@ -305,6 +305,10 @@ impl Shell {
                 }
                 None => AppReply::Error("no project is open".into()),
             },
+            AppMsg::DebugState => match self.caller_root(caller) {
+                Some(root) => AppReply::Debug(Box::new(self.debug_state_for_claude(&root))),
+                None => AppReply::Error("no project is open".into()),
+            },
             _ => AppReply::Error("Athena could not answer that request".into()),
         }
     }
