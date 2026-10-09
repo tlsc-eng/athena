@@ -949,6 +949,18 @@ mod tests {
     }
 
     #[test]
+    fn nerd_font_icons_survive_copying() {
+        let (mut t, _) = terminal();
+        run(&mut t, "ls", &["\u{F0493} src", "\u{E5FF} \u{F1AF0}"], 0);
+        assert_eq!(
+            t.last_output(),
+            Ok("\u{F0493} src\n\u{E5FF} \u{F1AF0}".to_string())
+        );
+        t.select_all();
+        assert!(t.selection_text().unwrap().contains("\u{F0493} src"));
+    }
+
+    #[test]
     fn marks_split_across_chunks_land_in_the_same_place() {
         let (mut whole, _) = terminal();
         run(&mut whole, "ls", &["a", "b"], 2);

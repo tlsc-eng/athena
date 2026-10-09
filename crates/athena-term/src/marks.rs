@@ -86,8 +86,9 @@ fn mark(body: &[u8]) -> Option<Mark> {
     })
 }
 
-/// First of the private-use characters that tag a prompt's first cell with a command id.
-const TAG_BASE: u32 = 0xF0000;
+/// First of the private-use characters that tag a prompt's first cell with a command id; plane
+/// 16, as Nerd Fonts put icons in plane 15.
+const TAG_BASE: u32 = 0x10_0000;
 /// Ids cycle through this many tags; older commands have long left the scrollback by then.
 const TAGS: u32 = 0xFFFE;
 /// Commands remembered at once; the scrollback holds far fewer prompts.
@@ -95,7 +96,7 @@ const MAX_COMMANDS: usize = 4096;
 
 /// The zero-width character tagging a prompt line with `id`.
 pub fn tag(id: u32) -> char {
-    char::from_u32(TAG_BASE + id % TAGS).unwrap_or('\u{F0000}')
+    char::from_u32(TAG_BASE + id % TAGS).unwrap_or('\u{100000}')
 }
 
 /// The command id a zero-width character tags, if it is one of Athena's tags.
@@ -225,6 +226,7 @@ mod tests {
         assert_eq!(tag_id(tag(41)), Some(41));
         assert_eq!(tag_id('\u{301}'), None);
         assert_eq!(tag_id('a'), None);
+        assert_eq!(tag_id('\u{F0493}'), None, "a Nerd Font icon");
     }
 
     #[test]
