@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use athena_editor::{EditorView, Indent, Lang, SaveSettings};
+use athena_editor::{EditorEvent, EditorView, Indent, Lang, SaveSettings};
+use athena_lsp::{Diagnostic, Position, Range, ServerKind, Severity};
 use athena_ui::{CODE_SIZE, CODE_ZOOM, Theme};
 use athena_workspace::{ItemKind, LinterTrust, Preferences, ThemeChoice, Workspace};
 use gpui::{AppContext as _, Context, Entity, Window};
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::Shell;
 use super::item::ItemView;
+use super::lsp::document_key;
 use super::notices::ToastAction;
 use super::settings_ui::{Scope, SettingsEvent, SettingsView};
 use crate::settings::{self, Settings};
@@ -33,8 +35,50 @@ pub(super) struct SettingsState {
     /// Each project's `.vscode/settings.json` with its `.athena/settings.json` laid over it.
     pub(super) projects: HashMap<PathBuf, ProjectSettings>,
     project_toast: Option<u64>,
+    /// What is wrong in settings.json, keymap.json or a project's settings file as edited, by
+    /// canonical path, shown in its editor beside language servers' diagnostics.
+    file_problems: HashMap<PathBuf, Vec<Diagnostic>>,
+    /// VS Code's JSON server was found, so JSON files open in it with Athena's schemas.
+    json_server: bool,
 }
 
+/// Athena's own files, checked as they are edited.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigFile {
+    Settings,
+    ProjectSettings,
+    Keymap,
+}
+
+/// Byte `at` of `text` as a language server counts it: line, and UTF-16 units into it.
+fn position_of(text: &str, at: usize) -> Position {
+    let before = &text[..at];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    Position {
+        line: before.matches('\n').count() as u32,
+        character: before[line_start..].encode_utf16().count() as u32,
+    }
+}
+
+fn diagnostic(
+    text: &str,
+    (range, why, fatal): (std::ops::Range<usize>, String, bool),
+) -> Diagnostic {
+    Diagnostic {
+        range: Range {
+            start: position_of(text, range.start),
+            end: position_of(text, range.end),
+        },
+        severity: if fatal {
+            Severity::Error
+        } else {
+            Severity::Warning
+        },
+        message: why,
+        source: Some("athena".into()),
+        raw: Value::Null,
+    }
+}
 
 pub(super) struct ProjectSettings {
     settings: Settings,
@@ -82,6 +126,8 @@ impl SettingsState {
             toast: None,
             projects: HashMap::new(),
             project_toast: None,
+            file_problems: HashMap::new(),
+            json_server: false,
         }
     }
 
@@ -109,6 +155,7 @@ impl Shell {
             .unwrap_or_default();
         let problems = std::mem::replace(&mut self.settings.problems, Ok(Vec::new()));
         self.report_settings(problems, cx);
+        self.find_json_server(cx);
         cx.spawn_in(window, async move |this, cx| {
             let _watchers = watchers;
             while changes.recv().await.is_ok() {
@@ -400,6 +447,7 @@ impl Shell {
             self.refresh_project_settings(root, cx);
         }
         self.apply_editor_settings(editor, cx);
+        self.watch_config_problems(editor, cx);
         let lang = editor.read(cx).lang();
         let Some(size) = self.settings_for(root.as_deref()).editor_for(lang).tab_size else {
             return;
@@ -488,39 +536,44 @@ impl Shell {
         let fallback = self.settings_fallback();
         let view = cx.new(|cx| SettingsView::new(root.to_path_buf(), fallback, cx));
         let root = root.to_path_buf();
-        cx.subscribe(&view, move |this, _, event: &SettingsEvent, cx| match event {
-            SettingsEvent::Set {
-                scope: Scope::User,
-                keys,
-                value,
-            } => this.write_setting(keys, value.clone(), cx),
-            SettingsEvent::Unset {
-                scope: Scope::User,
-                keys,
-            } => this.unset_setting(keys, cx),
-            SettingsEvent::Set {
-                scope: Scope::Project,
-                keys,
-                value,
-            } => this.write_project_setting(&root, keys, Some(value), cx),
-            SettingsEvent::Unset {
-                scope: Scope::Project,
-                keys,
-            } => this.write_project_setting(&root, keys, None, cx),
-            SettingsEvent::OpenJson(scope) => {
-                let path = match scope {
-                    Scope::User => settings::ensure_file(),
-                    Scope::Project => settings::ensure_project_file(&root),
-                };
-                match path {
-                    Ok(path) => {
-                        this.pending_open = Some(path);
-                        cx.notify();
+        cx.subscribe(
+            &view,
+            move |this, _, event: &SettingsEvent, cx| match event {
+                SettingsEvent::Set {
+                    scope: Scope::User,
+                    keys,
+                    value,
+                } => this.write_setting(keys, value.clone(), cx),
+                SettingsEvent::Unset {
+                    scope: Scope::User,
+                    keys,
+                } => this.unset_setting(keys, cx),
+                SettingsEvent::Set {
+                    scope: Scope::Project,
+                    keys,
+                    value,
+                } => this.write_project_setting(&root, keys, Some(value), cx),
+                SettingsEvent::Unset {
+                    scope: Scope::Project,
+                    keys,
+                } => this.write_project_setting(&root, keys, None, cx),
+                SettingsEvent::OpenJson(scope) => {
+                    let path = match scope {
+                        Scope::User => settings::ensure_file(),
+                        Scope::Project => settings::ensure_project_file(&root),
+                    };
+                    match path {
+                        Ok(path) => {
+                            this.pending_open = Some(path);
+                            cx.notify();
+                        }
+                        Err(e) => {
+                            this.transient_notice("Could not create the file", format!("{e:#}"), cx)
+                        }
                     }
-                    Err(e) => this.transient_notice("Could not create the file", format!("{e:#}"), cx),
                 }
-            }
-        })
+            },
+        )
         .detach();
         ItemView::Settings(view)
     }
@@ -535,7 +588,10 @@ impl Shell {
         };
         let font = CODE_SIZE + self.workspace.ui.font_zoom as f32;
         [
-            ("editor.format_on_save", json!(p.format_on_save.unwrap_or(false))),
+            (
+                "editor.format_on_save",
+                json!(p.format_on_save.unwrap_or(false)),
+            ),
             ("editor.word_wrap", json!(p.word_wrap)),
             ("editor.autosave_delay_ms", json!(p.autosave_delay_ms)),
             ("editor.font_size", json!(font as i64)),
@@ -567,6 +623,127 @@ impl Shell {
         }
     }
 
+    fn config_file(&self, path: &Path) -> Option<ConfigFile> {
+        let doc = document_key(path);
+        let same = |p: anyhow::Result<PathBuf>| p.is_ok_and(|p| document_key(&p) == doc);
+        if same(settings::path()) {
+            Some(ConfigFile::Settings)
+        } else if same(crate::keymap::path()) {
+            Some(ConfigFile::Keymap)
+        } else if path.ends_with(settings::PROJECT_FILE) && self.project_root_of(path).is_some() {
+            Some(ConfigFile::ProjectSettings)
+        } else {
+            None
+        }
+    }
+
+    /// Checks Athena's own settings and keymap files as they are edited, before they are saved.
+    fn watch_config_problems(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let Some(kind) = self.config_file(editor.read(cx).path()) else {
+            return;
+        };
+        self.check_config_file(editor, kind, cx);
+        cx.subscribe(editor, move |this, editor, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::Edited { .. }) {
+                this.check_config_file(&editor, kind, cx);
+            }
+        })
+        .detach();
+    }
+
+    fn check_config_file(
+        &mut self,
+        editor: &Entity<EditorView>,
+        kind: ConfigFile,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = editor.read(cx).text() else {
+            return;
+        };
+        let found = match kind {
+            ConfigFile::Settings => settings::problems_at(&text, false),
+            ConfigFile::ProjectSettings => settings::problems_at(&text, true),
+            ConfigFile::Keymap => crate::keymap::problems_at(&text, |name, args| {
+                cx.build_action(name, args)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            }),
+        };
+        let list = found.into_iter().map(|p| diagnostic(&text, p)).collect();
+        let doc = document_key(editor.read(cx).path());
+        self.settings.file_problems.insert(doc.clone(), list);
+        self.push_markers(editor, &doc, cx);
+    }
+
+    /// Looks for the optional JSON server off the main thread, as the login shell's PATH is read
+    /// to find it, then opens the JSON files already open in it.
+    fn find_json_server(&mut self, cx: &mut Context<Self>) {
+        let find = cx
+            .background_executor()
+            .spawn(async { athena_lsp::find_program(ServerKind::Json.program()).is_some() });
+        cx.spawn(async move |this, cx| {
+            if !find.await {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.settings.json_server = true;
+                let open: Vec<(PathBuf, Entity<EditorView>)> = this
+                    .items
+                    .iter()
+                    .filter_map(|((root, _), view)| match view {
+                        ItemView::Editor(e) if e.read(cx).lang() == Some(Lang::Json) => {
+                            Some((root.clone(), e.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (root, editor) in open {
+                    this.lsp_opened(&root, &editor, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether `kind`'s program is there to start; only the optional JSON server is looked for.
+    pub(super) fn server_installed(&self, kind: ServerKind) -> bool {
+        kind != ServerKind::Json || self.settings.json_server
+    }
+
+    /// The JSON server's settings: settings.json and keymap.json checked against their schemas.
+    pub(super) fn json_server_settings(&self) -> Value {
+        let folder = settings::path()
+            .ok()
+            .and_then(|p| Some(p.parent()?.file_name()?.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "athena".into());
+        let mut commands: Vec<&str> = gpui::generate_list_of_all_registered_actions()
+            .map(|a| a.name)
+            .filter(|n| {
+                !["zed::", "text_input::", "context_menu::"]
+                    .iter()
+                    .any(|p| n.starts_with(p))
+            })
+            .collect();
+        commands.sort_unstable();
+        // The server puts "**/" before each pattern and matches the file's whole URI.
+        json!({"json": {
+            "validate": {"enable": true},
+            "schemas": [
+                {
+                    "fileMatch": [format!("{folder}/settings.json"), settings::PROJECT_FILE],
+                    "schema": settings::schema::json_schema(),
+                },
+                {
+                    "fileMatch": [format!("{folder}/keymap.json")],
+                    "schema": crate::keymap::json_schema(&commands),
+                },
+            ],
+        }})
+    }
+
+    /// What Athena found wrong in its own file at `doc`, as edited.
+    pub(super) fn config_problems(&self, doc: &Path) -> impl Iterator<Item = &Diagnostic> {
+        self.settings.file_problems.get(doc).into_iter().flatten()
+    }
 
     /// Opens settings.json as a tab, creating it with every setting commented out first if needed.
     pub(super) fn open_settings_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {

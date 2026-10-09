@@ -220,14 +220,24 @@ fn append_entry(text: &str, entry: &NewEntry) -> Result<String, String> {
             false => "  ",
         };
         let at = last.end;
-        return Ok(format!("{},\n{indent}{rendered}{}", &text[..at], &text[at..]));
+        return Ok(format!(
+            "{},\n{indent}{rendered}{}",
+            &text[..at],
+            &text[at..]
+        ));
     }
     let close = layout.close;
     let line_start = text[..close].rfind('\n').map_or(0, |i| i + 1);
-    Ok(match text[line_start..close].trim().is_empty() && line_start > layout.open {
-        true => format!("{}  {rendered}\n{}", &text[..line_start], &text[line_start..]),
-        false => format!("{}\n  {rendered}\n{}", &text[..close], &text[close..]),
-    })
+    Ok(
+        match text[line_start..close].trim().is_empty() && line_start > layout.open {
+            true => format!(
+                "{}  {rendered}\n{}",
+                &text[..line_start],
+                &text[line_start..]
+            ),
+            false => format!("{}\n  {rendered}\n{}", &text[..close], &text[close..]),
+        },
+    )
 }
 
 /// `text` without the entries at `indices`, each with the comma that separated it.
@@ -272,21 +282,29 @@ pub fn rebind_entry(text: &str, index: usize, key: &str) -> Result<String, Strin
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        when: fields.get("when").and_then(Value::as_str).map(str::to_string),
+        when: fields
+            .get("when")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
     .render();
     if let Some(args) = fields.get("args") {
         rendered.insert_str(rendered.len() - 1, &format!(", \"args\": {args}"));
     }
-    Ok(format!("{}{rendered}{}", &text[..span.start], &text[span.end..]))
+    Ok(format!(
+        "{}{rendered}{}",
+        &text[..span.start],
+        &text[span.end..]
+    ))
 }
 
 /// The list's layout, refusing a file that is not a list of entries, as a write would break it.
 fn readable_layout(text: &str) -> Result<Option<crate::settings::ArrayLayout>, String> {
     let json = strip_jsonc(text);
     if !json.trim().is_empty() {
-        serde_json::from_str::<Vec<Value>>(&json)
-            .map_err(|e| format!("keymap.json is not a list of bindings: {e}; fix it, then try again"))?;
+        serde_json::from_str::<Vec<Value>>(&json).map_err(|e| {
+            format!("keymap.json is not a list of bindings: {e}; fix it, then try again")
+        })?;
     }
     crate::settings::array_layout(text)
         .map_err(|_| "keymap.json could not be read; fix it, then try again".to_string())
@@ -397,12 +415,9 @@ pub fn conflicts<'a>(bindings: &'a [KeyBinding], key: &str) -> Vec<&'a KeyBindin
         .iter()
         .filter(|b| {
             b.keystrokes().len() == wanted.len()
-                && b.keystrokes()
-                    .iter()
-                    .zip(&wanted)
-                    .all(|(have, want)| {
-                        have.inner().key == want.key && have.inner().modifiers == want.modifiers
-                    })
+                && b.keystrokes().iter().zip(&wanted).all(|(have, want)| {
+                    have.inner().key == want.key && have.inner().modifiers == want.modifiers
+                })
         })
         .collect()
 }
@@ -847,11 +862,16 @@ mod tests {
 
     #[test]
     fn new_entries_go_at_the_end_keeping_the_header_and_comments() {
-        let out = append_entries(TEMPLATE, &[entry("cmd-k cmd-t", "athena::NewTerminal", None)])
-            .unwrap();
+        let out = append_entries(
+            TEMPLATE,
+            &[entry("cmd-k cmd-t", "athena::NewTerminal", None)],
+        )
+        .unwrap();
         assert!(out.starts_with(&TEMPLATE[..TEMPLATE.rfind('[').unwrap()]));
         assert!(
-            out.ends_with("[\n  {\"key\": \"cmd-k cmd-t\", \"command\": \"athena::NewTerminal\"}\n]\n"),
+            out.ends_with(
+                "[\n  {\"key\": \"cmd-k cmd-t\", \"command\": \"athena::NewTerminal\"}\n]\n"
+            ),
             "{out}"
         );
         let out = append_entries(
@@ -871,9 +891,15 @@ mod tests {
         for (text, want) in [
             ("", "[\n  {\"key\": \"f1\", \"command\": \"x\"}\n]\n"),
             ("[]", "[\n  {\"key\": \"f1\", \"command\": \"x\"}\n]"),
-            ("[{\"key\": \"f2\", \"command\": \"y\"},]", "[{\"key\": \"f2\", \"command\": \"y\"},\n  {\"key\": \"f1\", \"command\": \"x\"},]"),
+            (
+                "[{\"key\": \"f2\", \"command\": \"y\"},]",
+                "[{\"key\": \"f2\", \"command\": \"y\"},\n  {\"key\": \"f1\", \"command\": \"x\"},]",
+            ),
         ] {
-            assert_eq!(append_entries(text, &[entry("f1", "x", None)]).unwrap(), want);
+            assert_eq!(
+                append_entries(text, &[entry("f1", "x", None)]).unwrap(),
+                want
+            );
         }
         assert!(append_entries("{\"not\": \"a list\"}", &[entry("f1", "x", None)]).is_err());
         assert!(append_entries("[{", &[entry("f1", "x", None)]).is_err());
@@ -899,14 +925,26 @@ mod tests {
     fn the_recorder_takes_a_chord_and_enter_or_escape_ends_it() {
         let k = |s: &str| Keystroke::parse(s).unwrap();
         let mut r = Recorder::default();
-        assert_eq!(r.press(&k("enter")), Step::Recording, "nothing to accept yet");
+        assert_eq!(
+            r.press(&k("enter")),
+            Step::Recording,
+            "nothing to accept yet"
+        );
         assert_eq!(r.press(&k("cmd-k")), Step::Recording);
         assert_eq!(r.press(&k("cmd-shift-t")), Step::Recording);
         assert_eq!(r.text(), "cmd-k cmd-shift-t");
         assert_eq!(r.problem(), None);
-        assert_eq!(r.press(&k("f5")), Step::Recording, "a third key starts over");
+        assert_eq!(
+            r.press(&k("f5")),
+            Step::Recording,
+            "a third key starts over"
+        );
         assert_eq!(r.text(), "f5");
-        assert_eq!(r.press(&k("cmd-enter")), Step::Recording, "modified Enter is a key");
+        assert_eq!(
+            r.press(&k("cmd-enter")),
+            Step::Recording,
+            "modified Enter is a key"
+        );
         assert_eq!(r.press(&k("enter")), Step::Accept("f5 cmd-enter".into()));
         assert_eq!(r.press(&k("escape")), Step::Cancel);
         let mut odd = Recorder::default();
@@ -924,20 +962,32 @@ mod tests {
             names(conflicts(&bindings, "cmd-t")),
             ["athena::NewTerminal", "athena::NewTerminal"]
         );
-        assert_eq!(names(conflicts(&bindings, "cmd-shift-d")), ["athena::SplitDown"]);
+        assert_eq!(
+            names(conflicts(&bindings, "cmd-shift-d")),
+            ["athena::SplitDown"]
+        );
         assert!(conflicts(&bindings, "cmd-k cmd-t").is_empty());
         assert!(conflicts(&bindings, "cmd-alt-t").is_empty());
         let (rules, _) = parse(r#"[{"key": "cmd+k cmd+t", "command": "QuickOpen"}]"#, build);
         let merged = merge(&bindings, rules);
-        assert_eq!(names(conflicts(&merged, "cmd-k cmd-t")), ["athena::QuickOpen"]);
-        assert_eq!(key_text(conflicts(&merged, "cmd-k cmd-t")[0]), "cmd-k cmd-t");
+        assert_eq!(
+            names(conflicts(&merged, "cmd-k cmd-t")),
+            ["athena::QuickOpen"]
+        );
+        assert_eq!(
+            key_text(conflicts(&merged, "cmd-k cmd-t")[0]),
+            "cmd-k cmd-t"
+        );
     }
 
     #[test]
     fn the_keymap_schema_lists_commands_and_their_removals() {
         let schema = json_schema(&["athena::NewTerminal"]);
         let names = &schema["items"]["properties"]["command"]["anyOf"][0]["enum"];
-        assert_eq!(names, &json!(["athena::NewTerminal", "-athena::NewTerminal"]));
+        assert_eq!(
+            names,
+            &json!(["athena::NewTerminal", "-athena::NewTerminal"])
+        );
         assert_eq!(schema["allowComments"], true);
     }
 

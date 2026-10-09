@@ -48,6 +48,8 @@ pub enum ServerKind {
     /// Started only from the project's own node_modules; see [`project_server`].
     Eslint,
     Biome,
+    /// VS Code's JSON server, used when installed; it checks files against their schemas.
+    Json,
 }
 
 impl ServerKind {
@@ -57,13 +59,14 @@ impl ServerKind {
             Self::TypeScript => "typescript-language-server",
             Self::Eslint => "vscode-eslint-language-server",
             Self::Biome => "biome",
+            Self::Json => "vscode-json-language-server",
         }
     }
 
     pub fn args(self) -> &'static [&'static str] {
         match self {
             Self::Go => &[],
-            Self::TypeScript | Self::Eslint => &["--stdio"],
+            Self::TypeScript | Self::Eslint | Self::Json => &["--stdio"],
             Self::Biome => &["lsp-proxy"],
         }
     }
@@ -75,6 +78,7 @@ impl ServerKind {
             Self::TypeScript => "npm install -g typescript-language-server typescript",
             Self::Eslint => "npm install -D vscode-langservers-extracted",
             Self::Biome => "npm install -D @biomejs/biome",
+            Self::Json => "npm install -g vscode-langservers-extracted",
         }
     }
 

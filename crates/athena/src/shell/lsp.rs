@@ -352,6 +352,7 @@ fn server_for(lang: Lang) -> Option<(ServerKind, &'static str)> {
         Lang::TypeScript => (ServerKind::TypeScript, "typescript"),
         Lang::Tsx => (ServerKind::TypeScript, "typescriptreact"),
         Lang::JavaScript => (ServerKind::TypeScript, "javascript"),
+        Lang::Json => (ServerKind::Json, "json"),
         _ => return None,
     })
 }
@@ -451,7 +452,8 @@ impl Shell {
             return;
         };
         // Another tab may have opened this file in its servers already.
-        if let Some((kind, language_id)) = server_for(lang)
+        let main = server_for(lang).filter(|(kind, _)| self.server_installed(*kind));
+        if let Some((kind, language_id)) = main
             && !self.lsp.documents.contains_key(&doc)
         {
             let key = (root.to_path_buf(), kind);
@@ -475,7 +477,7 @@ impl Shell {
         }
         match self.document_client(&doc) {
             Some(client) => push_triggers(editor, &client, cx),
-            None if server_for(lang).is_none() => super::snippets::attach_snippets(editor, cx),
+            None if main.is_none() => super::snippets::attach_snippets(editor, cx),
             None => {}
         }
     }
@@ -513,6 +515,7 @@ impl Shell {
             .into_iter()
             .flatten()
             .flat_map(|(_, list)| list)
+            .chain(self.config_problems(doc))
             .collect()
     }
 
@@ -539,6 +542,11 @@ impl Shell {
                         &serde_json::json!({"tsserver": {"path": global}}),
                     );
                 }
+                settings
+            }
+            ServerKind::Json => {
+                let mut settings = self.json_server_settings();
+                crate::settings::merge_json(&mut settings, &user);
                 settings
             }
             _ => user,
@@ -825,6 +833,12 @@ impl Shell {
                 server.ready = true;
                 // Editors opened while the server started learn its trigger characters now.
                 let client = server.client.clone();
+                // The JSON server reads its schemas only from a configuration change.
+                if key.1 == ServerKind::Json
+                    && let Ok(config) = server.config.read()
+                {
+                    client.did_change_configuration(config.clone());
+                }
                 let docs: Vec<PathBuf> = self
                     .lsp
                     .documents
@@ -875,6 +889,11 @@ impl Shell {
                 self.clear_diagnostics(&key, cx);
                 let program = key.1.program();
                 tracing::warn!("{program} stopped: {why}");
+                // JSON files work without their server, so it failing to start is not news.
+                if key.1 == ServerKind::Json && !server.ready {
+                    self.lsp.failed.insert(key, why);
+                    return;
+                }
                 let crashes = {
                     let times = self.lsp.crashes.entry(key.clone()).or_default();
                     times.retain(|t| t.elapsed() < CRASH_WINDOW);
@@ -1205,7 +1224,12 @@ impl Shell {
             .collect()
     }
 
-    fn push_markers(&self, editor: &Entity<EditorView>, doc: &Path, cx: &mut Context<Self>) {
+    pub(super) fn push_markers(
+        &self,
+        editor: &Entity<EditorView>,
+        doc: &Path,
+        cx: &mut Context<Self>,
+    ) {
         let markers = self.file_diagnostics(doc).into_iter().map(marker).collect();
         editor.update(cx, |e, cx| e.set_markers(markers, cx));
     }

@@ -166,7 +166,9 @@ impl Setting {
         let text = text.trim();
         match self.kind {
             Kind::Whole { min, max, .. } => {
-                let n: i64 = text.parse().map_err(|_| "Enter a whole number.".to_string())?;
+                let n: i64 = text
+                    .parse()
+                    .map_err(|_| "Enter a whole number.".to_string())?;
                 let too_big = max.is_some_and(|max| n > max);
                 if n < min || too_big {
                     return Err(match max {
@@ -632,7 +634,9 @@ mod tests {
             if key.starts_with('[') {
                 continue;
             }
-            let nested = SETTINGS.iter().any(|s| s.keys.len() > 1 && s.keys[0] == key);
+            let nested = SETTINGS
+                .iter()
+                .any(|s| s.keys.len() > 1 && s.keys[0] == key);
             match value.as_object() {
                 Some(inner) if nested => {
                     out.extend(inner.keys().map(|k| setting_name(Some(key), k)));
@@ -726,16 +730,25 @@ mod tests {
         let e = s.editor_for(Some(Lang::Rust));
         let font = e.font_size.unwrap_or(athena_ui::CODE_SIZE);
         vec![
-            format!("format {}", e.format_on_save.or(prefs.format_on_save) == Some(true)),
+            format!(
+                "format {}",
+                e.format_on_save.or(prefs.format_on_save) == Some(true)
+            ),
             format!("trim {}", e.trim_trailing_whitespace == Some(true)),
             format!("final newline {}", e.insert_final_newline == Some(true)),
             format!("wrap {}", e.word_wrap.unwrap_or(prefs.word_wrap)),
             format!("font {font}"),
             format!("tab {}", e.tab_size.unwrap_or(4)),
             format!("autosave {}", prefs.autosave_delay_ms),
-            format!("inlay curated {}", s.server_config("gopls").get("hints").is_some()),
+            format!(
+                "inlay curated {}",
+                s.server_config("gopls").get("hints").is_some()
+            ),
             format!("brackets {}", e.bracket_pair_colorization != Some(false)),
-            format!("lightbulb {:?}", e.lightbulb.unwrap_or(Lightbulb::QuickFixes)),
+            format!(
+                "lightbulb {:?}",
+                e.lightbulb.unwrap_or(Lightbulb::QuickFixes)
+            ),
             format!("linked {}", e.linked_editing == Some(true)),
             format!("minimap {}", e.minimap != Some(false)),
             format!("semantic {}", e.semantic_highlighting != Some(false)),

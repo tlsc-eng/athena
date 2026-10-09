@@ -138,28 +138,28 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| TextInput::new("Search settings", cx));
-        let mut subscriptions = vec![cx.subscribe(
-            &search,
-            |this: &mut Self, _, event: &InputEvent, cx| {
-                if *event == InputEvent::Changed {
-                    this.scroll.set_offset(Point::default());
-                    cx.notify();
-                }
-            },
-        )];
+        let mut subscriptions =
+            vec![
+                cx.subscribe(&search, |this: &mut Self, _, event: &InputEvent, cx| {
+                    if *event == InputEvent::Changed {
+                        this.scroll.set_offset(Point::default());
+                        cx.notify();
+                    }
+                }),
+            ];
         let mut fields = HashMap::new();
         for (i, setting) in SETTINGS.iter().enumerate() {
             if !matches!(setting.kind, Kind::Whole { .. } | Kind::Number { .. }) {
                 continue;
             }
             let input = cx.new(|cx| TextInput::new(field_text(&setting.default_value()), cx));
-            subscriptions.push(cx.subscribe(&input, move |this, _, event: &InputEvent, cx| {
-                match event {
+            subscriptions.push(
+                cx.subscribe(&input, move |this, _, event: &InputEvent, cx| match event {
                     InputEvent::Changed => this.typed(i, false, cx),
                     InputEvent::Submit | InputEvent::SubmitBeside => this.typed(i, true, cx),
                     _ => {}
-                }
-            }));
+                }),
+            );
             fields.insert(i, input);
         }
         let mut view = Self {
@@ -280,7 +280,13 @@ impl SettingsView {
         });
     }
 
-    fn choose(&mut self, i: usize, value: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn choose(
+        &mut self,
+        i: usize,
+        value: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The file watcher applies the rest; the theme changes now, as the menu item does.
         if SETTINGS[i].keys == ["theme"] {
             let choice = match value {
@@ -309,7 +315,11 @@ impl SettingsView {
             .iter()
             .map(|&(value, label)| {
                 let this = this.clone();
-                let mark = if current == json!(value) { "✓  " } else { "    " };
+                let mark = if current == json!(value) {
+                    "✓  "
+                } else {
+                    "    "
+                };
                 MenuItem::new(format!("{mark}{label}"), move |window, cx| {
                     let _ = this.update(cx, |v, cx| v.choose(i, value, window, cx));
                 })
@@ -356,9 +366,21 @@ impl SettingsView {
                 .flex()
                 .items_center()
                 .border_b_2()
-                .border_color(if on { t.color.accent } else { gpui::transparent_black() })
-                .text_color(if on { t.color.content } else { t.color.content_muted })
-                .font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                .border_color(if on {
+                    t.color.accent
+                } else {
+                    gpui::transparent_black()
+                })
+                .text_color(if on {
+                    t.color.content
+                } else {
+                    t.color.content_muted
+                })
+                .font_weight(if on {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
                 .cursor_pointer()
                 .hover(|s| s.text_color(t.color.content))
                 .child(label)
@@ -385,10 +407,14 @@ impl SettingsView {
                             .child("Settings"),
                     )
                     .child(
-                        Button::new("settings-json", "Open Settings (JSON)", ButtonKind::Secondary)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(SettingsEvent::OpenJson(scope))
-                            })),
+                        Button::new(
+                            "settings-json",
+                            "Open Settings (JSON)",
+                            ButtonKind::Secondary,
+                        )
+                        .on_click(
+                            cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenJson(scope))),
+                        ),
                     ),
             )
             .child(
@@ -424,14 +450,18 @@ impl SettingsView {
                     .items_end()
                     .gap(t.ui(4.))
                     .text_size(t.typography.caption)
-                    .child(tab("scope-user", "User".into(), Scope::User).on_click(cx.listener(
-                        |this, _, window, cx| this.set_scope(Scope::User, window, cx),
-                    )))
+                    .child(tab("scope-user", "User".into(), Scope::User).on_click(
+                        cx.listener(|this, _, window, cx| this.set_scope(Scope::User, window, cx)),
+                    ))
                     .child(
-                        tab("scope-project", format!("Project · {project_name}"), Scope::Project)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.set_scope(Scope::Project, window, cx)
-                            })),
+                        tab(
+                            "scope-project",
+                            format!("Project · {project_name}"),
+                            Scope::Project,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_scope(Scope::Project, window, cx)
+                        })),
                     ),
             )
             .into_any_element()
@@ -465,13 +495,19 @@ impl SettingsView {
                         div()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t.color.danger)
-                            .child(format!("{file} could not be read, so nothing here can change")),
+                            .child(format!(
+                                "{file} could not be read, so nothing here can change"
+                            )),
                     )
                     .child(div().text_color(t.color.content).child(why.to_string())),
             )
             .child(
-                Button::new("settings-fix", format!("Open {file}"), ButtonKind::Secondary)
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenJson(scope)))),
+                Button::new(
+                    "settings-fix",
+                    format!("Open {file}"),
+                    ButtonKind::Secondary,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenJson(scope)))),
             )
             .into_any_element()
     }
@@ -517,9 +553,8 @@ impl SettingsView {
             }))
             .when(state.modified && editable, |el| {
                 el.child(
-                    Button::new(("setting-reset", i), "Reset", ButtonKind::Ghost).on_click(
-                        cx.listener(move |this, _, _, cx| this.reset(i, cx)),
-                    ),
+                    Button::new(("setting-reset", i), "Reset", ButtonKind::Ghost)
+                        .on_click(cx.listener(move |this, _, _, cx| this.reset(i, cx))),
                 )
             });
         let description = |el: gpui::Div| {
@@ -536,10 +571,11 @@ impl SettingsView {
                     .items_start()
                     .gap(t.ui(8.))
                     .when(editable, |el| {
-                        el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
-                            let scope = this.scope;
-                            this.set(scope, i, json!(!on), cx)
-                        }))
+                        el.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let scope = this.scope;
+                                this.set(scope, i, json!(!on), cx)
+                            }))
                     })
                     .child(
                         div()
@@ -551,7 +587,11 @@ impl SettingsView {
                             .justify_center()
                             .rounded(px(3.))
                             .border_1()
-                            .border_color(if on { t.color.accent } else { t.color.border_strong })
+                            .border_color(if on {
+                                t.color.accent
+                            } else {
+                                t.color.border_strong
+                            })
                             .bg(if on { t.color.accent } else { t.color.surface })
                             .text_size(t.ui(10.))
                             .text_color(t.color.content_on_accent)
@@ -588,9 +628,11 @@ impl SettingsView {
                             .when(editable, |el| {
                                 el.cursor_pointer()
                                     .hover(|s| s.bg(t.color.surface_hover))
-                                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                                        this.open_choice(i, e.position(), window, cx)
-                                    }))
+                                    .on_click(cx.listener(
+                                        move |this, e: &ClickEvent, window, cx| {
+                                            this.open_choice(i, e.position(), window, cx)
+                                        },
+                                    ))
                             })
                             .child(label)
                             .child(div().text_color(t.color.content_muted).child("▾")),
@@ -668,7 +710,11 @@ impl SettingsView {
                     .flex_none()
                     .w(px(2.))
                     .rounded(px(1.))
-                    .bg(if state.modified { t.color.accent } else { gpui::transparent_black() }),
+                    .bg(if state.modified {
+                        t.color.accent
+                    } else {
+                        gpui::transparent_black()
+                    }),
             )
             .child(
                 div()
@@ -801,12 +847,36 @@ mod tests {
         let chosen = json!(true);
         let cases = [
             (Scope::User, &none, &none, None, json!(false), false, false),
-            (Scope::User, &none, &none, Some(&chosen), json!(true), false, false),
+            (
+                Scope::User,
+                &none,
+                &none,
+                Some(&chosen),
+                json!(true),
+                false,
+                false,
+            ),
             (Scope::User, &user, &none, None, json!(true), true, false),
             (Scope::User, &user, &project, None, json!(true), true, true),
             (Scope::Project, &user, &none, None, json!(true), false, true),
-            (Scope::Project, &user, &project, None, json!(false), true, true),
-            (Scope::Project, &none, &project, Some(&chosen), json!(false), true, false),
+            (
+                Scope::Project,
+                &user,
+                &project,
+                None,
+                json!(false),
+                true,
+                true,
+            ),
+            (
+                Scope::Project,
+                &none,
+                &project,
+                Some(&chosen),
+                json!(false),
+                true,
+                false,
+            ),
         ];
         for (scope, u, p, fallback, value, modified, elsewhere) in cases {
             assert_eq!(
@@ -862,6 +932,9 @@ mod tests {
     fn number_fields_show_whole_numbers_without_a_fraction() {
         assert_eq!(field_text(&json!(13)), "13");
         assert_eq!(field_text(&json!(13.5)), "13.5");
-        assert_eq!(field_text(&setting("editor.font_size").default_value()), "13");
+        assert_eq!(
+            field_text(&setting("editor.font_size").default_value()),
+            "13"
+        );
     }
 }

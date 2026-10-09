@@ -806,7 +806,10 @@ pub fn unset_value(text: &str, keys: &[&str]) -> Result<String, String> {
         let Some(root) = root_object(&out)? else {
             break;
         };
-        let read = root.members.iter().rposition(|m| keys.len() > 1 && m.key == keys[0]);
+        let read = root
+            .members
+            .iter()
+            .rposition(|m| keys.len() > 1 && m.key == keys[0]);
         let emptied = read.filter(|&at| {
             let m = &root.members[at];
             m.object.as_ref().is_some_and(|o| {
@@ -946,17 +949,28 @@ pub fn problems_at(text: &str, project: bool) -> Vec<(Range<usize>, String, bool
     for m in &root.members {
         let own = format!("{{{}}}", &text[m.key_start..m.value.end]);
         let problems = read(&own).map(|(_, p)| p).unwrap_or_default();
-        let block = m.key == "editor" || m.key.starts_with('[') && m.key.ends_with(']');
-        match &m.object {
-            Some(inner) if block && !problems.is_empty() => {
-                for im in &inner.members {
-                    let one = format!("{{{}: {{{}}}}}", quote(&m.key), &text[im.key_start..im.value.end]);
-                    for why in read(&one).map(|(_, p)| p).unwrap_or_default() {
-                        out.push((im.key_start..im.key_end, why, false));
-                    }
-                }
+        if problems.is_empty() {
+            continue;
+        }
+        // Inside a block, each problem goes on the key it is about, where one is.
+        let mut inside = Vec::new();
+        for im in m.object.iter().flat_map(|o| &o.members) {
+            let one = format!(
+                "{{{}: {{{}}}}}",
+                quote(&m.key),
+                &text[im.key_start..im.value.end]
+            );
+            for why in read(&one).map(|(_, p)| p).unwrap_or_default() {
+                inside.push((im.key_start..im.key_end, why, false));
             }
-            _ => out.extend(problems.into_iter().map(|why| (m.key_start..m.key_end, why, false))),
+        }
+        match inside.is_empty() {
+            true => out.extend(
+                problems
+                    .into_iter()
+                    .map(|why| (m.key_start..m.key_end, why, false)),
+            ),
+            false => out.extend(inside),
         }
     }
     out
@@ -1754,15 +1768,27 @@ mod tests {
     #[test]
     fn unsetting_the_last_member_takes_the_comma_before_it() {
         assert_eq!(
-            unset_value(r#"{"theme": "dark", "ide_integration": true}"#, &["ide_integration"]).unwrap(),
+            unset_value(
+                r#"{"theme": "dark", "ide_integration": true}"#,
+                &["ide_integration"]
+            )
+            .unwrap(),
             r#"{"theme": "dark"}"#
         );
         assert_eq!(
-            unset_value(r#"{"theme": "dark", "ide_integration": true, "git.autofetch": true}"#, &["ide_integration"]).unwrap(),
+            unset_value(
+                r#"{"theme": "dark", "ide_integration": true, "git.autofetch": true}"#,
+                &["ide_integration"]
+            )
+            .unwrap(),
             r#"{"theme": "dark", "git.autofetch": true}"#
         );
         assert_eq!(
-            unset_value("{\n  \"editor\": { /* keep */ \"word_wrap\": true }\n}", &["editor", "word_wrap"]).unwrap(),
+            unset_value(
+                "{\n  \"editor\": { /* keep */ \"word_wrap\": true }\n}",
+                &["editor", "word_wrap"]
+            )
+            .unwrap(),
             "{\n  \"editor\": { /* keep */ }\n}",
             "an editor block with a comment in it stays"
         );
@@ -1824,8 +1850,24 @@ mod tests {
             .iter()
             .map(|(r, _, fatal)| (&text[r.clone()], *fatal))
             .collect();
-        assert_eq!(at, [("\"theme\"", false), ("\"bogus\"", false), ("\"nope\"", false)]);
-        let project = problems_at(r#"{"editor": {"font_size": 14, "tab_size": 2}, "theme": "dark"}"#, true);
+        assert_eq!(
+            at,
+            [
+                ("\"theme\"", false),
+                ("\"bogus\"", false),
+                ("\"nope\"", false)
+            ]
+        );
+        let nested = r#"{"window": {"zoom_level": 9}, "git": {}}"#;
+        let at: Vec<&str> = problems_at(nested, false)
+            .iter()
+            .map(|(r, _, _)| &nested[r.clone()])
+            .collect();
+        assert_eq!(at, ["\"zoom_level\"", "\"git\""]);
+        let project = problems_at(
+            r#"{"editor": {"font_size": 14, "tab_size": 2}, "theme": "dark"}"#,
+            true,
+        );
         assert_eq!(project.len(), 2, "{project:?}");
         assert!(project[0].1.contains("only in the global"), "{project:?}");
         let broken = "{\n  \"theme\": \"dark\"\n  \"x\": 1\n}";

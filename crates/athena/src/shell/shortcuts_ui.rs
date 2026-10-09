@@ -5,9 +5,9 @@ use std::rc::Rc;
 use athena_ui::{ActiveTheme, Button, ButtonKind, ContextMenu, InputEvent, MenuItem, TextInput};
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyBinding, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
-    div, prelude::*, uniform_list,
+    FocusHandle, Focusable, FontWeight, KeyBinding, Keystroke, MouseButton, MouseDownEvent, Pixels,
+    Point, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window, div,
+    prelude::*, uniform_list,
 };
 
 use crate::keymap::{self, NewEntry, Recorder, Step};
@@ -96,7 +96,11 @@ fn humanize(name: &str) -> String {
         ns => {
             let ns = ns.replace('_', " ");
             let mut chars = ns.chars();
-            let first: String = chars.next().into_iter().flat_map(char::to_uppercase).collect();
+            let first: String = chars
+                .next()
+                .into_iter()
+                .flat_map(char::to_uppercase)
+                .collect();
             format!("{first}{}: {words}", chars.as_str())
         }
     }
@@ -276,17 +280,20 @@ impl ShortcutsView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| TextInput::new("Search keybindings", cx));
         let subscription =
-            cx.subscribe(&search, |this: &mut Self, _, event: &InputEvent, cx| match event {
-                InputEvent::Changed => this.filter(cx),
-                InputEvent::Up => this.step(-1, cx),
-                InputEvent::Down => this.step(1, cx),
-                InputEvent::Cancel => this.search.update(cx, |s, cx| s.set_text("", cx)),
-                // The field has no window to hand over; the next frame starts recording.
-                InputEvent::Submit | InputEvent::SubmitBeside => {
-                    this.pending_record = this.selected;
-                    cx.notify();
-                }
-            });
+            cx.subscribe(
+                &search,
+                |this: &mut Self, _, event: &InputEvent, cx| match event {
+                    InputEvent::Changed => this.filter(cx),
+                    InputEvent::Up => this.step(-1, cx),
+                    InputEvent::Down => this.step(1, cx),
+                    InputEvent::Cancel => this.search.update(cx, |s, cx| s.set_text("", cx)),
+                    // The field has no window to hand over; the next frame starts recording.
+                    InputEvent::Submit | InputEvent::SubmitBeside => {
+                        this.pending_record = this.selected;
+                        cx.notify();
+                    }
+                },
+            );
         let mut view = Self {
             search,
             rows: Rc::default(),
@@ -344,8 +351,9 @@ impl ShortcutsView {
         })
         .collect();
         self.selected = selected.and_then(|old| {
-            rows.iter()
-                .position(|r| r.command == old.command && r.binding.is_some() == old.binding.is_some())
+            rows.iter().position(|r| {
+                r.command == old.command && r.binding.is_some() == old.binding.is_some()
+            })
         });
         self.rows = Rc::new(rows);
         self.filter(cx);
@@ -387,7 +395,13 @@ impl ShortcutsView {
         reset(command, &self.entries).is_some()
     }
 
-    fn start_recording(&mut self, row: usize, adding: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_recording(
+        &mut self,
+        row: usize,
+        adding: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.rows.get(row).is_some_and(|r| r.bindable) {
             return;
         }
@@ -453,7 +467,13 @@ impl ShortcutsView {
         cx.notify();
     }
 
-    fn open_menu(&mut self, row: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_menu(
+        &mut self,
+        row: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(r) = self.rows.get(row).cloned() else {
             return;
         };
@@ -466,13 +486,19 @@ impl ShortcutsView {
             }
         };
         let mut items = vec![
-            MenuItem::new("Change Keybinding…", act(|v, row, w, cx| v.start_recording(row, false, w, cx)))
-                .disabled(!r.bindable),
+            MenuItem::new(
+                "Change Keybinding…",
+                act(|v, row, w, cx| v.start_recording(row, false, w, cx)),
+            )
+            .disabled(!r.bindable),
         ];
         if r.binding.is_some() {
             items.push(
-                MenuItem::new("Add Keybinding…", act(|v, row, w, cx| v.start_recording(row, true, w, cx)))
-                    .disabled(!r.bindable),
+                MenuItem::new(
+                    "Add Keybinding…",
+                    act(|v, row, w, cx| v.start_recording(row, true, w, cx)),
+                )
+                .disabled(!r.bindable),
             );
             items.push(MenuItem::new(
                 "Remove Keybinding",
@@ -618,7 +644,11 @@ impl ShortcutsView {
                                         .whitespace_nowrap()
                                         .child(bad.text.clone()),
                                 )
-                                .child(div().text_color(t.color.content_secondary).child(bad.why.clone()))
+                                .child(
+                                    div()
+                                        .text_color(t.color.content_secondary)
+                                        .child(bad.why.clone()),
+                                )
                         })),
                 )
                 .child(
@@ -636,7 +666,11 @@ impl ShortcutsView {
         let keys = rec.recorder.strokes();
         let shown = match keys.is_empty() {
             true => "Press keys…".to_string(),
-            false => keys.iter().map(keymap::symbols).collect::<Vec<_>>().join(" "),
+            false => keys
+                .iter()
+                .map(keymap::symbols)
+                .collect::<Vec<_>>()
+                .join(" "),
         };
         let others: Vec<String> = match keys.is_empty() {
             true => Vec::new(),
@@ -644,10 +678,9 @@ impl ShortcutsView {
                 .into_iter()
                 .filter(|b| {
                     rec.adding
-                        || row
-                            .binding
-                            .as_ref()
-                            .is_none_or(|own| !(b.action().name() == row.command && Bound::of(b) == *own))
+                        || row.binding.as_ref().is_none_or(|own| {
+                            !(b.action().name() == row.command && Bound::of(b) == *own)
+                        })
                 })
                 .map(|b| {
                     let name = self
@@ -665,9 +698,16 @@ impl ShortcutsView {
         let conflict = match others.len() {
             0 => None,
             1 => Some(format!("Also bound to {}", others[0])),
-            n => Some(format!("{n} other commands use these keys: {}", others.join(", "))),
+            n => Some(format!(
+                "{n} other commands use these keys: {}",
+                others.join(", ")
+            )),
         };
-        let verb = if rec.adding { "Add keys for" } else { "Press the keys for" };
+        let verb = if rec.adding {
+            "Add keys for"
+        } else {
+            "Press the keys for"
+        };
         Some(
             div()
                 .absolute()
@@ -709,13 +749,21 @@ impl ShortcutsView {
                                 .border_color(t.color.focus_ring)
                                 .bg(t.color.surface_sunken)
                                 .text_size(t.typography.heading)
-                                .text_color(if keys.is_empty() { t.color.content_muted } else { t.color.content })
+                                .text_color(if keys.is_empty() {
+                                    t.color.content_muted
+                                } else {
+                                    t.color.content
+                                })
                                 .child(shown),
                         )
-                        .children(rec.problem.clone().map(|why| {
-                            div().text_color(t.color.danger).child(why)
-                        }))
-                        .children(conflict.map(|text| div().text_color(t.color.warning).child(text)))
+                        .children(
+                            rec.problem
+                                .clone()
+                                .map(|why| div().text_color(t.color.danger).child(why)),
+                        )
+                        .children(
+                            conflict.map(|text| div().text_color(t.color.warning).child(text)),
+                        )
                         .child(
                             div()
                                 .text_color(t.color.content_muted)
@@ -792,13 +840,15 @@ impl ShortcutsView {
                                     .text_size(t.typography.caption)
                                     .when(on, |el| el.bg(t.color.surface_active))
                                     .when(!on, |el| el.hover(|s| s.bg(t.color.surface_hover)))
-                                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                                        this.selected = Some(i);
-                                        if e.click_count() >= 2 {
-                                            this.start_recording(i, false, window, cx);
-                                        }
-                                        cx.notify();
-                                    }))
+                                    .on_click(cx.listener(
+                                        move |this, e: &ClickEvent, window, cx| {
+                                            this.selected = Some(i);
+                                            if e.click_count() >= 2 {
+                                                this.start_recording(i, false, window, cx);
+                                            }
+                                            cx.notify();
+                                        },
+                                    ))
                                     .on_mouse_down(
                                         MouseButton::Right,
                                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -853,11 +903,23 @@ impl ShortcutsView {
                                                         .rounded(t.shape.radius_control)
                                                         .text_color(t.color.content_muted)
                                                         .cursor_pointer()
-                                                        .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-                                                        .tooltip(|_, cx| athena_ui::Tooltip::view("Change keybinding (↩)", cx))
-                                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                                            this.start_recording(i, false, window, cx)
-                                                        }))
+                                                        .hover(|s| {
+                                                            s.bg(t.color.surface_hover)
+                                                                .text_color(t.color.content)
+                                                        })
+                                                        .tooltip(|_, cx| {
+                                                            athena_ui::Tooltip::view(
+                                                                "Change keybinding (↩)",
+                                                                cx,
+                                                            )
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, window, cx| {
+                                                                this.start_recording(
+                                                                    i, false, window, cx,
+                                                                )
+                                                            },
+                                                        ))
                                                         .child("✎"),
                                                 )
                                             }),
@@ -870,7 +932,9 @@ impl ShortcutsView {
                                             .whitespace_nowrap()
                                             .font_family(t.typography.mono.clone())
                                             .text_color(t.color.content_secondary)
-                                            .child(b.and_then(|b| b.when.clone()).unwrap_or_default()),
+                                            .child(
+                                                b.and_then(|b| b.when.clone()).unwrap_or_default(),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -882,7 +946,9 @@ impl ShortcutsView {
                                             })
                                             .child(source)
                                             .when(resettable[i] && source != "User", |el| {
-                                                el.child(div().text_color(t.color.accent).child("•"))
+                                                el.child(
+                                                    div().text_color(t.color.accent).child("•"),
+                                                )
                                             }),
                                     )
                                     .into_any_element()
@@ -964,7 +1030,11 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}\n{text}");
         let bindings = keymap::merge(&defaults(), rules);
         let labels = HashMap::from([("athena::SplitRight", "Split right".to_string())]);
-        let commands = ["athena::QuickOpen", "athena::SplitRight", "context_menu::Up"];
+        let commands = [
+            "athena::QuickOpen",
+            "athena::SplitRight",
+            "context_menu::Up",
+        ];
         build_rows(&bindings, &commands, &labels, |n| build(n, None).is_ok())
     }
 
@@ -996,7 +1066,10 @@ mod tests {
                 ("Quick open", None),
             ]
         );
-        assert_eq!(rows[0].binding.as_ref().unwrap().when.as_deref(), Some("!Terminal"));
+        assert_eq!(
+            rows[0].binding.as_ref().unwrap().when.as_deref(),
+            Some("!Terminal")
+        );
         assert_eq!(humanize("editor::MoveLinesUp"), "Editor: Move lines up");
         assert_eq!(humanize("image_view::ZoomIn"), "Image view: Zoom in");
     }
@@ -1004,7 +1077,10 @@ mod tests {
     #[test]
     fn changing_a_default_adds_the_new_keys_and_removes_the_old_in_its_context() {
         let rows = table("[]");
-        let terminal = rows.iter().find(|r| r.command == "athena::NewTerminal").unwrap();
+        let terminal = rows
+            .iter()
+            .find(|r| r.command == "athena::NewTerminal")
+            .unwrap();
         let text = edited("[]", change(terminal, "cmd-k cmd-t"));
         let rows = table(&text);
         assert_eq!(
@@ -1015,7 +1091,10 @@ mod tests {
             KeyBindingContextPredicate::parse("!Terminal").is_ok(),
             "a default's context reads back"
         );
-        let user = rows.iter().find(|r| r.command == "athena::NewTerminal").unwrap();
+        let user = rows
+            .iter()
+            .find(|r| r.command == "athena::NewTerminal")
+            .unwrap();
         let text = edited(&text, change(user, "f7"));
         assert_eq!(
             keys(&table(&text), "athena::NewTerminal"),
@@ -1025,7 +1104,10 @@ mod tests {
         assert_eq!(change(user, "cmd-k cmd-t"), None, "the keys it has already");
         let same = &table(&text)[0];
         assert_eq!(change(same, "f7"), None, "the same keys change nothing");
-        let reset_text = edited(&text, reset("athena::NewTerminal", &keymap::entry_commands(&text)));
+        let reset_text = edited(
+            &text,
+            reset("athena::NewTerminal", &keymap::entry_commands(&text)),
+        );
         assert_eq!(
             keys(&table(&reset_text), "athena::NewTerminal"),
             [("cmd-t".into(), Some("!Terminal".into()), false)],
@@ -1036,7 +1118,10 @@ mod tests {
     #[test]
     fn removing_and_adding_bindings_round_trip_through_keymap_json() {
         let rows = table("[]");
-        let split = rows.iter().find(|r| r.command == "athena::SplitRight").unwrap();
+        let split = rows
+            .iter()
+            .find(|r| r.command == "athena::SplitRight")
+            .unwrap();
         let text = edited("[]", remove(split));
         assert!(keys(&table(&text), "athena::SplitRight").is_empty());
         let open = table(&text)
@@ -1046,8 +1131,14 @@ mod tests {
         assert!(open.binding.is_none() && open.bindable);
         let text = edited(&text, change(&open, "cmd-d"));
         let rows = table(&text);
-        assert_eq!(keys(&rows, "athena::QuickOpen"), [("cmd-d".into(), None, true)]);
-        let user = rows.iter().find(|r| r.command == "athena::QuickOpen").unwrap();
+        assert_eq!(
+            keys(&rows, "athena::QuickOpen"),
+            [("cmd-d".into(), None, true)]
+        );
+        let user = rows
+            .iter()
+            .find(|r| r.command == "athena::QuickOpen")
+            .unwrap();
         let text = edited(&text, add(user, "cmd-shift-o"));
         assert_eq!(keys(&table(&text), "athena::QuickOpen").len(), 2);
         let user = table(&text)
@@ -1056,7 +1147,10 @@ mod tests {
             .unwrap();
         let text = edited(&text, remove(&user));
         assert_eq!(keys(&table(&text), "athena::QuickOpen").len(), 1);
-        assert_eq!(reset("athena::NewTerminal", &keymap::entry_commands(&text)), None);
+        assert_eq!(
+            reset("athena::NewTerminal", &keymap::entry_commands(&text)),
+            None
+        );
     }
 
     #[test]

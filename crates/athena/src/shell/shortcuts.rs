@@ -139,7 +139,9 @@ impl Shell {
                     this.pending_open = Some(path);
                     cx.notify();
                 }
-                Err(e) => this.transient_notice("Could not create keymap.json", format!("{e:#}"), cx),
+                Err(e) => {
+                    this.transient_notice("Could not create keymap.json", format!("{e:#}"), cx)
+                }
             },
         })
         .detach();

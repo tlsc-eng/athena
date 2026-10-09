@@ -1037,11 +1037,11 @@ impl Render for Shell {
                     this.open_shortcuts_ui(w, cx)
                 }),
             )
-            .on_action(
-                cx.listener(|this, _: &crate::actions::OpenKeyboardShortcutsJson, w, cx| {
+            .on_action(cx.listener(
+                |this, _: &crate::actions::OpenKeyboardShortcutsJson, w, cx| {
                     this.open_keymap_file(w, cx)
-                }),
-            )
+                },
+            ))
             .on_action(
                 cx.listener(|this, _: &crate::actions::OpenSettings, w, cx| {
                     this.open_settings_ui(w, cx)
