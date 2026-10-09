@@ -1206,7 +1206,7 @@ impl Shell {
                         .min_w_0()
                         .min_h(px(26.))
                         .px(px(8.))
-                        .py(px(3.))
+                        .py(px(1.))
                         .flex()
                         .items_center()
                         .rounded(t.shape.radius_control)

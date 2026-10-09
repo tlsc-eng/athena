@@ -1205,6 +1205,7 @@ impl DiffView {
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_color(t.color.content_secondary)
                     .child(format!("{} ↔ {}", self.old_label, self.new_label)),
             )
