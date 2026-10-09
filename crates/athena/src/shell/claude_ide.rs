@@ -54,11 +54,12 @@ struct Proposal {
     view: Option<EntityId>,
 }
 
-fn is_proposal(kind: &ItemKind) -> bool {
+/// Tabs that mean nothing to a later run: Claude's proposals and project search replace previews.
+fn never_saved(kind: &ItemKind) -> bool {
     matches!(
         kind,
         ItemKind::Diff {
-            base: DiffBase::Proposal { .. },
+            base: DiffBase::Proposal { .. } | DiffBase::SearchReplace,
             ..
         }
     )
@@ -119,7 +120,7 @@ fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
         .projects
         .iter()
         .filter_map(|p| p.layout.as_ref())
-        .any(|l| l.items().any(|i| is_proposal(&i.kind)));
+        .any(|l| l.items().any(|i| never_saved(&i.kind)));
     if !any {
         return None;
     }
@@ -130,7 +131,7 @@ fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
         };
         let ids: Vec<ItemId> = layout
             .items()
-            .filter(|i| is_proposal(&i.kind))
+            .filter(|i| never_saved(&i.kind))
             .map(|i| i.id)
             .collect();
         for id in ids {
@@ -700,7 +701,7 @@ mod tests {
 
         let saved = without_proposals(&workspace).unwrap();
         let layout = saved.projects[0].layout.clone().unwrap();
-        assert!(layout.items().all(|i| !is_proposal(&i.kind)));
+        assert!(layout.items().all(|i| !never_saved(&i.kind)));
         assert_eq!(layout.focused, terminal_pane);
         assert!(layout.validated().is_some());
 

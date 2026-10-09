@@ -66,6 +66,8 @@ pub enum DiffBase {
     Snapshot { session: String },
     /// The file on disk against an edit Claude Code proposes and is waiting on; never saved.
     Proposal { id: String },
+    /// The file against what the project search's Replace All would make of it; never saved.
+    SearchReplace,
 }
 
 impl ItemKind {

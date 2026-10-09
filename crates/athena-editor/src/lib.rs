@@ -39,7 +39,8 @@ pub use syntax::{Lang, Token};
 pub use view::{
     AddCursorAbove, AddCursorBelow, AddNextOccurrence, CopyLinesDown, CopyLinesUp, EditorEvent,
     EditorStatus, EditorView, GutterMark, Marker, MarkerSeverity, MoveLinesDown, MoveLinesUp,
-    SelectAll, SelectAllOccurrences, SkipOccurrence, ToggleWordWrap, ViewState,
+    SelectAll, SelectAllOccurrences, SkipOccurrence, ToggleMatchCase, ToggleRegex, ToggleWholeWord,
+    ToggleWordWrap, ViewState,
 };
 
 /// Registers the editor's and image viewer's key bindings.

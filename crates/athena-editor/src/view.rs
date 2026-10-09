@@ -181,15 +181,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-l", SelectAllOccurrences, ctx),
         KeyBinding::new("alt-z", ToggleWordWrap, ctx),
     ]);
-    let bar = Some("FindBar");
-    cx.bind_keys([
-        KeyBinding::new("alt-c", ToggleMatchCase, bar),
-        KeyBinding::new("alt-w", ToggleWholeWord, bar),
-        KeyBinding::new("alt-r", ToggleRegex, bar),
-        KeyBinding::new("cmd-alt-c", ToggleMatchCase, bar),
-        KeyBinding::new("cmd-alt-w", ToggleWholeWord, bar),
-        KeyBinding::new("cmd-alt-r", ToggleRegex, bar),
-    ]);
+    // The shell's Search tab names its field row ProjectSearch to share these.
+    for bar in [Some("FindBar"), Some("ProjectSearch")] {
+        cx.bind_keys([
+            KeyBinding::new("alt-c", ToggleMatchCase, bar),
+            KeyBinding::new("alt-w", ToggleWholeWord, bar),
+            KeyBinding::new("alt-r", ToggleRegex, bar),
+            KeyBinding::new("cmd-alt-c", ToggleMatchCase, bar),
+            KeyBinding::new("cmd-alt-w", ToggleWholeWord, bar),
+            KeyBinding::new("cmd-alt-r", ToggleRegex, bar),
+        ]);
+    }
 }
 
 pub enum EditorEvent {

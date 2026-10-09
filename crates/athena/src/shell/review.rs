@@ -63,6 +63,7 @@ pub(super) fn diff_title(path: &Path, base: &DiffBase) -> String {
         DiffBase::Index => format!("{name} (Working Tree)"),
         DiffBase::Snapshot { .. } => format!("{name} (Claude's Edits)"),
         DiffBase::Proposal { .. } => format!("{name} (Claude's Proposal)"),
+        DiffBase::SearchReplace => format!("{name} (Replace Preview)"),
     }
 }
 
@@ -94,6 +95,7 @@ fn sides(base: &DiffBase) -> (&'static str, &'static str, HunkActions) {
             },
         ),
         DiffBase::Proposal { .. } => ("On Disk", "Claude's Proposal", HunkActions::default()),
+        DiffBase::SearchReplace => ("Current", "After Replace", HunkActions::default()),
     }
 }
 
@@ -173,6 +175,7 @@ fn load_with(
             (old, read_file(path)?)
         }
         DiffBase::Proposal { .. } => bail!("Claude's proposed change is no longer waiting."),
+        DiffBase::SearchReplace => bail!("A replace preview comes from the search."),
     };
     Ok(Sides {
         old: text(old)?,
@@ -261,6 +264,9 @@ impl Shell {
         base: &DiffBase,
         cx: &mut Context<Self>,
     ) {
+        if *base == DiffBase::SearchReplace {
+            return self.load_replace_preview(root, view, cx);
+        }
         let id = view.entity_id();
         if matches!(base, DiffBase::Proposal { .. }) || !self.review.loads.start(id) {
             return;
