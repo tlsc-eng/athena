@@ -239,6 +239,14 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::ToggleIdeIntegration),
         ),
         ("Send selection to Claude", Box::new(actions::SendToClaude)),
+        (
+            "Allow project linters (ESLint, Biome)",
+            Box::new(super::lsp::AllowProjectLinters),
+        ),
+        (
+            "Disallow project linters (ESLint, Biome)",
+            Box::new(super::lsp::DisallowProjectLinters),
+        ),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
         ("Focus outline", Box::new(super::outline::ShowOutline)),
         ("Show explorer", Box::new(super::outline::ShowExplorer)),

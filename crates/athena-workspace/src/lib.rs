@@ -10,7 +10,7 @@ pub use layout::{
     Pane, PaneId, Rect, ViewState,
 };
 pub use persist::{is_corrupt, load, save, set_aside};
-pub use project::{PANEL_IDS, Panel, Project, git_branch};
+pub use project::{LinterTrust, PANEL_IDS, Panel, Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
 
 use std::path::{Path, PathBuf};

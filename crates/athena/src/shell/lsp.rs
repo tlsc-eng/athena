@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
@@ -14,9 +14,10 @@ use athena_lsp::{
 };
 use athena_proto::{DiagnosticInfo, NoticeKind};
 use athena_ui::ActiveTheme;
+use athena_workspace::LinterTrust;
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Task, WeakEntity, Window, div, prelude::*, px,
-    uniform_list,
+    AnyElement, Context, Entity, FontWeight, PromptButton, PromptLevel, Task, WeakEntity, Window,
+    actions, div, prelude::*, px, uniform_list,
 };
 
 use super::Shell;
@@ -36,6 +37,10 @@ const SETTINGS_SETTLE: Duration = Duration::from_millis(300);
 const SNIPPET_CHARS: usize = 160;
 
 pub(super) const NO_SERVER: &str = "No language server runs for this file.";
+
+actions!(athena, [AllowProjectLinters, DisallowProjectLinters]);
+
+const PROJECT_LINTERS: [ServerKind; 2] = [ServerKind::Eslint, ServerKind::Biome];
 
 /// A server that stops this many times within `CRASH_WINDOW` is left stopped, as in VS Code.
 const MAX_CRASHES: usize = 5;
@@ -82,6 +87,8 @@ pub(super) struct LspState {
     pub(super) showing_calls: bool,
     pub(super) calls: Option<super::calls::Calls>,
     pub(super) calls_client: Option<Rc<Client>>,
+    /// Project roots whose "Run this project's linters?" question is on screen.
+    asking_trust: HashSet<PathBuf>,
 }
 
 impl LspState {
@@ -162,6 +169,13 @@ fn linters_for(lang: Lang) -> &'static [ServerKind] {
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => &[ServerKind::Eslint, ServerKind::Biome],
         Lang::Json | Lang::Css => &[ServerKind::Biome],
         _ => &[],
+    }
+}
+
+fn linter_name(kind: ServerKind) -> &'static str {
+    match kind {
+        ServerKind::Eslint => "ESLint",
+        _ => "Biome",
     }
 }
 
@@ -395,7 +409,17 @@ impl Shell {
         }
         // A linter the project does not install is simply not run, and never reported.
         let local = match key.1.is_project_local() {
-            true => Some(athena_lsp::project_server(&key.0, key.1)?),
+            true => {
+                let program = athena_lsp::project_server(&key.0, key.1)?;
+                match self.linter_trust(&key.0)? {
+                    LinterTrust::Allowed => Some(program),
+                    LinterTrust::NotAsked => {
+                        self.ask_linter_trust(&key.0, cx);
+                        return None;
+                    }
+                    LinterTrust::Denied => return None,
+                }
+            }
             false => None,
         };
         tracing::info!(root = %key.0.display(), ?local, "starting {}", key.1.program());
@@ -428,6 +452,142 @@ impl Shell {
             },
         );
         Some(client)
+    }
+
+    fn linter_trust(&self, root: &Path) -> Option<LinterTrust> {
+        let project = self.workspace.projects.iter().find(|p| p.root == root)?;
+        Some(project.linters)
+    }
+
+    /// Asks once per project whether the linters it installs may run, as VS Code asks before
+    /// running a workspace's ESLint.
+    fn ask_linter_trust(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if !self.lsp.asking_trust.insert(root.to_path_buf()) {
+            return;
+        }
+        let found: Vec<&str> = PROJECT_LINTERS
+            .into_iter()
+            .filter(|&kind| athena_lsp::project_server(root, kind).is_some())
+            .map(linter_name)
+            .collect();
+        let names = found.join(" and ");
+        let project = root.file_name().map_or_else(
+            || root.display().to_string(),
+            |n| n.to_string_lossy().into(),
+        );
+        let message = format!("Run {names} from {project}?");
+        let detail = format!(
+            "{project} installs {names} in node_modules. Running {} runs the project's own code, \
+             with its config and plugins, on this Mac. Allow it only for a project you trust; \
+             the command palette can change this later.",
+            if found.len() > 1 { "them" } else { "it" }
+        );
+        tracing::info!(root = %root.display(), "asking whether {names} may run");
+        let shell = cx.entity();
+        let root = root.to_path_buf();
+        // Deferred: files restored at launch open before the window exists.
+        cx.defer(move |cx| {
+            let window = cx
+                .active_window()
+                .or_else(|| cx.windows().into_iter().next());
+            let asked = window.map(|window| {
+                window.update(cx, |_, window, cx| {
+                    let answer = window.prompt(
+                        PromptLevel::Warning,
+                        &message,
+                        Some(&detail),
+                        &[
+                            PromptButton::ok("Allow"),
+                            PromptButton::cancel("Don't Allow"),
+                        ],
+                        cx,
+                    );
+                    let root = root.clone();
+                    shell.update(cx, |_, cx| {
+                        cx.spawn_in(window, async move |this, cx| {
+                            let answer = answer.await;
+                            let _ = this.update(cx, |this, cx| {
+                                this.lsp.asking_trust.remove(&root);
+                                match answer {
+                                    Ok(0) => this.set_linter_trust(&root, LinterTrust::Allowed, cx),
+                                    Ok(_) => this.set_linter_trust(&root, LinterTrust::Denied, cx),
+                                    // The window closed first; ask again next time.
+                                    Err(_) => {}
+                                }
+                            });
+                        })
+                        .detach();
+                    });
+                })
+            });
+            if !matches!(asked, Some(Ok(()))) {
+                shell.update(cx, |this, _| this.lsp.asking_trust.remove(&root));
+            }
+        });
+    }
+
+    /// Records the answer for the project at `root`, then starts or stops its linters to match.
+    fn set_linter_trust(&mut self, root: &Path, trust: LinterTrust, cx: &mut Context<Self>) {
+        let Some(project) = self.workspace.projects.iter_mut().find(|p| p.root == root) else {
+            return;
+        };
+        project.linters = trust;
+        self.schedule_save(cx);
+        if trust != LinterTrust::Allowed {
+            return self.stop_project_linters(root, cx);
+        }
+        for kind in PROJECT_LINTERS {
+            self.restart_lsp(&(root.to_path_buf(), kind), cx);
+        }
+    }
+
+    fn stop_project_linters(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let ours = |(r, kind): &ServerKey| r == root && kind.is_project_local();
+        let keys: Vec<ServerKey> = self
+            .lsp
+            .servers
+            .keys()
+            .filter(|k| ours(k))
+            .cloned()
+            .collect();
+        for key in &keys {
+            self.lsp.servers.remove(key);
+            self.clear_diagnostics(key, cx);
+        }
+        self.lsp.linters.retain(|_, keys| {
+            keys.retain(|k| !ours(k));
+            !keys.is_empty()
+        });
+        self.lsp.failed.retain(|k, _| !ours(k));
+        self.lsp.crashes.retain(|k, _| !ours(k));
+        self.lsp.restarts.retain(|k, _| !ours(k));
+        cx.notify();
+    }
+
+    /// The palette's Allow/Disallow Project Linters, for the active project.
+    pub(super) fn change_linter_trust(&mut self, allow: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let name = self
+            .workspace
+            .active_project()
+            .map(|p| p.name())
+            .unwrap_or_default();
+        let (trust, title, body) = match allow {
+            true => (
+                LinterTrust::Allowed,
+                "Project linters allowed",
+                format!("ESLint and Biome from {name}'s node_modules run for its files."),
+            ),
+            false => (
+                LinterTrust::Denied,
+                "Project linters disallowed",
+                format!("Athena no longer runs ESLint or Biome from {name}'s node_modules."),
+            ),
+        };
+        self.set_linter_trust(&root, trust, cx);
+        self.transient_notice(title, body, cx);
     }
 
     fn lsp_event(&mut self, key: ServerKey, event: Event, cx: &mut Context<Self>) {

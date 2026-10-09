@@ -951,6 +951,12 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &GoToWorkspaceSymbol, w, cx| {
                 this.open_palette_with(palette::Mode::Files, "#", w, cx)
             }))
+            .on_action(cx.listener(|this, _: &lsp::AllowProjectLinters, _, cx| {
+                this.change_linter_trust(true, cx)
+            }))
+            .on_action(cx.listener(|this, _: &lsp::DisallowProjectLinters, _, cx| {
+                this.change_linter_trust(false, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleIdeIntegration, w, cx| {
                 this.toggle_ide_integration(w, cx)
             }))

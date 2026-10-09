@@ -78,9 +78,28 @@ pub struct Project {
     pub claude_command: Option<String>,
     #[serde(default, skip_serializing_if = "Panel::is_empty")]
     pub panel: Panel,
+    /// Whether the ESLint and Biome the project installs may run; they are the project's code.
+    #[serde(default, skip_serializing_if = "LinterTrust::is_not_asked")]
+    pub linters: LinterTrust,
     /// Phase 3 stored a single shell here; read only to migrate it into `layout`.
     #[serde(default, skip_serializing)]
     terminal: Option<u64>,
+}
+
+/// The answer to "Run this project's linters?", asked once per project.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinterTrust {
+    #[default]
+    NotAsked,
+    Allowed,
+    Denied,
+}
+
+impl LinterTrust {
+    fn is_not_asked(&self) -> bool {
+        *self == Self::NotAsked
+    }
 }
 
 fn default_layout() -> Option<Layout> {
@@ -94,6 +113,7 @@ impl Project {
             layout: default_layout(),
             claude_command: None,
             panel: Panel::default(),
+            linters: LinterTrust::NotAsked,
             terminal: None,
         }
     }
@@ -189,6 +209,20 @@ mod tests {
         assert_eq!(mono("/x/hestia-infra"), "HI");
         assert_eq!(mono("/x/pi_dashboard"), "PD");
         assert_eq!(mono("/x/a"), "A");
+    }
+
+    #[test]
+    fn linters_are_not_asked_about_until_answered_and_the_answer_is_kept() {
+        let p: Project = serde_json::from_str(r#"{"root":"/n/a"}"#).unwrap();
+        assert_eq!(p.linters, LinterTrust::NotAsked);
+        assert!(!serde_json::to_string(&p).unwrap().contains("linters"));
+        for answer in [LinterTrust::Allowed, LinterTrust::Denied] {
+            let mut p = p.clone();
+            p.linters = answer;
+            let json = serde_json::to_string(&p).unwrap();
+            let back: Project = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.linters, answer, "{json}");
+        }
     }
 
     #[test]
