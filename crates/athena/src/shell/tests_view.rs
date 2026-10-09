@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use athena_editor::{EditorEvent, EditorView, RunMark, RunState, RunTestAt, TestSymbol};
 use athena_lsp::Position;
 use athena_testing::{
-    Ended, Framework, GoModule, Job, Outcome, Report, Suite, TestCase, find_go_module,
+    Ended, Framework, GoModule, Job, Outcome, Report, Stop, Suite, TestCase, find_go_module,
     find_js_package, go_job, go_run_pattern, js_job, js_name_pattern,
 };
 use athena_ui::{ActiveTheme, ButtonKind, Theme, empty_state};
@@ -62,8 +61,14 @@ struct Planned {
 
 struct ActiveRun {
     root: PathBuf,
-    cancel: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     scopes: Vec<Scope>,
+}
+
+impl Drop for ActiveRun {
+    fn drop(&mut self) {
+        self.stop.kill_now();
+    }
 }
 
 struct Watched {
@@ -499,9 +504,14 @@ impl Shell {
 
     fn stop_tests(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = &self.tests.run {
-            run.cancel.store(true, Ordering::Relaxed);
+            run.stop.request();
         }
         cx.notify();
+    }
+
+    /// The app is going, so test processes must not outlive it.
+    pub(super) fn tests_quit(&mut self) {
+        self.tests.run = None;
     }
 
     /// Runs the jobs one after another in the background, folding each one's results in.
@@ -516,10 +526,10 @@ impl Shell {
                 cx,
             );
         }
-        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(Stop::default());
         self.tests.run = Some(ActiveRun {
             root: root.clone(),
-            cancel: cancel.clone(),
+            stop: stop.clone(),
             scopes: planned.iter().map(|p| p.scope.clone()).collect(),
         });
         self.push_run_marks(cx);
@@ -529,16 +539,15 @@ impl Shell {
             let mut ran = Report::default();
             let mut cancelled = false;
             for p in planned {
-                let stop = cancel.clone();
+                let stop = stop.clone();
                 let done = cx
                     .background_executor()
                     .spawn(async move {
                         let finished = athena_testing::run(&p.job, RUN_LIMIT, &stop)?;
+                        // Jest held open by a leftover handle times out after writing its report.
                         let report = match finished.ended {
-                            Ended::Exited => {
-                                athena_testing::report(&p.job, &finished, p.module.as_ref())
-                            }
-                            _ => Ok(Report::default()),
+                            Ended::Cancelled => Ok(Report::default()),
+                            _ => athena_testing::report(&p.job, &finished, p.module.as_ref()),
                         };
                         if let Some(file) = &p.job.report {
                             let _ = std::fs::remove_file(file);
@@ -551,12 +560,22 @@ impl Shell {
                         cancelled = true;
                         break;
                     }
-                    Ok((Ended::TimedOut, _, framework)) => errors.push(format!(
-                        "{} did not finish within {} minutes.",
-                        framework.label(),
-                        RUN_LIMIT.as_secs() / 60
-                    )),
-                    Ok((_, Ok(report), _)) => {
+                    Ok((ended, report, framework)) => {
+                        if ended == Ended::TimedOut {
+                            errors.push(format!(
+                                "{} did not finish within {} minutes.",
+                                framework.label(),
+                                RUN_LIMIT.as_secs() / 60
+                            ));
+                        }
+                        let report = match report {
+                            Ok(report) => report,
+                            Err(_) if ended == Ended::TimedOut => continue,
+                            Err(err) => {
+                                errors.push(format!("{}: {err:#}", framework.label()));
+                                continue;
+                            }
+                        };
                         ran.merge(report.clone());
                         let root = root.clone();
                         let _ = this.update(cx, |this, cx| {
@@ -564,9 +583,6 @@ impl Shell {
                             this.push_run_marks(cx);
                             cx.notify();
                         });
-                    }
-                    Ok((_, Err(err), framework)) => {
-                        errors.push(format!("{}: {err:#}", framework.label()))
                     }
                     Err(err) => errors.push(format!("{err:#}")),
                 }

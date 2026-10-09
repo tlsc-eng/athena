@@ -186,6 +186,7 @@ impl Shell {
                 this.flush_unsaved(cx);
                 this.save_now(cx);
                 this.ide_quit();
+                this.tests_quit();
                 async {}
             }),
         ];
