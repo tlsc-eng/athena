@@ -24,6 +24,7 @@ const KEEP_COPIES: Duration = Duration::from_secs(30 * 24 * 3600);
 pub(super) struct ReviewState {
     edit_toasts: HashMap<PathBuf, u64>,
     loads: Loads,
+    pub(super) timeline: super::timeline::TimelineState,
 }
 
 /// One load per diff at a time; a reload asked for meanwhile runs once after it, so a late
@@ -65,11 +66,19 @@ pub(super) fn diff_title(path: &Path, base: &DiffBase) -> String {
         DiffBase::Proposal { .. } => format!("{name} (Claude's Proposal)"),
         DiffBase::SearchReplace => format!("{name} (Replace Preview)"),
         DiffBase::Conflict => format!("{name} (Current ↔ Incoming)"),
+        DiffBase::Commit { rev, .. } => format!("{name} ({0}^ ↔ {0})", short_rev(rev)),
+        DiffBase::Revision { rev, .. } => format!("{name} ({} ↔ Working Tree)", short_rev(rev)),
+        DiffBase::Files { other } => format!("{} ↔ {name}", file_label(other)),
     }
 }
 
-fn sides(base: &DiffBase) -> (&'static str, &'static str, HunkActions) {
-    match base {
+/// The 7-character id git shows for a commit.
+pub(super) fn short_rev(rev: &str) -> &str {
+    &rev[..rev.len().min(7)]
+}
+
+fn sides(base: &DiffBase) -> (String, String, HunkActions) {
+    let (old, new, actions) = match base {
         DiffBase::Head => (
             "HEAD",
             "Index",
@@ -102,7 +111,19 @@ fn sides(base: &DiffBase) -> (&'static str, &'static str, HunkActions) {
             "Incoming Changes",
             HunkActions::default(),
         ),
-    }
+        DiffBase::Commit { rev, .. } => {
+            let short = short_rev(rev);
+            return (format!("{short}^"), short.into(), HunkActions::default());
+        }
+        DiffBase::Revision { rev, .. } => {
+            let short = short_rev(rev).to_string();
+            return (short, "Working Tree".into(), HunkActions::default());
+        }
+        DiffBase::Files { other } => {
+            return (file_label(other), String::new(), HunkActions::default());
+        }
+    };
+    (old.into(), new.into(), actions)
 }
 
 /// Text for one side of a diff; a file that is not there is empty.
@@ -182,6 +203,15 @@ fn load_with(
         }
         DiffBase::Proposal { .. } => bail!("Claude's proposed change is no longer waiting."),
         DiffBase::SearchReplace => bail!("A replace preview comes from the search."),
+        DiffBase::Commit { rev, old, new } => {
+            let before = match old {
+                Some(old) => git::show_at(root, &format!("{rev}^"), old)?,
+                None => None,
+            };
+            (before, git::show_at(root, rev, new)?)
+        }
+        DiffBase::Revision { rev, at } => (git::show_at(root, rev, at)?, read_file(path)?),
+        DiffBase::Files { other } => (read_file(other)?, read_file(path)?),
         DiffBase::Conflict => {
             let both = text(read_file(path)?)?;
             return Ok(Sides {
@@ -258,7 +288,10 @@ impl Shell {
         if let DiffBase::Proposal { id } = base {
             return self.new_proposal_view(path, id, cx);
         }
-        let (old_label, new_label, actions) = sides(base);
+        let (old_label, mut new_label, actions) = sides(base);
+        if new_label.is_empty() {
+            new_label = file_label(path);
+        }
         let title = diff_title(path, base);
         let view = cx
             .new(|cx| DiffView::new(path.to_path_buf(), title, old_label, new_label, actions, cx));
@@ -301,7 +334,7 @@ impl Shell {
                 let _ = view.update(cx, |v, cx| match loaded {
                     Ok(sides) => {
                         let (old_label, note) = match sides.against_index {
-                            true => ("Index", Some(SKIPPED_NOTE)),
+                            true => ("Index".to_string(), Some(SKIPPED_NOTE)),
                             false => (label, None),
                         };
                         v.set_old_label(old_label, note, cx);
@@ -340,8 +373,10 @@ impl Shell {
             .flat_map(|l| l.items())
             .filter_map(
                 |item| match (&item.kind, self.items.get(&(root.to_path_buf(), item.id))) {
+                    // A commit's versions never change, so status runs need not read them again.
                     (ItemKind::Diff { path, base }, Some(ItemView::Diff(view)))
-                        if only.is_none_or(|o| o == path) =>
+                        if only.is_none_or(|o| o == path)
+                            && !matches!(base, DiffBase::Commit { .. }) =>
                     {
                         Some((view.clone(), base.clone()))
                     }
@@ -644,5 +679,75 @@ mod tests {
         assert_eq!(diff_title(p, &DiffBase::Head), "main.go (Index)");
         let (_, _, actions) = sides(&DiffBase::Head);
         assert!(actions.unstage && !actions.stage && !actions.revert);
+        let commit = DiffBase::Commit {
+            rev: "0123456789abcdef".into(),
+            old: None,
+            new: "main.go".into(),
+        };
+        assert_eq!(diff_title(p, &commit), "main.go (0123456^ ↔ 0123456)");
+        let files = DiffBase::Files {
+            other: "/r/old.go".into(),
+        };
+        assert_eq!(diff_title(p, &files), "old.go ↔ main.go");
+        assert_eq!(sides(&files).0, "old.go");
+    }
+
+    #[test]
+    fn commit_revision_and_file_sides_load_through_renames() {
+        if !git::available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-review-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let git_out = |args: &[&str]| {
+            let out = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.name=T", "-c", "user.email=t@x"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        std::fs::write(dir.join("sub/a.txt"), "one\n").unwrap();
+        git_out(&["init", "-q"]);
+        git_out(&["add", "-A"]);
+        git_out(&["commit", "-qm", "init"]);
+        git_out(&["mv", "sub/a.txt", "sub/b.txt"]);
+        std::fs::write(dir.join("sub/b.txt"), "one\ntwo\n").unwrap();
+        git_out(&["add", "-A"]);
+        git_out(&["commit", "-qm", "move"]);
+        let rev = git_out(&["rev-parse", "HEAD"]);
+        let sub = dir.join("sub");
+        let path = sub.join("b.txt");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let pair = |base: DiffBase| {
+            let s = load(&sub, &path, None, &base).unwrap();
+            (s.old, s.new)
+        };
+        let commit = DiffBase::Commit {
+            rev: rev.clone(),
+            old: Some("sub/a.txt".into()),
+            new: "sub/b.txt".into(),
+        };
+        assert_eq!(pair(commit), ("one\n".into(), "one\ntwo\n".into()));
+        let revision = DiffBase::Revision {
+            rev,
+            at: "sub/b.txt".into(),
+        };
+        assert_eq!(
+            pair(revision),
+            ("one\ntwo\n".into(), "one\ntwo\nthree\n".into())
+        );
+        std::fs::write(sub.join("c.txt"), "c\n").unwrap();
+        let files = DiffBase::Files {
+            other: sub.join("c.txt"),
+        };
+        assert_eq!(pair(files), ("c\n".into(), "one\ntwo\nthree\n".into()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

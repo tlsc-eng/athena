@@ -83,6 +83,8 @@ actions!(
     ]
 );
 
+actions!(athena, [GitOpenTimeline, GitToggleFileBlame]);
+
 actions!(
     athena,
     [
@@ -320,6 +322,8 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Playwright", ShowPlaywright),
                 MenuItem::action("Source Control Changes", ShowChanges),
                 MenuItem::action("Toggle Inline Blame", ToggleBlame),
+                MenuItem::action("Toggle File Blame", GitToggleFileBlame),
+                MenuItem::action("Open Timeline", GitOpenTimeline),
                 MenuItem::action("New Browser Preview", NewPreview),
                 MenuItem::action("Open Markdown Preview", TogglePreview),
                 MenuItem::action("Word Wrap", editor::ToggleWordWrap),

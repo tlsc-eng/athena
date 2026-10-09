@@ -1502,6 +1502,9 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
         |this, _: &crate::actions::GitStashIncludeUntracked, _, cx| this.git_stash(true, cx),
     ))
     .on_action(cx.listener(|this, _: &GitPopStash, w, cx| this.open_stashes(w, cx)))
+    .on_action(
+        cx.listener(|this, _: &crate::actions::GitOpenTimeline, _, cx| this.open_timeline(cx)),
+    )
 }
 
 /// Where Publish Branch pushes: origin when there is one, else the only remote.
@@ -1564,7 +1567,7 @@ fn change_rows(root: &Path, prefix: &str, entries: &[(PathBuf, Entry)]) -> Vec<R
 }
 
 /// A small text button shown while its row is hovered.
-fn row_button(
+pub(super) fn row_button(
     id: (&'static str, usize),
     label: &'static str,
     group: String,

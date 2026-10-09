@@ -20,6 +20,7 @@ pub(super) enum DrawerTab {
     Changes,
     Search,
     Problems,
+    Timeline,
 }
 
 impl DrawerTab {
@@ -34,6 +35,7 @@ impl DrawerTab {
             Self::Changes => "Changes",
             Self::Search => "Search",
             Self::Problems => "Problems",
+            Self::Timeline => "Timeline",
         }
     }
 }
@@ -128,6 +130,7 @@ impl Shell {
             DrawerTab::Notifications,
             DrawerTab::References,
             DrawerTab::Changes,
+            DrawerTab::Timeline,
             DrawerTab::Search,
         ]
         .map(|candidate| {
@@ -186,6 +189,7 @@ impl Shell {
             DrawerTab::Search => self.render_search_status(cx),
             DrawerTab::Problems => None,
             DrawerTab::Terminal => self.render_terminal_panel_actions(cx),
+            DrawerTab::Timeline => self.render_timeline_title(cx),
         };
         let content = match tab {
             DrawerTab::Notifications => self.render_notifications(cx),
@@ -197,6 +201,7 @@ impl Shell {
             DrawerTab::Search => self.render_search(cx),
             DrawerTab::Problems => self.render_problems(cx),
             DrawerTab::Terminal => self.render_terminal_panel(cx),
+            DrawerTab::Timeline => self.render_timeline(cx),
         };
         // Only the search field and the panel terminal take focus; once hidden it has nowhere to go.
         if self.drawer_focus.contains_focused(window, cx)

@@ -32,6 +32,7 @@ mod status_bar;
 mod tasks;
 mod terminal_panel;
 mod tests_view;
+mod timeline;
 mod tree;
 mod usage_view;
 mod watch;

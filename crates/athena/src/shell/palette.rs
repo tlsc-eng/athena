@@ -204,6 +204,11 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Tests: stop", Box::new(actions::StopTests)),
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),
+        (
+            "Git: Toggle file blame",
+            Box::new(actions::GitToggleFileBlame),
+        ),
+        ("Git: Open timeline", Box::new(actions::GitOpenTimeline)),
         ("Switch branch…", Box::new(actions::SwitchBranch)),
         ("Git: Fetch", Box::new(actions::GitFetch)),
         ("Git: Pull", Box::new(actions::GitPull)),
