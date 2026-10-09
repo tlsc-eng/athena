@@ -89,6 +89,20 @@ pub(crate) struct Linked {
     timer: Option<Task<()>>,
 }
 
+/// The server's linked ranges in chars, each start before its end; one alone links nothing.
+fn linked_ranges(b: &Buffer, ranges: Vec<((u32, u32), (u32, u32))>) -> Vec<(Range<usize>, ())> {
+    if ranges.len() < 2 {
+        return Vec::new();
+    }
+    ranges
+        .into_iter()
+        .map(|(a, z)| {
+            let (a, z) = (b.char_at_utf16(a.0, a.1), b.char_at_utf16(z.0, z.1));
+            (a.min(z)..a.max(z), ())
+        })
+        .collect()
+}
+
 /// Where the carets mirroring `selection` go in the other `ranges`, if `edit` at it keeps every
 /// range the same text; empty when the selection is in none of them or the edit would leave one.
 fn mirrors(
@@ -354,14 +368,7 @@ impl EditorView {
             return;
         }
         self.linked.pending = None;
-        let items: Vec<(Range<usize>, ())> = match ranges.len() {
-            0 | 1 => Vec::new(),
-            _ => ranges
-                .into_iter()
-                .map(|(a, z)| (b.char_at_utf16(a.0, a.1)..b.char_at_utf16(z.0, z.1), ()))
-                .collect(),
-        };
-        self.linked.shown = Anchored::growing(&b, items);
+        self.linked.shown = Anchored::growing(&b, linked_ranges(&b, ranges));
         self.linked.pattern = word_pattern.and_then(|p| regex::Regex::new(&p).ok());
         cx.notify();
     }
@@ -803,6 +810,16 @@ impl EditorView {
 mod tests {
     use super::*;
     use crate::buffer::{Cursor, Selection};
+
+    #[test]
+    fn linked_ranges_given_end_first_are_put_in_order() {
+        let b = Buffer::new("<div>x</div>", None);
+        assert_eq!(
+            linked_ranges(&b, vec![((0, 4), (0, 1)), ((0, 8), (0, 11))]),
+            [(1..4, ()), (8..11, ())]
+        );
+        assert!(linked_ranges(&b, vec![((0, 1), (0, 4))]).is_empty());
+    }
 
     #[test]
     fn typing_in_a_tag_name_reaches_its_partner_only_while_it_stays_a_name() {
