@@ -69,8 +69,14 @@ fn filter_env(
 
 /// Finds `name` on the login shell's PATH.
 pub fn find_program(name: &str) -> Option<PathBuf> {
-    let path = login_env().iter().find(|(k, _)| k == "PATH")?.1.clone();
-    std::env::split_paths(&path)
+    let path = &login_env().iter().find(|(k, _)| k == "PATH")?.1;
+    find_in(path, name)
+}
+
+fn find_in(path: &str, name: &str) -> Option<PathBuf> {
+    // A relative entry resolves against wherever Athena happens to run, often a project.
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable(candidate))
 }
@@ -97,6 +103,29 @@ mod tests {
                 .all(|(k, _)| !k.starts_with("CLAUDE") && !k.ends_with("_TOKEN"))
         );
         assert!(env.iter().any(|(k, _)| k == "PATH"));
+    }
+
+    #[test]
+    fn programs_are_found_only_in_absolute_path_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("athena-find-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("athena-tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+        relative.push(dir.strip_prefix("/").unwrap());
+        assert!(relative.is_relative() && relative.join("athena-tool").exists());
+        let both = format!("{}:{}", relative.display(), dir.display());
+        let found = find_in(&relative.display().to_string(), "athena-tool");
+        let absolute = find_in(&both, "athena-tool");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            found, None,
+            "a folder relative to wherever Athena started is skipped"
+        );
+        assert_eq!(absolute, Some(tool));
     }
 
     #[test]
