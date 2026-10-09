@@ -283,10 +283,13 @@ impl Snippet<'_> {
                 true
             }
             Some(':') => {
+                let stops = self.stops.len();
                 let mut k = j + 1;
                 self.part(&mut k, true);
                 if chars.get(k) != Some(&'}') {
+                    // Stops nested in the unclosed text go with it; it is read again as literal.
                     self.out.truncate(at);
+                    self.stops.truncate(stops);
                     return false;
                 }
                 *i = k + 1;
@@ -315,6 +318,14 @@ impl Snippet<'_> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_unclosed_placeholder_leaves_no_stop_behind() {
+        assert_eq!(
+            snippet_stops("${1:${2:x}"),
+            ("${1:x".into(), vec![(2, 4..5)])
+        );
+    }
 
     #[test]
     fn snippets_become_plain_text_with_the_first_stop_selected() {
