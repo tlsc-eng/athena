@@ -283,7 +283,7 @@ impl Shell {
                             request,
                             line,
                             character,
-                        } => return this.lsp_hover(&view, *request, (*line, *character), cx),
+                        } => return this.debug_hover(&view, *request, (*line, *character), cx),
                         EditorEvent::SignatureHelp {
                             request,
                             line,
@@ -329,6 +329,7 @@ impl Shell {
                 self.lsp_opened(root, &view, cx);
                 self.git_opened(&view, cx);
                 self.watch_tests(&view, cx);
+                self.debug_opened(&view, cx);
                 ItemView::Editor(view)
             }
             ItemKind::Image { path } => {

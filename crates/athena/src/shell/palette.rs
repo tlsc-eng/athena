@@ -227,6 +227,33 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::tests_view::ToggleCoverage),
         ),
         ("Tests: stop", Box::new(actions::StopTests)),
+        (
+            "Debug: start debugging / continue",
+            Box::new(actions::StartDebugging),
+        ),
+        ("Debug: stop", Box::new(actions::StopDebugging)),
+        ("Debug: restart", Box::new(actions::RestartDebugging)),
+        ("Debug: pause", Box::new(actions::PauseDebugging)),
+        ("Debug: step over", Box::new(actions::StepOver)),
+        ("Debug: step into", Box::new(actions::StepInto)),
+        ("Debug: step out", Box::new(actions::StepOut)),
+        (
+            "Debug: toggle breakpoint",
+            Box::new(athena_editor::ToggleBreakpoint),
+        ),
+        (
+            "Debug: remove all breakpoints",
+            Box::new(actions::RemoveAllBreakpoints),
+        ),
+        (
+            "Debug: debug test at cursor",
+            Box::new(actions::DebugTestAtCursor),
+        ),
+        (
+            "Debug: open configurations (launch.json)",
+            Box::new(actions::OpenLaunchConfig),
+        ),
+        ("Debug", Box::new(actions::ShowDebug)),
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),
         (

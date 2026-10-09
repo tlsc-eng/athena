@@ -10,6 +10,8 @@ mod code_actions;
 mod codelens;
 mod conflicts;
 mod containers_view;
+mod debug;
+mod debug_view;
 mod dnd;
 mod drawer;
 mod edits;
@@ -118,6 +120,7 @@ pub struct Shell {
     containers: containers_view::ContainersState,
     playwright: playwright_view::PlaywrightState,
     tests: tests_view::TestsState,
+    debug: debug::DebugState,
     lsp: lsp::LspState,
     settings: settings::SettingsState,
     breadcrumbs: breadcrumbs::BreadcrumbState,
@@ -201,6 +204,7 @@ impl Shell {
                 this.save_now(cx);
                 this.ide_quit();
                 this.tests_quit();
+                this.debug_quit();
                 async {}
             }),
         ];
@@ -244,6 +248,7 @@ impl Shell {
                 }
             }
         });
+        let debug = debug::DebugState::load(&path);
         let mut shell = Self {
             rail_from: workspace.active.unwrap_or(0),
             workspace,
@@ -274,6 +279,7 @@ impl Shell {
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
             tests: tests_view::TestsState::default(),
+            debug,
             lsp: lsp::LspState::default(),
             settings,
             breadcrumbs: breadcrumbs::BreadcrumbState::default(),
@@ -488,6 +494,7 @@ impl Shell {
                             .child(format!("· {branch}"))
                     }))
             }))
+            .children(self.render_debug_toolbar(cx))
             .child(div().flex_1())
             .child(self.render_problems_button(cx))
             .child(self.render_usage_button(cx))
@@ -774,6 +781,7 @@ impl Render for Shell {
         let root = conflicts::bind_conflict_actions(tasks::bind_run_actions(root, cx), cx);
         let root = tests_view::bind_test_actions(root, cx);
         let root = snippets::bind_snippet_actions(root, cx);
+        let root = debug::bind_debug_actions(root, cx);
         let root = claude_sessions::bind_claude_actions(root, cx);
         let root = github::bind_github_actions(root, cx);
         root.track_focus(&self.focus)

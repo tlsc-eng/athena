@@ -450,6 +450,7 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "athena-containers",
+ "athena-dap",
  "athena-editor",
  "athena-lsp",
  "athena-playwright",

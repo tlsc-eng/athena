@@ -11,6 +11,13 @@ macro_rules! assets {
 
 assets!(
     "brand/tlsc.svg",
+    "debug/continue.svg",
+    "debug/pause.svg",
+    "debug/restart.svg",
+    "debug/step-into.svg",
+    "debug/step-out.svg",
+    "debug/step-over.svg",
+    "debug/stop.svg",
     "icons/audio.svg",
     "icons/c-sharp.svg",
     "icons/c.svg",

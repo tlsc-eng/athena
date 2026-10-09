@@ -105,6 +105,23 @@ actions!(
     ]
 );
 
+actions!(
+    athena,
+    [
+        StartDebugging,
+        StopDebugging,
+        RestartDebugging,
+        PauseDebugging,
+        StepOver,
+        StepInto,
+        StepOut,
+        ShowDebug,
+        DebugTestAtCursor,
+        OpenLaunchConfig,
+        RemoveAllBreakpoints,
+    ]
+);
+
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = athena, no_json)]
 pub struct SelectProject(pub usize);
@@ -188,6 +205,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-f8", PrevProblem, Some("Editor")),
         // VS Code's key, except in a terminal, where the shell's reverse search needs it.
         KeyBinding::new("ctrl-r", OpenRecent, Some("!Terminal")),
+        // VS Code's debug keys, except in a terminal, where programs there read F-keys.
+        KeyBinding::new("f5", StartDebugging, Some("!Terminal")),
+        KeyBinding::new("shift-f5", StopDebugging, Some("!Terminal")),
+        KeyBinding::new("cmd-shift-f5", RestartDebugging, Some("!Terminal")),
+        KeyBinding::new("f6", PauseDebugging, Some("!Terminal")),
+        KeyBinding::new("f10", StepOver, Some("!Terminal")),
+        KeyBinding::new("f11", StepInto, Some("!Terminal")),
+        KeyBinding::new("shift-f11", StepOut, Some("!Terminal")),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -354,6 +379,26 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
             ],
         },
         Menu {
+            name: "Run".into(),
+            items: vec![
+                MenuItem::action("Start Debugging / Continue", StartDebugging),
+                MenuItem::action("Stop Debugging", StopDebugging),
+                MenuItem::action("Restart Debugging", RestartDebugging),
+                MenuItem::separator(),
+                MenuItem::action("Pause", PauseDebugging),
+                MenuItem::action("Step Over", StepOver),
+                MenuItem::action("Step Into", StepInto),
+                MenuItem::action("Step Out", StepOut),
+                MenuItem::separator(),
+                MenuItem::action("Toggle Breakpoint", editor::ToggleBreakpoint),
+                MenuItem::action("Remove All Breakpoints", RemoveAllBreakpoints),
+                MenuItem::action("Debug Test at Cursor", DebugTestAtCursor),
+                MenuItem::separator(),
+                MenuItem::action("Open Configurations", OpenLaunchConfig),
+                MenuItem::action("Debug", ShowDebug),
+            ],
+        },
+        Menu {
             name: "Window".into(),
             items: vec![
                 MenuItem::action("Minimize", Minimize),
@@ -434,7 +479,10 @@ mod tests {
     fn the_selection_menu_sits_between_file_and_view_with_the_multi_cursor_commands() {
         let menus = menus(&[]);
         let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
-        assert_eq!(names, ["Athena", "File", "Selection", "View", "Window"]);
+        assert_eq!(
+            names,
+            ["Athena", "File", "Selection", "View", "Run", "Window"]
+        );
         let selection: Vec<&str> = menus[2]
             .items
             .iter()
@@ -452,6 +500,33 @@ mod tests {
         ] {
             assert!(selection.contains(&name), "{name}");
         }
+    }
+
+    #[test]
+    fn debug_keystrokes_parse_and_leave_the_terminal_its_f_keys() {
+        for (source, key, shift, cmd) in [
+            ("f5", "f5", false, false),
+            ("shift-f5", "f5", true, false),
+            ("cmd-shift-f5", "f5", true, true),
+            ("f6", "f6", false, false),
+            ("f9", "f9", false, false),
+            ("f10", "f10", false, false),
+            ("f11", "f11", false, false),
+            ("shift-f11", "f11", true, false),
+        ] {
+            let k = Keystroke::parse(source).unwrap();
+            assert_eq!(
+                (k.key.as_str(), k.modifiers.shift, k.modifiers.platform),
+                (key, shift, cmd),
+                "{source}"
+            );
+        }
+        let outside = KeyBindingContextPredicate::parse("!Terminal").unwrap();
+        let terminal = [
+            KeyContext::parse("Shell").unwrap(),
+            KeyContext::parse("Terminal").unwrap(),
+        ];
+        assert!(outside.depth_of(&terminal).is_none());
     }
 
     #[test]

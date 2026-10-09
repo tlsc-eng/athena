@@ -465,6 +465,42 @@ information rather than triggering the install dialog).
   types the command into a new terminal tab in the project folder. Names that would not type
   safely into a shell (control characters, a leading `-`) are left out.
 
+**Debugging (Go, with Delve)**
+
+- **F5** debugs the first `"type": "go"` configuration in `.vscode/launch.json`, else the package
+  of the open Go file (VS Code's "Launch Package": a `_test.go` file debugs its package's tests).
+  launch.json may set `request` (`launch`; attach is not supported yet), `mode` (`auto`, `debug`,
+  `test`, `exec`), `program`, `args`, `env`, `buildFlags` (a string or a list) and `cwd`, with
+  `${workspaceFolder}`, `${file}`, `${fileDirname}`, `${relativeFile}` and the other file
+  variables. **Open Configurations** (Run menu, palette) opens it, writing a starter if there is
+  none.
+- Debugging builds and runs the project's code, so it starts only once the project's code is
+  allowed (the same answer as for its linters; F5 asks the first time). Delve (`dlv`) is found on
+  the login shell's PATH and never installed for you: `go install
+  github.com/go-delve/delve/cmd/dlv@latest`. Unsaved files of the project are saved first, and
+  Delve's binary goes to a private temporary folder rather than the project.
+- On macOS, unless Developer Mode is on, the system asks for an administrator password the first
+  time Delve takes control of a program in a while; `DevToolsSecurity -enable` stops it asking.
+- Click left of a line number, or press **F9**, to add or remove a breakpoint; the pointer shows a
+  faint dot where a click would add one. Right-click the gutter for **Add Conditional
+  Breakpoint…**, **Add Logpoint…** (a message with `{expression}` parts, printed instead of
+  stopping), **Edit Condition…** (expression or hit count, ↑↓ switches) and **Disable
+  Breakpoint**. Conditional breakpoints show two bars, logpoints a square, disabled ones a grey
+  ring and ones Delve could not place a red ring. Breakpoints move with edits above them and are
+  kept per project in `breakpoints.json`.
+- Right-clicking a test's ▶ offers **Run Test** and **Debug Test**; **Debug: debug test at
+  cursor** does the same from the keyboard, and only that test (or subtest) runs.
+- While paused, the line is tinted amber with an arrow in the gutter (green for a caller's frame
+  picked in the call stack), its file opens there, and hovering an identifier or a selector chain
+  such as `cfg.Server.Port` shows its value (or the language server's documentation when Delve
+  cannot evaluate it).
+- The title bar shows Continue / Pause, Step Over, Step Into, Step Out, Restart and Stop while a
+  session runs. The **Debug** drawer tab has Call Stack (goroutines; the paused one expanded,
+  runtime frames dimmed), Breakpoints (enable, remove, Remove All), Variables (expand structs,
+  slices and maps as needed; expansion is kept across steps), Watch (expressions evaluated at
+  each stop, kept per project) and the Debug Console, which shows the program's output and
+  evaluates what you type in the selected frame.
+
 **Claude Code**
 
 - A new Claude session opens in its own terminal tab; the command that starts Claude is asked
@@ -747,6 +783,11 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-m` | Minimize |
 | `cmd-h` | Hide Athena |
 | `ctrl-r` | Open recent folder (not in a terminal, where it is the shell's history search) |
+| `f5` | Start debugging, or continue when paused (not in a terminal, nor the other debug keys) |
+| `shift-f5` | Stop debugging |
+| `cmd-shift-f5` | Restart debugging |
+| `f6` | Pause |
+| `f10` / `f11` / `shift-f11` | Step over / into / out |
 | `cmd-alt-h` | Hide others |
 | `cmd-q` | Quit |
 
@@ -754,7 +795,8 @@ Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. Th
 commands without a key: Toggle auto save, Toggle format on save, Toggle word wrap by default,
 Toggle inlay hints, Source control changes, Switch branch…, the eleven **Git:** commands (Toggle
 file blame, Open timeline and the three worktree commands among them), the two **GitHub:**
-commands, Run task…, Tests and the seven **Tests:** commands, the three **Claude:** commands,
+commands, Run task…, Tests and the seven **Tests:** commands, Debug and the eleven **Debug:**
+commands, the three **Claude:** commands,
 **Terminal: move into panel** and **Terminal: move into editor area** (beside toggle panel and
 new in panel), Focus outline, Show explorer, Allow project code and Disallow project code,
 Reveal active file in tree, Open file to the side, Open Markdown preview, New browser preview,
@@ -766,7 +808,8 @@ selection, Format selection, the five multi-cursor commands and Toggle word wrap
 a terminal focused, Copy last command output and Scroll to previous / next command. In Go to
 file, `@` lists the file's symbols, `#` searches workspace symbols and `>` lists commands.
 
-The menu bar has Athena, File, Selection, View and Window menus. Athena holds Settings…
+The menu bar has Athena, File, Selection, View, Run and Window menus. Run holds the debugging
+commands and their keys. Athena holds Settings…
 (`cmd-,`). Selection holds Select All, the line copy and move commands and the multi-cursor
 commands. View includes Word Wrap, Theme, the terminal panel commands (Terminal, New Terminal in
 Panel, Move Terminal into Panel / into Editor Area), Toggle File Blame, Open Timeline and the
@@ -774,7 +817,9 @@ interface zoom commands, and File includes Open Recent, the settings toggles (au
 Claude Code integration) and Keyboard Shortcuts.
 
 On a Mac keyboard the `f`-keys need Fn unless "Use F1, F2, etc. keys as standard function keys" is
-on in System Settings. A system or app shortcut set on the same keys (`cmd-.` is a common one) can
+on in System Settings. macOS also takes F11 (Show Desktop) and, on some setups, F10 for itself
+unless those shortcuts are turned off under Keyboard Shortcuts > Mission Control; the Run menu
+and the title bar's buttons step without them. A system or app shortcut set on the same keys (`cmd-.` is a common one) can
 take them before Athena sees them; Quick Fix… in the editor's right-click menu does the same as
 `cmd-.`.
 
@@ -794,6 +839,7 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `f12`, `cmd-alt-g` | Go to definition |
 | `cmd`-click | Go to definition |
 | `shift-f12`, `cmd-alt-r` | Find references |
+| `f9` | Toggle breakpoint on the cursor's line |
 | `shift-alt-h` | Show call hierarchy |
 | `ctrl-shift-cmd-right` / `ctrl-shift-cmd-left` | Expand / shrink selection |
 | `cmd-k cmd-f` | Format selection |
@@ -1048,7 +1094,7 @@ each editor tab's cursor, scroll line, folds and wrap choice, recently closed fo
 sizes, the text and interface zoom, the theme (`System`, `Light` or `Dark`), each project's
 panel terminals and its answer about running the project's code, and the
 `autosave_delay_ms`, `format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
-integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
+integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, `breakpoints.json` (breakpoints and watch expressions per project), the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.

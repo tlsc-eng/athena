@@ -22,6 +22,7 @@ pub(super) enum DrawerTab {
     Problems,
     Timeline,
     Claude,
+    Debug,
 }
 
 impl DrawerTab {
@@ -38,6 +39,7 @@ impl DrawerTab {
             Self::Problems => "Problems",
             Self::Timeline => "Timeline",
             Self::Claude => "Claude",
+            Self::Debug => "Debug",
         }
     }
 }
@@ -127,6 +129,7 @@ impl Shell {
         let tabs = [
             DrawerTab::Problems,
             DrawerTab::Terminal,
+            DrawerTab::Debug,
             DrawerTab::Containers,
             DrawerTab::Playwright,
             DrawerTab::Tests,
@@ -195,6 +198,7 @@ impl Shell {
             DrawerTab::Terminal => self.render_terminal_panel_actions(cx),
             DrawerTab::Timeline => self.render_timeline_title(cx),
             DrawerTab::Claude => self.render_claude_sessions_action(cx),
+            DrawerTab::Debug => self.render_debug_action(cx),
         };
         let content = match tab {
             DrawerTab::Notifications => self.render_notifications(cx),
@@ -208,10 +212,15 @@ impl Shell {
             DrawerTab::Terminal => self.render_terminal_panel(cx),
             DrawerTab::Timeline => self.render_timeline(cx),
             DrawerTab::Claude => self.render_claude_sessions(cx),
+            DrawerTab::Debug => self.render_debug(window, cx),
         };
-        // Only the search field and the panel terminal take focus; once hidden it has nowhere to go.
+        // Only the search field, panel terminal and Debug fields take focus; once hidden, none can.
         if self.drawer_focus.contains_focused(window, cx)
-            && (closing.is_some() || !matches!(tab, DrawerTab::Search | DrawerTab::Terminal))
+            && (closing.is_some()
+                || !matches!(
+                    tab,
+                    DrawerTab::Search | DrawerTab::Terminal | DrawerTab::Debug
+                ))
         {
             self.focus_active_item(window, cx);
         }
