@@ -631,6 +631,15 @@ information rather than triggering the install dialog).
   scroll position, folds and word wrap choice as they were left.
 - Open Recent (`ctrl-r` outside a terminal, or File > Open Recent) lists the last 20 project
   folders you closed.
+- Several windows: New Window (`cmd-shift-n`), Open Project in New Window, Move Project to New
+  Window, Merge All Windows and Close Window. A project is open in one window at a time and keeps
+  its terminals and unsaved text when it moves. Moving a project ends its debug session, rejects
+  Claude's pending proposals for it and restarts its language servers in the window it lands in;
+  merging or closing a window also stops that window's debug session and test run. A closed
+  window's projects keep their shells running and stay in Open Recent until reopened; Clear
+  Recently Opened asks before ending them. Settings and Keyboard Shortcuts tabs are not restored
+  on launch. A v0.9 build opening the same workspace.json shows every project in one window and
+  forgets closed windows' projects, leaving their shells running.
 - Light and dark themes. By default Athena follows the macOS appearance and switches with it;
   View > Theme or the palette's **Theme:** commands pin light or dark. Both themes cover the
   interface, code, the terminal's 16 colours (tuned so Claude Code stays readable) and Markdown
