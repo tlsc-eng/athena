@@ -2395,13 +2395,16 @@ fn copied_text(b: &Buffer, cs: &Cursors) -> String {
 /// Deletes exactly what [`copied_text`] copies, so a cut never loses text.
 fn cut(b: &mut Buffer, cs: &mut Cursors) {
     if cs.all().iter().all(|c| c.selection.is_empty()) {
+        // An empty last line selects nothing, and backspace then takes the break before it.
         b.move_each(cs, |b, c| b.select_line_at(c, c.head()));
+        b.edit_each(cs, Buffer::backspace);
+    } else {
+        b.edit_each(cs, |b, c| {
+            if !c.selection.is_empty() {
+                b.backspace(c);
+            }
+        });
     }
-    b.edit_each(cs, |b, c| {
-        if !c.selection.is_empty() {
-            b.backspace(c);
-        }
-    });
 }
 
 #[cfg(test)]
@@ -2433,6 +2436,11 @@ mod tests {
         assert_eq!(copied_text(&b, &cs), "a\nb\n");
         cut(&mut b, &mut cs);
         assert_eq!(b.full_text(), "", "with no selection whole lines go");
+
+        let mut b = Buffer::new("a\n", None);
+        let mut cs = Cursors::new(Cursor::at(2));
+        cut(&mut b, &mut cs);
+        assert_eq!(b.full_text(), "a", "an empty last line goes with its break");
     }
 
     #[test]
