@@ -14,7 +14,7 @@ pub use layout::{
 pub use persist::{is_corrupt, load, save, set_aside};
 pub use project::{LinterTrust, PANEL_IDS, Panel, Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
-pub use windows::{WindowEntry, park, retain_parked, take_parked};
+pub use windows::{WindowEntry, list_parked, park, parked_sessions, retain_parked, take_parked};
 
 use std::path::{Path, PathBuf};
 
@@ -318,7 +318,6 @@ impl Workspace {
             }
         }
         self.projects = kept;
-        self.parked.retain(|p| p.root.is_dir());
         self.active = kept_active.or(if self.projects.is_empty() {
             None
         } else {

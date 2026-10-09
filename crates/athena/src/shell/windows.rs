@@ -9,12 +9,13 @@ use std::rc::Rc;
 use athena_proto::{AppMsg, AppReply, Notice, PaneId};
 use athena_workspace::{Project, WindowMode, WindowState, Workspace};
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, Context, Global, Task, TitlebarOptions, Window,
-    WindowBounds, WindowHandle, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, Context, Global, PromptLevel, Task, TitlebarOptions,
+    Window, WindowBounds, WindowHandle, WindowOptions, point, px, size,
 };
 
 use super::Shell;
 use super::item::ItemView;
+use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
 use crate::app_socket::Request;
 use crate::ide;
@@ -68,7 +69,10 @@ impl AppFields {
 
 /// Opens a window for each saved one and starts what the whole app shares.
 pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &mut App) {
-    let (windows, parked) = workspace.into_windows();
+    let (windows, mut parked) = workspace.into_windows();
+    athena_term::kill_sessions(athena_workspace::retain_parked(&mut parked, |p| {
+        p.root.is_dir()
+    }));
     let notices_path = path.with_file_name("notifications.json");
     cx.set_global(Windows {
         notices: Rc::new(RefCell::new(Log::load(&notices_path))),
@@ -266,20 +270,20 @@ fn open_roots(except: Option<AnyWindowHandle>, cx: &App) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Hands changed app-wide fields to the other windows, so none of them saves them back.
-pub(super) fn publish(window: Option<AnyWindowHandle>, fields: AppFields, cx: &mut App) {
+/// Hands changed app-wide fields to the other windows, so none of them saves them back; `window`
+/// gets them too when Open Recent had dropped a parked project.
+pub(super) fn publish(window: Option<AnyWindowHandle>, mut fields: AppFields, cx: &mut App) {
     let windows = cx.global_mut::<Windows>();
-    if windows.app == fields {
+    let relisted = athena_workspace::list_parked(&mut fields.recent, &windows.parked);
+    if windows.app == fields && !relisted {
         return;
     }
     windows.app = fields.clone();
-    let orphaned = athena_workspace::retain_parked(&mut windows.parked, &fields.recent);
-    athena_term::kill_sessions(orphaned);
     let others: Vec<WindowHandle<Shell>> = windows
         .open
         .iter()
         .map(|o| o.handle)
-        .filter(|h| Some(AnyWindowHandle::from(*h)) != window)
+        .filter(|h| relisted || Some(AnyWindowHandle::from(*h)) != window)
         .collect();
     cx.defer(move |cx| {
         for handle in others {
@@ -835,6 +839,42 @@ impl Shell {
         if fields.usage_indicator && !usage_was_on {
             self.start_usage(window, cx);
         }
+        cx.notify();
+    }
+
+    /// Clears Open Recent; closed windows' projects go too, after asking if their shells still run.
+    pub(super) fn clear_recent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let running = athena_workspace::parked_sessions(&cx.global::<Windows>().parked).len();
+        if running == 0 {
+            return self.clear_recent_now(cx);
+        }
+        let terminals = match running {
+            1 => "A terminal".to_string(),
+            n => format!("{n} terminals"),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Clear Recently Opened?",
+            Some(&format!(
+                "{terminals} in projects of windows you closed still run; clearing the list ends \
+                 them."
+            )),
+            &confirm_buttons("Cancel", "Clear and End Terminals"),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(CONFIRMED) {
+                let _ = this.update(cx, |this, cx| this.clear_recent_now(cx));
+            }
+        })
+        .detach();
+    }
+
+    fn clear_recent_now(&mut self, cx: &mut Context<Self>) {
+        let parked = &mut cx.global_mut::<Windows>().parked;
+        athena_term::kill_sessions(athena_workspace::retain_parked(parked, |_| false));
+        self.workspace.recent.clear();
+        self.schedule_save(cx);
         cx.notify();
     }
 

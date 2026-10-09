@@ -132,6 +132,19 @@ pub fn park(parked: &mut Vec<Project>, recent: &mut Vec<PathBuf>, projects: Vec<
         parked.insert(0, project);
     }
     recent.truncate(crate::MAX_RECENT);
+    list_parked(recent, parked);
+}
+
+/// Adds parked projects that fell off the end of Open Recent back there, as their shells still
+/// run; true if any was missing.
+pub fn list_parked(recent: &mut Vec<PathBuf>, parked: &[Project]) -> bool {
+    let missing: Vec<PathBuf> = parked
+        .iter()
+        .map(|p| p.root.clone())
+        .filter(|root| !recent.contains(root))
+        .collect();
+    recent.extend_from_slice(&missing);
+    !missing.is_empty()
 }
 
 /// Removes and returns the parked project at `root`, so reopening it keeps its tabs and shells.
@@ -141,20 +154,29 @@ pub fn take_parked(parked: &mut Vec<Project>, root: &Path) -> Option<Project> {
     Some(parked.remove(at))
 }
 
-/// Drops parked projects that left Open Recent, returning the shells they leave behind.
-pub fn retain_parked(parked: &mut Vec<Project>, recent: &[PathBuf]) -> Vec<u64> {
+/// Drops the parked projects `keep` turns down, returning the shells they leave running.
+pub fn retain_parked(parked: &mut Vec<Project>, keep: impl Fn(&Project) -> bool) -> Vec<u64> {
     let mut orphaned = Vec::new();
     parked.retain(|p| {
-        let kept = recent.contains(&p.root);
+        let kept = keep(p);
         if !kept {
-            orphaned.extend(p.items().filter_map(|i| match i.kind {
-                ItemKind::Terminal { session } => session,
-                _ => None,
-            }));
+            orphaned.extend(parked_sessions(std::slice::from_ref(p)));
         }
         kept
     });
     orphaned
+}
+
+/// The daemon shells parked projects' terminals still hold.
+pub fn parked_sessions(parked: &[Project]) -> Vec<u64> {
+    parked
+        .iter()
+        .flat_map(|p| p.items())
+        .filter_map(|i| match i.kind {
+            ItemKind::Terminal { session } => session,
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -335,7 +357,7 @@ mod tests {
             first.recent,
             [PathBuf::from("/n/b"), "/n/c".into(), "/n/old".into()]
         );
-        assert!(retain_parked(&mut parked, &first.recent).is_empty());
+        assert!(!list_parked(&mut first.recent, &parked));
 
         let text =
             serde_json::to_string(&Workspace::join(&first, &[first.clone()], &parked)).unwrap();
@@ -351,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn a_parked_project_comes_back_with_its_shells_until_it_leaves_open_recent() {
+    fn a_parked_project_stays_in_open_recent_until_it_is_reopened_or_ended() {
         let mut project = Project::new(PathBuf::from("/n/a"));
         project.layout = Some(Layout::new(ItemKind::Terminal { session: Some(3) }));
         let mut parked = vec![project.clone(), Project::new(PathBuf::from("/n/b"))];
@@ -374,14 +396,32 @@ mod tests {
         );
 
         parked.insert(0, project);
-        let orphaned = retain_parked(&mut parked, &[PathBuf::from("/n/b")]);
+        let mut recent: Vec<PathBuf> = (0..crate::MAX_RECENT)
+            .map(|i| PathBuf::from(format!("/n/r{i}")))
+            .collect();
+        park(&mut parked, &mut recent, vec![Project::new("/n/d".into())]);
+        assert_eq!(recent.len(), crate::MAX_RECENT + 2);
+        assert_eq!(recent[0], PathBuf::from("/n/d"));
+        assert_eq!(
+            recent[crate::MAX_RECENT..],
+            [PathBuf::from("/n/a"), "/n/b".into()],
+            "more recent folders do not push out running shells"
+        );
+        assert!(!list_parked(&mut recent, &parked));
+        recent.clear();
+        assert!(list_parked(&mut recent, &parked));
+        assert_eq!(recent.len(), 3);
+
+        assert_eq!(parked_sessions(&parked), [3]);
+        let orphaned = retain_parked(&mut parked, |p| p.root != Path::new("/n/a"));
         assert_eq!(orphaned, [3]);
+        assert!(parked_sessions(&parked).is_empty());
         assert_eq!(
             roots(&Workspace {
                 projects: parked,
                 ..Workspace::default()
             }),
-            ["/n/b"]
+            ["/n/d", "/n/b"]
         );
     }
 }

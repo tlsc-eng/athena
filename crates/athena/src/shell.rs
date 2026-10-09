@@ -1053,11 +1053,11 @@ impl Render for Shell {
                     cx.defer(move |cx| windows::merge_into(into, cx));
                 }),
             )
-            .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {
-                this.workspace.recent.clear();
-                this.schedule_save(cx);
-                cx.notify();
-            }))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ClearRecent, window, cx| {
+                    this.clear_recent(window, cx)
+                }),
+            )
             .relative()
             .child(self.render_title_bar(cx))
             .child(body)
