@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
@@ -173,22 +174,63 @@ pub fn revert(store: &Path, session: &str, root: &Path, path: &Path, backup: &Pa
         fs::copy(path, &to).with_context(|| format!("keep a copy of {}", rel.display()))?;
     }
     match before {
-        Before::Text(bytes) => {
-            let mut name = path.file_name().context("the file has no name")?.to_owned();
-            name.push(".athena-revert");
-            let tmp = path.with_file_name(name);
-            fs::write(&tmp, bytes)?;
-            if let Ok(meta) = fs::metadata(path) {
-                fs::set_permissions(&tmp, meta.permissions())?;
-            }
-            fs::rename(&tmp, path)?;
-        }
+        Before::Text(bytes) => write_through(path, &bytes)?,
         _ => match fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
         },
     }
     Ok(())
+}
+
+/// Replaces the file `path` names, through any links, by a fully written copy of `bytes`.
+fn write_through(path: &Path, bytes: &[u8]) -> Result<()> {
+    static TEMPS: AtomicU64 = AtomicU64::new(0);
+    let target = link_target(path);
+    let dir = target.parent().context("the file has no folder")?;
+    fs::create_dir_all(dir)?;
+    let name = target.file_name().context("the file has no name")?;
+    let tmp = dir.join(format!(
+        ".{}.{}.{}.athena-revert",
+        name.to_string_lossy(),
+        std::process::id(),
+        TEMPS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut out = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        out.write_all(bytes)?;
+        out.sync_all()?;
+        if let Ok(meta) = fs::metadata(&target) {
+            fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        fs::rename(&tmp, &target)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("write {}", target.display()))
+}
+
+/// Where `path` leads once its links are followed, even to a file that no longer exists.
+fn link_target(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    let mut at = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::read_link(&at) {
+            Ok(next) => {
+                at = at
+                    .parent()
+                    .map_or_else(|| next.clone(), |dir| dir.join(&next))
+            }
+            Err(_) => break,
+        }
+    }
+    at
 }
 
 /// Deletes sessions older than `max_age`, then the oldest others until the store is under
@@ -357,6 +399,48 @@ mod tests {
             "made by Claude\n"
         );
         assert!(revert(&store, "s-9", &root, &edited, &backup).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reverting_writes_through_a_link_and_recreates_a_removed_folder() {
+        let dir = temp("link");
+        let (store, root, real) = (dir.join("store"), dir.join("app"), dir.join("real"));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("a.go"), "before\n").unwrap();
+        let link = root.join("a.go");
+        std::os::unix::fs::symlink("../real/a.go", &link).unwrap();
+        take(&store, "s-1", &link).unwrap();
+        fs::write(&link, "after\n").unwrap();
+        let gone = root.join("gone/b.go");
+        fs::create_dir_all(gone.parent().unwrap()).unwrap();
+        fs::write(&gone, "kept\n").unwrap();
+        take(&store, "s-1", &gone).unwrap();
+        fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+
+        let backup = dir.join("backup");
+        revert(&store, "s-1", &root, &link, &backup).unwrap();
+        assert!(
+            fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "the link stays"
+        );
+        assert_eq!(fs::read_to_string(real.join("a.go")).unwrap(), "before\n");
+        revert(&store, "s-1", &root, &gone, &backup).unwrap();
+        assert_eq!(fs::read_to_string(&gone).unwrap(), "kept\n");
+        for folder in [&root, &real, &gone.parent().unwrap().to_path_buf()] {
+            let names: Vec<_> = fs::read_dir(folder)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect();
+            assert!(
+                names
+                    .iter()
+                    .all(|n| !n.to_string_lossy().contains("athena-revert")),
+                "{names:?}"
+            );
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 
