@@ -118,8 +118,10 @@ impl RowCache {
     }
 }
 
-/// Edge of a prompt dot; it fits in the 8px padding left of the grid.
+/// Edge of a prompt dot, centred in the padding left of the grid.
 const PROMPT_DOT: f32 = 6.;
+/// Padding left of the grid, wide enough for a prompt dot with room on both sides.
+pub(crate) const PROMPT_GUTTER: f32 = 14.;
 
 /// A dot beside each visible prompt line: filled once its command finished (success or failure
 /// colour), an outline while it runs, as VS Code marks commands.
@@ -136,7 +138,7 @@ fn prompt_dots(
             let command = terminal.command_at(Line(row as i32 - offset))?;
             let at = origin
                 + point(
-                    px(-PROMPT_DOT - 1.),
+                    px(-(PROMPT_GUTTER + PROMPT_DOT) / 2.),
                     line_height * row as f32 + (line_height - px(PROMPT_DOT)) / 2.,
                 );
             let dot = Bounds::new(at, size(px(PROMPT_DOT), px(PROMPT_DOT)));
@@ -927,7 +929,11 @@ mod tests {
         assert_eq!(dots[0].background, ok.into());
         assert_eq!(dots[1].background, bad.into());
         assert_eq!(dots[2].border_color, running);
-        assert!(dots.iter().all(|d| d.bounds.right() < origin.x));
+        // As far from the first character as from the pane's edge, PROMPT_GUTTER left of it.
+        for dot in &dots {
+            assert_eq!(origin.x - dot.bounds.right(), px(4.));
+            assert_eq!(dot.bounds.left() - (origin.x - px(PROMPT_GUTTER)), px(4.));
+        }
         assert_eq!(dots[1].bounds.top(), origin.y + px(18. + 6.));
     }
 }

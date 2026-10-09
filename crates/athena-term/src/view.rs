@@ -20,7 +20,7 @@ use gpui::{
     div, prelude::*, px,
 };
 
-use crate::element::{RowCache, TerminalElement};
+use crate::element::{PROMPT_GUTTER, RowCache, TerminalElement};
 use crate::keys;
 use crate::links;
 use crate::mouse::{self, MouseEvent};
@@ -1644,6 +1644,7 @@ impl Render for TerminalView {
                 .flex_1()
                 .min_h_0()
                 .p(px(8.))
+                .pl(px(PROMPT_GUTTER))
                 .child(TerminalElement::new(cx.entity(), focused)),
         )
         .children(self.render_clipboard_notice(cx))
