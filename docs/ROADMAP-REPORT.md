@@ -7,7 +7,7 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
 - Release: v0.3.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.3.0 (tap `5f58c02`,
   installed here with `brew upgrade --cask athena`)
 - Release: v0.4.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.4.0 (tap `7aa6afb`, installed here)
-- Release: v0.5.0 — <link added at release>
+- Release: v0.5.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.5.0 (tap `b75ca95`, installed here)
 
 The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
 v0.5. Everything below marked **unverified on screen** is covered by unit tests, logs or
