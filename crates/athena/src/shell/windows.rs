@@ -89,8 +89,9 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         _ide_events: None,
         _tasks: Vec::new(),
     });
+    let mut near = None;
     for workspace in windows {
-        open_window(workspace, None, cx);
+        near = open_window(workspace, near, cx).map(Into::into).or(near);
     }
     // The first window started the IDE server before the others' projects were known.
     refresh_ide_folders(cx);
