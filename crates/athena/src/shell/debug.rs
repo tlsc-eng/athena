@@ -125,6 +125,8 @@ pub(super) struct Session {
     /// Counts stops and resumes, so a reply about an earlier stop is dropped.
     pub(super) generation: u64,
     stopping: bool,
+    /// A step is under way; Delve reports it continued, but the marks stay until it stops.
+    stepping: bool,
     pub(super) opened: Opening,
     _events: Task<()>,
 }
@@ -359,11 +361,13 @@ impl Shell {
         self.debug
             .editors
             .insert(view.entity_id(), (weak, subscription));
+        // The view is not among the shell's items yet, so it is handed its list directly.
         let doc = document_key(view.read(cx).path());
-        self.push_breakpoints(&doc, cx);
+        let list = self.marked_breakpoints(&doc, Some(self.file_breakpoints(&doc, cx)));
         let stopped = self.stopped_line_in(&doc);
         let paused = self.paused();
         view.update(cx, |v, cx| {
+            v.set_breakpoints(list, cx);
             v.set_debug_paused(paused);
             v.set_stopped_line(stopped, cx);
         });
@@ -434,7 +438,15 @@ impl Shell {
 
     /// Shows a file's breakpoints in its editors, hollow where the debugger could not place them.
     fn push_breakpoints(&mut self, doc: &Path, cx: &mut Context<Self>) {
-        let mut list = self.debug.breakpoints.get(doc).cloned().unwrap_or_default();
+        let list = self.marked_breakpoints(doc, self.debug.breakpoints.get(doc).cloned());
+        for editor in self.editors_showing(doc, cx) {
+            editor.update(cx, |e, cx| e.set_breakpoints(list.clone(), cx));
+        }
+    }
+
+    /// `list` (else none) with the ones the running session could not place marked.
+    fn marked_breakpoints(&self, doc: &Path, list: Option<Vec<Breakpoint>>) -> Vec<Breakpoint> {
+        let mut list = list.unwrap_or_default();
         if let Some(statuses) = self
             .debug
             .session
@@ -447,9 +459,7 @@ impl Shell {
                     .any(|(line, status)| *line == b.line && !status.verified);
             }
         }
-        for editor in self.editors_showing(doc, cx) {
-            editor.update(cx, |e, cx| e.set_breakpoints(list.clone(), cx));
-        }
+        list
     }
 
     pub(super) fn toggle_breakpoint(&mut self, path: PathBuf, line: usize, cx: &mut Context<Self>) {
@@ -753,6 +763,7 @@ impl Shell {
             verified: HashMap::new(),
             generation: 0,
             stopping: false,
+            stepping: false,
             opened: Opening::now(),
             _events: events,
         });
@@ -788,6 +799,7 @@ impl Shell {
         match event {
             Event::Initialized => self.configure_session(cx),
             Event::Stopped(stopped) => self.on_stopped(stopped, cx),
+            Event::Continued { .. } if self.debug.session.as_ref().is_some_and(|s| s.stepping) => {}
             Event::Continued { .. } => self.on_resumed(cx),
             Event::Output { category, text } => {
                 let kind = match category.as_str() {
@@ -873,6 +885,7 @@ impl Shell {
             return;
         };
         session.generation += 1;
+        session.stepping = false;
         session.phase = Phase::Stopped(stopped.clone());
         let generation = session.generation;
         let client = session.client.clone();
@@ -1036,6 +1049,7 @@ impl Shell {
         };
         session.generation += 1;
         session.phase = Phase::Running;
+        session.stepping = true;
         let client = session.client.clone();
         self.run_request(
             async move {
