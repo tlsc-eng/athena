@@ -70,11 +70,31 @@ pub(super) struct GitState {
     pub(super) branches: Vec<git::Branch>,
     /// Stashes for the branch picker, newest first.
     pub(super) stashes: Vec<git::Stash>,
-    /// The fetch, pull or push under way, as the status bar words it.
+    /// The fetch, pull, push or stash under way, as the status bar words it.
     pub(super) remote_busy: Option<&'static str>,
     autofetch: Option<Task<()>>,
     /// Editors followed for saves that resolve a file's last conflict.
     pub(super) conflict_watch: HashMap<gpui::EntityId, Subscription>,
+}
+
+impl GitState {
+    /// Takes the one slot for syncing and stashing, or names the op that holds it.
+    fn claim(&mut self, busy: &'static str) -> Result<(), &'static str> {
+        match self.remote_busy {
+            Some(current) => Err(current),
+            None => {
+                self.remote_busy = Some(busy);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn busy_notice(current: &str) -> String {
+    format!(
+        "{} is under way; try again when it finishes.",
+        current.trim_end_matches('…')
+    )
 }
 
 /// A remote operation the status bar menu and the palette offer.
@@ -300,7 +320,13 @@ impl Shell {
         let Some(root) = self.active_root() else {
             return;
         };
-        if !git::available() || self.git.remote_busy.is_some() {
+        if !git::available() {
+            return;
+        }
+        if let Some(current) = self.git.remote_busy {
+            if !quiet {
+                self.transient_notice("Git is busy", busy_notice(current), cx);
+            }
             return;
         }
         if op == Remote::Push && self.cached_tracking(&root).is_none() {
@@ -317,8 +343,9 @@ impl Shell {
         quiet: bool,
         cx: &mut Context<Self>,
     ) {
-        self.git.remote_busy = Some(op.busy());
-        cx.notify();
+        if !self.claim_git(op.busy(), quiet, cx) {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let task_root = root.clone();
             let done = cx
@@ -421,6 +448,7 @@ impl Shell {
             return;
         };
         self.git_background(
+            "Stashing…",
             "Could not stash",
             move || git::stash_push(&root, include_untracked, None),
             cx,
@@ -433,27 +461,50 @@ impl Shell {
             return;
         };
         self.git_background(
+            "Popping the stash…",
             "Could not pop the stash",
             move || git::stash_pop(&root, &commit),
             cx,
         );
     }
 
+    /// Claims the sync and stash slot, telling the user what holds it unless `quiet`.
+    fn claim_git(&mut self, busy: &'static str, quiet: bool, cx: &mut Context<Self>) -> bool {
+        match self.git.claim(busy) {
+            Ok(()) => {
+                cx.notify();
+                true
+            }
+            Err(current) => {
+                if !quiet {
+                    self.transient_notice("Git is busy", busy_notice(current), cx);
+                }
+                false
+            }
+        }
+    }
+
     /// Runs a git write off the main thread, then reports its failure and re-reads the status.
     fn git_background(
         &mut self,
+        busy: &'static str,
         failed: &'static str,
         job: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
+        if !self.claim_git(busy, false, cx) {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let done = cx.background_executor().spawn(async move { job() }).await;
             let _ = this.update(cx, |this, cx| {
+                this.git.remote_busy = None;
                 if let Err(err) = done {
                     this.transient_notice(failed, format!("{err:#}"), cx);
                 }
                 this.tree.invalidate();
                 this.git_kick(cx);
+                cx.notify();
             });
         })
         .detach();
@@ -1536,6 +1587,20 @@ fn row_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_sync_or_stash_is_refused_while_one_runs() {
+        let mut git = GitState::default();
+        assert_eq!(git.claim("Fetching…"), Ok(()));
+        assert_eq!(git.claim("Pushing…"), Err("Fetching…"));
+        assert_eq!(git.claim("Stashing…"), Err("Fetching…"));
+        assert_eq!(
+            busy_notice("Fetching…"),
+            "Fetching is under way; try again when it finishes."
+        );
+        git.remote_busy = None;
+        assert_eq!(git.claim("Stashing…"), Ok(()));
+    }
 
     #[test]
     fn publishing_prefers_origin_and_asks_nothing_of_many_others() {
