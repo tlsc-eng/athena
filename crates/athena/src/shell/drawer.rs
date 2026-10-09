@@ -228,8 +228,17 @@ impl Shell {
                     .border_b_1()
                     .border_color(t.color.border)
                     .text_size(t.typography.caption)
-                    .child(div().h_full().flex().children(tabs))
-                    .children(action),
+                    // Tabs give way to the tab's own buttons when a zoomed interface runs out of room.
+                    .child(
+                        div()
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .children(tabs),
+                    )
+                    .children(action.map(|a| div().flex_none().child(a))),
             )
             .child(div().flex_1().min_h_0().child(content));
         // The box keeps its full height throughout, so the panes above resize once, not per frame.
