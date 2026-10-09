@@ -253,6 +253,24 @@ fn trust_question(project: &str, found: &[&str], settings: bool) -> (String, Str
     (message, detail)
 }
 
+/// The servers a trust answer for `root` starts afresh: settings a server reads only at start,
+/// such as gopls' environment, would otherwise outlive the trust that chose them, and
+/// TypeScript goes back through the held-back check even when it is not running.
+fn restarted_on_trust_change<'a>(
+    running: impl Iterator<Item = &'a ServerKey>,
+    root: &Path,
+) -> Vec<ServerKey> {
+    let mut keys: Vec<ServerKey> = running
+        .filter(|(r, kind)| r == root && !kind.is_project_local())
+        .cloned()
+        .collect();
+    let typescript = (root.to_path_buf(), ServerKind::TypeScript);
+    if !keys.contains(&typescript) {
+        keys.push(typescript);
+    }
+    keys
+}
+
 fn server_for(lang: Lang) -> Option<(ServerKind, &'static str)> {
     Some(match lang {
         Lang::Go => (ServerKind::Go, "go"),
@@ -648,12 +666,11 @@ impl Shell {
         project.linters = trust;
         self.schedule_save(cx);
         self.lsp.held_back.remove(root);
-        // Started again even when its settings match: without a global TypeScript the pinned
-        // and the trusted configuration are the same, yet only a trusted project may keep its own.
-        let typescript = (root.to_path_buf(), ServerKind::TypeScript);
-        match self.lsp.servers.contains_key(&typescript) {
-            true => self.replace_server(&typescript, cx),
-            false => self.restart_lsp(&typescript, cx),
+        for key in restarted_on_trust_change(self.lsp.servers.keys(), root) {
+            match self.lsp.servers.contains_key(&key) {
+                true => self.replace_server(&key, cx),
+                false => self.restart_lsp(&key, cx),
+            }
         }
         self.project_settings_changed(root, cx);
         if trust != LinterTrust::Allowed {
@@ -2117,6 +2134,29 @@ mod tests {
         let enter = added.first().copied().filter(|i| !cancel(i));
         let escape = added.iter().copied().find(cancel);
         [enter, escape, added.last().copied()]
+    }
+
+    #[test]
+    fn a_trust_answer_restarts_every_main_server_of_the_project_and_typescript() {
+        let root = Path::new("/p");
+        let running = [
+            (root.to_path_buf(), ServerKind::Go),
+            (root.to_path_buf(), ServerKind::Eslint),
+            (PathBuf::from("/q"), ServerKind::Go),
+        ];
+        assert_eq!(
+            restarted_on_trust_change(running.iter(), root),
+            [
+                (root.to_path_buf(), ServerKind::Go),
+                (root.to_path_buf(), ServerKind::TypeScript),
+            ]
+        );
+        let running = [(root.to_path_buf(), ServerKind::TypeScript)];
+        assert_eq!(
+            restarted_on_trust_change(running.iter(), root),
+            running,
+            "once"
+        );
     }
 
     #[test]
