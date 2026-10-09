@@ -126,17 +126,25 @@ impl Settings {
         self.confirm_drag_and_drop.unwrap_or(true)
     }
 
-    /// The word wrap set in `lang`'s own block, if any.
+    /// The word wrap `lang` chooses: its own block's, else its built-in default.
     pub fn language_word_wrap(&self, lang: Option<Lang>) -> Option<bool> {
-        lang.and_then(|l| self.languages.get(language_id(l)))
-            .and_then(|over| over.word_wrap)
+        self.language_block(lang?).word_wrap
     }
 
-    /// The editor settings for files of `lang`, its language block applied.
+    /// The editor settings for files of `lang`: the global ones, then the language's built-in
+    /// defaults, then the user's `"[lang]"` block, which is VS Code's order.
     pub fn editor_for(&self, lang: Option<Lang>) -> EditorSettings {
-        match lang.and_then(|l| self.languages.get(language_id(l))) {
-            Some(over) => self.editor.overlaid(over),
+        match lang {
+            Some(lang) => self.editor.overlaid(&self.language_block(lang)),
             None => self.editor.clone(),
+        }
+    }
+
+    fn language_block(&self, lang: Lang) -> EditorSettings {
+        let defaults = language_defaults(lang);
+        match self.languages.get(language_id(lang)) {
+            Some(over) => defaults.overlaid(over),
+            None => defaults,
         }
     }
 
@@ -206,6 +214,23 @@ fn set_pointer(root: &mut Value, pointer: &str, value: Value) {
             return;
         }
         at = map.entry(key.to_string()).or_insert_with(|| json!({}));
+    }
+}
+
+/// The settings VS Code ships for a language, which beat the user's global ones.
+/// Go's tab indentation is the editor's own default for Go files.
+fn language_defaults(lang: Lang) -> EditorSettings {
+    match lang {
+        Lang::Markdown => EditorSettings {
+            word_wrap: Some(true),
+            trim_trailing_whitespace: Some(false),
+            ..EditorSettings::default()
+        },
+        Lang::Go => EditorSettings {
+            format_on_save: Some(true),
+            ..EditorSettings::default()
+        },
+        _ => EditorSettings::default(),
     }
 }
 
@@ -1132,6 +1157,42 @@ mod tests {
         assert!(problems.iter().any(|p| p.contains("\"bogus\"")));
         assert!(problems.iter().any(|p| p.starts_with("\"theme\"")));
         assert!(problems.iter().any(|p| p.starts_with("\"nope\"")));
+    }
+
+    #[test]
+    fn language_defaults_beat_global_settings_and_lose_to_the_language_block() {
+        let cases = [None, Some(true), Some(false)];
+        for global in cases {
+            for block in cases {
+                let mut s = Settings::default();
+                s.editor.word_wrap = global;
+                s.editor.trim_trailing_whitespace = global;
+                s.editor.format_on_save = global;
+                for id in ["markdown", "go"] {
+                    let over = s.languages.entry(id.into()).or_default();
+                    over.word_wrap = block;
+                    over.trim_trailing_whitespace = block;
+                    over.format_on_save = block;
+                }
+                let md = s.editor_for(Some(Lang::Markdown));
+                let go = s.editor_for(Some(Lang::Go));
+                let rust = s.editor_for(Some(Lang::Rust));
+                let case = format!("global {global:?}, block {block:?}");
+                assert_eq!(md.word_wrap, block.or(Some(true)), "{case}");
+                assert_eq!(md.trim_trailing_whitespace, block.or(Some(false)), "{case}");
+                assert_eq!(md.format_on_save, block.or(global), "{case}");
+                assert_eq!(go.format_on_save, block.or(Some(true)), "{case}");
+                assert_eq!(go.word_wrap, block.or(global), "{case}");
+                assert_eq!(rust.format_on_save, global, "{case}");
+                assert_eq!(
+                    s.language_word_wrap(Some(Lang::Markdown)),
+                    block.or(Some(true)),
+                    "{case}"
+                );
+                assert_eq!(s.language_word_wrap(Some(Lang::Go)), block, "{case}");
+                assert_eq!(s.editor_for(None), s.editor, "{case}");
+            }
+        }
     }
 
     #[test]

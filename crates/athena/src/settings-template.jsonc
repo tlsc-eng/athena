@@ -13,7 +13,9 @@
   //   "inlay_hints": true,             // off hides them; on also turns on a curated set
   //   "bracket_pair_colorization": true // colour brackets by nesting depth
   // },
-  // "[markdown]": { "trim_trailing_whitespace": false },
+  // // Built in, as in VS Code: Markdown wraps and keeps trailing blanks, Go formats on save.
+  // // These beat the "editor" block above, and a language block like this one beats them.
+  // "[markdown]": { "trim_trailing_whitespace": true },
   // "theme": "system",                 // "system", "light" or "dark"
   // "ide_integration": false,          // Claude Code connects to Athena as its IDE
   // "git": { "autofetch": true },      // fetch the active project every three minutes
