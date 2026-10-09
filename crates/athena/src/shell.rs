@@ -1,5 +1,6 @@
 mod appearance;
 mod branches;
+mod breadcrumbs;
 mod bridge;
 mod claude;
 mod claude_ide;
@@ -106,6 +107,7 @@ pub struct Shell {
     tests: tests_view::TestsState,
     lsp: lsp::LspState,
     settings: settings::SettingsState,
+    breadcrumbs: breadcrumbs::BreadcrumbState,
     problems: problems::ProblemsState,
     code_actions: code_actions::CodeActionState,
     git: git_view::GitState,
@@ -255,6 +257,7 @@ impl Shell {
             tests: tests_view::TestsState::default(),
             lsp: lsp::LspState::default(),
             settings,
+            breadcrumbs: breadcrumbs::BreadcrumbState::default(),
             problems: problems::ProblemsState::default(),
             code_actions: code_actions::CodeActionState::default(),
             git: git_view::GitState::default(),

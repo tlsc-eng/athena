@@ -1224,6 +1224,7 @@ impl Shell {
             return;
         }
         self.lsp.changes.remove(&doc);
+        self.breadcrumbs_closed(&doc);
         if let Some(key) = self.lsp.documents.remove(&doc)
             && let Some(server) = self.lsp.servers.get(&key)
         {

@@ -13,7 +13,7 @@ use super::item::ItemView;
 use super::tree::{Edit, EditKind};
 
 /// A menu row that runs `f` on the shell, if it is still around.
-fn shell_item(
+pub(super) fn shell_item(
     label: impl Into<SharedString>,
     cx: &Context<Shell>,
     f: impl Fn(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,

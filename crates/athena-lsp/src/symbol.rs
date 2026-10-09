@@ -15,18 +15,28 @@ pub struct Symbol {
     pub path: PathBuf,
     /// Where to put the cursor: the name itself when the server says.
     pub range: Range,
+    /// All of it, body included, to tell which symbols hold a position.
+    pub scope: Range,
+    /// The symbol holding it, as an index into the same list.
+    pub parent: Option<usize>,
 }
 
 /// Reads `DocumentSymbol[]` (flattened, parents first) or `SymbolInformation[]`.
 pub(crate) fn parse_symbols(result: &Value, path: Option<&Path>) -> Vec<Symbol> {
     let mut out = Vec::new();
     for item in result.as_array().map_or(&[][..], Vec::as_slice) {
-        walk(item, path, None, &mut out);
+        walk(item, path, None, None, &mut out);
     }
     out
 }
 
-fn walk(item: &Value, path: Option<&Path>, parent: Option<&str>, out: &mut Vec<Symbol>) {
+fn walk(
+    item: &Value,
+    path: Option<&Path>,
+    parent: Option<&str>,
+    parent_index: Option<usize>,
+    out: &mut Vec<Symbol>,
+) {
     let Some(name) = item.get("name").and_then(Value::as_str) else {
         return;
     };
@@ -42,19 +52,27 @@ fn walk(item: &Value, path: Option<&Path>, parent: Option<&str>, out: &mut Vec<S
         .or_else(|| location.and_then(|l| l.get("range")))
         .or_else(|| item.get("range"))
         .and_then(|r| serde_json::from_value(r.clone()).ok());
+    let scope: Option<Range> = item
+        .get("range")
+        .or_else(|| location.and_then(|l| l.get("range")))
+        .and_then(|r| serde_json::from_value(r.clone()).ok());
     let container = item
         .get("containerName")
         .and_then(Value::as_str)
         .filter(|c| !c.is_empty())
         .or(parent)
         .map(str::to_string);
+    let mut index = None;
     if let (Some(path), Some(range)) = (file, range) {
+        index = Some(out.len());
         out.push(Symbol {
             name: name.to_string(),
             kind,
             container,
             path,
             range,
+            scope: scope.unwrap_or(range),
+            parent: parent_index,
         });
     }
     for child in item
@@ -62,7 +80,7 @@ fn walk(item: &Value, path: Option<&Path>, parent: Option<&str>, out: &mut Vec<S
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice)
     {
-        walk(child, path, Some(name), out);
+        walk(child, path, Some(name), index, out);
     }
 }
 
@@ -126,6 +144,8 @@ mod tests {
             "the name, not the whole body"
         );
         assert_eq!(list[1].container.as_deref(), Some("Server"));
+        assert_eq!((list[0].parent, list[1].parent), (None, Some(0)));
+        assert_eq!(list[0].scope.end.line, 9, "the whole body");
         assert_eq!(list[1].path, Path::new("/p/s.go"));
     }
 

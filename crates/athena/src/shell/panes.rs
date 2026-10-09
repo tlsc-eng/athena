@@ -263,6 +263,7 @@ impl Shell {
                         }
                         EditorEvent::CursorMoved { line } => {
                             this.schedule_save(cx);
+                            this.breadcrumbs_cursor_moved(&view, cx);
                             return this.git_cursor_moved(&view, *line, cx);
                         }
                         EditorEvent::Hover {
@@ -1639,6 +1640,7 @@ impl Shell {
                 cx.listener(move |this, _, window, cx| this.focus_pane(pane_id, window, cx)),
             )
             .child(strip)
+            .children(self.render_breadcrumbs(root, pane, cx))
             .child(content);
 
         if let Some(closing) = self.leaving.get(&(root.to_path_buf(), pane_id)) {

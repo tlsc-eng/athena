@@ -1136,6 +1136,8 @@ mod tests {
             container: container.map(str::to_string),
             path: canonical.join("pkg/run.go"),
             range: Range { start: at, end: at },
+            scope: Range { start: at, end: at },
+            parent: None,
         };
         let entries = symbol_entries(vec![symbol("Run", Some("pkg"))], None, Some(&dir));
         assert_eq!(entries[0].detail.as_deref(), Some("pkg · pkg/run.go"));
