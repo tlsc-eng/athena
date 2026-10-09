@@ -557,6 +557,7 @@ impl Shell {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .p(t.ui(12.))
                             .flex()
                             .flex_col()
