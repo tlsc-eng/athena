@@ -237,6 +237,22 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Problems", Box::new(actions::ShowProblems)),
         ("Go to next problem", Box::new(actions::NextProblem)),
         ("Go to previous problem", Box::new(actions::PrevProblem)),
+        (
+            "Terminal: toggle panel",
+            Box::new(actions::ToggleTerminalPanel),
+        ),
+        (
+            "Terminal: new in panel",
+            Box::new(actions::NewPanelTerminal),
+        ),
+        (
+            "Terminal: move into panel",
+            Box::new(actions::MoveTerminalToPanel),
+        ),
+        (
+            "Terminal: move into editor area",
+            Box::new(actions::MoveTerminalToEditor),
+        ),
         ("Notifications", Box::new(actions::ToggleNotifications)),
         ("Containers", Box::new(actions::ShowContainers)),
         ("Playwright", Box::new(actions::ShowPlaywright)),
@@ -261,6 +277,9 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Zoom in", Box::new(actions::FontZoomIn)),
         ("Zoom out", Box::new(actions::FontZoomOut)),
         ("Reset zoom", Box::new(actions::FontZoomReset)),
+        ("Zoom interface in", Box::new(actions::WindowZoomIn)),
+        ("Zoom interface out", Box::new(actions::WindowZoomOut)),
+        ("Reset interface zoom", Box::new(actions::WindowZoomReset)),
         (
             "Theme: follow system appearance",
             Box::new(actions::ThemeFollowSystem),
@@ -1109,6 +1128,22 @@ mod tests {
                 "{}",
                 action.name()
             );
+        }
+    }
+
+    #[test]
+    fn the_panel_terminal_and_window_zoom_commands_are_listed() {
+        let names: Vec<&str> = commands().iter().map(|(_, a)| a.name()).collect();
+        for action in [
+            "athena::ToggleTerminalPanel",
+            "athena::NewPanelTerminal",
+            "athena::MoveTerminalToPanel",
+            "athena::MoveTerminalToEditor",
+            "athena::WindowZoomIn",
+            "athena::WindowZoomOut",
+            "athena::WindowZoomReset",
+        ] {
+            assert!(names.contains(&action), "{action}");
         }
     }
 
