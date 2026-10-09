@@ -39,6 +39,28 @@ pub struct Location {
     pub range: Range,
 }
 
+/// A use of the symbol a highlight was asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Highlight {
+    pub range: Range,
+    /// The symbol is assigned here, not only read.
+    pub write: bool,
+}
+
+pub(crate) fn parse_highlights(result: &serde_json::Value) -> Vec<Highlight> {
+    result
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(|h| {
+            Some(Highlight {
+                range: serde_json::from_value(h.get("range")?.clone()).ok()?,
+                write: h.get("kind").and_then(serde_json::Value::as_u64) == Some(3),
+            })
+        })
+        .collect()
+}
+
 #[derive(Deserialize)]
 struct RawDiagnostic {
     range: Range,
@@ -161,6 +183,15 @@ mod tests {
                 character: 1
             }
         );
+
+        let highlights = parse_highlights(&json!([
+            {"range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 5}}, "kind": 3},
+            {"range": {"start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 3}}},
+            {"kind": 2}
+        ]));
+        assert_eq!(highlights.len(), 2);
+        assert!(highlights[0].write && !highlights[1].write);
+        assert_eq!(highlights[1].range.end.character, 3);
 
         let link = json!([{"targetUri": "file:///b.ts", "targetRange": {}, "targetSelectionRange":
             {"start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 3}}}]);

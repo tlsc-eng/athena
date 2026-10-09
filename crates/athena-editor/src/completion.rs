@@ -165,6 +165,11 @@ impl EditorView {
         self.completing.triggers = triggers;
     }
 
+    /// Whether a language server has the file, so typing asks it for suggestions.
+    pub(crate) fn completing_attached(&self) -> bool {
+        self.completing.triggers.is_some()
+    }
+
     /// A list is on screen, so Up, Down, Enter and Tab go to it.
     pub(crate) fn completion_open(&self) -> bool {
         self.completing

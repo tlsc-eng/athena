@@ -384,6 +384,70 @@ fn gopls_renames_fixes_imports_lists_symbols_and_finds_implementations() {
 }
 
 /// A minimal executor: the definition future only waits on a channel the reader thread fills.
+/// Opens `source` as main.go in a new module and waits for gopls to have read it.
+fn open_go(
+    name: &str,
+    source: &str,
+    config: serde_json::Value,
+) -> (Client, std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("athena-lsp-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(dir.join("go.mod"), "module example.com/probe\n\ngo 1.21\n").unwrap();
+    let file = dir.join("main.go");
+    std::fs::write(&file, source).unwrap();
+    let config = std::sync::Arc::new(std::sync::RwLock::new(config));
+    let (client, events) = Client::start_with(ServerKind::Go, dir.clone(), config);
+    client.did_open(&file, "go", 1, source.into());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match next_event(&events, deadline).expect("no diagnostics from gopls in time") {
+            Event::Diagnostics { path, .. } if path == file => break,
+            Event::Stopped(why) => panic!("gopls stopped: {why}"),
+            _ => {}
+        }
+    }
+    (client, dir, file)
+}
+
+#[test]
+fn gopls_highlights_where_the_symbol_under_the_cursor_is_read_and_written() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let source =
+        "package main\n\nfunc main() {\n\tcount := 1\n\tcount = count + 1\n\t_ = count\n}\n";
+    let (client, dir, file) = open_go("highlight", source, serde_json::Value::Null);
+    let on_count = Position {
+        line: 4,
+        character: 2,
+    };
+    let mut found = futures_lite_block_on(client.document_highlights(&file, on_count)).unwrap();
+    found.sort_by_key(|h| h.range.start);
+    let lines: Vec<(u32, u32)> = found
+        .iter()
+        .map(|h| (h.range.start.line, h.range.start.character))
+        .collect();
+    assert_eq!(lines, [(3, 1), (4, 1), (4, 9), (5, 5)], "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|h| h.range.end.character - h.range.start.character == 5)
+    );
+    let nothing = Position {
+        line: 1,
+        character: 0,
+    };
+    assert!(
+        futures_lite_block_on(client.document_highlights(&file, nothing))
+            .unwrap_or_default()
+            .is_empty()
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn futures_lite_block_on<F: std::future::Future>(future: F) -> F::Output {
     use std::pin::pin;
     use std::task::{Context, Poll, Wake, Waker};

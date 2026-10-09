@@ -1,12 +1,19 @@
+use std::ops::Range;
+use std::time::Duration;
+
 use athena_ui::motion;
 use athena_ui::{ActiveTheme, InputEvent, TextInput};
 use gpui::{
     Action, Animation, AnyElement, App, Context, Corner, Entity, Focusable, KeyBinding, Pixels,
-    Point, Subscription, Window, actions, anchored, deferred, div, point, prelude::*, px,
+    Point, Subscription, Task, Window, actions, anchored, deferred, div, point, prelude::*, px,
 };
 
+use crate::buffer::Buffer;
 use crate::element::GUTTER_PAD;
-use crate::view::EditorView;
+use crate::view::{EditorEvent, EditorView};
+
+/// The cursor rests this long before other uses of its symbol are asked for, as in VS Code.
+const HIGHLIGHT_DELAY: Duration = Duration::from_millis(250);
 
 // Handled by the shell, which talks to the language server, as they bubble up from the editor.
 actions!(
@@ -35,6 +42,75 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-.", ShowCodeActions, ctx),
         KeyBinding::new("cmd-f12", GoToImplementation, ctx),
     ]);
+}
+
+/// Char ranges a language server gave for one buffer version, followed through later edits.
+pub(crate) struct Anchored<T> {
+    version: u64,
+    items: Vec<(Range<usize>, T)>,
+}
+
+impl<T> Default for Anchored<T> {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            items: Vec::new(),
+        }
+    }
+}
+
+impl<T: Clone> Anchored<T> {
+    fn new(b: &Buffer, items: Vec<(Range<usize>, T)>) -> Self {
+        Self {
+            version: b.version(),
+            items,
+        }
+    }
+
+    /// The ranges where they are in `b` now; none once the edits since are no longer kept.
+    pub(crate) fn now(&self, b: &Buffer) -> Vec<(Range<usize>, T)> {
+        let Some(edits) = b.edits_since(self.version) else {
+            return Vec::new();
+        };
+        let edits: Vec<_> = edits.collect();
+        // Text typed at either edge of a range stays outside it.
+        let follow = |r: Range<usize>, e: &&crate::buffer::Edit| {
+            let start = match e.removed == 0 && r.start == e.at {
+                true => r.start + e.inserted,
+                false => e.map(r.start),
+            };
+            start..e.map(r.end).max(start)
+        };
+        self.items
+            .iter()
+            .map(|(r, t)| (edits.iter().fold(r.clone(), follow), t.clone()))
+            .collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+/// A use of the symbol at the cursor, in zero-based lines and UTF-16 columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Occurrence {
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+    /// The symbol is assigned here.
+    pub write: bool,
+}
+
+/// Other uses of the symbol at the cursor, and whether each writes it.
+#[derive(Default)]
+pub(crate) struct Occurrences {
+    pub(crate) shown: Anchored<bool>,
+    /// The cursor and buffer version last asked about, or waited on.
+    asked: Option<(usize, u64)>,
+    /// The request in flight and the buffer version it was asked for.
+    pending: Option<(u64, u64)>,
+    requests: u64,
+    timer: Option<Task<()>>,
 }
 
 /// The inline field F2 opens over a symbol.
@@ -196,6 +272,72 @@ impl EditorView {
         )
     }
 
+    /// Asks, once the cursor has rested, where else its symbol is used; called every frame.
+    pub(crate) fn schedule_occurrences(&mut self, focused: bool, cx: &mut Context<Self>) {
+        let attached = self.completing_attached();
+        let Some(version) = self.version().filter(|_| focused && attached) else {
+            return;
+        };
+        let key = (self.cursor.head(), version);
+        if self.occurrences.asked == Some(key) || self.cursor.is_multi() {
+            return;
+        }
+        self.occurrences.asked = Some(key);
+        self.occurrences.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HIGHLIGHT_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.occurrences.timer = None;
+                let Some((line, character)) = this.cursor_utf16() else {
+                    return;
+                };
+                this.occurrences.requests += 1;
+                let request = this.occurrences.requests;
+                this.occurrences.pending = Some((request, version));
+                cx.emit(EditorEvent::DocumentHighlight {
+                    request,
+                    line,
+                    character,
+                });
+            });
+        }));
+    }
+
+    /// The answer to an [`EditorEvent::DocumentHighlight`]; dropped if the text changed since.
+    pub fn show_document_highlights(
+        &mut self,
+        request: u64,
+        ranges: Vec<Occurrence>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((asked, version)) = self.occurrences.pending else {
+            return;
+        };
+        let Some(shared) = self.buffer.clone() else {
+            return;
+        };
+        let b = shared.buffer.borrow();
+        if asked != request || b.version() != version {
+            return;
+        }
+        self.occurrences.pending = None;
+        let items: Vec<(Range<usize>, bool)> = ranges
+            .into_iter()
+            .map(|o| {
+                let (a, z) = (o.start, o.end);
+                (
+                    b.char_at_utf16(a.0, a.1)..b.char_at_utf16(z.0, z.1),
+                    o.write,
+                )
+            })
+            .filter(|(r, _)| !r.is_empty())
+            .collect();
+        if items.is_empty() && self.occurrences.shown.is_empty() {
+            return;
+        }
+        self.occurrences.shown = Anchored::new(&b, items);
+        cx.notify();
+    }
+
     /// Shows the code action lightbulb on a zero-based line, or hides it.
     pub fn set_lightbulb(&mut self, line: Option<u32>, cx: &mut Context<Self>) {
         let line = line.map(|l| l as usize);
@@ -225,5 +367,44 @@ impl EditorView {
         }
         window.dispatch_action(Box::new(ShowCodeActions), cx);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::Cursor;
+
+    #[test]
+    fn found_ranges_follow_edits_made_after_they_were_found() {
+        let mut b = Buffer::new("count = count + 1\n", None);
+        let found = Anchored::new(&b, vec![(0..5, true), (8..13, false)]);
+        let mut c = Cursor::at(0);
+        b.insert(&mut c, "😀 ");
+        assert_eq!(found.now(&b), vec![(2..7, true), (10..15, false)]);
+        let mut c = Cursor::at(12);
+        b.insert(&mut c, "x");
+        assert_eq!(
+            found.now(&b)[1],
+            (10..16, false),
+            "typing inside a use widens it"
+        );
+        let mut c = Cursor::at(16);
+        b.insert(&mut c, "y");
+        let mut c = Cursor::at(10);
+        b.insert(&mut c, "z");
+        assert_eq!(
+            found.now(&b)[1],
+            (11..17, false),
+            "typing at its edges does not"
+        );
+        let point = Anchored::new(&b, vec![(5..5, ())]);
+        let mut c = Cursor::at(5);
+        b.insert(&mut c, "ab");
+        assert_eq!(
+            point.now(&b),
+            vec![(7..7, ())],
+            "a point moves past text typed at it"
+        );
     }
 }

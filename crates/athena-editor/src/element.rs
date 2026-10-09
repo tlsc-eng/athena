@@ -389,6 +389,7 @@ impl Element for EditorElement {
             }
         }
 
+        let occurrences = view.occurrences.shown.now(&buffer);
         let finds = view.find_matches().to_vec();
         let brackets = selection
             .is_empty()
@@ -454,6 +455,15 @@ impl Element for EditorElement {
                 let xb = r.x_for(b - start) + if past_end { cell } else { px(0.) };
                 Some(Bounds::new(point(x0 + xa, y), size(xb - xa, lh)))
             };
+            for (range, write) in &occurrences {
+                if let Some(b) = span(range) {
+                    let color = match write {
+                        true => syntax.bracket_match,
+                        false => theme.color.surface_active,
+                    };
+                    frame.backgrounds.push(fill(b, color));
+                }
+            }
             for m in &finds {
                 if let Some(b) = span(m) {
                     frame.backgrounds.push(fill(b, theme.color.surface_active));

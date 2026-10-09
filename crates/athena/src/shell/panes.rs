@@ -292,6 +292,11 @@ impl Shell {
                             let at = (*line, *character);
                             return this.lsp_complete(&view, *request, at, trigger.clone(), cx);
                         }
+                        EditorEvent::DocumentHighlight {
+                            request,
+                            line,
+                            character,
+                        } => return this.lsp_highlight(&view, *request, (*line, *character), cx),
                     }
                     cx.notify();
                 })

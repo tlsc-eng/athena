@@ -251,6 +251,13 @@ pub enum EditorEvent {
     },
     /// A file that could not be opened opened after all, so language servers can now be told.
     Opened,
+    /// Other uses of the symbol at a zero-based line and UTF-16 column are wanted; answer with
+    /// [`EditorView::show_document_highlights`].
+    DocumentHighlight {
+        request: u64,
+        line: u32,
+        character: u32,
+    },
 }
 
 /// A change bar in the gutter, in zero-based lines of the saved file.
@@ -462,6 +469,7 @@ pub struct EditorView {
     cursor_line: usize,
     context_menu: Option<(Entity<ContextMenu>, Subscription)>,
     pub(crate) rename: Option<crate::lsp_ui::RenameBox>,
+    pub(crate) occurrences: crate::lsp_ui::Occurrences,
     /// The zero-based line showing the code action lightbulb.
     pub(crate) lightbulb: Option<usize>,
     /// A restored first line to scroll to once the line height is known.
@@ -554,6 +562,7 @@ impl EditorView {
             cursor_line: 0,
             context_menu: None,
             rename: None,
+            occurrences: Default::default(),
             lightbulb: None,
             pending_top: None,
             column_select: None,
@@ -1645,6 +1654,7 @@ impl Render for EditorView {
         if !focused {
             self.dismiss_completion(cx);
         }
+        self.schedule_occurrences(focused, cx);
         let root = div()
             .id("editor")
             .size_full()

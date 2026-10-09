@@ -5,7 +5,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use athena_editor::{
-    Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, ServerEdit, Signature,
+    Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, Occurrence, ServerEdit,
+    Signature,
 };
 use athena_lsp::{
     Client, CompletionItem, Config, Diagnostic, Event, Location, MarkupBlock, Position, ServerKind,
@@ -682,6 +683,52 @@ impl Shell {
             };
             tracing::debug!("hover → {} blocks", blocks.len());
             let _ = weak.update(cx, |e, cx| e.show_hover(request, blocks, cx));
+        })
+        .detach();
+    }
+
+    /// Asks the server where else the symbol at `at` is used, to mark while the cursor rests.
+    pub(super) fn lsp_highlight(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        at: (u32, u32),
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let Some(client) = self
+            .document_client(&doc)
+            .filter(|c| c.supports("/documentHighlightProvider"))
+        else {
+            editor.update(cx, |e, cx| {
+                e.show_document_highlights(request, Vec::new(), cx)
+            });
+            return;
+        };
+        let at = Position {
+            line: at.0,
+            character: at.1,
+        };
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let found = client
+                .document_highlights(&doc, at)
+                .await
+                .unwrap_or_else(|why| {
+                    tracing::debug!("document highlight failed: {why}");
+                    Vec::new()
+                });
+            let pos = |p: Position| (p.line, p.character);
+            let ranges = found
+                .into_iter()
+                .map(|h| Occurrence {
+                    start: pos(h.range.start),
+                    end: pos(h.range.end),
+                    write: h.write,
+                })
+                .collect();
+            let _ = weak.update(cx, |e, cx| e.show_document_highlights(request, ranges, cx));
         })
         .detach();
     }

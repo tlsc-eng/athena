@@ -14,7 +14,7 @@ use crate::code_action::{self, CodeAction, parse_code_action, parse_code_actions
 use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
 use crate::edit::{WorkspaceEdit, parse_workspace_edit};
 use crate::markup::{Hover, parse_hover};
-use crate::protocol::{self, Diagnostic, Location, Position, Range};
+use crate::protocol::{self, Diagnostic, Highlight, Location, Position, Range};
 use crate::signature::{SignatureHelp, parse_signature_help};
 use crate::symbol::{Symbol, parse_symbols};
 use crate::{ServerKind, env};
@@ -297,6 +297,19 @@ impl Client {
                    "context": {"includeDeclaration": true}}),
         );
         locations(reply).await
+    }
+
+    /// Where the symbol at `at` is used in its file, as the editor marks it while the cursor rests.
+    pub async fn document_highlights(
+        &self,
+        path: &Path,
+        at: Position,
+    ) -> Result<Vec<Highlight>, String> {
+        let reply = self.request(
+            "textDocument/documentHighlight",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        Ok(protocol::parse_highlights(&answer(reply).await?))
     }
 
     /// Documentation for the symbol at `at`; `None` when the server has nothing to say.
@@ -636,6 +649,7 @@ impl Session {
                     "implementation": {"linkSupport": true},
                     "typeDefinition": {"linkSupport": true},
                     "references": {},
+                    "documentHighlight": {},
                     "rename": {"prepareSupport": true},
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                     "codeAction": {
