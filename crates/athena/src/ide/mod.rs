@@ -193,7 +193,7 @@ impl Shared {
 /// The server most recently started, for the panic hook.
 static RUNNING: Mutex<Option<Weak<Shared>>> = Mutex::new(None);
 
-/// Called from the panic hook: rejects pending proposals and removes the lock file.
+/// Called when the main thread panics: rejects pending proposals and removes the lock file.
 pub fn on_panic() {
     let Ok(running) = RUNNING.try_lock() else {
         return;

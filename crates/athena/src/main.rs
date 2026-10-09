@@ -102,7 +102,10 @@ fn install_panic_hook() {
     let recovery = athena_proto::recovery_dir().ok();
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        ide::on_panic();
+        // A worker thread's panic leaves the window running, and the IDE server with it.
+        if std::thread::current().name() == Some("main") {
+            ide::on_panic();
+        }
         let kept = recovery
             .as_deref()
             .map(athena_editor::recovery::write_dirty);
