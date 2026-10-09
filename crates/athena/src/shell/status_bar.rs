@@ -61,6 +61,7 @@ fn lang_name(lang: Option<Lang>) -> &'static str {
         Some(Lang::Makefile) => "Makefile",
         Some(Lang::Sql) => "SQL",
         Some(Lang::Protobuf) => "Protocol Buffers",
+        Some(Lang::Mermaid) => "Mermaid",
     }
 }
 

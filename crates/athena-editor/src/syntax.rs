@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
@@ -6,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ropey::Rope;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{InputEdit, Language, Node, Parser, Query, QueryCursor, TextProvider, Tree};
+use tree_sitter::{
+    InputEdit, Language, Node, Parser, Query, QueryCursor, Range as TreeRange, TextProvider, Tree,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
@@ -31,6 +34,7 @@ pub enum Lang {
     Makefile,
     Sql,
     Protobuf,
+    Mermaid,
 }
 
 /// Highlight classes; the theme gives each a colour, and headings a heavier weight.
@@ -58,6 +62,8 @@ pub enum Token {
     Label,
     Heading,
     Link,
+    Emphasis,
+    Strong,
     Error,
 }
 
@@ -80,6 +86,11 @@ struct LangSpec {
     comment: Option<&'static str>,
     /// Which of several patterns capturing one node wins; the bundled queries disagree.
     first_pattern_wins: bool,
+}
+
+/// Upstream's all-caps constant pattern ends in a stray `'`, so it never matches.
+fn rust_query() -> String {
+    tree_sitter_rust::HIGHLIGHTS_QUERY.replace(r#"[A-Z\\d_]+$'""#, r#"[A-Z\\d_]+$""#)
 }
 
 const JS: &str = tree_sitter_javascript::HIGHLIGHT_QUERY;
@@ -236,10 +247,7 @@ const SPECS: [LangSpec; Lang::COUNT] = [
     LangSpec {
         extensions: &["rs"],
         filenames: &[],
-        engine: grammar(
-            || tree_sitter_rust::LANGUAGE.into(),
-            || tree_sitter_rust::HIGHLIGHTS_QUERY.into(),
-        ),
+        engine: grammar(|| tree_sitter_rust::LANGUAGE.into(), rust_query),
         comment: Some("// "),
         first_pattern_wins: true,
     },
@@ -354,10 +362,17 @@ const SPECS: [LangSpec; Lang::COUNT] = [
         comment: Some("// "),
         first_pattern_wins: false,
     },
+    LangSpec {
+        extensions: &["mmd", "mermaid"],
+        filenames: &[],
+        engine: Engine::Lines(crate::lines::mermaid),
+        comment: Some("%% "),
+        first_pattern_wins: false,
+    },
 ];
 
 impl Lang {
-    const COUNT: usize = 21;
+    const COUNT: usize = 22;
 
     pub const ALL: [Lang; Self::COUNT] = [
         Self::Go,
@@ -381,6 +396,7 @@ impl Lang {
         Self::Makefile,
         Self::Sql,
         Self::Protobuf,
+        Self::Mermaid,
     ];
 
     fn spec(self) -> &'static LangSpec {
@@ -494,6 +510,8 @@ const CAPTURES: &[(&str, Option<Token>)] = &[
     ("text.uri", Some(Token::Link)),
     ("text.reference", Some(Token::Link)),
     ("text.literal", Some(Token::String)),
+    ("text.emphasis", Some(Token::Emphasis)),
+    ("text.strong", Some(Token::Strong)),
     ("none", None),
     ("spell", None),
 ];
@@ -689,24 +707,11 @@ impl Syntax {
         let Some(query) = self.lang.query() else {
             return Vec::new();
         };
-        let names = query.capture_names();
-        let mut cursor = QueryCursor::new();
-        cursor.set_byte_range(bytes);
         let first_wins = self.lang.spec().first_pattern_wins;
         let mut best: HashMap<(usize, usize), (usize, Token)> = HashMap::new();
-        let mut captures = cursor.captures(query, tree.root_node(), RopeText(rope));
-        while let Some((m, index)) = captures.next() {
-            let capture = m.captures()[*index];
-            let Some(token) = token_for(names[capture.index as usize]) else {
-                continue;
-            };
-            let range = capture.node.byte_range();
-            let entry = best
-                .entry((range.start, range.end))
-                .or_insert((m.pattern_index, token));
-            if (m.pattern_index < entry.0) == first_wins {
-                *entry = (m.pattern_index, token);
-            }
+        capture_tokens(query, tree, rope, bytes.clone(), first_wins, &mut best);
+        if self.lang == Lang::Markdown {
+            markdown_inline(tree, rope, bytes, &mut best);
         }
         let mut out: Vec<_> = best
             .into_iter()
@@ -715,6 +720,115 @@ impl Syntax {
         out.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
         out
     }
+}
+
+/// Adds each capture of `query` in `bytes` to `best`, one token per node range.
+fn capture_tokens(
+    query: &Query,
+    tree: &Tree,
+    rope: &Rope,
+    bytes: Range<usize>,
+    first_wins: bool,
+    best: &mut HashMap<(usize, usize), (usize, Token)>,
+) {
+    let names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(bytes);
+    let mut captures = cursor.captures(query, tree.root_node(), RopeText(rope));
+    while let Some((m, index)) = captures.next() {
+        let capture = m.captures()[*index];
+        let Some(token) = token_for(names[capture.index as usize]) else {
+            continue;
+        };
+        let range = capture.node.byte_range();
+        let entry = best
+            .entry((range.start, range.end))
+            .or_insert((m.pattern_index, token));
+        if (m.pattern_index < entry.0) == first_wins {
+            *entry = (m.pattern_index, token);
+        }
+    }
+}
+
+/// The block grammar leaves paragraph text as opaque `inline` nodes; each is parsed with the
+/// inline grammar for emphasis, code spans and links, as editors inject it.
+fn markdown_inline(
+    block: &Tree,
+    rope: &Rope,
+    bytes: Range<usize>,
+    best: &mut HashMap<(usize, usize), (usize, Token)>,
+) {
+    static INLINE_NODES: OnceLock<Query> = OnceLock::new();
+    static INLINE_HIGHLIGHTS: OnceLock<Query> = OnceLock::new();
+    thread_local! {
+        static PARSER: RefCell<Parser> = RefCell::new({
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tree_sitter_md::INLINE_LANGUAGE.into())
+                .expect("grammar matches tree-sitter ABI");
+            parser
+        });
+    }
+    let nodes = INLINE_NODES.get_or_init(|| {
+        Query::new(&tree_sitter_md::LANGUAGE.into(), "(inline) @inline")
+            .expect("inline node query compiles")
+    });
+    let highlights = INLINE_HIGHLIGHTS.get_or_init(|| {
+        Query::new(
+            &tree_sitter_md::INLINE_LANGUAGE.into(),
+            tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+        )
+        .expect("bundled highlight query compiles")
+    });
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(bytes.clone());
+    let mut matches = cursor.matches(nodes, block.root_node(), RopeText(rope));
+    let mut ranges = Vec::new();
+    while let Some(m) = matches.next() {
+        for capture in m.captures() {
+            ranges.push(inline_ranges(capture.node));
+        }
+    }
+    PARSER.with_borrow_mut(|parser| {
+        for included in ranges.into_iter().filter(|r| !r.is_empty()) {
+            if parser.set_included_ranges(&included).is_err() {
+                continue;
+            }
+            if let Some(tree) = parse_rope(parser, rope, None) {
+                capture_tokens(highlights, &tree, rope, bytes.clone(), false, best);
+            }
+        }
+    });
+}
+
+/// `node`'s text without the `>` or indent that continues a quote or list item on a later line.
+fn inline_ranges(node: Node) -> Vec<TreeRange> {
+    let mut out = Vec::new();
+    let (mut start_byte, mut start_point) = (node.start_byte(), node.start_position());
+    let mut walker = node.walk();
+    let continuations = node
+        .children(&mut walker)
+        .filter(|c| c.kind() == "block_continuation");
+    for child in continuations {
+        if child.start_byte() > start_byte {
+            out.push(TreeRange {
+                start_byte,
+                end_byte: child.start_byte(),
+                start_point,
+                end_point: child.start_position(),
+            });
+        }
+        (start_byte, start_point) = (child.end_byte(), child.end_position());
+    }
+    if node.end_byte() > start_byte {
+        out.push(TreeRange {
+            start_byte,
+            end_byte: node.end_byte(),
+            start_point,
+            end_point: node.end_position(),
+        });
+    }
+    out
 }
 
 impl Syntax {
@@ -921,6 +1035,55 @@ mod tests {
     }
 
     #[test]
+    fn markdown_inline_text_gets_emphasis_strong_code_and_links() {
+        let src = "# A *big* title\n\nSome *soft* and **loud** with `code`.\n\n- see [docs](https://x.dev)\n  and **more**\n\n> quoted *line*\n> and `next`\n";
+        assert_eq!(painted(Lang::Markdown, src, "soft"), Some(Token::Emphasis));
+        assert_eq!(painted(Lang::Markdown, src, "loud"), Some(Token::Strong));
+        assert_eq!(painted(Lang::Markdown, src, "code`"), Some(Token::String));
+        assert_eq!(painted(Lang::Markdown, src, "docs"), Some(Token::Link));
+        assert_eq!(
+            painted(Lang::Markdown, src, "https://x.dev"),
+            Some(Token::Link)
+        );
+        assert_eq!(painted(Lang::Markdown, src, "more"), Some(Token::Strong));
+        assert_eq!(painted(Lang::Markdown, src, "big"), Some(Token::Emphasis));
+        assert_eq!(painted(Lang::Markdown, src, "title"), Some(Token::Heading));
+        assert_eq!(painted(Lang::Markdown, src, "line"), Some(Token::Emphasis));
+        assert_eq!(painted(Lang::Markdown, src, "next"), Some(Token::String));
+        assert_eq!(painted(Lang::Markdown, src, "Some"), None);
+        // Highlighting just the last line still finds the inline nodes it crosses.
+        let rope = Rope::from_str(src);
+        let start = src.find("> and").unwrap();
+        let tail = Syntax::new(Lang::Markdown, &rope).highlights(&rope, start..src.len());
+        assert!(
+            tail.iter()
+                .any(|(r, t)| &src[r.clone()] == "`next`" && *t == Token::String)
+        );
+    }
+
+    #[test]
+    fn rust_all_caps_names_are_constants() {
+        let src = "const MAX_LEN: usize = 4;
+fn f() -> usize { MAX_LEN + Self::LIMIT + Some(1).unwrap() }
+";
+        assert_eq!(painted(Lang::Rust, src, "MAX_LEN:"), Some(Token::Constant));
+        assert_eq!(painted(Lang::Rust, src, "MAX_LEN +"), Some(Token::Constant));
+        assert_eq!(painted(Lang::Rust, src, "LIMIT"), Some(Token::Constant));
+        assert_eq!(painted(Lang::Rust, src, "Some"), Some(Token::Type));
+        assert_eq!(painted(Lang::Rust, src, "f()"), Some(Token::Function));
+    }
+
+    #[test]
+    fn mermaid_files_use_the_line_highlighter() {
+        assert_eq!(Lang::for_path(Path::new("flow.mmd")), Some(Lang::Mermaid));
+        assert_eq!(Lang::for_path(Path::new("a.mermaid")), Some(Lang::Mermaid));
+        let src = "graph TD\n  A[One] --> B\n";
+        assert_eq!(painted(Lang::Mermaid, src, "graph"), Some(Token::Keyword));
+        assert_eq!(painted(Lang::Mermaid, src, "-->"), Some(Token::Operator));
+        assert_eq!(painted(Lang::Mermaid, src, "[One]"), Some(Token::String));
+    }
+
+    #[test]
     fn later_patterns_win_on_the_same_node() {
         let src = "function f() {}\nf(x);\n";
         assert_eq!(painted(Lang::TypeScript, src, "f("), Some(Token::Function));
@@ -1096,6 +1259,7 @@ mod tests {
             Lang::Makefile => "# build\nall: main.o\n\tcc -o $@ $^\n",
             Lang::Sql => "SELECT id FROM users WHERE name = 'a';\n",
             Lang::Protobuf => "syntax = \"proto3\";\nmessage A { string name = 1; }\n",
+            Lang::Mermaid => "graph TD\n  A --> B\n",
         }
     }
 

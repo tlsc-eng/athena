@@ -233,6 +233,7 @@ pub fn language_id(lang: Lang) -> &'static str {
         Lang::Makefile => "makefile",
         Lang::Sql => "sql",
         Lang::Protobuf => "proto",
+        Lang::Mermaid => "mermaid",
     }
 }
 

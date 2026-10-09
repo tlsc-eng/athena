@@ -22,6 +22,7 @@ use crate::view::{EditorLayout, EditorView, LayoutRow};
 struct TokenStyle {
     color: Hsla,
     weight: FontWeight,
+    italic: bool,
     underline: bool,
     inlay: bool,
 }
@@ -31,6 +32,7 @@ impl TokenStyle {
         Self {
             color,
             weight: FontWeight::NORMAL,
+            italic: false,
             underline: false,
             inlay: false,
         }
@@ -238,14 +240,15 @@ fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
         Token::Comment => syntax.comment,
         Token::Heading => syntax.heading,
         Token::Error => syntax.error,
-        Token::Variable => syntax.text,
+        Token::Variable | Token::Emphasis | Token::Strong => syntax.text,
     };
     TokenStyle {
-        weight: if token == Token::Heading {
+        weight: if matches!(token, Token::Heading | Token::Strong) {
             FontWeight::BOLD
         } else {
             FontWeight::NORMAL
         },
+        italic: token == Token::Emphasis,
         underline: token == Token::Link,
         ..TokenStyle::plain(color)
     }
@@ -378,6 +381,11 @@ impl Element for EditorElement {
         let styled = |len: usize, style: TokenStyle| TextRun {
             font: Font {
                 weight: style.weight,
+                style: if style.italic {
+                    FontStyle::Italic
+                } else {
+                    FontStyle::Normal
+                },
                 ..font.clone()
             },
             background_color: style.inlay.then_some(inlay_background),

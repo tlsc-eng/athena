@@ -190,6 +190,197 @@ pub fn dotenv(line: &str) -> Vec<(Range<usize>, Token)> {
     out
 }
 
+/// Words that open a Mermaid diagram, on its first line.
+const MERMAID_DIAGRAMS: &[&str] = &[
+    "graph",
+    "flowchart",
+    "sequenceDiagram",
+    "classDiagram",
+    "stateDiagram",
+    "stateDiagram-v2",
+    "erDiagram",
+    "gantt",
+    "pie",
+    "journey",
+    "gitGraph",
+    "mindmap",
+    "timeline",
+    "quadrantChart",
+    "requirementDiagram",
+    "C4Context",
+    "sankey-beta",
+    "xychart-beta",
+    "block-beta",
+];
+
+const MERMAID_KEYWORDS: &[&str] = &[
+    "subgraph",
+    "end",
+    "direction",
+    "participant",
+    "actor",
+    "note",
+    "Note",
+    "over",
+    "of",
+    "loop",
+    "alt",
+    "else",
+    "opt",
+    "par",
+    "and",
+    "rect",
+    "critical",
+    "break",
+    "activate",
+    "deactivate",
+    "autonumber",
+    "title",
+    "section",
+    "class",
+    "classDef",
+    "style",
+    "linkStyle",
+    "click",
+    "as",
+    "state",
+    "dateFormat",
+    "axisFormat",
+    "commit",
+    "branch",
+    "checkout",
+    "merge",
+];
+
+const MERMAID_DIRECTIONS: &[&str] = &["TB", "TD", "BT", "RL", "LR"];
+
+/// Highlights one Mermaid line: diagram and block keywords, arrows, node and edge labels,
+/// message text after an arrow's `:`, `%%` comments and `%%{...}%%` directives.
+pub fn mermaid(line: &str) -> Vec<(Range<usize>, Token)> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    if rest.starts_with("%%{") {
+        return vec![(indent..line.len(), Token::Attribute)];
+    }
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut arrow_seen = false;
+    let mut i = indent;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'%' if bytes.get(i + 1) == Some(&b'%') => {
+                out.push((i..line.len(), Token::Comment));
+                break;
+            }
+            b'"' => {
+                let end = line[i + 1..].find('"').map_or(line.len(), |j| i + j + 2);
+                out.push((i..end, Token::String));
+                i = end;
+            }
+            b'[' | b'(' | b'{' | b'|' => {
+                let end = label_end(line, i);
+                out.push((i..end, Token::String));
+                i = end;
+            }
+            b':' if bytes.get(i + 1..i + 3) == Some(b"::") => {
+                let end = i + 3 + word_len(&line[i + 3..]);
+                out.push((i..end, Token::Attribute));
+                i = end;
+            }
+            b':' if arrow_seen => {
+                out.push((i..i + 1, Token::Punctuation));
+                let text = i + 1 + (line.len() - i - 1 - line[i + 1..].trim_start().len());
+                if text < line.len() {
+                    out.push((text..line.len(), Token::String));
+                }
+                break;
+            }
+            b'-' | b'=' | b'.' | b'<' | b'>' | b'~' => {
+                let len = line[i..]
+                    .find(|c: char| !matches!(c, '-' | '=' | '.' | '<' | '>' | '~'))
+                    .unwrap_or(line.len() - i);
+                if len >= 2 && line[i..i + len].contains(['-', '=', '>', '~']) {
+                    out.push((i..i + len, Token::Operator));
+                    arrow_seen = true;
+                }
+                i += len.max(1);
+            }
+            c if c.is_ascii_digit() && (i == 0 || !is_word_byte(bytes[i - 1])) => {
+                let len = line[i..]
+                    .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                    .unwrap_or(line.len() - i);
+                out.push((i..i + len, Token::Number));
+                i += len;
+            }
+            c if is_word_byte(c) => {
+                let len = word_len(&line[i..]);
+                let word = &line[i..i + len];
+                let diagram = i == indent && MERMAID_DIAGRAMS.contains(&word);
+                let token = if diagram || MERMAID_KEYWORDS.contains(&word) {
+                    Some(Token::Keyword)
+                } else if MERMAID_DIRECTIONS.contains(&word) {
+                    Some(Token::Constant)
+                } else {
+                    None
+                };
+                if let Some(token) = token {
+                    out.push((i..i + len, token));
+                }
+                i += len;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+fn is_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80
+}
+
+/// A word, with the `-` of names such as `stateDiagram-v2` when a letter follows it.
+fn word_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_word_byte(bytes[i])
+            || bytes[i] == b'-' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic())
+        {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// The byte after a node or edge label opened at `at`: `[..]`, `((..))`, `{..}` or `|..|`.
+fn label_end(line: &str, at: usize) -> usize {
+    let open = line.as_bytes()[at];
+    let close = match open {
+        b'[' => b']',
+        b'(' => b')',
+        b'{' => b'}',
+        _ => b'|',
+    };
+    if open == close {
+        return line[at + 1..].find('|').map_or(line.len(), |j| at + j + 2);
+    }
+    let mut depth = 0;
+    for (i, &c) in line.as_bytes().iter().enumerate().skip(at) {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return i + 1;
+            }
+        }
+    }
+    line.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +431,41 @@ mod tests {
                 .iter()
                 .any(|(_, t)| *t == Token::Embedded)
         );
+    }
+
+    #[test]
+    fn mermaid_keywords_arrows_labels_and_comments() {
+        let line = "flowchart LR";
+        assert_eq!(
+            spans(line, mermaid(line)),
+            vec![("flowchart", Token::Keyword), ("LR", Token::Constant)]
+        );
+        let line = "    A[Start here] -->|yes| B((Done)) %% note";
+        let t = spans(line, mermaid(line));
+        assert!(t.contains(&("[Start here]", Token::String)));
+        assert!(t.contains(&("-->", Token::Operator)));
+        assert!(t.contains(&("|yes|", Token::String)));
+        assert!(t.contains(&("((Done))", Token::String)));
+        assert!(t.contains(&("%% note", Token::Comment)));
+        assert!(!t.iter().any(|(s, _)| *s == "A" || *s == "B"), "{t:?}");
+        let line = "  Alice->>Bob: Hello Bob, how are you?";
+        let t = spans(line, mermaid(line));
+        assert!(t.contains(&("->>", Token::Operator)));
+        assert!(t.contains(&("Hello Bob, how are you?", Token::String)));
+        let line = "%%{init: {'theme': 'dark'}}%%";
+        assert_eq!(spans(line, mermaid(line)), vec![(line, Token::Attribute)]);
+        let line = "stateDiagram-v2";
+        assert_eq!(spans(line, mermaid(line)), vec![(line, Token::Keyword)]);
+        let line = "  subgraph one";
+        assert_eq!(
+            spans(line, mermaid(line)),
+            vec![("subgraph", Token::Keyword)]
+        );
+        let line = "    \"Dogs\" : 386";
+        let t = spans(line, mermaid(line));
+        assert!(t.contains(&("\"Dogs\"", Token::String)));
+        assert!(t.contains(&("386", Token::Number)));
+        let line = "  C:::hot --> D";
+        assert!(spans(line, mermaid(line)).contains(&(":::hot", Token::Attribute)));
     }
 }

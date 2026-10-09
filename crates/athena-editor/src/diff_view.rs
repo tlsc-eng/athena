@@ -830,7 +830,7 @@ fn token_color(token: Token, syntax: &SyntaxColors) -> Hsla {
         Token::Comment => syntax.comment,
         Token::Heading => syntax.heading,
         Token::Error => syntax.error,
-        Token::Variable => syntax.text,
+        Token::Variable | Token::Emphasis | Token::Strong => syntax.text,
     }
 }
 
