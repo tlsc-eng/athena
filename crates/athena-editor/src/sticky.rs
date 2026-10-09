@@ -1,7 +1,7 @@
 use gpui::{Context, Pixels, Point};
 
 use crate::buffer::Buffer;
-use crate::display::{Fold, indent_column};
+use crate::display::{Fold, indent_column_of};
 use crate::view::EditorView;
 
 /// Lines scanned upward for the scopes around the top line.
@@ -69,15 +69,7 @@ fn scope_headers(
     if max == 0 || top >= b.len_lines() {
         return Vec::new();
     }
-    let indent_of = |l: usize| {
-        let line: String = b
-            .rope()
-            .line(l)
-            .chars()
-            .take_while(|c| *c != '\n')
-            .collect();
-        indent_column(&line)
-    };
+    let indent_of = |l: usize| indent_column_of(b.rope().line(l).chars());
     let mut below = indent_of(top).unwrap_or(usize::MAX);
     let mut found = Vec::new();
     for line in (top.saturating_sub(REACH)..top).rev() {
@@ -126,5 +118,25 @@ mod tests {
         );
         assert!(scope_headers(&b, 9, 5, fold).is_empty());
         assert!(scope_headers(&b, 0, 5, fold).is_empty());
+    }
+
+    #[test]
+    fn indentation_read_from_the_rope_matches_the_whole_line() {
+        let whole = |s: &str| {
+            let code = s.trim_start_matches([' ', '\t']);
+            let indent = crate::display::column_width(&s[..s.len() - code.len()]);
+            (!s.trim().is_empty()).then_some(indent)
+        };
+        for line in [
+            "",
+            "  \r\n",
+            "\t x\n",
+            "  \u{a0} y",
+            "    z",
+            " \u{3000}\n",
+            "x",
+        ] {
+            assert_eq!(indent_column_of(line.chars()), whole(line), "{line:?}");
+        }
     }
 }

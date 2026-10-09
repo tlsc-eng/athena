@@ -387,18 +387,23 @@ impl DisplayMap {
 
 /// The visual column a line's code starts at; `None` for a blank line.
 pub(crate) fn indent_column(s: &str) -> Option<usize> {
-    if s.trim().is_empty() {
-        return None;
-    }
+    indent_column_of(s.chars())
+}
+
+/// As [`indent_column`], reading only as far as the line's first non-blank char.
+pub(crate) fn indent_column_of(chars: impl Iterator<Item = char>) -> Option<usize> {
     let mut col = 0;
-    for c in s.chars() {
+    let mut counting = true;
+    for c in chars {
         match c {
-            ' ' => col += 1,
-            '\t' => col += TAB_WIDTH - col % TAB_WIDTH,
-            _ => break,
+            ' ' if counting => col += 1,
+            '\t' if counting => col += TAB_WIDTH - col % TAB_WIDTH,
+            // Other blanks end the indentation without making the line any less blank.
+            c if c.is_whitespace() => counting = false,
+            _ => return Some(col),
         }
     }
-    Some(col)
+    None
 }
 
 /// The block indented under `line`: following lines indented deeper, ignoring blank ones.
