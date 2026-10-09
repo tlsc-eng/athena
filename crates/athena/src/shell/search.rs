@@ -505,9 +505,13 @@ impl Shell {
             .and_then(|e| e.read(cx).cursor())
             .and_then(|(_, _, selection)| selection)
             .filter(|s| !s.contains('\n'));
-        if let Some(seed) = seed {
-            find.update(cx, |i, cx| i.set_text(seed, cx));
-        }
+        // Selected, as VS Code leaves it, so typing replaces the seed or the last query.
+        find.update(cx, |i, cx| {
+            if let Some(seed) = seed {
+                i.set_text(seed, cx);
+            }
+            i.select_all(cx);
+        });
         self.show_drawer_tab(DrawerTab::Search, cx);
         window.focus(&find.focus_handle(cx));
     }
