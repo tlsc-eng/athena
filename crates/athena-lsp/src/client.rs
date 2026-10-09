@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -566,13 +567,15 @@ impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.outgoing.try_send(Outgoing::Shutdown);
         let child = self.child.clone();
-        // A server that ignores shutdown, or never finished starting, is killed.
+        // A server that ignores shutdown, or never finished starting, is killed with what it
+        // started: biome's node wrapper leaves a native lsp-proxy holding the pipes otherwise.
         let _ = thread::Builder::new()
             .name("lsp-reaper".into())
             .spawn(move || {
                 thread::sleep(SHUTDOWN_GRACE);
                 if let Some(mut c) = child.lock().expect("child lock").take() {
-                    let _ = c.kill();
+                    // SAFETY: the unreaped child keeps its group id from being reused.
+                    unsafe { libc::killpg(c.id() as libc::pid_t, libc::SIGKILL) };
                     let _ = c.wait();
                 }
             });
@@ -609,8 +612,9 @@ impl Session {
         let mut child = Command::new(&program)
             .args(self.kind.args())
             .env_clear()
-            .envs(env::server_env())
+            .envs(env::server_env(self.program.is_some()))
             .current_dir(&self.root)
+            .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -980,6 +984,47 @@ mod tests {
         let body = serde_json::to_vec(message).unwrap();
         write!(out, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
         out.write_all(&body).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_server_kills_the_processes_it_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("athena-lsp-group-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("server");
+        let pid_file = dir.join("helper.pid");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+        let (client, _events) =
+            Client::start_local(ServerKind::Biome, program, dir.clone(), Config::default());
+        let started = Instant::now();
+        let helper: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "never started");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert!(alive(helper));
+        drop(client);
+        let dropped = Instant::now();
+        while alive(helper) && dropped.elapsed() < SHUTDOWN_GRACE + Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(helper), "the server's own child outlived it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A server that floods configuration requests while the client sends a huge didChange.

@@ -64,7 +64,7 @@ pub fn eslint_settings(root: &Path) -> Value {
         "options": {},
         "rulesCustomizations": [],
         "problems": {"shortenToSingleLine": false},
-        "nodePath": null,
+        "nodePath": root.join("node_modules"),
         "workingDirectory": {"mode": "location"},
         "workspaceFolder": {"uri": uri_from_path(root), "name": name},
         "codeAction": {
@@ -179,6 +179,11 @@ mod tests {
         assert_eq!(settings["validate"], "on");
         assert_eq!(settings["useFlatConfig"], false);
         assert_eq!(settings["workspaceFolder"]["uri"], uri_from_path(&root));
+        assert_eq!(
+            settings["nodePath"],
+            root.join("node_modules").to_str().unwrap(),
+            "ESLint resolves its library from the project, never a folder above it"
+        );
         std::fs::write(root.join("eslint.config.mjs"), "export default [];\n").unwrap();
         assert_eq!(
             eslint_settings(&root)["experimental"]["useFlatConfig"],
