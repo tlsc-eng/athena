@@ -3,14 +3,15 @@
 Athena is a macOS IDE built around terminals that outlive the window and around Claude Code.
 Shells run in a separate session daemon (`athena-mux`), so quitting or updating the app does not
 kill them; the window reattaches on the next launch. Projects get split panes of terminals and a
-terminal panel under them, an editor with language-server support, a git diff viewer with hunk
+terminal panel under them, an editor with language-server support that opens files in their own
+encoding (and files over 50 MB read-only), a Go debugger on Delve, a git diff viewer with hunk
 staging, file history and blame, a commit box and fetch, pull and push, worktrees, CI status and
 pull requests through the GitHub CLI, a test runner for Go, Vitest and Jest, a browser preview, and
 read-only views of Playwright results and Docker containers. Claude Code sessions show their state
 and todo progress on the tab, a Claude tab lists each session's changed files, cost estimate and
 plan with Resume, each file Claude edits can be reviewed as one diff against the version from
-before the session, and an MCP server lets Claude read the editor, language servers, tests and
-terminals.
+before the session, and an MCP server lets Claude read the editor, language servers, tests, the
+debugger and terminals.
 Optionally Athena also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
 or reject, and the editor selection goes with each prompt.
 
@@ -170,7 +171,9 @@ its shells running.
   focused editor, `Ln N, Col M` with the selected character count, or "3 selections (15
   characters selected)" with several carets (click: go to line), the indentation (click: indent
   with 2, 4 or 8 spaces or tabs, or convert the file's indentation),
-  `UTF-8`, `LF` or `CRLF` (click: convert every line break to the other, as one undo step), the
+  the file's encoding (`UTF-8`, `UTF-16 LE`, `Shift JIS`…; click: Reopen with Encoding or Save
+  with Encoding, see below), `LF` or `CRLF` (click: convert every line break to the other, as one
+  undo step), the
   language (click: highlight as another language) and a dot for its language server (starting,
   running or failed; hover for the program). Beside the branch a sync cell shows the commits to
   pull and push (see Git below).
@@ -188,6 +191,8 @@ its shells running.
   the previous one, a placeholder used in several places gets a caret in each so they are typed
   together, and `$0` (or the snippet's end), Escape or Tab once the caret has left the snippet
   ends it.
+- Your own snippets, in VS Code's format, join the suggestions after the language server's (see
+  [Snippets](#snippets)).
 - Once the cursor rests for 250 ms on a symbol, the language server's other uses of it are marked:
   reads in the find-match colour, writes in a stronger one. The marks follow edits until the next
   answer.
@@ -196,7 +201,30 @@ its shells running.
   folders first; clicking a symbol lists the symbols beside it, and choosing one jumps there.
 - Inlay hints (parameter names, inferred types) inside the line, when the language server sends
   them; gopls and typescript-language-server send none until asked, so they stay hidden until
-  **Toggle inlay hints** or an `lsp` setting asks for some (see [Settings](#settings)).
+  **Toggle inlay hints** or an `lsp` setting asks for some (see [Settings](#settings)). With word
+  wrap on, each hint sits on the row it belongs to: at a wrap point a type hint ends the row above
+  and a parameter name starts the next one, and hints that would push a row's text past the edge
+  are left out rather than hide code.
+- Semantic highlighting, as VS Code's `editor.semanticHighlighting.enabled` (on by default): gopls
+  and typescript-language-server colour names over the tree-sitter colours. Only names take the
+  server's colour: parameters and type parameters get colours of their own in both themes,
+  read-only variables show as constants and standard-library variables as builtins, while
+  keywords, strings, numbers, comments and operators keep the finer tree-sitter colours. The
+  server is asked again 300 ms after typing pauses; meanwhile the colours move with the edits.
+  gopls is asked for them through its `semanticTokens` setting unless your `gopls` settings set
+  it. `"editor.semanticHighlighting.enabled": false` (also per language) turns them off.
+- Code lens: a language server's lenses are drawn in muted text after their line, as gopls's
+  **run go generate** on a `//go:generate` line (and **run test** once `"lsp": {"gopls":
+  {"codelenses": {"test": true}}}` asks for it), or typescript-language-server's reference and
+  implementation counts once `typescript.referencesCodeLens.enabled` or
+  `typescript.implementationsCodeLens.enabled` is set (in a project's `.vscode/settings.json`, or
+  under the server's `lsp` entry as `{"typescript": {"referencesCodeLens": {"enabled": true}}}`).
+  They are asked for around the lines on screen once typing or scrolling pauses. Clicking one
+  runs its command on the server (a failure shows as a notice), or lists a reference count's
+  locations in the References tab; a lens whose command neither applies is shown but not
+  clickable. A server command builds or runs the project's code, so it runs only once the
+  project's code is allowed (see [Languages](#languages)); reference lists open at once.
+  `"editor.codeLens": false` (also per language) hides them.
 - Renaming or moving a file or folder in the tree (its name field, or a drag) lets the language
   servers that ask for it take part, as VS Code's file participants: typescript-language-server
   is sent `workspace/willRenameFiles` first and its edit, the imports that name the file updated
@@ -261,6 +289,38 @@ its shells running.
   `.mermaid`: tables, task lists, local images and links, ```` ```mermaid ```` blocks. It follows
   unsaved edits as you type and re-renders on save.
 - Images (PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, SVG) open in a viewer that fits and zooms.
+- Files open in their own encoding. Detection takes UTF-8 (with or without a byte order mark),
+  UTF-16 LE or BE with a byte order mark, Shift JIS or EUC-JP when the bytes read cleanly as text
+  with kana, and otherwise Windows 1252, which reads and writes back any byte. The text is held
+  without the byte order mark, and saving writes it back in the same encoding with the mark and
+  line breaks the file had, so bytes nobody edited stay the same. A file whose bytes do not
+  survive decoding (a broken UTF-16 tail, or an encoding you picked that does not fit), or text
+  with a character the encoding has no bytes for, refuses to save with the reason; the text is
+  encoded before the file is opened for writing, so a refused save leaves the file untouched.
+  Binary files are still refused. Click the encoding in the status bar for **Reopen with
+  Encoding** (read the file again as another encoding; this drops the tab's undo history, so undo
+  cannot bring back text decoded the old way) or **Save with Encoding** (write it in another one),
+  each listing UTF-8, UTF-8 with BOM, UTF-16 LE / BE, Windows 1252 and 1250, ISO 8859-2, Windows
+  1251, KOI8-R, Shift JIS, EUC-JP, GBK, Big5 and EUC-KR. A picked encoding is kept across reloads.
+  Cyrillic, Chinese and Korean files are not detected (only Japanese is); they open as Windows
+  1252 until you reopen them in their encoding.
+- Files over 50 MB, up to 2 GB, open in a read-only large-file view instead of the editor. It
+  reads the file in pages as you scroll and builds a line index in the background, so the file is
+  usable at once; a banner shows the indexing progress, then the line count, and says what the
+  view leaves out: highlighting, the language server, folding and the git gutter. Lines end at LF,
+  CRLF or a lone CR; a line longer than 16 KB is cut off, tabs are expanded and control
+  characters are drawn as their Unicode pictures. Scroll with the wheel, the arrows, Page Up /
+  Down, `cmd-up` / `cmd-down` or the scrollbar; `cmd-f` finds, ignoring case, over the whole file
+  in the background, wrapping at either end. There is no selection or copy. The view reloads when
+  the file changes; the tab is saved as an editor tab, so a file that has shrunk below 50 MB
+  opens in the editor the next time. Larger files
+  and binary files are refused.
+- A minimap at the editor's right edge, as in VS Code: each row two pixels tall, each run of
+  characters a block in its token's colour, the caret's line tinted and a slider over the rows on
+  screen. Drag the slider, or press elsewhere to centre that row and drag from there. It follows
+  folds and word wrap, and hides in panes narrower than 520 px. **Toggle minimap** (palette, or
+  View > Toggle Minimap) writes `"editor.minimap.enabled"`; `false` there (or `"minimap": false`
+  in `"editor"` or a `"[lang]"` block) turns it off.
 - File-type icons from [seti-ui](https://github.com/jesseweed/seti-ui) in the tree and on tabs.
 
 **Git**
@@ -272,14 +332,17 @@ information rather than triggering the install dialog).
   conflicted, ignored), tree rows also show the status letter, and folders take the most severe
   status inside them.
 - The editor gutter marks added, modified and removed lines of the saved file against the index,
-  as VS Code's quick diff does, so staging a change clears its bar.
+  as VS Code's quick diff does, so staging a change clears its bar. UTF-16 files, which git diffs
+  as binary, get their marks from Athena's own line diff of the two decoded texts.
 - Quick diff peek: clicking a change bar, or `alt-f3` / `shift-alt-f3` from the cursor, opens a
   peek under the change with the index's lines for it in red and **Stage**, **Revert**, previous,
   next and close buttons; Escape closes it. It diffs the buffer, unsaved edits included, and
   follows edits while open. Revert is an undoable edit; Stage writes only that change to the
-  index and refuses if the index changed meanwhile. A file that goes through a `filter` attribute
-  (Git LFS, git-crypt) gets a message to stage or revert the whole file instead, as hunk staging
-  does.
+  index and refuses if the index changed meanwhile. The index's copy is read and staged in the
+  editor's encoding, keeping the byte order mark the index's copy has. A file that goes through a
+  `filter` attribute (Git LFS, git-crypt) or a `working-tree-encoding` attribute (git keeps it as
+  UTF-8 and writes it out in another encoding) gets a message to stage or revert the whole file
+  instead, as hunk staging does.
 - Inline blame (`cmd-alt-shift-g`, off by default): "author · 3 days ago · summary" after the
   cursor's line, "Not committed yet" for edited lines.
 - File blame (**Git: Toggle file blame** in the palette, or View > Toggle File Blame) adds a
@@ -303,7 +366,14 @@ information rather than triggering the install dialog).
   `alt-f5` / `shift-alt-f5` step through the changes. Above each change, **Stage**, **Unstage** or
   **Revert** acts on that change alone; a staging action is refused if the index changed since
   the diff was made, and Revert refuses a file that changed since. Open diffs reload when git
-  status is re-read. Binary, non-UTF-8 and files over 20 MB show why there is no diff.
+  status is re-read. Every version (`HEAD`, the index, the disk, a commit, Claude's snapshot) is
+  decoded as the editor decodes files, so a Shift JIS or UTF-16 file shows its real changes; a
+  side that could only be guessed as Windows 1252 is read in the other side's encoding when it
+  fits that byte for byte. Stage, Unstage and Revert write a hunk back in that encoding, and only
+  when both versions are in the same encoding and each decoded without loss; otherwise they are
+  refused with the reason, so no hunk changes bytes outside itself. Blame of unsaved text sends
+  git the bytes a save would write. Binary files and files over 20 MB show why there is no diff,
+  and Compare Changes on a merge conflict needs a UTF-8 file.
 - In a diff, drag to select text on either side (Shift+click extends); `cmd-c` copies only that
   side's lines, including any inside hidden regions, and `cmd-a` selects everything. **Hide
   Unchanged** in the toolbar folds unchanged stretches down to three lines around each change,
@@ -354,7 +424,8 @@ information rather than triggering the install dialog).
   into submodules, can still run them. Commands that write (staging or discarding a whole file,
   switching branches, stash, pull, commit and its hooks) run the filters as git would, since
   skipping them would store or check out the wrong bytes; hunk staging, unstaging and reverting
-  are refused for a filtered file for the same reason.
+  are refused for a filtered file, and for one with a `working-tree-encoding` attribute, for the
+  same reason.
 - Autofetch (`"git": {"autofetch": true}` in [settings.json](#settings), off by default as in VS
   Code) fetches the active project every three minutes while the window is in front.
 - Worktrees: **Git: Open worktree…**, **Git: Create worktree…** and **Git: Delete worktree…** in
@@ -454,10 +525,10 @@ information rather than triggering the install dialog).
   names it in its `test` script).
 - A **Tests** drawer tab lists suites (Go packages, test files) and their tests with pass/fail
   dots, durations and a summary, with **Run All**, **Re-run Failed** and **Stop**. Clicking a test
-  shows its output with `file:line` places clickable; hovering offers Run and Go to Test. A failed
-  run opens the tab at the first failure. The palette has **Tests**, **Tests: run test at
-  cursor**, **Tests: run tests in current file**, **Tests: run all tests**, **Tests: re-run failed
-  tests**, **Tests: stop** and the two coverage commands.
+  shows its output with `file:line` places clickable; hovering offers Run and Go to Test (and
+  Debug for a Go test). A failed run opens the tab at the first failure. The palette has
+  **Tests**, **Tests: run test at cursor**, **Tests: run tests in current file**, **Tests: run all
+  tests**, **Tests: re-run failed tests**, **Tests: stop** and the two coverage commands.
 - Runs have a 15-minute limit; Stop, the limit and quitting Athena kill the whole process group,
   test binaries and workers included.
 - **Run task…** (palette) lists the project's `package.json` scripts ("npm: build", run through
@@ -467,41 +538,60 @@ information rather than triggering the install dialog).
 
 **Debugging (Go, with Delve)**
 
+- Requirements: Delve (`dlv`) on your login shell's `PATH`, found as gopls is and never installed
+  for you (`go install github.com/go-delve/delve/cmd/dlv@latest`; without it F5 shows that
+  command). Athena runs it as `dlv dap` through the login shell, so goenv-style shims work. On
+  macOS, unless Developer Mode is on, the system asks for an administrator password whenever
+  Delve takes control of a program after a while; `sudo DevToolsSecurity -enable` turns Developer
+  Mode on and stops it asking. A launch held up by that prompt says so in the Debug Console.
 - **F5** debugs the first `"type": "go"` configuration in `.vscode/launch.json`, else the package
   of the open Go file (VS Code's "Launch Package": a `_test.go` file debugs its package's tests).
-  launch.json may set `request` (`launch`; attach is not supported yet), `mode` (`auto`, `debug`,
-  `test`, `exec`), `program`, `args`, `env`, `buildFlags` (a string or a list) and `cwd`, with
-  `${workspaceFolder}`, `${file}`, `${fileDirname}`, `${relativeFile}` and the other file
-  variables. **Open Configurations** (Run menu, palette) opens it, writing a starter if there is
-  none.
+  launch.json may set `request` (`launch`; attach is refused for now), `mode` (`auto`, `debug`,
+  `test`, `exec`), `program`, `args`, `env`, `buildFlags` (a string or a list) and `cwd`, with VS
+  Code's `${workspaceFolder}` (or `${workspaceRoot}`), `${workspaceFolderBasename}`, `${file}`,
+  `${fileDirname}`, `${fileBasename}`, `${fileBasenameNoExtension}`, `${relativeFile}`,
+  `${relativeFileDirname}` and `${pathSeparator}`. Any other variable (`${env:…}` included) or
+  a field of the wrong type is an error that names it. **Open Configurations** (Run menu,
+  palette) opens launch.json, writing a starter if there is none.
 - Debugging builds and runs the project's code, so it starts only once the project's code is
-  allowed (the same answer as for its linters; F5 asks the first time). Delve (`dlv`) is found on
-  the login shell's PATH and never installed for you: `go install
-  github.com/go-delve/delve/cmd/dlv@latest`. Unsaved files of the project are saved first, and
-  Delve's binary goes to a private temporary folder rather than the project.
-- On macOS, unless Developer Mode is on, the system asks for an administrator password the first
-  time Delve takes control of a program in a while; `DevToolsSecurity -enable` stops it asking.
+  allowed (the same answer as for its linters, see [Languages](#languages)). In a project never
+  asked, F5 asks first with **Cancel** and **Allow and Debug** (Escape cancels, Return answers
+  neither), before launch.json is even read; a disallowed project gets a notice naming **Allow
+  project code**. Restart checks again, and disallowing a project stops its session. Unsaved
+  files of the project are saved first, and Delve's binary goes to a private temporary folder
+  rather than the project; quitting Athena or closing the project ends the session, kills Delve
+  and removes that folder.
 - Click left of a line number, or press **F9**, to add or remove a breakpoint; the pointer shows a
   faint dot where a click would add one. Right-click the gutter for **Add Conditional
   Breakpoint…**, **Add Logpoint…** (a message with `{expression}` parts, printed instead of
   stopping), **Edit Condition…** (expression or hit count, ↑↓ switches) and **Disable
   Breakpoint**. Conditional breakpoints show two bars, logpoints a square, disabled ones a grey
-  ring and ones Delve could not place a red ring. Breakpoints move with edits above them and are
-  kept per project in `breakpoints.json`.
-- Right-clicking a test's ▶ offers **Run Test** and **Debug Test**; **Debug: debug test at
-  cursor** does the same from the keyboard, and only that test (or subtest) runs.
+  ring and ones Delve could not place a red ring; one Delve places on another line moves there.
+  Breakpoints move with edits above them and are kept per project, with paths relative to it, in
+  `breakpoints.json`. A breakpoints file that does not parse is kept aside as
+  `breakpoints.json.corrupt-<time>` rather than overwritten.
+- Right-clicking a test's ▶ offers **Run Test** and **Debug Test**, Go test rows in the Tests tab
+  have a **Debug** link beside Run, and **Debug: debug test at cursor** does the same from the
+  keyboard; only that test (or subtest) runs.
 - While paused, the line is tinted amber with an arrow in the gutter (green for a caller's frame
   picked in the call stack), its file opens there, and hovering an identifier or a selector chain
   such as `cfg.Server.Port` shows its value (or the language server's documentation when Delve
-  cannot evaluate it).
+  cannot evaluate it). A panic stops on the first frame inside the project rather than in the
+  runtime. Steps keep the last stop's marks and variables until the next stop.
 - The title bar shows Continue / Pause, Step Over, Step Into, Step Out, Restart and Stop while a
   session runs. The **Debug** drawer tab has Call Stack (goroutines; the paused one expanded,
-  runtime frames dimmed), Breakpoints (enable, remove, Remove All), Variables (expand structs,
-  slices and maps as needed; expansion is kept across steps), Watch (expressions evaluated at
-  each stop, kept per project) and the Debug Console, which shows the program's output and
-  evaluates what you type in the selected frame.
+  runtime frames dimmed), Breakpoints (enable, open, remove, Remove All), Variables (expand
+  structs, slices and maps as needed; expansion is kept across steps), Watch (expressions
+  evaluated at each stop, kept per project) and the Debug Console, which shows the program's
+  output (each line cut at 4 KB) and evaluates what you type in the selected frame.
+- Keys: **F5** start or continue, **Shift+F5** stop, **Cmd+Shift+F5** restart, **F6** pause,
+  **F10** / **F11** / **Shift+F11** step over / into / out (outside terminals), **F9** breakpoint
+  (in an editor). On a Mac keyboard these need Fn unless the F-keys are standard function keys,
+  and macOS takes F11 and sometimes F10 first (see [Keyboard shortcuts](#keyboard-shortcuts));
+  the Run menu, the palette's eleven **Debug:** commands and the title bar's buttons work
+  without them.
 - Claude Code's `debug_state` tool reads where the program is paused, its stack and the selected
-  frame's locals.
+  frame's locals, without resuming or stepping it.
 
 **Claude Code**
 
@@ -575,8 +665,9 @@ Highlighting uses tree-sitter grammars, except Dockerfile, `.env` and Mermaid, w
 scanner; Markdown's paragraphs, headings, lists and quotes are parsed again with the inline
 grammar, so emphasis is italic, strong text bold, code spans coloured and links underlined.
 Language servers are started only for Go and TypeScript/JavaScript, when `gopls` or
-`typescript-language-server` is on your login shell's `PATH`; other languages get highlighting,
-folding and bracket matching without one.
+`typescript-language-server` is on your login shell's `PATH`; with one, names are coloured again
+from its semantic tokens. Other languages get highlighting, folding and bracket matching without
+one.
 
 Linters run beside them when the project installs them: `vscode-eslint-language-server` (from
 `vscode-langservers-extracted`) or `biome` (from `@biomejs/biome`). They are the project's own
@@ -594,6 +685,10 @@ only what it installs), or "Use proj's language server settings?" for a project 
 such settings. One answer covers everything the project brings: its linters, its own TypeScript,
 and project settings that choose what language servers run (see [Project
 settings](#project-settings)); until it is allowed, the project's editor settings still apply.
+The same answer covers what builds or runs the project's code: debugging, and the server commands
+behind code lenses and code actions (gopls's **run go generate**, **run test**, `go mod tidy`,
+add dependency). Those ask in any project not yet asked, with **Cancel** and **Allow and Debug**
+or **Allow and Run**, and a refused code action changes nothing.
 Only a project that brings one of them is asked, and the answer is kept with the project in
 `workspace.json`. The buttons are **Don't Allow** and **Allow**: Escape is Don't Allow, Return
 answers neither, and only a click (or Space on the focused button) allows. Deleting a worktree
@@ -652,7 +747,7 @@ that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB
 | `read_buffer` | An open file's text including unsaved changes: 256 KiB unless `max_bytes` asks for more, never over 512 KiB, with the full size. |
 | `run_tests`, `get_test_results` | Start go test or Vitest/Jest in the Tests panel (all, a package or file, or one test or `TestX/subtest` by name), then read counts and failures. The path must lie in the session's own project. Vitest and Jest run the project's `node_modules`, so for Claude they run only once the project's code is allowed; a Go and JavaScript run keeps its go test and says what was skipped. |
 | `git_status` | Branch, ahead/behind and changed files of a project; ignored files left out. |
-| `debug_state` | Read-only: whether the session's project is being debugged and, while paused, why, where (file and 1-based line), the call stack (up to 20 frames) and the selected frame's locals (up to 50, values cut at 200 characters). |
+| `debug_state` | Read-only: whether the session's project is being debugged and, while paused, why, where (file and 1-based line), the call stack (up to 20 frames) and the selected frame's locals (up to 50, values and types cut at 200 characters; long names, frames and descriptions are shortened too). It never resumes or steps the program. |
 
 ### Hooks
 
@@ -796,15 +891,15 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 
 Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
 commands without a key: Toggle auto save, Toggle format on save, Toggle word wrap by default,
-Toggle inlay hints, Source control changes, Switch branch…, the eleven **Git:** commands (Toggle
+Toggle inlay hints, Toggle minimap, Source control changes, Switch branch…, the eleven **Git:** commands (Toggle
 file blame, Open timeline and the three worktree commands among them), the two **GitHub:**
 commands, Run task…, Tests and the seven **Tests:** commands, Debug and the eleven **Debug:**
 commands, the three **Claude:** commands,
 **Terminal: move into panel** and **Terminal: move into editor area** (beside toggle panel and
 new in panel), Focus outline, Show explorer, Allow project code and Disallow project code,
 Reveal active file in tree, Open file to the side, Open Markdown preview, New browser preview,
-Clear recently opened, the three **Theme:** commands, Open keyboard shortcuts file and the Claude
-Code and Playwright commands. With an editor focused it also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
+Clear recently opened, the three **Theme:** commands, Open keyboard shortcuts file, the two
+**Snippets:** commands and the Claude Code and Playwright commands. With an editor focused it also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
 no key, since `cmd-shift-enter` is Zoom pane), Insert line below, Rename symbol, Quick fix, Go to
 implementations, Go to type definition, Show type hierarchy (no key), Expand selection, Shrink
 selection, Format selection, the five multi-cursor commands and Toggle word wrap; with
@@ -815,8 +910,8 @@ The menu bar has Athena, File, Selection, View, Run and Window menus. Run holds 
 commands and their keys. Athena holds Settings…
 (`cmd-,`). Selection holds Select All, the line copy and move commands and the multi-cursor
 commands. View includes Word Wrap, Theme, the terminal panel commands (Terminal, New Terminal in
-Panel, Move Terminal into Panel / into Editor Area), Toggle File Blame, Open Timeline and the
-interface zoom commands, and File includes Open Recent, the settings toggles (auto save, format on save, word wrap by default,
+Panel, Move Terminal into Panel / into Editor Area), Toggle File Blame, Open Timeline, Toggle
+Minimap and the interface zoom commands, and File includes Open Recent, the settings toggles (auto save, format on save, word wrap by default,
 Claude Code integration) and Keyboard Shortcuts.
 
 On a Mac keyboard the `f`-keys need Fn unless "Use F1, F2, etc. keys as standard function keys" is
@@ -895,6 +990,11 @@ Image viewer (`crates/athena-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd-
 `cmd-0` fit to the pane, `cmd`-scroll zooms at the pointer. These take over from the text zoom
 keys while the image viewer has focus.
 
+Large-file view (`crates/athena-editor/src/large.rs`, files over 50 MB): `up` / `down` scroll a
+line, `pageup` / `pagedown` a page, `cmd-up` / `cmd-down` go to the start / end and `cmd-f` finds;
+in its find field `enter` or `down` goes to the next match, `up` to the previous one and
+`escape` closes it.
+
 ### Diff view (`crates/athena-editor/src/diff_view.rs`)
 
 | Keys | Action |
@@ -964,7 +1064,7 @@ shape as VS Code's `keybindings.json`, and Athena applies it as soon as you save
 
 Command names are the action names in the source: `athena::…` (`crates/athena/src/actions.rs`),
 `editor::…`, `terminal::…` and so on. `when` takes the key contexts `Shell`, `Editor`,
-`Terminal`, `DiffView`, `ImageView`, `DocView` and `TextInput`, combined with `&&`, `||` and `!`.
+`Terminal`, `DiffView`, `ImageView`, `DocView`, `LargeFile` and `TextInput`, combined with `&&`, `||` and `!`.
 Your entries come after Athena's, so on the same key in the same context yours win, and an entry
 without `when` takes its key in every context: Athena's bindings of that key, including the
 editor's and terminal's, no longer apply. Comments and trailing commas are allowed. Entries Athena cannot use (an unknown command, a key it cannot
@@ -990,7 +1090,10 @@ as soon as you save:
     "bracket_pair_colorization": true, // colour brackets by nesting depth (on by default)
     "lightbulb": "quickfix",         // "all" adds refactorings, "off" hides it
     "linked_editing": false,         // rename a JSX/TSX closing tag as you type its opening one
-    "codeActionsOnSave": { "source.organizeImports": "explicit" }
+    "codeActionsOnSave": { "source.organizeImports": "explicit" },
+    "minimap": false,                // the file overview at the right edge (on by default)
+    "semanticHighlighting.enabled": false, // colours from the language server (on by default)
+    "codeLens": false                // "run go generate", reference counts (on by default)
   },
   "[markdown]": { "trim_trailing_whitespace": false },   // per language, by VS Code's id
   "theme": "system",                 // "system", "light" or "dark"
@@ -1010,7 +1113,7 @@ as soon as you save:
 `"editor.formatOnSave"`, `"editor.tabSize"` and so on), so its settings can be pasted in. Trimming
 trailing whitespace and inserting a final newline are off by default, as in VS Code; these settings
 or an `.editorconfig` (which wins) turn them on. The palette and menu toggles (auto save, format on
-save, word wrap, inlay hints, theme, Claude Code integration) write only their own key into this
+save, word wrap, inlay hints, minimap, theme, Claude Code integration) write only their own key into this
 file, changing that key's value where the parser reads it (the last one, if it is spelled twice)
 or adding it at the end of its object, so comments and layout stay. A file Athena cannot read
 (a missing comma, a bare `tru`) is never rewritten: the toggle still takes effect, kept in
@@ -1066,7 +1169,9 @@ refactorings too, and `"off"` hides it. `cmd-.` lists quick fixes, refactorings 
 actions either way. `"editor.codeActionsOnSave"` runs `source.organizeImports` and
 `source.fixAll.eslint` on `cmd-s`, in VS Code's shapes (`{"source.organizeImports": "explicit"}`,
 `true`, `"always"`, or a list of kinds); Go organizes its imports on save by default, as VS Code's
-Go extension sets up, and `"[go]": { "codeActionsOnSave": {} }` turns that off.
+Go extension sets up, and `"[go]": { "codeActionsOnSave": {} }` turns that off. A code action
+that carries a server command (gopls's `go mod tidy`, add dependency) runs, edit and command
+together, only once the project's code is allowed (see [Languages](#languages)).
 
 Inlay hints (parameter names before arguments, inferred types after names) are drawn in muted
 text inside the line whenever the language server sends them. As with VS Code's Go extension,
@@ -1075,7 +1180,30 @@ sets `editor.inlay_hints`: `true` also asks gopls for `assignVariableTypes`,
 `compositeLiteralFields`, `constantValues`, `functionTypeParameters`, `parameterNames` and
 `rangeVariableTypes`, and typescript-language-server for parameter names of literals, return
 types and enum values, unless your `lsp` entry already chooses its own; `false` hides every hint.
-Lines that wrap are drawn without hints.
+On wrapped lines each hint sits on its own row, and hints that do not fit their row are left out.
+
+#### Snippets
+
+Your own snippets live in `~/Library/Application Support/athena/snippets/`, in VS Code's format:
+`<language id>.json` (`go.json`, `typescript.json`, the ids of the `"[lang]"` blocks above) for one
+language, and any `*.code-snippets` file for every language, or for those its snippets name in
+`"scope": "go,typescript"`. Each snippet has a `prefix` and a `body` (a string or a list of lines)
+and may have a `description`; comments and trailing commas are allowed. **Snippets: configure
+snippets for this language** and **Snippets: configure global snippets** (palette) open the file,
+creating it with a commented example (the global one is `global.code-snippets`). Files are read
+again when they change; saving one in Athena reports a parse error, or applies it to open editors.
+
+Snippets join the suggestions after the language server's, one per prefix, with the body as their
+documentation, and expand with the usual tab stops. Languages without a server offer them as you
+type when they have any, except Markdown, where they wait for `ctrl-space` as in VS Code. VS
+Code's variables are filled in: `TM_FILENAME`, `TM_FILENAME_BASE`, `TM_DIRECTORY`, `TM_FILEPATH`,
+`RELATIVE_FILEPATH`, `WORKSPACE_NAME`, `WORKSPACE_FOLDER`, `CLIPBOARD`, `CURRENT_YEAR`,
+`CURRENT_YEAR_SHORT`, `CURRENT_MONTH`, `CURRENT_DATE`, `CURRENT_HOUR`, `CURRENT_MINUTE`,
+`CURRENT_SECOND`, `CURRENT_SECONDS_UNIX`, `LINE_COMMENT`, and `TM_SELECTED_TEXT` (always empty);
+an unknown one keeps its default (`${NAME:default}`). Transforms follow VS Code's rules:
+`${TM_FILENAME/(.*)\\..+$/${1:/upcase}/}` with `$1`, `${1:/upcase}`, `/downcase`, `/capitalize`,
+`/pascalcase`, `/camelcase`, `${1:+if}`, `${1:-else}`, `${1:?if:else}` and the `g`, `i`, `m` and
+`s` options. Variables inside a choice (`${1|a,b|}`) are left as written, as VS Code does.
 
 ## Command line
 
@@ -1097,7 +1225,8 @@ each editor tab's cursor, scroll line, folds and wrap choice, recently closed fo
 sizes, the text and interface zoom, the theme (`System`, `Light` or `Dark`), each project's
 panel terminals and its answer about running the project's code, and the
 `autosave_delay_ms`, `format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
-integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, `breakpoints.json` (breakpoints and watch expressions per project), the daemon and app sockets, `snapshots/` (copies taken before Claude's
+integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, `breakpoints.json` (breakpoints and watch expressions per project; one that
+does not parse is kept aside as `breakpoints.json.corrupt-<time>`), `snippets/` (your snippets), the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.
