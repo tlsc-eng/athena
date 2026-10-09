@@ -253,17 +253,19 @@ impl Workspace {
                 project.root = root;
             }
             match kept.iter().position(|k| k.root == project.root) {
-                // The active copy's tabs are the ones the user was looking at.
-                Some(j) if active == Some(i) => {
-                    if project.layout.is_some() {
-                        kept[j].layout = project.layout;
+                Some(j) => {
+                    kept[j].linters = kept[j].linters.strictest(project.linters);
+                    // The active copy's tabs are the ones the user was looking at.
+                    if active == Some(i) {
+                        if project.layout.is_some() {
+                            kept[j].layout = project.layout;
+                        }
+                        if !project.panel.is_empty() {
+                            kept[j].panel = project.panel;
+                        }
+                        kept_active = Some(j);
                     }
-                    if !project.panel.is_empty() {
-                        kept[j].panel = project.panel;
-                    }
-                    kept_active = Some(j);
                 }
-                Some(_) => {}
                 None => {
                     if active == Some(i) {
                         kept_active = Some(kept.len());
@@ -372,6 +374,29 @@ mod tests {
             "and so do its panel terminals"
         );
         std::fs::remove_dir_all(real.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn merged_roots_keep_the_most_cautious_linter_answer() {
+        use crate::LinterTrust::{Allowed, Denied, NotAsked};
+        for (answers, kept) in [
+            ([Allowed, Denied, NotAsked], Denied),
+            ([NotAsked, Allowed, NotAsked], Allowed),
+            ([NotAsked, NotAsked, NotAsked], NotAsked),
+        ] {
+            let (real, link) = linked_dirs("linters");
+            let mut w = Workspace::default();
+            for (root, answer) in [link.clone(), real.clone(), link].into_iter().zip(answers) {
+                let mut project = Project::new(root);
+                project.linters = answer;
+                w.projects.push(project);
+            }
+            w.active = Some(0);
+            w.prune_missing();
+            assert_eq!(w.projects.len(), 1);
+            assert_eq!(w.projects[0].linters, kept, "{answers:?}");
+            std::fs::remove_dir_all(real.parent().unwrap()).unwrap();
+        }
     }
 
     #[test]

@@ -100,6 +100,15 @@ impl LinterTrust {
     fn is_not_asked(&self) -> bool {
         *self == Self::NotAsked
     }
+
+    /// The answer to keep when two copies of a project disagree: a refusal wins over consent.
+    pub fn strictest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Denied, _) | (_, Self::Denied) => Self::Denied,
+            (Self::Allowed, _) | (_, Self::Allowed) => Self::Allowed,
+            _ => Self::NotAsked,
+        }
+    }
 }
 
 fn default_layout() -> Option<Layout> {
