@@ -4,6 +4,7 @@
 mod call;
 mod client;
 mod code_action;
+mod code_lens;
 mod completion;
 mod edit;
 mod env;
@@ -12,12 +13,14 @@ mod local;
 mod markup;
 mod protocol;
 mod ranges;
+mod semantic;
 mod signature;
 mod symbol;
 
 pub use call::{Call, CallItem};
 pub use client::{Client, Config, EditReply, Event, FileEvent, RenameTarget};
 pub use code_action::{CodeAction, Command};
+pub use code_lens::CodeLens;
 pub use completion::{CompletionItem, CompletionList, TextEdit};
 pub use edit::{EditError, FileChange, WorkspaceEdit, apply_text_edits};
 pub use env::{find_program, server_env};
@@ -30,6 +33,10 @@ pub use protocol::{
     uri_from_path,
 };
 pub use ranges::LinkedRanges;
+pub use semantic::{
+    SemanticAnswer, SemanticEdit, SemanticLegend, SemanticReply, SemanticToken, SemanticTokens,
+    apply_semantic_edits, decode_semantic_tokens,
+};
 pub use signature::SignatureHelp;
 pub use symbol::{Symbol, symbol_kind_label};
 

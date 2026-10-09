@@ -38,7 +38,7 @@ impl CodeAction {
     }
 }
 
-fn command(value: &Value) -> Option<Command> {
+pub(crate) fn parse_command(value: &Value) -> Option<Command> {
     Some(Command {
         title: value
             .get("title")
@@ -60,7 +60,7 @@ pub(crate) fn parse_code_action(item: &Value) -> Option<CodeAction> {
             preferred: false,
             disabled: None,
             edit: None,
-            command: Some(command(item)?),
+            command: Some(parse_command(item)?),
             raw: item.clone(),
         });
     }
@@ -80,7 +80,7 @@ pub(crate) fn parse_code_action(item: &Value) -> Option<CodeAction> {
             .and_then(Value::as_str)
             .map(str::to_string),
         edit,
-        command: item.get("command").and_then(command),
+        command: item.get("command").and_then(parse_command),
         raw: item.clone(),
     })
 }

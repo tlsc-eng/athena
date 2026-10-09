@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use athena_lsp::{
-    Client, Event, FileChange, MarkupBlock, Position, Range, RenameTarget, ServerKind, Severity,
-    apply_text_edits,
+    Client, CodeLens, Event, FileChange, MarkupBlock, Position, Range, RenameTarget, SemanticReply,
+    ServerKind, Severity, apply_semantic_edits, apply_text_edits, decode_semantic_tokens,
 };
 
 fn next_event(events: &async_channel::Receiver<Event>, deadline: Instant) -> Option<Event> {
@@ -667,6 +667,125 @@ fn gopls_sends_the_inlay_hints_its_settings_ask_for() {
         found.len(),
         2,
         "settings changed while it runs apply: {found:?}"
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gopls_classifies_names_with_semantic_tokens_and_answers_again_after_an_edit() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let source = "package main\n\nconst limit = 3\n\nfunc helper(n int) int { return n + limit }\n\nfunc main() { _ = helper(1) }\n";
+    let Opened {
+        client, dir, file, ..
+    } = open_go(
+        "semantic",
+        source,
+        serde_json::json!({"semanticTokens": true}),
+    );
+    let legend = client.semantic_legend().expect("gopls sends a legend");
+    let tokens = |reply: SemanticReply, previous: &[u32]| -> (Option<String>, Vec<u32>) {
+        match reply {
+            SemanticReply::Full(t) => (t.result_id, t.data),
+            SemanticReply::Delta { result_id, edits } => {
+                (result_id, apply_semantic_edits(previous, &edits).unwrap())
+            }
+        }
+    };
+    let kind_at = |data: &[u32], line: u32, start: u32| -> Option<(String, u32)> {
+        decode_semantic_tokens(data)
+            .into_iter()
+            .find(|t| t.line == line && t.start == start)
+            .map(|t| (legend.types[t.kind as usize].clone(), t.modifiers))
+    };
+    let first = futures_lite_block_on(client.semantic_tokens(&file, None))
+        .unwrap()
+        .parse()
+        .expect("a readable reply");
+    let (id, data) = tokens(first, &[]);
+    assert_eq!(kind_at(&data, 4, 5).unwrap().0, "function", "helper");
+    assert_eq!(kind_at(&data, 4, 12).unwrap().0, "parameter", "n");
+    let (kind, modifiers) = kind_at(&data, 4, 36).expect("limit is classified");
+    assert_eq!(kind, "variable");
+    assert_ne!(
+        modifiers & legend.modifier_bit("readonly"),
+        0,
+        "a constant is read-only"
+    );
+
+    let edited = source.replace("_ = helper(1)", "x := helper(2); _ = x");
+    client.did_change(&file, 2, edited);
+    let again = futures_lite_block_on(client.semantic_tokens(&file, id.as_deref()))
+        .unwrap()
+        .parse()
+        .expect("a readable reply");
+    let (_, data) = tokens(again, &data);
+    assert_eq!(kind_at(&data, 6, 14).unwrap().0, "variable", "x");
+    assert_eq!(kind_at(&data, 6, 19).unwrap().0, "function", "helper");
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gopls_offers_code_lenses_that_run_as_commands() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let source = "package main\n\n//go:generate echo hello\n\nfunc main() {}\n";
+    let Opened {
+        client, dir, file, ..
+    } = open_go("codelens", source, serde_json::Value::Null);
+    let lenses = futures_lite_block_on(client.code_lens(&file)).unwrap();
+    let mut lenses: Vec<CodeLens> = lenses
+        .iter()
+        .map(|l| futures_lite_block_on(client.resolve_code_lens(l)).unwrap())
+        .collect();
+    lenses.sort_by_key(|l| l.range.start);
+    let shown: Vec<(u32, String, String)> = lenses
+        .iter()
+        .map(|l| {
+            let c = l.command.as_ref().expect("resolved");
+            (l.range.start.line, c.title.clone(), c.command.clone())
+        })
+        .collect();
+    assert!(
+        shown.iter().any(|(line, title, command)| *line == 2
+            && title.contains("go generate")
+            && command == "gopls.generate"),
+        "{shown:?}"
+    );
+    let generate = lenses
+        .iter()
+        .filter_map(|l| l.command.as_ref())
+        .find(|c| c.command == "gopls.generate")
+        .unwrap();
+    assert!(
+        futures_lite_block_on(client.execute_command(generate)).is_ok(),
+        "gopls runs its own lens command"
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let Opened { client, dir, .. } = open_go(
+        "codelens-test",
+        "package main\n",
+        serde_json::json!({"codelenses": {"test": true}}),
+    );
+    let tests = "package main\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {}\n";
+    let file = dir.join("main_test.go");
+    std::fs::write(&file, tests).unwrap();
+    client.did_open(&file, "go", 1, tests.into());
+    let lenses = futures_lite_block_on(client.code_lens(&file)).unwrap();
+    assert!(
+        lenses.iter().any(|l| l.range.start.line == 4
+            && l.command
+                .as_ref()
+                .is_some_and(|c| c.command == "gopls.run_tests")),
+        "the test lens follows gopls's codelenses setting: {lenses:?}"
     );
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);

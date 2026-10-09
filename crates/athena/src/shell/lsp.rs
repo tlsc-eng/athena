@@ -818,6 +818,18 @@ impl Shell {
                 self.local_notice(NoticeKind::Message { title, body: why }, cx);
             }
             Event::RefreshInlayHints => self.refresh_inlay_hints(&key, cx),
+            Event::RefreshSemanticTokens | Event::RefreshCodeLens => {}
+            Event::Message { severity, text } => {
+                let title = key.1.label().to_string();
+                match severity {
+                    Severity::Error | Severity::Warning => {
+                        self.local_notice(NoticeKind::Message { title, body: text }, cx)
+                    }
+                    Severity::Information | Severity::Hint => {
+                        self.transient_notice(title, text, cx)
+                    }
+                }
+            }
             Event::ApplyEdit { label, edit, reply } => {
                 tracing::debug!(
                     ?label,

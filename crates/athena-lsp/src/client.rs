@@ -13,19 +13,64 @@ use serde_json::{Value, json};
 
 use crate::call::{Call, CallItem, parse_calls, parse_items};
 use crate::code_action::{self, CodeAction, parse_code_action, parse_code_actions};
+use crate::code_lens::{CodeLens, parse_code_lens, parse_code_lenses};
 use crate::completion::{
     CompletionItem, CompletionList, TextEdit, parse_completions, parse_text_edits,
 };
 use crate::edit::{WorkspaceEdit, parse_workspace_edit};
 use crate::file_ops;
 use crate::markup::{Hover, parse_hover};
-use crate::protocol::{self, Diagnostic, Highlight, InlayHint, Location, Position, Range};
+use crate::protocol::{
+    self, Diagnostic, Highlight, InlayHint, Location, Position, Range, Severity,
+};
 use crate::ranges::{LinkedRanges, parse_linked_ranges, parse_selection_ranges};
+use crate::semantic::{SemanticAnswer, SemanticLegend};
 use crate::signature::{SignatureHelp, parse_signature_help};
 use crate::symbol::{Symbol, parse_symbols};
 use crate::{ServerKind, env};
 
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
+
+/// The protocol's standard semantic token types and modifiers, all of which Athena colours or
+/// safely ignores.
+const SEMANTIC_TYPES: &[&str] = &[
+    "namespace",
+    "type",
+    "class",
+    "enum",
+    "interface",
+    "struct",
+    "typeParameter",
+    "parameter",
+    "variable",
+    "property",
+    "enumMember",
+    "event",
+    "function",
+    "method",
+    "macro",
+    "keyword",
+    "modifier",
+    "comment",
+    "string",
+    "number",
+    "regexp",
+    "operator",
+    "decorator",
+    "label",
+];
+const SEMANTIC_MODIFIERS: &[&str] = &[
+    "declaration",
+    "definition",
+    "readonly",
+    "static",
+    "deprecated",
+    "abstract",
+    "async",
+    "modification",
+    "documentation",
+    "defaultLibrary",
+];
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// What a server reports, in arrival order.
@@ -42,6 +87,15 @@ pub enum Event {
     RefreshInlayHints,
     /// Diagnostics pulled so far are out of date; ask for them again.
     RefreshDiagnostics,
+    /// Semantic tokens shown so far are out of date, as after a dependency changed.
+    RefreshSemanticTokens,
+    /// Code lenses shown so far are out of date.
+    RefreshCodeLens,
+    /// A message for the user, such as how a command a code lens ran went.
+    Message {
+        severity: Severity,
+        text: String,
+    },
     /// The server asks for an edit, usually while running a command; answer through `reply`.
     ApplyEdit {
         label: Option<String>,
@@ -349,6 +403,55 @@ impl Client {
             json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "range": range}),
         );
         Ok(protocol::parse_inlay_hints(&answer(reply).await?))
+    }
+
+    /// The token types and modifiers the server's semantic tokens are numbered by, once started.
+    pub fn semantic_legend(&self) -> Option<SemanticLegend> {
+        SemanticLegend::parse(
+            self.capabilities
+                .get()?
+                .pointer("/semanticTokensProvider/legend")?,
+        )
+    }
+
+    /// The file's semantic tokens: a delta from the reply `previous` named when the server
+    /// offers deltas, else all of them.
+    pub async fn semantic_tokens(
+        &self,
+        path: &Path,
+        previous: Option<&str>,
+    ) -> Result<SemanticAnswer, String> {
+        let document = json!({"uri": protocol::uri_from_path(path)});
+        let reply = match previous.filter(|_| self.supports("/semanticTokensProvider/full/delta")) {
+            Some(id) => self.request(
+                "textDocument/semanticTokens/full/delta",
+                json!({"textDocument": document, "previousResultId": id}),
+            ),
+            None => self.request(
+                "textDocument/semanticTokens/full",
+                json!({"textDocument": document}),
+            ),
+        };
+        answer(reply).await.map(SemanticAnswer)
+    }
+
+    /// The commands the server shows above lines of the file; some need resolving first.
+    pub async fn code_lens(&self, path: &Path) -> Result<Vec<CodeLens>, String> {
+        let reply = self.request(
+            "textDocument/codeLens",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}}),
+        );
+        Ok(parse_code_lenses(&answer(reply).await?))
+    }
+
+    /// Fills in the command of a lens the server sent without one.
+    pub async fn resolve_code_lens(&self, lens: &CodeLens) -> Result<CodeLens, String> {
+        if lens.command.is_some() || !self.supports("/codeLensProvider/resolveProvider") {
+            return Ok(lens.clone());
+        }
+        let reply = self.request("codeLens/resolve", lens.raw.clone());
+        parse_code_lens(&answer(reply).await?)
+            .ok_or_else(|| "the server sent an unreadable lens".into())
     }
 
     /// Documentation for the symbol at `at`; `None` when the server has nothing to say.
@@ -858,6 +961,8 @@ impl Session {
                     },
                     "executeCommand": {},
                     "inlayHint": {"refreshSupport": true},
+                    "semanticTokens": {"refreshSupport": true},
+                    "codeLens": {"refreshSupport": true},
                     "symbol": {},
                     "didChangeWatchedFiles": {},
                     "fileOperations": {"willRename": true, "didRename": true}
@@ -878,6 +983,16 @@ impl Session {
                     "selectionRange": {},
                     "rangeFormatting": {},
                     "linkedEditingRange": {},
+                    "codeLens": {},
+                    "semanticTokens": {
+                        "requests": {"full": {"delta": true}},
+                        "tokenTypes": SEMANTIC_TYPES,
+                        "tokenModifiers": SEMANTIC_MODIFIERS,
+                        "formats": ["relative"],
+                        "overlappingTokenSupport": false,
+                        "multilineTokenSupport": false,
+                        "augmentsSyntaxTokens": true
+                    },
                     "codeAction": {
                         "codeActionLiteralSupport": {
                             "codeActionKind": {"valueSet": [
@@ -1000,6 +1115,12 @@ impl Reader {
                 if method == "workspace/diagnostic/refresh" {
                     let _ = self.events.send_blocking(Event::RefreshDiagnostics);
                 }
+                if method == "workspace/semanticTokens/refresh" {
+                    let _ = self.events.send_blocking(Event::RefreshSemanticTokens);
+                }
+                if method == "workspace/codeLens/refresh" {
+                    let _ = self.events.send_blocking(Event::RefreshCodeLens);
+                }
                 let result = match method {
                     "workspace/configuration" => {
                         let config = self.config.read().map_or(Value::Null, |c| c.clone());
@@ -1027,6 +1148,11 @@ impl Reader {
                     json!({"jsonrpc": "2.0", "id": id, "result": result}),
                 );
             }
+            (Some("window/showMessage"), None) => {
+                if let Some(event) = message.get("params").and_then(show_message) {
+                    let _ = self.events.send_blocking(event);
+                }
+            }
             (Some("textDocument/publishDiagnostics"), None) => {
                 if let Some((path, list)) =
                     message.get("params").and_then(protocol::parse_diagnostics)
@@ -1037,6 +1163,21 @@ impl Reader {
             _ => {}
         }
     }
+}
+
+/// A `window/showMessage` worth showing; log-level messages are not.
+fn show_message(params: &Value) -> Option<Event> {
+    let severity = match params.get("type")?.as_u64()? {
+        1 => Severity::Error,
+        2 => Severity::Warning,
+        3 => Severity::Information,
+        _ => return None,
+    };
+    let text = params.get("message")?.as_str()?.trim();
+    (!text.is_empty()).then(|| Event::Message {
+        severity,
+        text: text.to_string(),
+    })
 }
 
 /// The part of a server's settings a `workspace/configuration` item asks for: all of them for
@@ -1464,6 +1605,60 @@ mod tests {
             sent(&seen, "typeHierarchy/subtypes")["params"]["item"]["name"],
             "Shape"
         );
+    }
+
+    #[test]
+    fn semantic_tokens_ask_for_a_delta_only_from_servers_that_offer_one() {
+        let caps = json!({"semanticTokensProvider": {
+            "legend": {"tokenTypes": ["function"], "tokenModifiers": ["readonly"]},
+            "full": {"delta": true}}, "codeLensProvider": {"resolveProvider": true}});
+        let (client, seen) = scripted(caps, |method, params| match method {
+            "textDocument/semanticTokens/full" => json!({"resultId": "1", "data": [0, 0, 4, 0, 0]}),
+            "textDocument/semanticTokens/full/delta" => {
+                assert_eq!(params["previousResultId"], "1");
+                json!({"resultId": "2", "edits": [{"start": 0, "deleteCount": 1, "data": [2]}]})
+            }
+            "textDocument/codeLens" => json!([{"range": range((3, 0), (3, 4)), "data": 9}]),
+            "codeLens/resolve" => {
+                assert_eq!(params["data"], 9);
+                json!({"range": range((3, 0), (3, 4)),
+                       "command": {"title": "1 reference", "command": "x.show"}})
+            }
+            _ => Value::Null,
+        });
+        let init = sent(&seen, "initialize");
+        let caps = &init["params"]["capabilities"];
+        assert_eq!(
+            caps["textDocument"]["semanticTokens"]["requests"]["full"]["delta"],
+            true
+        );
+        assert_eq!(caps["workspace"]["semanticTokens"]["refreshSupport"], true);
+        assert_eq!(caps["workspace"]["codeLens"]["refreshSupport"], true);
+        assert_eq!(client.semantic_legend().unwrap().types, ["function"]);
+        let doc = Path::new("/p/a.ts");
+        let full = block_on(client.semantic_tokens(doc, None)).unwrap().parse();
+        assert!(
+            matches!(full, Some(crate::SemanticReply::Full(t)) if t.result_id.as_deref() == Some("1"))
+        );
+        let delta = block_on(client.semantic_tokens(doc, Some("1")))
+            .unwrap()
+            .parse();
+        assert!(
+            matches!(delta, Some(crate::SemanticReply::Delta { edits, .. }) if edits[0].data == [2])
+        );
+        let lenses = block_on(client.code_lens(doc)).unwrap();
+        let lens = block_on(client.resolve_code_lens(&lenses[0])).unwrap();
+        assert_eq!(lens.command.unwrap().title, "1 reference");
+    }
+
+    #[test]
+    fn show_message_reaches_the_user_unless_it_is_only_a_log_line() {
+        let event = show_message(&json!({"type": 1, "message": " go generate failed \n"}));
+        assert!(
+            matches!(event, Some(Event::Message { severity: Severity::Error, text }) if text == "go generate failed")
+        );
+        assert!(show_message(&json!({"type": 4, "message": "log"})).is_none());
+        assert!(show_message(&json!({"type": 3, "message": "  "})).is_none());
     }
 
     #[test]
