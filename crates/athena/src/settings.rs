@@ -48,6 +48,7 @@ pub struct EditorSettings {
     pub tab_size: Option<usize>,
     pub autosave_delay_ms: Option<u64>,
     pub inlay_hints: Option<bool>,
+    pub bracket_pair_colorization: Option<bool>,
 }
 
 impl EditorSettings {
@@ -64,6 +65,9 @@ impl EditorSettings {
             tab_size: over.tab_size.or(self.tab_size),
             autosave_delay_ms: over.autosave_delay_ms.or(self.autosave_delay_ms),
             inlay_hints: over.inlay_hints.or(self.inlay_hints),
+            bracket_pair_colorization: over
+                .bracket_pair_colorization
+                .or(self.bracket_pair_colorization),
         }
     }
 
@@ -75,6 +79,7 @@ impl EditorSettings {
             "insert_final_newline" => self.insert_final_newline = Some(flag()?),
             "word_wrap" => self.word_wrap = Some(flag()?),
             "inlay_hints" => self.inlay_hints = Some(flag()?),
+            "bracket_pair_colorization" => self.bracket_pair_colorization = Some(flag()?),
             "font_size" => {
                 let size = value.as_f64().filter(|s| (6.0..=40.0).contains(s));
                 self.font_size = Some(size.ok_or("must be a number from 6 to 40")? as f32);
@@ -105,6 +110,9 @@ fn editor_key(key: &str) -> &str {
         "fontSize" => "font_size",
         "tabSize" => "tab_size",
         "autoSaveDelay" => "autosave_delay_ms",
+        "bracketPairColorization" | "bracketPairColorization.enabled" => {
+            "bracket_pair_colorization"
+        }
         other => other,
     }
 }
@@ -809,6 +817,22 @@ mod tests {
             Settings::default().confirm_drag_and_drop(),
             "on by default, as in VS Code"
         );
+    }
+
+    #[test]
+    fn bracket_pair_colorization_reads_vs_codes_key_and_athenas_and_by_language() {
+        let (s, problems) = parse(
+            r#"{"editor.bracketPairColorization.enabled": false,
+                "[markdown]": {"bracket_pair_colorization": true}}"#,
+        )
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.editor.bracket_pair_colorization, Some(false));
+        let md = s.editor_for(Some(Lang::Markdown));
+        assert_eq!(md.bracket_pair_colorization, Some(true));
+        let (s, _) = parse(r#"{"editor": {"bracketPairColorization": false}}"#).unwrap();
+        assert_eq!(s.editor.bracket_pair_colorization, Some(false));
+        assert_eq!(Settings::default().editor.bracket_pair_colorization, None);
     }
 
     #[test]

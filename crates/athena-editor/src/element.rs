@@ -94,6 +94,15 @@ fn line_styles(
     styles
 }
 
+impl EditorView {
+    pub fn set_bracket_pair_colorization(&mut self, on: bool, cx: &mut gpui::Context<Self>) {
+        if self.bracket_pairs != on {
+            self.bracket_pairs = on;
+            cx.notify();
+        }
+    }
+}
+
 /// Lines above the view a bracket count starts from when no parse tree knows the nesting.
 const BRACKET_SCAN_LIMIT: usize = 5_000;
 
@@ -470,7 +479,10 @@ impl Element for EditorElement {
         for run in shown.chunk_by(|a, b| a + 1 == *b) {
             tokens.extend(buffer.highlights(run[0]..run[run.len() - 1] + 1));
         }
-        let brackets = bracket_colors(&buffer, &shown, &tokens, &syntax.bracket_pairs);
+        let brackets = match view.bracket_pairs {
+            true => bracket_colors(&buffer, &shown, &tokens, &syntax.bracket_pairs),
+            false => HashMap::new(),
+        };
         let mut inlays: HashMap<usize, Vec<(usize, String, bool)>> = HashMap::new();
         for (at, (text, is_type)) in view.inlays.shown.now(&buffer) {
             let line = buffer.line_of(at.start);
@@ -894,7 +906,10 @@ impl Element for EditorElement {
             let n = raw.chars().count();
             let tokens = buffer.highlights(line..line + 1);
             let mut styles = line_styles(rope, &tokens, line, n, &syntax);
-            let brackets = bracket_colors(&buffer, &[line], &tokens, &syntax.bracket_pairs);
+            let brackets = match view.bracket_pairs {
+                true => bracket_colors(&buffer, &[line], &tokens, &syntax.bracket_pairs),
+                false => HashMap::new(),
+            };
             paint_brackets(&mut styles, buffer.line_start(line), &brackets);
             let mut runs: Vec<(TextRun, TokenStyle)> = Vec::new();
             for (i, style) in styles.iter().enumerate() {

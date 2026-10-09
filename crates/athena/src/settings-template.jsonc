@@ -10,7 +10,8 @@
   //   "font_size": 13,
   //   "tab_size": 4,                   // for files whose indentation cannot be detected
   //   "autosave_delay_ms": 1000,       // 0 turns auto save off
-  //   "inlay_hints": true              // off hides them; on also turns on a curated set
+  //   "inlay_hints": true,             // off hides them; on also turns on a curated set
+  //   "bracket_pair_colorization": true // colour brackets by nesting depth
   // },
   // "[markdown]": { "trim_trailing_whitespace": false },
   // "theme": "system",                 // "system", "light" or "dark"

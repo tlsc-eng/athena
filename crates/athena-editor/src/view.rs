@@ -448,6 +448,8 @@ pub struct EditorView {
     pub(crate) formatting: Option<(u64, u64)>,
     pub(crate) format_requests: u64,
     pub(crate) save_settings: crate::SaveSettings,
+    /// VS Code's `editor.bracketPairColorization.enabled`, on by default.
+    pub(crate) bracket_pairs: bool,
     /// Set around an edit that typing made, which narrows the suggestion list instead of closing it.
     typing: bool,
     pub(crate) marked: Option<String>,
@@ -553,6 +555,7 @@ impl EditorView {
             formatting: None,
             format_requests: 0,
             save_settings: crate::SaveSettings::default(),
+            bracket_pairs: true,
             marked: None,
             find: None,
             find_opening: None,
