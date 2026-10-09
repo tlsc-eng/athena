@@ -193,6 +193,13 @@ its shells running.
 - Inlay hints (parameter names, inferred types) inside the line, when the language server sends
   them; gopls and typescript-language-server send none until asked, so they stay hidden until
   **Toggle inlay hints** or an `lsp` setting asks for some (see [Settings](#settings)).
+- Renaming or moving a file or folder in the tree (its name field, or a drag) lets the language
+  servers that ask for it take part, as VS Code's file participants: typescript-language-server
+  is sent `workspace/willRenameFiles` first and its edit, the imports that name the file updated
+  to its new place, is applied before the file moves (asking first when it reaches more than one
+  file: **Update Imports** or **Don't Update**); servers that ask then hear
+  `workspace/didRenameFiles`. A server that takes more than 5 seconds is not waited for. gopls
+  does not take part, so Go files simply move.
 - Also with a language server: rename symbol (`f2` opens a field over the symbol with the old name
   selected; Enter renames it in every file, open files as one undo step each and closed files saved
   to disk), quick fixes and refactorings (`cmd-.` lists them in a menu at the cursor, preferred

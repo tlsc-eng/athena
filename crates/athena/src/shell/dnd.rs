@@ -210,20 +210,28 @@ impl Shell {
                 replacing = true;
             }
             let _ = this.update_in(cx, |this, window, cx| {
-                let replaced = match replacing {
-                    true => tabs_under(&this.workspace.projects, &dest),
-                    false => Vec::new(),
+                let Some(root) = this.project_root_of(&from).or_else(|| this.active_root()) else {
+                    return;
                 };
-                let result = fileops::move_to(&from, &dest, replacing, fileops::trash);
-                if result.is_ok() {
-                    // Before the watcher sees the new file, so no tab of the old one reloads it.
-                    for (root, item) in replaced {
-                        this.remove_item_from(&root, item, window, cx);
+                let (old, new) = (from.clone(), dest.clone());
+                this.rename_with_servers(&root, old, new, window, cx, move |this, window, cx| {
+                    let replaced = match replacing {
+                        true => tabs_under(&this.workspace.projects, &dest),
+                        false => Vec::new(),
+                    };
+                    let result = fileops::move_to(&from, &dest, replacing, fileops::trash);
+                    let moved = result.is_ok();
+                    if moved {
+                        // Before the watcher sees the new file, so no tab of the old one reloads it.
+                        for (root, item) in replaced {
+                            this.remove_item_from(&root, item, window, cx);
+                        }
+                        this.retarget_items(&from, &dest, cx);
+                        this.reload_changed_files(cx);
                     }
-                    this.retarget_items(&from, &dest, cx);
-                    this.reload_changed_files(cx);
-                }
-                this.after_tree_drop(result, &dest, cx);
+                    this.after_tree_drop(result, &dest, cx);
+                    moved
+                });
             });
         })
         .detach();

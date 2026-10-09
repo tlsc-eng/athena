@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
 
 use athena_editor::{Buffer, EditorView, ServerEdit};
-use athena_lsp::{EditError, FileChange, FileEvent, TextEdit, WorkspaceEdit, apply_text_edits};
-use gpui::{Context, Entity};
+use athena_lsp::{
+    Client, EditError, FileChange, FileEvent, TextEdit, WorkspaceEdit, apply_text_edits,
+};
+use gpui::{Context, Entity, PromptButton, PromptLevel, Window};
 
 use super::Shell;
 use super::fileops;
@@ -12,6 +16,24 @@ use super::lsp::document_key;
 
 /// Closed files larger than this are not edited, as the editor would not open them either.
 const MAX_FILE: u64 = 16 * 1024 * 1024;
+
+/// A rename waits this long for servers to say what else changes with it, then goes ahead.
+const WILL_RENAME_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Edits a rename brings to more files than this are confirmed first.
+const CONFIRM_FILES: usize = 1;
+
+/// The files whose text a rename's edits change, other than the renamed one itself.
+fn files_changed(edits: &[WorkspaceEdit]) -> BTreeSet<PathBuf> {
+    edits
+        .iter()
+        .flat_map(|e| &e.changes)
+        .filter_map(|c| match c {
+            FileChange::Edit { path, edits, .. } if !edits.is_empty() => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Each open file's buffer version when a request went to the server, by document key.
 pub(super) type AskedAt = HashMap<PathBuf, i64>;
@@ -462,6 +484,113 @@ impl Shell {
         result
     }
 
+    /// Renames `from` to `to` (a tree rename or move) with the project's language servers taking
+    /// part, as VS Code runs its file participants: those that ask are sent `willRenameFiles`
+    /// first and their edit (TypeScript's updated imports) is applied, confirmed when it reaches
+    /// several files; then `rename` runs, and if it returns true they hear `didRenameFiles`.
+    pub(super) fn rename_with_servers(
+        &mut self,
+        root: &Path,
+        from: PathBuf,
+        to: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        rename: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> bool + 'static,
+    ) {
+        let is_dir = std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_dir());
+        // Servers know files by their real paths.
+        let real = |p: &Path| match (p.parent(), p.file_name()) {
+            (Some(dir), Some(name)) => super::lsp::document_key(dir).join(name),
+            _ => p.to_path_buf(),
+        };
+        let renames = vec![(real(&from), real(&to))];
+        let request = renames.clone();
+        let clients = self.project_clients(root);
+        let told: Vec<Rc<Client>> = clients
+            .iter()
+            .filter(|c| c.wants_rename(false, &renames[0].0, is_dir))
+            .cloned()
+            .collect();
+        let asked: Vec<Rc<Client>> = clients
+            .into_iter()
+            .filter(|c| c.wants_rename(true, &renames[0].0, is_dir))
+            .collect();
+        let after = move |done: bool| {
+            if done {
+                for client in &told {
+                    client.did_rename_files(&renames);
+                }
+            }
+        };
+        if asked.is_empty() {
+            return after(rename(self, window, cx));
+        }
+        let versions = self.versions_for_request(cx);
+        let name = from.file_name().map_or_else(
+            || from.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let answers = futures::future::join_all(
+                asked
+                    .iter()
+                    .map(|client| client.will_rename_files(&request)),
+            );
+            let timeout = cx.background_executor().timer(WILL_RENAME_TIMEOUT);
+            let edits: Vec<WorkspaceEdit> =
+                match futures::future::select(std::pin::pin!(answers), std::pin::pin!(timeout))
+                    .await
+                {
+                    futures::future::Either::Left((answers, _)) => answers
+                        .into_iter()
+                        .filter_map(|answer| {
+                            answer
+                                .inspect_err(|why| tracing::warn!("willRenameFiles failed: {why}"))
+                                .ok()
+                        })
+                        .filter(|edit| !edit.is_empty())
+                        .collect(),
+                    futures::future::Either::Right(_) => {
+                        tracing::warn!("willRenameFiles timed out; renaming without its edits");
+                        Vec::new()
+                    }
+                };
+            let files = files_changed(&edits);
+            let mut apply = !edits.is_empty();
+            if files.len() > CONFIRM_FILES {
+                let Ok(answer) = this.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Info,
+                        &format!("Update imports for “{name}”?"),
+                        Some(&format!(
+                            "{} files refer to it and can be updated to its new place.",
+                            files.len()
+                        )),
+                        &[
+                            PromptButton::ok("Update Imports"),
+                            PromptButton::cancel("Don't Update"),
+                        ],
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                apply = matches!(answer.await, Ok(0));
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                if apply {
+                    for edit in &edits {
+                        if let Err(why) = this.apply_requested_edit(edit, &versions, cx) {
+                            this.lsp_failed("Imports not updated", why, cx);
+                        }
+                    }
+                }
+                after(rename(this, window, cx));
+            });
+        })
+        .detach();
+    }
+
     /// Servers hear about files changed behind their back; the tree and git status refresh.
     fn after_disk_changes(&mut self, changes: &[(PathBuf, FileEvent)], cx: &mut Context<Self>) {
         if changes.is_empty() {
@@ -503,6 +632,29 @@ mod tests {
             version,
             edits,
         }
+    }
+
+    #[test]
+    fn a_rename_confirms_only_edits_reaching_several_files() {
+        let (a, b) = (Path::new("/p/a.ts"), Path::new("/p/b.ts"));
+        let one = WorkspaceEdit {
+            changes: vec![change(a, None, vec![edit(0, 20, 23, "./c")])],
+        };
+        let other = WorkspaceEdit {
+            changes: vec![
+                change(b, None, vec![edit(1, 20, 23, "./c")]),
+                change(a, None, vec![edit(2, 0, 0, "x")]),
+                change(Path::new("/p/empty.ts"), None, Vec::new()),
+            ],
+        };
+        assert_eq!(files_changed(std::slice::from_ref(&one)).len(), 1);
+        assert!(files_changed(std::slice::from_ref(&one)).len() <= CONFIRM_FILES);
+        let both = files_changed(&[one, other]);
+        assert_eq!(
+            both.into_iter().collect::<Vec<_>>(),
+            [a.to_path_buf(), b.to_path_buf()],
+            "each file once, untouched ones left out"
+        );
     }
 
     /// Editors as plain texts, the version each server last saw beside them.

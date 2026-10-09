@@ -259,6 +259,32 @@ impl Shell {
                 }
                 EditKind::Rename => {
                     let path = target.with_file_name(&name);
+                    if let Some(root) = self.active_root() {
+                        let (from, to) = (target.clone(), path.clone());
+                        self.rename_with_servers(
+                            &root,
+                            from,
+                            to,
+                            window,
+                            cx,
+                            move |this, w, cx| match fileops::rename(&target, &path) {
+                                Ok(()) => {
+                                    this.tree.editing = None;
+                                    this.tree_renamed(&target, &path, by_enter, w, cx);
+                                    true
+                                }
+                                Err(err) => {
+                                    let body = format!("{err:#}");
+                                    this.transient_notice("Could not do that", body, cx);
+                                    if !by_enter {
+                                        this.end_tree_edit(false, w, cx);
+                                    }
+                                    false
+                                }
+                            },
+                        );
+                        return;
+                    }
                     fileops::rename(&target, &path).map(|()| path)
                 }
             },
@@ -287,13 +313,26 @@ impl Shell {
                     self.focus_active_item(window, cx);
                 }
             }
-            EditKind::Rename => {
-                self.retarget_items(&target, &path, cx);
-                self.tree.scroll_to(&path);
-                if by_enter {
-                    self.focus_active_item(window, cx);
-                }
-            }
+            EditKind::Rename => return self.tree_renamed(&target, &path, by_enter, window, cx),
+        }
+        cx.notify();
+    }
+
+    /// What follows a rename in the tree: tabs follow the file, and the tree shows it.
+    fn tree_renamed(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        refocus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tree.invalidate();
+        self.git_kick(cx);
+        self.retarget_items(from, to, cx);
+        self.tree.scroll_to(to);
+        if refocus {
+            self.focus_active_item(window, cx);
         }
         cx.notify();
     }
