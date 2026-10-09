@@ -1,4 +1,4 @@
-use athena_workspace::git::{self, Branch, Switch};
+use athena_workspace::git::{self, Branch, Stash, Switch};
 use gpui::{Context, Window};
 
 use super::Shell;
@@ -11,6 +11,10 @@ pub(super) enum BranchPick {
     /// A remote branch with no local one yet: make a local branch tracking it.
     Track(String),
     Create(String),
+    Stash {
+        untracked: bool,
+    },
+    PopStash(usize),
 }
 
 /// One picker row: label, detail, the text the query is matched against, and what it does.
@@ -21,8 +25,9 @@ pub(super) struct BranchEntry {
     pub pick: BranchPick,
 }
 
-/// The picker's rows for `query`, VS Code's order: create from the query, local, then remote.
-pub(super) fn entries(branches: &[Branch], query: &str) -> Vec<BranchEntry> {
+/// The picker's rows for `query`, VS Code's order: create from the query, local, then remote;
+/// stashing and the stashes to pop come last.
+pub(super) fn entries(branches: &[Branch], stashes: &[Stash], query: &str) -> Vec<BranchEntry> {
     let typed = query.trim();
     let mut out = Vec::new();
     if !typed.is_empty() && !branches.iter().any(|b| b.name == typed) {
@@ -61,7 +66,35 @@ pub(super) fn entries(branches: &[Branch], query: &str) -> Vec<BranchEntry> {
             pick,
         });
     }
+    for (label, untracked) in [
+        ("Stash changes", false),
+        ("Stash changes (include untracked)", true),
+    ] {
+        out.push(BranchEntry {
+            label: label.into(),
+            detail: None,
+            key: label.into(),
+            pick: BranchPick::Stash { untracked },
+        });
+    }
+    out.extend(stash_entries(stashes));
     out
+}
+
+/// One row per stash, newest first, each popping it.
+pub(super) fn stash_entries(stashes: &[Stash]) -> Vec<BranchEntry> {
+    stashes
+        .iter()
+        .map(|s| {
+            let label = format!("Pop stash@{{{}}}: {}", s.index, s.message);
+            BranchEntry {
+                key: label.clone(),
+                label,
+                detail: Some(s.when.clone()),
+                pick: BranchPick::PopStash(s.index),
+            }
+        })
+        .collect()
 }
 
 impl Shell {
@@ -76,16 +109,44 @@ impl Shell {
         cx.spawn_in(window, async move |this, cx| {
             let listed = cx
                 .background_executor()
-                .spawn(async move { git::branches(&root) })
+                .spawn(async move { anyhow::Ok((git::branches(&root)?, git::stashes(&root)?)) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match listed {
-                Ok(branches) => {
+                Ok((branches, stashes)) => {
                     this.git.branches = branches;
+                    this.git.stashes = stashes;
                     this.open_palette(Mode::Branches, window, cx);
                 }
                 Err(err) => {
                     this.transient_notice("Could not list branches", format!("{err:#}"), cx)
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// VS Code's "Pop Stash…": lists the stashes, newest first, to pick one.
+    pub(super) fn open_stashes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        if !git::available() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let listed = cx
+                .background_executor()
+                .spawn(async move { git::stashes(&root) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match listed {
+                Ok(stashes) if stashes.is_empty() => {
+                    this.transient_notice("No stashes", "There is nothing to pop.", cx)
+                }
+                Ok(stashes) => {
+                    this.git.stashes = stashes;
+                    this.open_palette(Mode::Stashes, window, cx);
+                }
+                Err(err) => this.transient_notice("Could not list stashes", format!("{err:#}"), cx),
             });
         })
         .detach();
@@ -99,6 +160,8 @@ impl Shell {
             BranchPick::Switch(name) => (name, Switch::Existing),
             BranchPick::Track(name) => (name, Switch::Track),
             BranchPick::Create(name) => (name, Switch::Create),
+            BranchPick::Stash { untracked } => return self.git_stash(untracked, cx),
+            BranchPick::PopStash(index) => return self.git_stash_pop(index, cx),
         };
         cx.spawn(async move |this, cx| {
             let task_name = name.clone();
@@ -142,7 +205,7 @@ mod tests {
             branch("main", false, true),
             branch("origin/dev", true, false),
         ];
-        let rows = entries(&list, "feat/x");
+        let rows = entries(&list, &[], "feat/x");
         assert_eq!(rows[0].pick, BranchPick::Create("feat/x".into()));
         assert_eq!(rows[1].pick, BranchPick::Switch("main".into()));
         assert_eq!(
@@ -151,7 +214,7 @@ mod tests {
         );
         assert_eq!(rows[2].pick, BranchPick::Track("origin/dev".into()));
         assert!(
-            entries(&list, "main")
+            entries(&list, &[], "main")
                 .iter()
                 .all(|e| !matches!(e.pick, BranchPick::Create(_)))
         );
@@ -163,7 +226,32 @@ mod tests {
             branch("dev", false, false),
             branch("origin/dev", true, false),
         ];
-        let rows = entries(&list, "");
+        let rows = entries(&list, &[], "");
         assert_eq!(rows[1].pick, BranchPick::Switch("dev".into()));
+    }
+
+    #[test]
+    fn stashing_and_each_stash_follow_the_branches() {
+        let stash = Stash {
+            index: 0,
+            message: "On main: wip".into(),
+            when: "1 hour ago".into(),
+        };
+        let rows = entries(
+            &[branch("main", false, true)],
+            std::slice::from_ref(&stash),
+            "",
+        );
+        let picks: Vec<&BranchPick> = rows.iter().map(|r| &r.pick).collect();
+        assert_eq!(
+            picks,
+            [
+                &BranchPick::Switch("main".into()),
+                &BranchPick::Stash { untracked: false },
+                &BranchPick::Stash { untracked: true },
+                &BranchPick::PopStash(0),
+            ]
+        );
+        assert_eq!(rows[3].label, "Pop stash@{0}: On main: wip");
     }
 }

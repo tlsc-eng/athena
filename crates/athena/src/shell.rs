@@ -708,8 +708,8 @@ impl Render for Shell {
             |el, d| el.opacity(d).top(px(4. * (1. - d))),
         );
 
-        div()
-            .track_focus(&self.focus)
+        let root = git_view::bind_git_actions(div(), cx);
+        root.track_focus(&self.focus)
             .key_context("Shell")
             .on_action(cx.listener(Self::add_project))
             .on_action(cx.listener(Self::close_project))

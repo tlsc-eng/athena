@@ -88,10 +88,20 @@ impl Entry {
     }
 }
 
+/// The branch's upstream and how far apart they are, from the last fetch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tracking {
+    /// `origin/main`.
+    pub upstream: String,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub branch: Option<String>,
     pub entries: Vec<Entry>,
+    pub tracking: Option<Tracking>,
 }
 
 /// Parses `git status --porcelain=v2 -z --branch` output.
@@ -110,6 +120,17 @@ pub fn parse_status(out: &[u8]) -> Status {
                     status.branch = (head != "(detached)").then(|| head.to_string());
                 } else if let Some(o) = record.strip_prefix("# branch.oid ") {
                     oid = (o != "(initial)").then(|| o.chars().take(7).collect::<String>());
+                } else if let Some(up) = record.strip_prefix("# branch.upstream ") {
+                    status.tracking.get_or_insert_default().upstream = up.to_string();
+                } else if let Some(ab) = record.strip_prefix("# branch.ab ") {
+                    let tracking = status.tracking.get_or_insert_default();
+                    for part in ab.split(' ') {
+                        if let Some(n) = part.strip_prefix('+') {
+                            tracking.ahead = n.parse().unwrap_or(0);
+                        } else if let Some(n) = part.strip_prefix('-') {
+                            tracking.behind = n.parse().unwrap_or(0);
+                        }
+                    }
                 }
             }
             b'1' | b'2' | b'u' => {
@@ -395,6 +416,7 @@ pub fn prefix(root: &Path) -> Result<String> {
 pub struct Snapshot {
     pub branch: Option<String>,
     pub entries: Vec<(PathBuf, Entry)>,
+    pub tracking: Option<Tracking>,
     /// How long git took, to switch huge repositories to cheaper untracked scanning.
     pub took: Duration,
 }
@@ -429,6 +451,7 @@ pub fn status(root: &Path, prefix: &str, all_untracked: bool) -> Result<Snapshot
     Ok(Snapshot {
         branch: parsed.branch,
         entries,
+        tracking: parsed.tracking,
         took: started.elapsed(),
     })
 }
@@ -699,6 +722,115 @@ pub enum Switch {
     Existing,
     Track,
     Create,
+}
+
+/// Fetches, pulls and pushes wait on the network and on hooks; a hung one still ends.
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `git fetch` from the branch's remote, or origin.
+pub fn fetch(root: &Path) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.arg("fetch");
+    run_within(cmd, None, REMOTE_TIMEOUT).map(drop)
+}
+
+/// `git pull --ff-only`: git refuses, and says why, when the branches have diverged.
+pub fn pull(root: &Path) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.args(["pull", "--ff-only"]);
+    run_within(cmd, None, REMOTE_TIMEOUT).map(drop)
+}
+
+/// `git push`, or with `publish` the branch to that remote, setting it as the upstream.
+pub fn push(root: &Path, publish: Option<(&str, &str)>) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.arg("push");
+    if let Some((remote, branch)) = publish {
+        if remote.starts_with('-') || branch.starts_with('-') {
+            bail!("a remote or branch name cannot start with a dash");
+        }
+        cmd.args(["-u", remote, branch]);
+    }
+    run_within(cmd, None, REMOTE_TIMEOUT).map(drop)
+}
+
+/// The checked-out branch's name; `None` on a detached HEAD.
+pub fn current_branch(root: &Path) -> Result<Option<String>> {
+    let mut cmd = git(root);
+    cmd.args(["symbolic-ref", "-q", "--short", "HEAD"]);
+    match run(cmd, None) {
+        Ok(out) => Ok(Some(String::from_utf8_lossy(&out).trim().to_string())),
+        Err(e) if e.is::<TimedOut>() => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
+pub fn remotes(root: &Path) -> Result<Vec<String>> {
+    let mut cmd = git(root);
+    cmd.arg("remote");
+    Ok(String::from_utf8_lossy(&run(cmd, None)?)
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// One `git stash list` entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stash {
+    pub index: usize,
+    /// "WIP on main: 1a2b3c Fix the parser", or the message it was stashed with.
+    pub message: String,
+    /// "3 days ago".
+    pub when: String,
+}
+
+/// Parses `stash list` records of the reflog selector, subject and relative date.
+pub fn parse_stashes(out: &str) -> Vec<Stash> {
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.split('\0');
+            let index = f
+                .next()?
+                .strip_prefix("stash@{")?
+                .strip_suffix('}')?
+                .parse()
+                .ok()?;
+            Some(Stash {
+                index,
+                message: f.next().unwrap_or_default().to_string(),
+                when: f.next().unwrap_or_default().to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn stashes(root: &Path) -> Result<Vec<Stash>> {
+    let mut cmd = git(root);
+    cmd.args(["stash", "list", "--format=%gd%x00%s%x00%cr"]);
+    Ok(parse_stashes(&String::from_utf8_lossy(&run(cmd, None)?)))
+}
+
+/// `git stash push`, with untracked files too when asked, as VS Code's two Stash commands.
+pub fn stash_push(root: &Path, include_untracked: bool, message: Option<&str>) -> Result<()> {
+    let mut cmd = git(root);
+    // With literal pathspecs, git's own clean-up of stashed untracked files matches nothing.
+    cmd.env_remove("GIT_LITERAL_PATHSPECS")
+        .args(["stash", "push"]);
+    if include_untracked {
+        cmd.arg("--include-untracked");
+    }
+    if let Some(message) = message.filter(|m| !m.trim().is_empty()) {
+        cmd.args(["--message", message]);
+    }
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// `git stash pop stash@{index}`; git keeps the stash when applying it conflicts.
+pub fn stash_pop(root: &Path, index: usize) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.args(["stash", "pop", &format!("stash@{{{index}}}")]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
 /// Per-file statuses plus every folder's most severe one, for colouring a file tree.
@@ -1368,6 +1500,141 @@ mod tests {
         );
         assert_eq!(git_out(&dir, &["branch", "--show-current"]).trim(), "main");
         assert!(switch(&dir, "-f", Switch::Create).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn status_reads_the_upstream_and_how_far_apart_it_is() {
+        let out = nul(&[
+            "# branch.oid 0930e963f1c8991bb9873ea31854b682b2ec228a",
+            "# branch.head main",
+            "# branch.upstream origin/main",
+            "# branch.ab +2 -3",
+        ]);
+        let tracking = parse_status(&out).tracking.unwrap();
+        assert_eq!(tracking.upstream, "origin/main");
+        assert_eq!((tracking.ahead, tracking.behind), (2, 3));
+        let none = nul(&["# branch.oid 0930e963", "# branch.head feat"]);
+        assert_eq!(parse_status(&none).tracking, None);
+    }
+
+    #[test]
+    fn stash_records_parse() {
+        let out = "stash@{0}\0On main: mine\x002 minutes ago\nstash@{1}\0WIP on main: 1a2b Fix\x001 day ago\nnoise\n";
+        let list = parse_stashes(out);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].index, 1);
+        assert_eq!(list[0].message, "On main: mine");
+        assert_eq!(list[1].when, "1 day ago");
+    }
+
+    fn configure(dir: &Path) {
+        for (key, value) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            repo_git(dir, &["config", key, value]);
+        }
+    }
+
+    fn commit_file(dir: &Path, name: &str, contents: &str, message: &str) {
+        std::fs::write(dir.join(name), contents).unwrap();
+        stage(dir, &[PathBuf::from(name)]).unwrap();
+        commit(dir, message, false).unwrap();
+    }
+
+    fn tracking(dir: &Path) -> Option<Tracking> {
+        status(dir, "", true).unwrap().tracking
+    }
+
+    #[test]
+    fn fetch_pull_and_push_against_a_local_bare_remote() {
+        if !available() {
+            return;
+        }
+        let a = committed_repo("remote-a", "one\n");
+        let parent = a.parent().unwrap().to_path_buf();
+        let tag = format!("{}", std::process::id());
+        let bare = parent.join(format!("athena-git-remote-{tag}.git"));
+        let b = parent.join(format!("athena-git-remote-b-{tag}"));
+        let _ = std::fs::remove_dir_all(&bare);
+        let _ = std::fs::remove_dir_all(&b);
+        repo_git(&parent, &["init", "--bare", "-q", bare.to_str().unwrap()]);
+        repo_git(&a, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        assert_eq!(remotes(&a).unwrap(), ["origin"]);
+        assert_eq!(current_branch(&a).unwrap().as_deref(), Some("main"));
+        assert_eq!(tracking(&a), None);
+
+        let err = push(&a, None).unwrap_err();
+        assert!(err.to_string().contains("upstream"), "{err:#}");
+        push(&a, Some(("origin", "main"))).unwrap();
+        let t = tracking(&a).unwrap();
+        assert_eq!(
+            (t.upstream.as_str(), t.ahead, t.behind),
+            ("origin/main", 0, 0)
+        );
+
+        repo_git(
+            &parent,
+            &["clone", "-q", bare.to_str().unwrap(), b.to_str().unwrap()],
+        );
+        configure(&b);
+        commit_file(&b, "f.txt", "two\n", "Two");
+        push(&b, None).unwrap();
+
+        assert_eq!(tracking(&a).unwrap().behind, 0, "nothing fetched yet");
+        fetch(&a).unwrap();
+        assert_eq!(tracking(&a).unwrap().behind, 1);
+        pull(&a).unwrap();
+        assert_eq!(std::fs::read_to_string(a.join("f.txt")).unwrap(), "two\n");
+        assert_eq!(tracking(&a).unwrap().behind, 0);
+
+        commit_file(&a, "a.txt", "a\n", "Mine");
+        commit_file(&b, "b.txt", "b\n", "Theirs");
+        push(&b, None).unwrap();
+        fetch(&a).unwrap();
+        let t = tracking(&a).unwrap();
+        assert_eq!((t.ahead, t.behind), (1, 1));
+        let err = pull(&a).unwrap_err();
+        assert!(err.to_string().contains("fast-forward"), "{err:#}");
+        assert!(
+            !a.join("b.txt").exists(),
+            "a refused pull leaves the worktree alone"
+        );
+
+        for dir in [a, b, bare] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn stashing_and_popping_round_trips_changes() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("stash", "a\n");
+        std::fs::write(dir.join("f.txt"), "mine\n").unwrap();
+        std::fs::write(dir.join("u.txt"), "u\n").unwrap();
+        stash_push(&dir, false, Some("mine")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "a\n");
+        assert!(
+            dir.join("u.txt").exists(),
+            "untracked files stay without the option"
+        );
+        stash_push(&dir, true, None).unwrap();
+        assert!(!dir.join("u.txt").exists());
+        let list = stashes(&dir).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[1].message.ends_with("mine"), "{list:?}");
+        stash_pop(&dir, 1).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "mine\n"
+        );
+        assert_eq!(stashes(&dir).unwrap().len(), 1);
+        assert!(stash_pop(&dir, 5).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

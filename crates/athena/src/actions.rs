@@ -74,6 +74,18 @@ actions!(
     ]
 );
 
+actions!(
+    athena,
+    [
+        GitFetch,
+        GitPull,
+        GitPush,
+        GitStash,
+        GitStashIncludeUntracked,
+        GitPopStash,
+    ]
+);
+
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = athena, no_json)]
 pub struct SelectProject(pub usize);

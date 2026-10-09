@@ -1,10 +1,13 @@
 use athena_editor::{EditorView, Indent, Lang, LineEnding};
 use athena_ui::{ActiveTheme, MenuItem, Tooltip};
+use athena_workspace::git;
 use gpui::{
-    ClickEvent, Context, Entity, Focusable, IntoElement, SharedString, div, prelude::*, px,
+    ClickEvent, Context, Entity, Focusable, IntoElement, SharedString, WeakEntity, Window, div,
+    prelude::*, px,
 };
 
 use super::Shell;
+use super::git_view::Remote;
 use super::lsp::LspStatus;
 
 const HEIGHT: f32 = 22.;
@@ -95,9 +98,27 @@ impl Shell {
                 .tooltip(move |_, cx| Tooltip::view(tip, cx))
         };
 
+        let tracking = root.as_deref().and_then(|r| self.cached_tracking(r));
+        let busy = self.git.remote_busy;
         let left = branch.map(|branch| {
-            button("status-branch", branch.into(), "Switch branch")
-                .on_click(cx.listener(|this, _, window, cx| this.open_branches(window, cx)))
+            let sync = sync_label(tracking.as_ref(), busy);
+            div()
+                .flex()
+                .h_full()
+                .child(
+                    button("status-branch", branch.into(), "Switch branch").on_click(
+                        cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
+                    ),
+                )
+                .child(
+                    button("status-sync", sync.into(), "Pull, push, fetch or stash").on_click(
+                        cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            let shell = cx.entity().downgrade();
+                            let items = sync_menu(tracking.is_some(), shell);
+                            this.open_context_menu(event.position(), items, window, cx);
+                        }),
+                    ),
+                )
         });
         let right = status.zip(editor).map(|(status, editor)| {
             let position =
@@ -196,6 +217,50 @@ impl Shell {
             .child(div().flex().h_full().children(left))
             .child(div().flex().h_full().children(right))
     }
+}
+
+/// The branch's sync state: the remote operation under way, "↓2 ↑1" against its upstream, or
+/// "Publish" when it has none.
+fn sync_label(tracking: Option<&git::Tracking>, busy: Option<&'static str>) -> String {
+    match (busy, tracking) {
+        (Some(busy), _) => busy.to_string(),
+        (None, Some(t)) => format!("↓{} ↑{}", t.behind, t.ahead),
+        (None, None) => "Publish".to_string(),
+    }
+}
+
+fn sync_menu(has_upstream: bool, shell: WeakEntity<Shell>) -> Vec<MenuItem> {
+    let item = |label: &'static str, run: fn(&mut Shell, &mut Window, &mut Context<Shell>)| {
+        let shell = shell.clone();
+        MenuItem::new(label, move |window, cx| {
+            shell.update(cx, |this, cx| run(this, window, cx)).ok();
+        })
+    };
+    let mut items = Vec::new();
+    if has_upstream {
+        items.push(item("Pull", |this, w, cx| {
+            this.git_remote(Remote::Pull, false, w, cx)
+        }));
+        items.push(item("Push", |this, w, cx| {
+            this.git_remote(Remote::Push, false, w, cx)
+        }));
+    } else {
+        items.push(item("Publish Branch", |this, w, cx| {
+            this.git_remote(Remote::Push, false, w, cx)
+        }));
+    }
+    items.push(item("Fetch", |this, w, cx| {
+        this.git_remote(Remote::Fetch, false, w, cx)
+    }));
+    items.push(MenuItem::separator());
+    items.push(item("Stash Changes", |this, _, cx| {
+        this.git_stash(false, cx)
+    }));
+    items.push(item("Stash Changes (Include Untracked)", |this, _, cx| {
+        this.git_stash(true, cx)
+    }));
+    items.push(item("Pop Stash…", |this, w, cx| this.open_stashes(w, cx)));
+    items
 }
 
 /// VS Code's indentation picker, as a menu at the status item.
@@ -301,6 +366,18 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), count);
+    }
+
+    #[test]
+    fn the_sync_cell_shows_behind_then_ahead_or_offers_to_publish() {
+        let t = git::Tracking {
+            upstream: "origin/main".into(),
+            ahead: 1,
+            behind: 2,
+        };
+        assert_eq!(sync_label(Some(&t), None), "↓2 ↑1");
+        assert_eq!(sync_label(None, None), "Publish");
+        assert_eq!(sync_label(Some(&t), Some("Pulling…")), "Pulling…");
     }
 
     #[test]

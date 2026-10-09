@@ -61,6 +61,7 @@ pub(super) enum Mode {
     WorkspaceSymbols,
     /// Recently closed project folders.
     Recent,
+    Stashes,
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -182,6 +183,15 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),
         ("Switch branch…", Box::new(actions::SwitchBranch)),
+        ("Git: Fetch", Box::new(actions::GitFetch)),
+        ("Git: Pull", Box::new(actions::GitPull)),
+        ("Git: Push", Box::new(actions::GitPush)),
+        ("Git: Stash", Box::new(actions::GitStash)),
+        (
+            "Git: Stash (include untracked)",
+            Box::new(actions::GitStashIncludeUntracked),
+        ),
+        ("Git: Pop stash…", Box::new(actions::GitPopStash)),
         ("Open file to the side", Box::new(actions::QuickOpenBeside)),
         ("New Claude session", Box::new(actions::NewClaudeSession)),
         (
@@ -274,6 +284,7 @@ impl Shell {
             Mode::Symbols => "Go to symbol in file…",
             Mode::WorkspaceSymbols => "Go to symbol in workspace…",
             Mode::Recent => "Open a recent folder…",
+            Mode::Stashes => "Pop a stash…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -292,6 +303,7 @@ impl Shell {
             Mode::Files
             | Mode::FilesBeside
             | Mode::Branches
+            | Mode::Stashes
             | Mode::Symbols
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
@@ -642,8 +654,17 @@ impl Shell {
         if palette.mode == Mode::Claude {
             palette.entries = claude_entries(&query);
         }
-        if palette.mode == Mode::Branches {
-            palette.entries = super::branches::entries(&self.git.branches, &query)
+        let branch_rows = match palette.mode {
+            Mode::Branches => Some(super::branches::entries(
+                &self.git.branches,
+                &self.git.stashes,
+                &query,
+            )),
+            Mode::Stashes => Some(super::branches::stash_entries(&self.git.stashes)),
+            _ => None,
+        };
+        if let Some(rows) = branch_rows {
+            palette.entries = rows
                 .into_iter()
                 .map(|b| Entry {
                     kind: None,

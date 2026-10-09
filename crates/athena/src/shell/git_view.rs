@@ -25,6 +25,10 @@ const BLAME_DELAY: Duration = Duration::from_millis(150);
 /// A status run slower than this switches the project to cheaper untracked-file scanning.
 const SLOW_STATUS: Duration = Duration::from_secs(1);
 const ROW_HEIGHT: f32 = 24.;
+/// VS Code's `git.autofetchPeriod`.
+const AUTOFETCH_EVERY: Duration = Duration::from_secs(180);
+/// VS Code's `git.autofetch` default; a settings file can pass its own value to `set_autofetch`.
+const AUTOFETCH_DEFAULT: bool = false;
 
 #[derive(Default)]
 struct Repo {
@@ -34,6 +38,7 @@ struct Repo {
     checked: bool,
     slow: bool,
     branch: Option<String>,
+    tracking: Option<git::Tracking>,
     entries: Rc<Vec<(PathBuf, Entry)>>,
     decorations: Rc<Decorations>,
 }
@@ -63,6 +68,37 @@ pub(super) struct GitState {
     committing: bool,
     /// Branches for the branch picker, newest first.
     pub(super) branches: Vec<git::Branch>,
+    /// Stashes for the branch picker, newest first.
+    pub(super) stashes: Vec<git::Stash>,
+    /// The fetch, pull or push under way, as the status bar words it.
+    pub(super) remote_busy: Option<&'static str>,
+    autofetch: Option<Task<()>>,
+}
+
+/// A remote operation the status bar menu and the palette offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Remote {
+    Fetch,
+    Pull,
+    Push,
+}
+
+impl Remote {
+    fn busy(self) -> &'static str {
+        match self {
+            Self::Fetch => "Fetching…",
+            Self::Pull => "Pulling…",
+            Self::Push => "Pushing…",
+        }
+    }
+
+    fn failed(self) -> &'static str {
+        match self {
+            Self::Fetch => "Fetch failed",
+            Self::Pull => "Pull failed",
+            Self::Push => "Push failed",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -172,6 +208,7 @@ impl Shell {
             },
         ));
         self.git.commit_input = Some(input);
+        self.set_autofetch(AUTOFETCH_DEFAULT, window, cx);
         // The window is not active yet while it is being built, so the first run is kicked.
         self.git_kick(cx);
         self.git.poll = Some(cx.spawn_in(window, async move |this, cx| {
@@ -209,6 +246,207 @@ impl Shell {
     /// The branch for the title bar, from the last status run.
     pub(super) fn cached_branch(&self, root: &Path) -> Option<String> {
         self.git.repos.get(root)?.branch.clone()
+    }
+
+    /// The branch's upstream and ahead/behind counts, from the last status run.
+    pub(super) fn cached_tracking(&self, root: &Path) -> Option<git::Tracking> {
+        self.git.repos.get(root)?.tracking.clone()
+    }
+
+    /// Fetches the active project every three minutes while the window is in front, as VS Code's
+    /// `git.autofetch` does; off by default, also as there.
+    pub(super) fn set_autofetch(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !on {
+            self.git.autofetch = None;
+            return;
+        }
+        if self.git.autofetch.is_some() {
+            return;
+        }
+        self.git.autofetch = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTOFETCH_EVERY).await;
+                let alive = this.update_in(cx, |this, window, cx| {
+                    if window.is_window_active() && this.git.remote_busy.is_none() {
+                        this.git_remote(Remote::Fetch, true, window, cx);
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Fetch, `pull --ff-only` or push for the active project; a branch without an upstream is
+    /// published after the user agrees. `quiet` keeps a background fetch's failures out of sight.
+    pub(super) fn git_remote(
+        &mut self,
+        op: Remote,
+        quiet: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        if !git::available() || self.git.remote_busy.is_some() {
+            return;
+        }
+        if op == Remote::Push && self.cached_tracking(&root).is_none() {
+            return self.publish_branch(root, window, cx);
+        }
+        self.run_remote(root, op, None, quiet, cx);
+    }
+
+    fn run_remote(
+        &mut self,
+        root: PathBuf,
+        op: Remote,
+        publish: Option<(String, String)>,
+        quiet: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.git.remote_busy = Some(op.busy());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let task_root = root.clone();
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    match op {
+                        Remote::Fetch => git::fetch(&task_root),
+                        Remote::Pull => git::pull(&task_root),
+                        Remote::Push => git::push(
+                            &task_root,
+                            publish.as_ref().map(|(r, b)| (r.as_str(), b.as_str())),
+                        ),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.git.remote_busy = None;
+                match done {
+                    Err(err) if quiet => tracing::debug!("background {op:?}: {err:#}"),
+                    Err(err) => this.transient_notice(op.failed(), format!("{err:#}"), cx),
+                    Ok(()) if op == Remote::Pull => {
+                        this.transient_notice("Pulled", "The branch is up to date.", cx)
+                    }
+                    Ok(()) if op == Remote::Push => {
+                        this.transient_notice("Pushed", "The remote branch is up to date.", cx)
+                    }
+                    Ok(()) => {}
+                }
+                this.tree.invalidate();
+                this.git_kick(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// VS Code's "Publish Branch": asks before pushing a branch with no upstream to origin, or
+    /// the only remote.
+    fn publish_branch(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let task_root = root.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    let branch = git::current_branch(&task_root)?;
+                    let remotes = git::remotes(&task_root)?;
+                    anyhow::Ok((branch, remotes))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let (branch, remotes) = match found {
+                    Ok(found) => found,
+                    Err(err) => {
+                        return this.transient_notice("Push failed", format!("{err:#}"), cx);
+                    }
+                };
+                let Some(branch) = branch else {
+                    return this.transient_notice(
+                        "Push failed",
+                        "HEAD is detached; switch to a branch to push it.",
+                        cx,
+                    );
+                };
+                let Some(remote) = publish_remote(&remotes) else {
+                    return this.transient_notice(
+                        "No remote to push to",
+                        "Add one with git remote add, then push again.",
+                        cx,
+                    );
+                };
+                let message = format!("The branch “{branch}” has no upstream branch.");
+                let detail = format!(
+                    "Publish it to {remote}? Athena runs git push -u {remote} {branch}, so later \
+                     pushes and pulls go there."
+                );
+                let answer = window.prompt(
+                    PromptLevel::Info,
+                    &message,
+                    Some(&detail),
+                    &["Publish Branch", "Cancel"],
+                    cx,
+                );
+                cx.spawn(async move |this, cx| {
+                    if answer.await == Ok(0) {
+                        let _ = this.update(cx, |this, cx| {
+                            let publish = Some((remote, branch));
+                            this.run_remote(root, Remote::Push, publish, false, cx)
+                        });
+                    }
+                })
+                .detach();
+            });
+        })
+        .detach();
+    }
+
+    /// `git stash push`, as VS Code's Stash and Stash (Include Untracked).
+    pub(super) fn git_stash(&mut self, include_untracked: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        self.git_background(
+            "Could not stash",
+            move || git::stash_push(&root, include_untracked, None),
+            cx,
+        );
+    }
+
+    /// `git stash pop` of the stash at `index`.
+    pub(super) fn git_stash_pop(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        self.git_background(
+            "Could not pop the stash",
+            move || git::stash_pop(&root, index),
+            cx,
+        );
+    }
+
+    /// Runs a git write off the main thread, then reports its failure and re-reads the status.
+    fn git_background(
+        &mut self,
+        failed: &'static str,
+        job: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let done = cx.background_executor().spawn(async move { job() }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = done {
+                    this.transient_notice(failed, format!("{err:#}"), cx);
+                }
+                this.tree.invalidate();
+                this.git_kick(cx);
+            });
+        })
+        .detach();
     }
 
     /// A project's git state, seeded from .git/HEAD so the title bar has a branch before git answers.
@@ -321,8 +559,13 @@ impl Shell {
         repo.prefix = Some(prefix);
         let first = !std::mem::replace(&mut repo.checked, true);
         // Most polls find nothing new; skipping the redraw keeps an idle window idle.
-        if first || *repo.entries != snapshot.entries || repo.branch != snapshot.branch {
+        if first
+            || *repo.entries != snapshot.entries
+            || repo.branch != snapshot.branch
+            || repo.tracking != snapshot.tracking
+        {
             repo.branch = snapshot.branch;
+            repo.tracking = snapshot.tracking;
             repo.decorations = Rc::new(Decorations::new(root, &snapshot.entries));
             repo.entries = Rc::new(snapshot.entries);
             cx.notify();
@@ -1168,6 +1411,29 @@ impl Shell {
     }
 }
 
+/// Binds the git remote and stash commands on the shell's root element.
+pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::Div {
+    use crate::actions::{GitFetch, GitPopStash, GitPull, GitPush, GitStash};
+    el.on_action(
+        cx.listener(|this, _: &GitFetch, w, cx| this.git_remote(Remote::Fetch, false, w, cx)),
+    )
+    .on_action(cx.listener(|this, _: &GitPull, w, cx| this.git_remote(Remote::Pull, false, w, cx)))
+    .on_action(cx.listener(|this, _: &GitPush, w, cx| this.git_remote(Remote::Push, false, w, cx)))
+    .on_action(cx.listener(|this, _: &GitStash, _, cx| this.git_stash(false, cx)))
+    .on_action(cx.listener(
+        |this, _: &crate::actions::GitStashIncludeUntracked, _, cx| this.git_stash(true, cx),
+    ))
+    .on_action(cx.listener(|this, _: &GitPopStash, w, cx| this.open_stashes(w, cx)))
+}
+
+/// Where Publish Branch pushes: origin when there is one, else the only remote.
+fn publish_remote(remotes: &[String]) -> Option<String> {
+    match remotes {
+        [only] => Some(only.clone()),
+        many => many.iter().find(|r| *r == "origin").cloned(),
+    }
+}
+
 /// A commit message from the one-line box plus the body kept aside while amending.
 fn with_body(subject: &str, body: &str) -> String {
     format!("{}\n\n{body}", subject.trim_end())
@@ -1243,6 +1509,21 @@ fn row_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publishing_prefers_origin_and_asks_nothing_of_many_others() {
+        let list = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            publish_remote(&list(&["upstream"])).as_deref(),
+            Some("upstream")
+        );
+        assert_eq!(
+            publish_remote(&list(&["fork", "origin"])).as_deref(),
+            Some("origin")
+        );
+        assert_eq!(publish_remote(&list(&["a", "b"])), None);
+        assert_eq!(publish_remote(&[]), None);
+    }
 
     #[test]
     fn amending_sends_the_kept_body_back_after_the_subject() {
