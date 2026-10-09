@@ -68,7 +68,13 @@ pub(super) fn diff_title(path: &Path, base: &DiffBase) -> String {
         DiffBase::Proposal { .. } => format!("{name} (Claude's Proposal)"),
         DiffBase::SearchReplace => format!("{name} (Replace Preview)"),
         DiffBase::Conflict => format!("{name} (Current ↔ Incoming)"),
-        DiffBase::Commit { rev, .. } => format!("{name} ({0}^ ↔ {0})", short_rev(rev)),
+        DiffBase::Commit { rev, parent, .. } => {
+            format!(
+                "{name} ({} ↔ {})",
+                parent_label(rev, parent),
+                short_rev(rev)
+            )
+        }
         DiffBase::Revision { rev, .. } => format!("{name} ({} ↔ Working Tree)", short_rev(rev)),
         DiffBase::Files { other } => format!("{} ↔ {name}", file_label(other)),
     }
@@ -77,6 +83,18 @@ pub(super) fn diff_title(path: &Path, base: &DiffBase) -> String {
 /// The 7-character id git shows for a commit.
 pub(super) fn short_rev(rev: &str) -> &str {
     &rev[..rev.len().min(7)]
+}
+
+/// The side a commit's diff compares against: the parent blame named, else the first parent.
+fn parent_rev(rev: &str, parent: &Option<String>) -> String {
+    parent.clone().unwrap_or_else(|| format!("{rev}^"))
+}
+
+fn parent_label(rev: &str, parent: &Option<String>) -> String {
+    match parent {
+        Some(p) => short_rev(p).to_string(),
+        None => format!("{}^", short_rev(rev)),
+    }
 }
 
 fn sides(base: &DiffBase) -> (String, String, HunkActions) {
@@ -113,9 +131,9 @@ fn sides(base: &DiffBase) -> (String, String, HunkActions) {
             "Incoming Changes",
             HunkActions::default(),
         ),
-        DiffBase::Commit { rev, .. } => {
-            let short = short_rev(rev);
-            return (format!("{short}^"), short.into(), HunkActions::default());
+        DiffBase::Commit { rev, parent, .. } => {
+            let old = parent_label(rev, parent);
+            return (old, short_rev(rev).into(), HunkActions::default());
         }
         DiffBase::Revision { rev, .. } => {
             let short = short_rev(rev).to_string();
@@ -205,9 +223,14 @@ fn load_with(
         }
         DiffBase::Proposal { .. } => bail!("Claude's proposed change is no longer waiting."),
         DiffBase::SearchReplace => bail!("A replace preview comes from the search."),
-        DiffBase::Commit { rev, old, new } => {
+        DiffBase::Commit {
+            rev,
+            old,
+            new,
+            parent,
+        } => {
             let before = match old {
-                Some(old) => git::show_at(root, &format!("{rev}^"), old)?,
+                Some(old) => git::show_at(root, &parent_rev(rev, parent), old)?,
                 None => None,
             };
             (before, git::show_at(root, rev, new)?)
@@ -424,12 +447,19 @@ impl Shell {
                 "Could not unstage the change",
                 Box::new(move || unstage_hunk(&dir, &rel, &head_rel, &expected, &contents)),
             ),
-            DiffEvent::Revert { contents, expected } => (
-                "Could not revert the change",
-                Box::new(move || {
-                    git::revert_file(&dir, &rel, &expected, &contents, &backup_dir()?)
-                }),
-            ),
+            DiffEvent::Revert { contents, expected } => {
+                // The index side was read without the file's filter, so it is not what belongs on disk.
+                let from_index = *base == DiffBase::Index;
+                (
+                    "Could not revert the change",
+                    Box::new(move || {
+                        if from_index {
+                            git::refuse_filtered(&dir, &rel)?;
+                        }
+                        git::revert_file(&dir, &rel, &expected, &contents, &backup_dir()?)
+                    }),
+                )
+            }
             DiffEvent::OpenFile | DiffEvent::Accept | DiffEvent::Reject => return,
         };
         let root = root.to_path_buf();
@@ -686,8 +716,17 @@ mod tests {
             rev: "0123456789abcdef".into(),
             old: None,
             new: "main.go".into(),
+            parent: None,
         };
         assert_eq!(diff_title(p, &commit), "main.go (0123456^ ↔ 0123456)");
+        let blamed = DiffBase::Commit {
+            rev: "0123456789abcdef".into(),
+            old: None,
+            new: "main.go".into(),
+            parent: Some("fedcba9876543210".into()),
+        };
+        assert_eq!(diff_title(p, &blamed), "main.go (fedcba9 ↔ 0123456)");
+        assert_eq!(sides(&blamed).0, "fedcba9");
         let files = DiffBase::Files {
             other: "/r/old.go".into(),
         };
@@ -736,8 +775,17 @@ mod tests {
             rev: rev.clone(),
             old: Some("sub/a.txt".into()),
             new: "sub/b.txt".into(),
+            parent: None,
         };
         assert_eq!(pair(commit), ("one\n".into(), "one\ntwo\n".into()));
+        // A parent blame names is read as it is, not as the commit's first parent.
+        let named = DiffBase::Commit {
+            rev: rev.clone(),
+            old: Some("sub/b.txt".into()),
+            new: "sub/b.txt".into(),
+            parent: Some(rev.clone()),
+        };
+        assert_eq!(pair(named), ("one\ntwo\n".into(), "one\ntwo\n".into()));
         let revision = DiffBase::Revision {
             rev,
             at: "sub/b.txt".into(),

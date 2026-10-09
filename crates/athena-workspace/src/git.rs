@@ -5,7 +5,8 @@ use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{OnceLock, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -321,18 +322,79 @@ pub fn available() -> bool {
     })
 }
 
-fn git(root: &Path) -> Command {
+/// A git that runs the clean and smudge filters config names, for commands the user asked for
+/// that write file contents and would store or check out the wrong bytes without them.
+fn filtering_git(root: &Path) -> Command {
     let mut cmd = Command::new(GIT);
     cmd.arg("-C")
         .arg(root)
         .arg("--no-optional-locks")
         // A repository's own config must not make opening it run a command.
-        .args(["-c", "core.fsmonitor=false"])
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "log.showSignature=false",
+        ])
         .env("GIT_TERMINAL_PROMPT", "0")
         // File names like `app/[slug]/page.tsx` are paths, not glob patterns.
         .env("GIT_LITERAL_PATHSPECS", "1")
         .stdin(Stdio::null());
     cmd
+}
+
+/// A git whose filter drivers are all switched off, so reading a repository never runs a command
+/// its config names; line-ending conversion is built in and still applies.
+fn git(root: &Path) -> Command {
+    let mut probe = filtering_git(root);
+    probe.args(["config", "-z", "--get-regexp", r"^filter\."]);
+    // No match exits 1, and a config git cannot read fails the real run before any filter.
+    let drivers = run(probe, None)
+        .map(|out| filter_drivers(&out))
+        .unwrap_or_default();
+    let mut cmd = filtering_git(root);
+    without_filters(&mut cmd, &drivers);
+    cmd
+}
+
+/// Driver names in `git config -z --get-regexp` output for `filter.<name>.<key>`.
+fn filter_drivers(out: &[u8]) -> Vec<String> {
+    let mut names: Vec<String> = out
+        .split(|&b| b == 0)
+        .filter_map(|entry| {
+            let key = String::from_utf8_lossy(entry.split(|&b| b == b'\n').next()?).into_owned();
+            let (name, _) = key.strip_prefix("filter.")?.rsplit_once('.')?;
+            Some(name.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Empties each driver's commands through `GIT_CONFIG_KEY_n`, which takes a name with `=` or
+/// spaces as it is, after any such settings Athena itself was started with.
+fn without_filters(cmd: &mut Command, drivers: &[String]) {
+    let mut n: usize = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    for name in drivers {
+        for (key, value) in [
+            ("clean", ""),
+            ("smudge", ""),
+            ("process", ""),
+            ("required", "false"),
+        ] {
+            cmd.env(
+                format!("GIT_CONFIG_KEY_{n}"),
+                format!("filter.{name}.{key}"),
+            )
+            .env(format!("GIT_CONFIG_VALUE_{n}"), value);
+            n += 1;
+        }
+    }
+    cmd.env("GIT_CONFIG_COUNT", n.to_string());
 }
 
 fn run(cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
@@ -341,13 +403,13 @@ fn run(cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
 
 /// A git that talks to a remote: no prompt can wait on a terminal or dialog nobody sees.
 fn remote_git(root: &Path) -> Command {
-    let mut probe = git(root);
+    let mut probe = filtering_git(root);
     probe.args(["config", "--get", "core.sshCommand"]);
     let ssh_configured = ["GIT_SSH_COMMAND", "GIT_SSH"]
         .iter()
         .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
         || run(probe, None).is_ok_and(|out| !out.trim_ascii().is_empty());
-    let mut cmd = git(root);
+    let mut cmd = filtering_git(root);
     never_prompt(&mut cmd, ssh_configured);
     cmd
 }
@@ -408,7 +470,56 @@ impl std::fmt::Display for TimedOut {
 
 impl std::error::Error for TimedOut {}
 
-fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<Vec<u8>> {
+/// Error from a run stopped through its [`Cancel`].
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("git was stopped")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Stops a run from another thread: its git is killed and the run fails with [`Cancelled`].
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Cancels when dropped, so dropping the task that holds it stops the git it started.
+    pub fn on_drop(&self) -> CancelOnDrop {
+        CancelOnDrop(self.clone())
+    }
+}
+
+/// See [`Cancel::on_drop`].
+pub struct CancelOnDrop(Cancel);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+fn run_within(cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<Vec<u8>> {
+    run_until(cmd, stdin, limit, &Cancel::default())
+}
+
+fn run_until(
+    mut cmd: Command,
+    stdin: Option<&str>,
+    limit: Duration,
+    cancel: &Cancel,
+) -> Result<Vec<u8>> {
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     }
@@ -440,6 +551,11 @@ fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<
     let succeeded = loop {
         if let Some(succeeded) = exited(pid) {
             break succeeded;
+        }
+        if cancel.is_cancelled() {
+            kill_all(&mut child);
+            let _ = child.wait();
+            return Err(Cancelled.into());
         }
         if Instant::now() >= deadline {
             kill_all(&mut child);
@@ -533,8 +649,15 @@ pub fn diff_hunks(root: &Path, path: &Path) -> Result<Vec<Hunk>> {
         .strip_prefix(root)
         .context("file is outside the project")?;
     let mut cmd = git(root);
-    cmd.args(["diff", "--no-color", "--no-ext-diff", "-U0", "--"])
-        .arg(rel);
+    cmd.args([
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-U0",
+        "--",
+    ])
+    .arg(rel);
     Ok(parse_hunks(&String::from_utf8_lossy(&run(cmd, None)?)))
 }
 
@@ -544,18 +667,26 @@ pub fn blame_line(
     path: &Path,
     line: usize,
     contents: Option<&str>,
+    cancel: &Cancel,
 ) -> Result<Option<Blame>> {
     let rel = path
         .strip_prefix(root)
         .context("file is outside the project")?;
     let n = line + 1;
     let mut cmd = git(root);
-    cmd.args(["blame", "--porcelain", "-L", &format!("{n},{n}")]);
+    cmd.args([
+        "blame",
+        "--porcelain",
+        "--no-textconv",
+        "-L",
+        &format!("{n},{n}"),
+    ]);
     if contents.is_some() {
         cmd.args(["--contents", "-"]);
     }
     cmd.arg("--").arg(rel);
-    Ok(parse_blame(&String::from_utf8_lossy(&run(cmd, contents)?)))
+    let out = run_until(cmd, contents, TIMEOUT, cancel)?;
+    Ok(parse_blame(&String::from_utf8_lossy(&out)))
 }
 
 /// A commit that last changed some lines of a blamed file.
@@ -571,6 +702,8 @@ pub struct BlameCommit {
     pub path: String,
     /// The file's path in the parent the lines came from; `None` for a root or boundary commit.
     pub previous: Option<String>,
+    /// The parent commit the lines came from, with `previous`.
+    pub parent: Option<String>,
 }
 
 /// Whole-file blame: the commits, and which of them each zero-based line came from.
@@ -610,6 +743,7 @@ pub fn parse_file_blame(out: &str) -> FileBlame {
                     uncommitted: sha.bytes().all(|b| b == b'0'),
                     path: String::new(),
                     previous: None,
+                    parent: None,
                 });
             }
             current = Some(i);
@@ -624,7 +758,12 @@ pub fn parse_file_blame(out: &str) -> FileBlame {
             "author-time" => c.time = value.parse().unwrap_or(0),
             "summary" => c.summary = value.to_string(),
             "filename" => c.path = value.to_string(),
-            "previous" => c.previous = value.split_once(' ').map(|(_, p)| p.to_string()),
+            "previous" => {
+                if let Some((sha, path)) = value.split_once(' ') {
+                    c.parent = Some(sha.to_string());
+                    c.previous = Some(path.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -632,19 +771,23 @@ pub fn parse_file_blame(out: &str) -> FileBlame {
 }
 
 /// Blames every line of a file; `contents` blames unsaved text instead of the file on disk.
-pub fn blame_file(root: &Path, path: &Path, contents: Option<&str>) -> Result<FileBlame> {
+pub fn blame_file(
+    root: &Path,
+    path: &Path,
+    contents: Option<&str>,
+    cancel: &Cancel,
+) -> Result<FileBlame> {
     let rel = path
         .strip_prefix(root)
         .context("file is outside the project")?;
     let mut cmd = git(root);
-    cmd.args(["blame", "--porcelain"]);
+    cmd.args(["blame", "--porcelain", "--no-textconv"]);
     if contents.is_some() {
         cmd.args(["--contents", "-"]);
     }
     cmd.arg("--").arg(rel);
-    Ok(parse_file_blame(&String::from_utf8_lossy(&run(
-        cmd, contents,
-    )?)))
+    let out = run_until(cmd, contents, TIMEOUT, cancel)?;
+    Ok(parse_file_blame(&String::from_utf8_lossy(&out)))
 }
 
 /// One commit in a file's history, newest first in [`file_log`].
@@ -664,30 +807,45 @@ pub struct LogEntry {
 
 /// The most commits the timeline lists.
 pub const LOG_LIMIT: usize = 500;
-const LOG_FORMAT: &str = "--format=%x1e%H%x00%P%x00%an%x00%at%x00%s";
+const LOG_FORMAT: &str = "--format=%H%x00%P%x00%an%x00%at%x00%s";
+
+/// Whether a `--name-status` field is a status letter rather than a path or commit id.
+fn is_name_status(field: &str) -> bool {
+    let mut chars = field.chars();
+    chars.next().is_some_and(|c| "ACDMRTUXB".contains(c)) && chars.all(|c| c.is_ascii_digit())
+}
 
 /// Parses `git log -z --name-status` written with `LOG_FORMAT`; `path` is the file's current
 /// path from the repository's top, followed back through renames.
 pub fn parse_log(out: &[u8], path: &str) -> Vec<LogEntry> {
     let text = String::from_utf8_lossy(out);
+    // Only NUL separates fields, and no subject or name can hold one, so none can fake a record.
+    let mut fields = text
+        .split('\0')
+        .map(|f| f.trim_start_matches('\n'))
+        .peekable();
     let mut tracking = path.to_string();
     let mut entries = Vec::new();
-    for record in text.split('\x1e').filter(|r| !r.trim().is_empty()) {
-        let mut fields = record.split('\0');
-        let (Some(sha), Some(parents), Some(author), Some(time), Some(subject)) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        ) else {
+    while let Some(sha) = fields.next() {
+        if sha.is_empty() {
             continue;
+        }
+        let (Some(parents), Some(author), Some(time), Some(subject)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            break;
         };
+        let mut names = Vec::new();
+        while let Some(status) = fields.next_if(|f| is_name_status(f)) {
+            let paths = if status.starts_with(['R', 'C']) { 2 } else { 1 };
+            names.push(status);
+            names.extend(fields.by_ref().take(paths));
+        }
         if sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
-        let mut status = fields.map(|f| f.trim_start_matches('\n'));
-        let mut name = || status.next().unwrap_or_default().to_string();
+        let mut name = names.into_iter().map(str::to_string);
+        let mut name = || name.next().unwrap_or_default();
         // A merge has no name-status of its own; the file keeps the name it has after it.
         let (now, before) = match name().as_str() {
             s if s.starts_with('R') || s.starts_with('C') => {
@@ -724,7 +882,7 @@ pub fn parse_log(out: &[u8], path: &str) -> Vec<LogEntry> {
 }
 
 /// The commits that changed a file, newest first, following it through renames.
-pub fn file_log(root: &Path, path: &Path) -> Result<Vec<LogEntry>> {
+pub fn file_log(root: &Path, path: &Path, cancel: &Cancel) -> Result<Vec<LogEntry>> {
     let rel = path
         .strip_prefix(root)
         .context("file is outside the project")?;
@@ -734,7 +892,7 @@ pub fn file_log(root: &Path, path: &Path) -> Result<Vec<LogEntry>> {
         .arg(format!("--max-count={LOG_LIMIT}"))
         .arg("--")
         .arg(rel);
-    Ok(parse_log(&run(cmd, None)?, &top))
+    Ok(parse_log(&run_until(cmd, None, TIMEOUT, cancel)?, &top))
 }
 
 /// Whether `rev` is a commit id, optionally naming its first parent with a trailing `^`.
@@ -768,7 +926,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// `git add` for the given paths.
 pub fn stage(root: &Path, paths: &[PathBuf]) -> Result<()> {
-    let mut cmd = git(root);
+    let mut cmd = filtering_git(root);
     cmd.args(["add", "--"]).args(paths);
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
@@ -796,8 +954,8 @@ pub enum Rev {
     Index,
 }
 
-/// A file's contents at HEAD or in the index as checkout would write them (line endings and
-/// filters applied); `None` when it is not there (new, or no commits yet).
+/// A file's contents at HEAD or in the index as checkout would write them, line endings applied
+/// but no filter driver run; `None` when it is not there (new, or no commits yet).
 pub fn show(root: &Path, rev: Rev, rel: &Path) -> Result<Option<Vec<u8>>> {
     let spec = match rev {
         Rev::Head => format!("HEAD:./{}", rel.display()),
@@ -815,9 +973,28 @@ pub fn show(root: &Path, rev: Rev, rel: &Path) -> Result<Option<Vec<u8>>> {
     run(cmd, None).map(Some)
 }
 
+/// Refuses a file that goes through a filter driver: its hunks were read without the driver, so
+/// only git itself, staging or restoring the whole file, can store or write it correctly.
+pub fn refuse_filtered(root: &Path, rel: &Path) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.args(["check-attr", "-z", "filter", "--"]).arg(rel);
+    let out = run(cmd, None)?;
+    let driver = out.split(|&b| b == 0).nth(2).unwrap_or_default();
+    match driver {
+        b"" | b"unspecified" | b"unset" | b"set" => Ok(()),
+        name => bail!(
+            "{} goes through the \"{}\" filter, so Athena stages and reverts it only as a whole \
+             file.",
+            rel.display(),
+            String::from_utf8_lossy(name)
+        ),
+    }
+}
+
 /// Puts `contents` in the index as `rel`, or takes `rel` out of it for `None`, leaving the
 /// worktree alone; staging one hunk does this. Refuses when the index no longer holds `expected`.
 pub fn write_index(root: &Path, rel: &Path, expected: &str, contents: Option<&str>) -> Result<()> {
+    refuse_filtered(root, rel)?;
     let now = show(root, Rev::Index, rel)?.unwrap_or_default();
     if now != expected.as_bytes() {
         bail!(
@@ -833,7 +1010,7 @@ pub fn write_index(root: &Path, rel: &Path, expected: &str, contents: Option<&st
         return run(remove, None).map(drop);
     };
     let mut hash = git(root);
-    // `--path` runs the clean side of the file's filters and line-ending conversion.
+    // `--path` applies the file's line-ending conversion.
     hash.args(["hash-object", "-w", "--stdin", "--path"])
         .arg(rel);
     let sha = String::from_utf8_lossy(&run(hash, Some(contents))?)
@@ -865,7 +1042,8 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Commits the index with `message`, or rewrites the last commit with it when `amend`.
 pub fn commit(root: &Path, message: &str, amend: bool) -> Result<()> {
-    let mut cmd = git(root);
+    // Its hooks may stage files, and a git they start inherits these settings.
+    let mut cmd = filtering_git(root);
     cmd.args(["commit", "--quiet", "--file", "-"]);
     if amend {
         cmd.arg("--amend");
@@ -897,7 +1075,7 @@ fn keep_copy(root: &Path, rel: &Path, backup: &Path) -> Result<()> {
 /// Throws away a tracked file's unstaged changes, keeping a copy of it in `backup` first.
 pub fn discard(root: &Path, rel: &Path, backup: &Path) -> Result<()> {
     keep_copy(root, rel, backup)?;
-    let mut cmd = git(root);
+    let mut cmd = filtering_git(root);
     cmd.args(["restore", "--worktree", "--"]).arg(rel);
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
@@ -981,7 +1159,7 @@ pub fn switch(root: &Path, branch: &str, how: Switch) -> Result<()> {
     if branch.starts_with('-') {
         bail!("a branch name cannot start with a dash");
     }
-    let mut cmd = git(root);
+    let mut cmd = filtering_git(root);
     cmd.arg("switch");
     match how {
         Switch::Existing => cmd.arg("--no-guess"),
@@ -1091,7 +1269,7 @@ pub fn stashes(root: &Path) -> Result<Vec<Stash>> {
 
 /// `git stash push`, with untracked files too when asked, as VS Code's two Stash commands.
 pub fn stash_push(root: &Path, include_untracked: bool, message: Option<&str>) -> Result<()> {
-    let mut cmd = git(root);
+    let mut cmd = filtering_git(root);
     // With literal pathspecs, git's own clean-up of stashed untracked files matches nothing.
     cmd.env_remove("GIT_LITERAL_PATHSPECS")
         .args(["stash", "push"]);
@@ -1113,7 +1291,7 @@ pub fn stash_pop(root: &Path, commit: &str) -> Result<()> {
     let Some(index) = out.lines().position(|h| h == commit) else {
         bail!("that stash is no longer in the stash list");
     };
-    let mut cmd = git(root);
+    let mut cmd = filtering_git(root);
     cmd.args(["stash", "pop", &format!("stash@{{{index}}}")]);
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
@@ -1545,18 +1723,19 @@ mod tests {
                 Hunk::Added { start: 3, len: 1 }
             ]
         );
-        let first = blame_line(&sub, &sub.join("f.txt"), 0, None)
+        let none = Cancel::default();
+        let first = blame_line(&sub, &sub.join("f.txt"), 0, None, &none)
             .unwrap()
             .unwrap();
         assert_eq!(
             (first.author.as_str(), first.summary.as_str()),
             ("Test", "init")
         );
-        let changed = blame_line(&sub, &sub.join("f.txt"), 1, None)
+        let changed = blame_line(&sub, &sub.join("f.txt"), 1, None, &none)
             .unwrap()
             .unwrap();
         assert!(changed.uncommitted);
-        let unsaved = blame_line(&sub, &sub.join("f.txt"), 0, Some("z\nB\n"))
+        let unsaved = blame_line(&sub, &sub.join("f.txt"), 0, Some("z\nB\n"), &none)
             .unwrap()
             .unwrap();
         assert!(unsaved.uncommitted);
@@ -1734,7 +1913,7 @@ mod tests {
     }
 
     #[test]
-    fn hunks_go_through_the_repositorys_line_endings_and_filters() {
+    fn hunks_keep_line_endings_and_refuse_files_behind_a_filter() {
         if !available() {
             return;
         }
@@ -1779,16 +1958,121 @@ mod tests {
 
         assert_eq!(
             show(&dir, Rev::Head, Path::new("g.dat")).unwrap().unwrap(),
-            b"ONE\nTWO\n"
+            b"one\ntwo\n",
+            "showing a stored version runs no filter driver"
         );
         std::fs::write(dir.join("g.dat"), "ONE\nTHREE\n").unwrap();
-        write_index(&dir, Path::new("g.dat"), "ONE\nTWO\n", Some("ONE\nTHREE\n")).unwrap();
-        assert_eq!(
-            git_out(&dir, &["cat-file", "blob", ":g.dat"]),
-            "one\nthree\n"
-        );
-        assert!(git_out(&dir, &["diff", "--", "g.dat"]).is_empty());
+        let err =
+            write_index(&dir, Path::new("g.dat"), "one\ntwo\n", Some("one\nthree\n")).unwrap_err();
+        assert!(err.to_string().contains("\"caps\" filter"), "{err:#}");
+        assert_eq!(git_out(&dir, &["cat-file", "blob", ":g.dat"]), "one\ntwo\n");
+        refuse_filtered(&dir, Path::new("f.txt")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reading_a_repository_never_runs_its_filters_or_textconv() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("no-filters", "a\nb\n");
+        let ran = dir.with_extension("ran");
+        let _ = std::fs::remove_dir_all(&ran);
+        std::fs::create_dir_all(&ran).unwrap();
+        std::fs::write(dir.join("e.crlf"), "x\r\ny\r\n").unwrap();
+        std::fs::write(dir.join("g.dat"), "g\n").unwrap();
+        // Info attributes come from the repository's own folder, which --attr-source leaves in force.
+        std::fs::write(
+            dir.join(".git/info/attributes"),
+            "*.txt filter=evil diff=evil\n*.dat filter=proc\n*.crlf text eol=crlf\n",
+        )
+        .unwrap();
+        repo_git(&dir, &["add", "-A"]);
+        repo_git(&dir, &["commit", "-qm", "more"]);
+        let touch = |what: &str| format!("touch '{}'; cat", ran.join(what).display());
+        repo_git(&dir, &["config", "filter.evil.clean", &touch("clean")]);
+        repo_git(&dir, &["config", "filter.evil.smudge", &touch("smudge")]);
+        repo_git(&dir, &["config", "filter.evil.required", "true"]);
+        repo_git(&dir, &["config", "diff.evil.textconv", &touch("textconv")]);
+        repo_git(&dir, &["config", "filter.proc.process", &touch("process")]);
+        std::fs::write(dir.join("f.txt"), "a\nB\n").unwrap();
+        std::fs::write(dir.join("g.dat"), "h\n").unwrap();
+        std::fs::write(dir.join("e.crlf"), "x\r\nY\r\n").unwrap();
+
+        let none = Cancel::default();
+        let f = dir.join("f.txt");
+        let snap = status(&dir, "", true).unwrap();
+        assert!(
+            snap.entries.iter().any(|(p, _)| *p == f),
+            "{:?}",
+            snap.entries
+        );
+        assert_eq!(
+            diff_hunks(&dir, &f).unwrap(),
+            vec![Hunk::Modified { start: 1, len: 1 }]
+        );
+        assert!(!diff_hunks(&dir, &dir.join("g.dat")).unwrap().is_empty());
+        blame_line(&dir, &f, 0, None, &none).unwrap().unwrap();
+        blame_file(&dir, &f, None, &none).unwrap();
+        blame_file(&dir, &f, Some("a\nb\nc\n"), &none).unwrap();
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_eq!(show_at(&dir, &head, "f.txt").unwrap().unwrap(), b"a\nb\n");
+        assert_eq!(file_log(&dir, &f, &none).unwrap().len(), 1);
+        for path in ["f.txt", "g.dat"] {
+            show(&dir, Rev::Head, Path::new(path)).unwrap().unwrap();
+            show(&dir, Rev::Index, Path::new(path)).unwrap().unwrap();
+        }
+        let err = write_index(&dir, Path::new("f.txt"), "a\nb\n", Some("a\nB\n")).unwrap_err();
+        assert!(err.to_string().contains("\"evil\" filter"), "{err:#}");
+        write_index(&dir, Path::new("e.crlf"), "x\r\ny\r\n", Some("x\r\nY\r\n")).unwrap();
+        assert_eq!(git_out(&dir, &["cat-file", "blob", ":e.crlf"]), "x\nY\n");
+        let listed: Vec<_> = std::fs::read_dir(&ran).unwrap().flatten().collect();
+        assert!(listed.is_empty(), "a filter or textconv ran: {listed:?}");
+
+        // Staging a whole file is git's own add, filters and all.
+        stage(&dir, &[PathBuf::from("f.txt")]).unwrap();
+        assert!(ran.join("clean").exists());
+        for d in [dir, ran] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    #[test]
+    fn driver_names_come_whole_from_the_config_listing() {
+        let out =
+            b"filter.lfs.clean\ngit-lfs clean -- %f\0filter.lfs.process\ngit-lfs filter-process\0\
+                    filter.a.b=c.smudge\ncat\0filter.x.required\0";
+        assert_eq!(filter_drivers(out), ["a.b=c", "lfs", "x"]);
+        let mut cmd = Command::new("/usr/bin/env");
+        without_filters(&mut cmd, &["a.b=c".to_string()]);
+        let env: HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+            .collect();
+        let base: usize = std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        assert_eq!(env["GIT_CONFIG_COUNT"], (base + 4).to_string());
+        assert_eq!(env[&format!("GIT_CONFIG_KEY_{base}")], "filter.a.b=c.clean");
+        assert_eq!(env[&format!("GIT_CONFIG_VALUE_{}", base + 3)], "false");
+    }
+
+    #[test]
+    fn a_cancelled_run_kills_its_command_at_once() {
+        let cancel = Cancel::default();
+        let guard = cancel.on_drop();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(guard);
+        });
+        let started = Instant::now();
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("30");
+        let err = run_until(cmd, None, Duration::from_secs(20), &cancel).unwrap_err();
+        assert!(err.is::<Cancelled>(), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        stopper.join().unwrap();
     }
 
     #[test]
@@ -2081,10 +2365,10 @@ mod tests {
 
     #[test]
     fn log_records_follow_renames_back_and_keep_non_ascii_authors() {
-        let out = "\x1eaaaaaaa1\0bbbbbbb2 ccccccc3\0Zoë\x001700000000\0Merge branch 'x'\0\
-                   \x1ebbbbbbb2\0ddddddd4\0Ann\x001600000000\0Edit\0\nM\0src/new.rs\0\
-                   \x1eddddddd4\0eeeeeee5\0Ann\x001500000000\0Move\0\nR097\0src/old.rs\0src/new.rs\0\
-                   \x1eeeeeeee5\0\0李\x001400000000\0Start\0\nA\0src/old.rs\0";
+        let out = "aaaaaaa1\0bbbbbbb2 ccccccc3\0Zoë\x001700000000\0Merge branch 'x'\0\
+                   bbbbbbb2\0ddddddd4\0Ann\x001600000000\0Edit\0\nM\0src/new.rs\0\
+                   ddddddd4\0eeeeeee5\0Ann\x001500000000\0Move\0\nR097\0src/old.rs\0src/new.rs\0\
+                   eeeeeee5\0\0李\x001400000000\0Start\0\nA\0src/old.rs\0";
         let log = parse_log(out.as_bytes(), "src/new.rs");
         assert_eq!(log.len(), 4);
         assert_eq!(log[0].author, "Zoë");
@@ -2104,7 +2388,23 @@ mod tests {
             ("src/old.rs", None)
         );
         assert_eq!((log[3].author.as_str(), log[3].time), ("李", 1_400_000_000));
-        assert!(parse_log(b"\x1enot-a-sha\0\0a\x001\0s\0", "f").is_empty());
+        assert!(parse_log(b"not-a-sha\0\0a\x001\0s\0", "f").is_empty());
+    }
+
+    #[test]
+    fn a_subject_cannot_forge_a_timeline_record() {
+        let forged = "Fix\x1eccccccc3 Eve 1 Fake";
+        let out = format!(
+            "aaaaaaa1\0bbbbbbb2\0Ann\x001700000000\0{forged}\0\nM\0f.rs\0\
+             bbbbbbb2\0\0Ann\x001600000000\0Start\0\nA\0f.rs\0"
+        );
+        let log = parse_log(out.as_bytes(), "f.rs");
+        let subjects: Vec<_> = log.iter().map(|e| e.subject.as_str()).collect();
+        assert_eq!(subjects, [forged, "Start"]);
+        assert_eq!(
+            (log[0].path.as_str(), log[0].old_path.as_deref()),
+            ("f.rs", Some("f.rs"))
+        );
     }
 
     #[test]
@@ -2126,7 +2426,12 @@ mod tests {
             (fix.path.as_str(), fix.previous.as_deref()),
             ("new.rs", Some("old.rs"))
         );
+        assert_eq!(
+            fix.parent.as_deref(),
+            Some("2222222222222222222222222222222222222222")
+        );
         assert_eq!(blame.commits[1].previous, None);
+        assert_eq!(blame.commits[1].parent, None);
         assert!(blame.commits[2].uncommitted && !fix.uncommitted);
     }
 
@@ -2150,7 +2455,8 @@ mod tests {
         std::fs::write(sub.join("new.txt"), "a\nB\nc\n").unwrap();
         repo_git(&dir, &["commit", "-qam", "edit"]);
 
-        let log = file_log(&sub, &sub.join("new.txt")).unwrap();
+        let none = Cancel::default();
+        let log = file_log(&sub, &sub.join("new.txt"), &none).unwrap();
         let subjects: Vec<_> = log.iter().map(|e| e.subject.as_str()).collect();
         assert_eq!(subjects, ["edit", "rename", "first"]);
         assert_eq!(log[1].old_path.as_deref(), Some("sub/old.txt"));
@@ -2166,7 +2472,7 @@ mod tests {
         );
         assert!(show_at(&sub, "--output=x", "sub/old.txt").is_err());
 
-        let blame = blame_file(&sub, &sub.join("new.txt"), Some("a\nB\nc\nd\n")).unwrap();
+        let blame = blame_file(&sub, &sub.join("new.txt"), Some("a\nB\nc\nd\n"), &none).unwrap();
         assert_eq!(blame.lines.len(), 4);
         let at = |line: usize| &blame.commits[blame.lines[line]];
         assert_eq!(
@@ -2174,6 +2480,7 @@ mod tests {
             ("first", "sub/old.txt")
         );
         assert_eq!(at(1).summary, "edit");
+        assert_eq!(at(1).parent.as_deref(), Some(log[1].sha.as_str()));
         assert!(at(3).uncommitted);
         std::fs::remove_dir_all(&dir).unwrap();
     }

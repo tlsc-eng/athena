@@ -24,7 +24,34 @@ pub(super) struct GutterState {
 struct Blamed {
     /// The blame the gutter shows, to find a clicked commit's paths.
     blame: Option<FileBlame>,
+    /// The pause before a run, or the run; dropping it kills the run's git.
     task: Option<Task<()>>,
+    runs: Runs,
+}
+
+/// One blame run per editor at a time: asking during a run gets one more run after it.
+#[derive(Default)]
+struct Runs {
+    running: bool,
+    again: bool,
+}
+
+impl Runs {
+    /// Whether to start a run, or restart the pause before one, now.
+    fn request(&mut self) -> bool {
+        self.again |= self.running;
+        !self.running
+    }
+
+    fn started(&mut self) {
+        self.running = true;
+    }
+
+    /// Whether to run once more for what changed while this run went.
+    fn finished(&mut self) -> bool {
+        self.running = false;
+        std::mem::take(&mut self.again)
+    }
 }
 
 /// How recent `time` is among a file's commits: 1 for the newest down to 0 for the oldest.
@@ -79,6 +106,7 @@ fn commit_diff(blame: &FileBlame, sha: &str) -> Option<DiffBase> {
         rev: commit.sha.clone(),
         old: commit.previous.clone(),
         new: commit.path.clone(),
+        parent: commit.parent.clone(),
     })
 }
 
@@ -160,10 +188,28 @@ impl Shell {
             return;
         };
         let id = editor.entity_id();
+        let entry = self.git.gutters.blames.entry(id).or_insert(Blamed {
+            blame: None,
+            task: None,
+            runs: Runs::default(),
+        });
+        if !entry.runs.request() {
+            return;
+        }
         let weak = editor.downgrade();
+        let cancel = git::Cancel::default();
         let task = cx.spawn(async move |this, cx| {
+            let _stop = cancel.on_drop();
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
+            }
+            let started = this.update(cx, |this, _| {
+                let entry = this.git.gutters.blames.get_mut(&id)?;
+                entry.runs.started();
+                Some(())
+            });
+            if !matches!(started, Ok(Some(()))) {
+                return;
             }
             let Ok((path, contents)) = weak.read_with(cx, |e, _| {
                 let contents = if e.is_dirty() { e.text() } else { None };
@@ -174,7 +220,7 @@ impl Shell {
             let name = file_label(&path);
             let found = cx
                 .background_executor()
-                .spawn(async move { git::blame_file(&root, &path, contents.as_deref()) })
+                .spawn(async move { git::blame_file(&root, &path, contents.as_deref(), &cancel) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let Some(editor) = weak.upgrade() else {
@@ -183,30 +229,40 @@ impl Shell {
                 let Some(entry) = this.git.gutters.blames.get_mut(&id) else {
                     return;
                 };
-                entry.task = None;
-                match found {
+                let again = entry.runs.finished();
+                let (title, body) = match found {
                     Ok(blame) if !blame.lines.is_empty() => {
                         let shown = gutter_blame(&blame, now());
                         entry.blame = Some(blame);
                         editor.update(cx, |e, cx| e.set_file_blame(Some(shown), cx));
+                        if again {
+                            this.blame_file(&editor, REBLAME_DELAY, cx);
+                        }
+                        return;
                     }
+                    Err(err) if err.is::<git::Cancelled>() => return,
+                    Err(err) if err.is::<git::TimedOut>() => (
+                        "File blame is off",
+                        format!("Blaming {name} stopped: {err}."),
+                    ),
                     other => {
                         if let Err(err) = other {
                             tracing::debug!("git blame: {err:#}");
                         }
-                        this.git.gutters.blames.remove(&id);
-                        editor.update(cx, |e, cx| e.set_file_blame(None, cx));
-                        let body = format!("{name} has no committed lines to blame.");
-                        this.transient_notice("No blame for this file", body, cx);
+                        (
+                            "No blame for this file",
+                            format!("{name} has no committed lines to blame."),
+                        )
                     }
-                }
+                };
+                this.git.gutters.blames.remove(&id);
+                editor.update(cx, |e, cx| e.set_file_blame(None, cx));
+                this.transient_notice(title, body, cx);
             });
         });
-        let entry = self.git.gutters.blames.entry(id).or_insert(Blamed {
-            blame: None,
-            task: None,
-        });
-        entry.task = Some(task);
+        if let Some(entry) = self.git.gutters.blames.get_mut(&id) {
+            entry.task = Some(task);
+        }
     }
 
     fn git_gutter_event(
@@ -330,6 +386,7 @@ mod tests {
             uncommitted,
             path: "src/b.rs".into(),
             previous: Some("src/a.rs".into()),
+            parent: Some("ddddddd".into()),
         }
     }
 
@@ -364,9 +421,24 @@ mod tests {
                 rev: "aaaaaaa".into(),
                 old: Some("src/a.rs".into()),
                 new: "src/b.rs".into(),
+                parent: Some("ddddddd".into()),
             })
         );
         assert_eq!(commit_diff(&blame, "0000000"), Some(DiffBase::Index));
         assert_eq!(commit_diff(&blame, "fffffff"), None);
+    }
+
+    #[test]
+    fn a_blame_asked_for_during_a_run_runs_once_after_it() {
+        let mut runs = Runs::default();
+        assert!(runs.request());
+        assert!(runs.request(), "a pause not yet over just starts again");
+        runs.started();
+        assert!(!runs.request());
+        assert!(!runs.request());
+        assert!(runs.finished());
+        assert!(runs.request());
+        runs.started();
+        assert!(!runs.finished());
     }
 }

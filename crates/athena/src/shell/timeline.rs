@@ -27,6 +27,7 @@ pub(super) struct TimelineState {
     file: Option<(PathBuf, PathBuf)>,
     entries: Rc<Vec<LogEntry>>,
     error: Option<String>,
+    /// Dropping it kills the git log it is waiting on.
     loading: Option<Task<()>>,
 }
 
@@ -36,6 +37,7 @@ pub(super) fn commit_base(entry: &LogEntry) -> DiffBase {
         rev: entry.sha.clone(),
         old: entry.old_path.clone(),
         new: entry.path.clone(),
+        parent: None,
     }
 }
 
@@ -77,20 +79,26 @@ impl Shell {
         let state = &mut self.review.timeline;
         state.file = Some((root.clone(), path.clone()));
         state.error = None;
+        state.entries = Rc::default();
         let git_path = under_root(&root, &path);
+        let cancel = git::Cancel::default();
         state.loading = Some(cx.spawn(async move |this, cx| {
+            let _stop = cancel.on_drop();
             let log = cx
                 .background_executor()
-                .spawn(async move { git::file_log(&root, &git_path) })
+                .spawn(async move { git::file_log(&root, &git_path, &cancel) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let state = &mut this.review.timeline;
                 state.loading = None;
                 match log {
                     Ok(entries) => state.entries = Rc::new(entries),
+                    Err(err) if err.is::<git::Cancelled>() => return,
+                    Err(err) if err.is::<git::TimedOut>() => {
+                        state.error = Some(format!("Reading this file's history stopped: {err}."))
+                    }
                     Err(err) => {
                         tracing::debug!("git log: {err:#}");
-                        state.entries = Rc::default();
                         state.error = Some("This file has no git history here.".into());
                     }
                 }
@@ -310,6 +318,7 @@ mod tests {
                 rev: "0123456789".into(),
                 old: Some("src/a.rs".into()),
                 new: "src/b.rs".into(),
+                parent: None,
             }
         );
         assert_eq!(

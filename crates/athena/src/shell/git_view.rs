@@ -829,7 +829,9 @@ impl Shell {
         };
         let weak = editor.downgrade();
         let line = line as usize;
+        let cancel = git::Cancel::default();
         self.git.blame = Some(cx.spawn(async move |_, cx| {
+            let _stop = cancel.on_drop();
             cx.background_executor().timer(BLAME_DELAY).await;
             // Read after the pause, so typing does not copy the whole buffer per keystroke.
             let Ok((path, contents)) = weak.read_with(cx, |e, _| {
@@ -838,10 +840,12 @@ impl Shell {
             }) else {
                 return;
             };
-            let found = cx
-                .background_executor()
-                .spawn(async move { git::blame_line(&root, &path, line, contents.as_deref()) })
-                .await;
+            let found =
+                cx.background_executor()
+                    .spawn(async move {
+                        git::blame_line(&root, &path, line, contents.as_deref(), &cancel)
+                    })
+                    .await;
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64);
