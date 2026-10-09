@@ -460,6 +460,8 @@ pub struct Buffer {
     encoding_pinned: bool,
     /// Background parses taken in, so highlight caches notice a new tree under the same text.
     parses: u64,
+    /// Semantic token sets laid on, as a refresh can bring new ones for the same version.
+    semantic_sets: u64,
 }
 
 /// What a file looked like on disk; tools that keep the modification time still change its size.
@@ -526,6 +528,7 @@ impl Buffer {
             round_trips: true,
             encoding_pinned: false,
             parses: 0,
+            semantic_sets: 0,
         }
     }
 
@@ -821,6 +824,7 @@ impl Buffer {
         if let Some(syntax) = self.syntax.as_mut() {
             syntax.set_semantic(tokens, version);
         }
+        self.semantic_sets += 1;
     }
 
     /// The buffer version the semantic tokens were last given for.
@@ -923,6 +927,10 @@ impl Buffer {
 
     pub(crate) fn parses(&self) -> u64 {
         self.parses
+    }
+
+    pub(crate) fn semantic_sets(&self) -> u64 {
+        self.semantic_sets
     }
 
     /// Parses now if the tree lags the text, for checks that must see the last keystroke's tokens.

@@ -59,10 +59,10 @@ struct LineBlocks {
     row_starts: Vec<u16>,
 }
 
-/// Lines' blocks, valid for one text version, parse, language and wrap width.
+/// Lines' blocks, valid for one text version, parse, language, wrap width and semantic tokens.
 #[derive(Default)]
 struct Cache {
-    key: (u64, u64, Option<Lang>, Option<usize>, Option<u64>),
+    key: (u64, u64, Option<Lang>, Option<usize>, u64),
     lines: HashMap<usize, Rc<LineBlocks>>,
 }
 
@@ -190,7 +190,7 @@ impl Minimap {
             buffer.parses(),
             buffer.lang(),
             wrap,
-            buffer.semantic_version(),
+            buffer.semantic_sets(),
         );
         if cache.key != key {
             *cache = Cache {
@@ -458,6 +458,25 @@ mod tests {
         b.set_lang(Some(Lang::Rust));
         let blocks = m.blocks(&b, 0..1, None);
         assert!(blocks[0].blocks.iter().any(|b| b.token.is_some()));
+    }
+
+    #[test]
+    fn tokens_refreshed_for_the_same_version_recolour_the_minimap() {
+        let mut b = Buffer::new("let x = 1;\n", Some("/x/a.rs".into()));
+        let m = Minimap::default();
+        let token_at_x = |m: &Minimap, b: &Buffer| {
+            let blocks = m.blocks(b, 0..1, None);
+            blocks[0]
+                .blocks
+                .iter()
+                .find(|b| b.cols.0 == 4)
+                .unwrap()
+                .token
+        };
+        b.set_semantic_tokens(vec![(4..5, Token::Parameter)], Some(b.version()));
+        assert_eq!(token_at_x(&m, &b), Some(Token::Parameter));
+        b.set_semantic_tokens(vec![(4..5, Token::Constant)], Some(b.version()));
+        assert_eq!(token_at_x(&m, &b), Some(Token::Constant));
     }
 
     #[test]
