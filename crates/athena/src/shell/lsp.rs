@@ -220,11 +220,22 @@ fn trust_question(project: &str, found: &[&str], settings: bool) -> (String, Str
     if settings {
         brings.push("has settings that choose what its language servers run".to_string());
     }
+    let risk = match found.is_empty() {
+        true => "Those settings can name programs, plugins, flags and toolchains",
+        false => {
+            "Running them runs the project's own code, with its config and plugins, on this Mac"
+        }
+    };
+    let meanwhile = match found.contains(&"TypeScript") {
+        true => {
+            "Until then TypeScript uses your global install, and the project's editor settings \
+                 still apply"
+        }
+        false => "Until then the project's editor settings still apply",
+    };
     let detail = format!(
-        "{project} {}. Allowing runs the project's own code, with its config and plugins, on \
-         this Mac; allow it only for a project you trust. Until then TypeScript uses your global \
-         install and the project's editor settings still apply. The command palette can change \
-         this later.",
+        "{project} {}. {risk}; allow it only for a project you trust. {meanwhile}. The command \
+         palette can change this later.",
         brings.join(" and ")
     );
     (message, detail)
@@ -2072,9 +2083,11 @@ mod tests {
         let (message, detail) = trust_question("api", &["ESLint"], false);
         assert_eq!(message, "Run ESLint from api?");
         assert!(!detail.contains("settings that"), "{detail}");
+        assert!(!detail.contains("TypeScript"), "{detail}");
         let (message, detail) = trust_question("go-svc", &[], true);
         assert_eq!(message, "Use go-svc's language server settings?");
         assert!(detail.starts_with("go-svc has settings"), "{detail}");
+        assert!(detail.contains("can name programs"), "{detail}");
     }
 
     #[test]
