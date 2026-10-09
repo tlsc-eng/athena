@@ -84,6 +84,19 @@ pub(super) struct LspState {
     pub(super) calls_client: Option<Rc<Client>>,
 }
 
+impl LspState {
+    /// Whether an answer `client` gave about `doc` still applies: that instance of the server
+    /// still runs and still has the file open, so a late answer cannot revive either.
+    fn answer_is_current(&self, key: &ServerKey, client: &Rc<Client>, doc: &Path) -> bool {
+        let open = self.documents.get(doc) == Some(key)
+            || self.linters.get(doc).is_some_and(|keys| keys.contains(key));
+        open && self
+            .servers
+            .get(key)
+            .is_some_and(|s| Rc::ptr_eq(&s.client, client))
+    }
+}
+
 #[derive(Default)]
 enum References {
     #[default]
@@ -731,8 +744,7 @@ impl Shell {
                 Err(why) => return tracing::debug!("{} diagnostics failed: {why}", key.1.label()),
             };
             let _ = this.update(cx, |this, cx| {
-                // Only for servers and files still open, so a late answer cannot revive one.
-                if this.document_keys(&path).any(|k| *k == key) {
+                if this.lsp.answer_is_current(&key, &client, &path) {
                     this.lsp_event(key, Event::Diagnostics { path, list }, cx);
                 }
             });
@@ -1518,6 +1530,43 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unstarted() -> (Rc<Client>, Server) {
+        let (client, _) = Client::start_local(
+            ServerKind::Eslint,
+            PathBuf::from("/nonexistent/eslint"),
+            PathBuf::from("/tmp"),
+            Config::default(),
+        );
+        let client = Rc::new(client);
+        let server = Server {
+            client: client.clone(),
+            config: Config::default(),
+            ready: true,
+            _events: Task::ready(()),
+        };
+        (client, server)
+    }
+
+    #[test]
+    fn a_pulled_answer_from_a_crashed_instance_is_not_applied_to_its_restart() {
+        let key: ServerKey = (PathBuf::from("/p"), ServerKind::Eslint);
+        let doc = PathBuf::from("/p/a.ts");
+        let mut lsp = LspState::default();
+        let (crashed, server) = unstarted();
+        lsp.servers.insert(key.clone(), server);
+        lsp.linters.insert(doc.clone(), vec![key.clone()]);
+        assert!(lsp.answer_is_current(&key, &crashed, &doc));
+        let (restarted, server) = unstarted();
+        lsp.servers.insert(key.clone(), server);
+        assert!(!lsp.answer_is_current(&key, &crashed, &doc));
+        assert!(lsp.answer_is_current(&key, &restarted, &doc));
+        lsp.linters.clear();
+        assert!(
+            !lsp.answer_is_current(&key, &restarted, &doc),
+            "the file closed"
+        );
+    }
 
     #[test]
     fn a_crashed_server_restarts_later_each_time_and_then_stays_stopped() {
