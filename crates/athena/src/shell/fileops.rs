@@ -35,7 +35,8 @@ pub(super) fn rename(from: &Path, to: &Path) -> Result<()> {
     fs::rename(from, to).with_context(|| describe("rename", from))
 }
 
-/// Moves `from` to `to`, first sending what is at `to` to the Trash when `replace` is set.
+/// Moves `from` to `to`, first sending what is at `to` to the Trash when `replace` is set; across
+/// volumes it copies, then trashes the original.
 pub(super) fn move_to(
     from: &Path,
     to: &Path,
@@ -48,7 +49,20 @@ pub(super) fn move_to(
         }
         trash(to)?;
     }
-    rename(from, to)
+    match rename(from, to) {
+        Err(err) if crosses_volumes(&err) => move_by_copy(from, to, &trash),
+        result => result,
+    }
+}
+
+fn move_by_copy(from: &Path, to: &Path, trash: impl Fn(&Path) -> Result<()>) -> Result<()> {
+    copy(from, to)?;
+    trash(from)
+}
+
+fn crosses_volumes(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<io::Error>()
+        .is_some_and(|e| e.kind() == io::ErrorKind::CrossesDevices)
 }
 
 /// Whether `outer` is `inner` or a folder holding it, however either path is spelled.
@@ -261,6 +275,27 @@ mod tests {
         assert!(move_to(&from, &dir.join("pkg"), true, trash).is_err());
         assert_eq!(trashed.borrow().as_slice(), &[] as &[PathBuf]);
         assert_eq!(fs::read_to_string(from.join("lib.rs")).unwrap(), "keep");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_move_across_volumes_copies_then_trashes_the_original() {
+        let exdev = anyhow::Error::from(io::Error::from_raw_os_error(libc::EXDEV));
+        assert!(crosses_volumes(&exdev.context("could not rename a")));
+        let missing = anyhow::Error::from(io::Error::from(io::ErrorKind::NotFound));
+        assert!(!crosses_volumes(&missing));
+
+        let dir = scratch("move-by-copy");
+        fs::create_dir_all(dir.join("src/inner")).unwrap();
+        fs::write(dir.join("src/inner/a.rs"), "a").unwrap();
+        let trashed = std::cell::RefCell::new(Vec::new());
+        let trash = |path: &Path| {
+            trashed.borrow_mut().push(path.to_path_buf());
+            Ok(())
+        };
+        move_by_copy(&dir.join("src"), &dir.join("dst"), trash).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("dst/inner/a.rs")).unwrap(), "a");
+        assert_eq!(trashed.borrow().as_slice(), [dir.join("src")]);
         fs::remove_dir_all(&dir).unwrap();
     }
 

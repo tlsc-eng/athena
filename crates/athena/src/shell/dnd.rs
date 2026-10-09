@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use athena_ui::ActiveTheme;
-use athena_workspace::{ItemId, PaneId};
+use athena_workspace::{ItemId, PaneId, Project};
 use gpui::{
     Bounds, Context, FontWeight, IntoElement, Pixels, Point, PromptLevel, Render, SharedString,
     Window, div, prelude::*, px,
@@ -176,6 +176,23 @@ impl Shell {
             }
             let mut replacing = false;
             if std::fs::symlink_metadata(&dest).is_ok() {
+                let Ok(dirty) = this.update(cx, |this, cx| {
+                    tabs_under(&this.workspace.projects, &dest)
+                        .iter()
+                        .any(|key| this.items.get(key).is_some_and(|v| v.is_dirty(cx)))
+                }) else {
+                    return;
+                };
+                // Replacing would drop those edits; refusing keeps them and can simply be retried.
+                if dirty {
+                    let _ = this.update(cx, |this, cx| {
+                        let body = format!(
+                            "“{name}” in “{into}” has unsaved changes. Save or close it first."
+                        );
+                        this.transient_notice("Could not move that", body, cx)
+                    });
+                    return;
+                }
                 let Ok(replace) = this.update_in(cx, |_, window, cx| {
                     window.prompt(
                         PromptLevel::Warning,
@@ -192,9 +209,17 @@ impl Shell {
                 }
                 replacing = true;
             }
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
+                let replaced = match replacing {
+                    true => tabs_under(&this.workspace.projects, &dest),
+                    false => Vec::new(),
+                };
                 let result = fileops::move_to(&from, &dest, replacing, fileops::trash);
                 if result.is_ok() {
+                    // Before the watcher sees the new file, so no tab of the old one reloads it.
+                    for (root, item) in replaced {
+                        this.remove_item_from(&root, item, window, cx);
+                    }
                     this.retarget_items(&from, &dest, cx);
                     this.reload_changed_files(cx);
                 }
@@ -217,10 +242,41 @@ impl Shell {
     }
 }
 
+/// Tabs, in any project, showing `path` or a file inside it.
+fn tabs_under(projects: &[Project], path: &Path) -> Vec<(PathBuf, ItemId)> {
+    projects
+        .iter()
+        .flat_map(|p| {
+            p.layout
+                .iter()
+                .flat_map(|l| l.items())
+                .filter(|i| i.kind.file().is_some_and(|f| f.starts_with(path)))
+                .map(|i| (p.root.clone(), i.id))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_workspace::{ItemKind, Layout};
     use gpui::{point, size};
+
+    #[test]
+    fn a_replaced_folder_takes_the_tabs_of_every_file_in_it() {
+        let editor = |path: &str| ItemKind::Editor { path: path.into() };
+        let mut a = Project::new("/p".into());
+        let mut layout = Layout::new(editor("/p/pkg/a.rs"));
+        let focused = layout.focused;
+        layout.add_item(focused, editor("/p/pkgs/b.rs"));
+        layout.add_item(focused, editor("/p/pkg"));
+        a.layout = Some(layout);
+        let mut b = Project::new("/p/pkg".into());
+        b.layout = Some(Layout::new(editor("/p/pkg/c.rs")));
+        let tabs = tabs_under(&[a, b], Path::new("/p/pkg"));
+        let roots: Vec<_> = tabs.iter().map(|(r, _)| r.to_str().unwrap()).collect();
+        assert_eq!(roots, ["/p", "/p", "/p/pkg"]);
+    }
 
     #[test]
     fn a_tree_entry_fits_any_folder_but_itself_inside_itself_or_its_own_unless_copied() {
