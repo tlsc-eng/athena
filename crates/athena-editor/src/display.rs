@@ -307,9 +307,10 @@ impl DisplayMap {
         self.folds.iter().copied().find(|f| f.header() == line)
     }
 
-    /// Folds `fold`, absorbing any folds inside or overlapping it.
+    /// Folds `fold`, absorbing any folds inside or overlapping it, unless its header is hidden.
     pub fn fold(&mut self, fold: Fold) {
-        if fold.start == 0 || fold.end < fold.start {
+        if fold.start == 0 || fold.end < fold.start || self.fold_containing(fold.header()).is_some()
+        {
             return;
         }
         self.folds
@@ -659,6 +660,24 @@ mod tests {
             }
         });
         assert_eq!(map.row_of(5), 1);
+        assert_eq!(map.row_count(10), 6);
+    }
+
+    #[test]
+    fn a_fold_whose_header_is_hidden_is_not_added() {
+        let mut map = DisplayMap::default();
+        map.fold(fold(2, 5));
+        map.fold(fold(6, 8));
+        assert_eq!(map.folds, vec![fold(2, 5)], "line 5 is already folded away");
+        map.set_wrap(Some(4));
+        map.sync_wrap(10, |l| {
+            if l == 5 {
+                "aaaa ".repeat(6)
+            } else {
+                "a".into()
+            }
+        });
+        assert_eq!(map.row_of(7), 3);
         assert_eq!(map.row_count(10), 6);
     }
 
