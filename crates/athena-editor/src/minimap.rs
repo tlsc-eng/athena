@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::buffer::Buffer;
 use crate::display::{TAB_WIDTH, wrap_breaks};
-use crate::syntax::Token;
+use crate::syntax::{Lang, Token};
 use crate::view::EditorView;
 
 /// Height of one row, as VS Code's minimap at scale 1.
@@ -59,10 +59,10 @@ struct LineBlocks {
     row_starts: Vec<u16>,
 }
 
-/// Lines' blocks, valid for one text version, parse and wrap width.
+/// Lines' blocks, valid for one text version, parse, language and wrap width.
 #[derive(Default)]
 struct Cache {
-    key: (u64, u64, Option<usize>),
+    key: (u64, u64, Option<Lang>, Option<usize>),
     lines: HashMap<usize, Rc<LineBlocks>>,
 }
 
@@ -169,6 +169,13 @@ fn line_blocks(
 }
 
 impl Minimap {
+    /// Whether the last frame drew the minimap under `position`.
+    pub(crate) fn covers(&self, position: gpui::Point<Pixels>) -> bool {
+        self.shown
+            .get()
+            .is_some_and(|(area, _)| area.contains(&position))
+    }
+
     /// Blocks for `lines`, from the cache or worked out with one highlight query per gap in it.
     fn blocks(
         &self,
@@ -177,7 +184,7 @@ impl Minimap {
         wrap: Option<usize>,
     ) -> Vec<Rc<LineBlocks>> {
         let mut cache = self.cache.borrow_mut();
-        let key = (buffer.version(), buffer.parses(), wrap);
+        let key = (buffer.version(), buffer.parses(), buffer.lang(), wrap);
         if cache.key != key {
             *cache = Cache {
                 key,
@@ -434,6 +441,16 @@ mod tests {
         );
         let wrapped = line_blocks("aaaa bbbb cccc", &[], 0, Some(5));
         assert_eq!(wrapped.row_starts, [0, 5, 10]);
+    }
+
+    #[test]
+    fn a_new_language_recolours_the_minimap_without_an_edit() {
+        let mut b = Buffer::new("fn f() {}\n", Some("/x/a.txt".into()));
+        let m = Minimap::default();
+        assert_eq!(m.blocks(&b, 0..1, None)[0].blocks[0].token, None);
+        b.set_lang(Some(Lang::Rust));
+        let blocks = m.blocks(&b, 0..1, None);
+        assert!(blocks[0].blocks.iter().any(|b| b.token.is_some()));
     }
 
     /// 10k lines of Rust: a frame from the cache, and one after an edit that misses it.

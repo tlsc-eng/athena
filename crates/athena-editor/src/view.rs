@@ -974,6 +974,9 @@ impl EditorView {
 
     /// Buffer char under a window position, from last frame's layout.
     pub(crate) fn char_at_position(&self, position: Point<Pixels>) -> Option<usize> {
+        if self.minimap.covers(position) {
+            return None;
+        }
         let layout = self.layout.as_ref()?;
         let buffer = self.buf()?;
         let y = position.y - layout.origin.y + px(self.scroll.y);
