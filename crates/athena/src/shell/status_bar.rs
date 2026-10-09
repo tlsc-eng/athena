@@ -149,7 +149,21 @@ impl Shell {
                     }),
                 )
                 .child(item("status-encoding", "UTF-8".into()))
-                .child(item("status-eol", eol_label(status.line_ending).into()))
+                .child(
+                    button(
+                        "status-eol",
+                        eol_label(status.line_ending).into(),
+                        "Select End of Line Sequence",
+                    )
+                    .on_click({
+                        let editor = editor.clone();
+                        let current = status.line_ending;
+                        cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            let items = eol_menu(&editor, current);
+                            this.open_context_menu(event.position(), items, window, cx);
+                        })
+                    }),
+                )
                 .child(
                     button(
                         "status-lang",
@@ -217,6 +231,22 @@ fn indent_menu(editor: &Entity<EditorView>, current: Indent) -> Vec<MenuItem> {
     ));
     items.push(convert("Convert Indentation to Tabs", Indent::Tab));
     items
+}
+
+/// VS Code's end-of-line picker; choosing converts every line break as one undo step.
+fn eol_menu(editor: &Entity<EditorView>, current: LineEnding) -> Vec<MenuItem> {
+    [LineEnding::Lf, LineEnding::CrLf]
+        .into_iter()
+        .map(|eol| {
+            let editor = editor.downgrade();
+            MenuItem::new(eol_label(eol), move |_, cx| {
+                editor
+                    .update(cx, |e, cx| e.convert_line_endings(eol, cx))
+                    .ok();
+            })
+            .disabled(eol == current)
+        })
+        .collect()
 }
 
 fn language_menu(editor: &Entity<EditorView>, current: Option<Lang>) -> Vec<MenuItem> {

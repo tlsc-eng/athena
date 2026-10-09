@@ -3,6 +3,7 @@ mod completion;
 pub mod diff;
 mod diff_view;
 mod display;
+pub mod editorconfig;
 mod element;
 pub mod find;
 mod format;
@@ -14,6 +15,7 @@ mod lsp_ui;
 mod multi;
 mod pairs;
 pub mod recovery;
+mod save;
 mod shared;
 mod signature;
 mod sticky;
@@ -31,6 +33,7 @@ pub use image::{ImageView, is_image_path};
 pub use lsp_ui::{
     ConfirmRename, GoToImplementation, GoToTypeDefinition, RenameSymbol, ShowCodeActions,
 };
+pub use save::{SaveSettings, Tidy, resolve_tidy, save_defaults};
 pub use signature::Signature;
 pub use syntax::{Lang, Token};
 pub use view::{

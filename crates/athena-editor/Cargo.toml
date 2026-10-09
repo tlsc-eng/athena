@@ -29,3 +29,4 @@ athena-ui.workspace = true
 imagesize.workspace = true
 libc.workspace = true
 regex.workspace = true
+globset.workspace = true

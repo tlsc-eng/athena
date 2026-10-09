@@ -12,6 +12,7 @@ use tree_sitter::{InputEdit, Point};
 
 use crate::display::{Fold, TAB_WIDTH, indent_fold_at};
 use crate::pairs::{self, AutoClosed};
+use crate::save::Tidy;
 use crate::syntax::{Lang, ParseJob, Parsed, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
@@ -521,6 +522,7 @@ impl Buffer {
         let (text, stamp) = read_text(path)?;
         let mut buffer = Self::new(&text, Some(path.to_path_buf()));
         buffer.disk = Some(stamp);
+        buffer.indent = crate::editorconfig::resolve(path).indent(buffer.indent);
         Ok(buffer)
     }
 
@@ -1450,6 +1452,56 @@ impl Buffer {
             })
             .collect();
         self.indent = to;
+        self.transact_all(cs, changes, after);
+    }
+
+    /// Trims trailing blanks, converts line breaks and adds a final one as `tidy` asks, as one
+    /// undo step; with `keep_caret_lines` the lines holding a caret keep their blanks.
+    pub fn tidy(&mut self, cs: &mut Cursors, tidy: Tidy, keep_caret_lines: bool) {
+        let eol = tidy.end_of_line.map(LineEnding::as_str);
+        let caret_lines: Vec<usize> = match keep_caret_lines {
+            true => cs.all().iter().map(|c| self.line_of(c.head())).collect(),
+            false => Vec::new(),
+        };
+        let mut changes = Vec::new();
+        for i in 0..self.len_lines() {
+            let start = self.line_start(i);
+            let line = self.rope.line(i);
+            let len = line.len_chars();
+            let mut body = len;
+            while body > 0 && matches!(line.char(body - 1), '\n' | '\r') {
+                body -= 1;
+            }
+            if tidy.trim_trailing_whitespace && !caret_lines.contains(&i) {
+                let mut end = body;
+                while end > 0 && matches!(line.char(end - 1), ' ' | '\t') {
+                    end -= 1;
+                }
+                if end < body {
+                    changes.push((start + end..start + body, String::new()));
+                }
+            }
+            if let Some(eol) = eol
+                && body < len
+                && line.slice(body..len) != eol
+            {
+                changes.push((start + body..start + len, eol.to_string()));
+            }
+        }
+        let after = cs
+            .all()
+            .iter()
+            .map(|c| Selection {
+                anchor: through_indents(&changes, c.selection.anchor, false),
+                head: through_indents(&changes, c.selection.head, false),
+            })
+            .collect();
+        let len = self.len_chars();
+        // Added after mapping the carets, so one at the very end stays before the new break.
+        if tidy.insert_final_newline && len > 0 && !matches!(self.rope.char(len - 1), '\n' | '\r') {
+            let eol = eol.unwrap_or(self.line_ending().as_str());
+            changes.push((len..len, eol.to_string()));
+        }
         self.transact_all(cs, changes, after);
     }
 

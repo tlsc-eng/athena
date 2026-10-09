@@ -429,6 +429,7 @@ pub struct EditorView {
     /// The format request a save waits for, and the buffer version it was asked about.
     pub(crate) formatting: Option<(u64, u64)>,
     pub(crate) format_requests: u64,
+    pub(crate) save_settings: crate::SaveSettings,
     /// Set around an edit that typing made, which narrows the suggestion list instead of closing it.
     typing: bool,
     pub(crate) marked: Option<String>,
@@ -526,6 +527,7 @@ impl EditorView {
             format_setting: None,
             formatting: None,
             format_requests: 0,
+            save_settings: crate::SaveSettings::default(),
             marked: None,
             find: None,
             find_opening: None,
@@ -810,9 +812,14 @@ impl EditorView {
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
+        self.save_with(false, cx)
+    }
+
+    fn save_with(&mut self, auto: bool, cx: &mut Context<Self>) -> bool {
         let Some(shared) = self.buffer.clone() else {
             return false;
         };
+        self.tidy_for_save(auto, cx);
         let checked = shared.buffer.borrow_mut().save_checked();
         let result = match checked {
             Err(SaveError::Conflict) => {
@@ -1128,7 +1135,7 @@ impl EditorView {
     }
 
     /// Re-runs the search; `jump` moves the selection to the first match at or after the cursor.
-    fn refresh_find(&mut self, jump: bool, cx: &App) {
+    pub(crate) fn refresh_find(&mut self, jump: bool, cx: &App) {
         let Some(query) = self
             .find
             .as_ref()
@@ -2087,7 +2094,7 @@ impl EditorView {
             && self.save_error.is_none()
             && self.conflict.is_none()
         {
-            self.save(cx);
+            self.save_with(true, cx);
         }
     }
 
@@ -2197,6 +2204,7 @@ impl EditorView {
             .buffer
             .clone()
             .ok_or_else(|| anyhow::anyhow!("nothing to save"))?;
+        self.tidy_for_save(false, cx);
         // Two strong counts are this view's and the clone above; more means another tab shares it.
         if Rc::strong_count(&shared) > 2 {
             let mut fork = {
