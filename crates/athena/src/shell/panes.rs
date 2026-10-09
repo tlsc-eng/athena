@@ -653,6 +653,9 @@ impl Shell {
     }
 
     pub(super) fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_focused_panel_terminal(window, cx) {
+            return;
+        }
         let Some(pane) = self
             .workspace
             .active_project()

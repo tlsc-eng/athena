@@ -32,7 +32,31 @@ fn toggle(shown: bool, focused: bool, empty: bool) -> Toggle {
     }
 }
 
+/// Whether keys go to the panel's terminal: focus is in the drawer and it shows the terminal.
+fn panel_has_keys(drawer: Option<DrawerTab>, drawer_focused: bool) -> bool {
+    drawer == Some(DrawerTab::Terminal) && drawer_focused
+}
+
 impl Shell {
+    fn panel_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
+        panel_has_keys(self.drawer, self.drawer_focus.contains_focused(window, cx))
+    }
+
+    /// ⌘W while the panel has focus closes its terminal, not the editor area's tab; false otherwise.
+    pub(super) fn close_focused_panel_terminal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.panel_focused(window, cx) {
+            return false;
+        }
+        if let Some(id) = self.panel().and_then(Panel::active_item).map(|i| i.id) {
+            self.close_panel_terminal(id, window, cx);
+        }
+        true
+    }
+
     fn panel(&self) -> Option<&Panel> {
         Some(&self.workspace.active_project()?.panel)
     }
@@ -234,6 +258,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The focused terminal is already in the panel; the editor area's must not be taken.
+        if to_panel && self.panel_focused(window, cx) {
+            return;
+        }
         let project = self.workspace.active_project();
         if to_panel {
             let item = project
@@ -454,6 +482,14 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_focused_drawer_showing_the_terminal_takes_the_keys() {
+        assert!(panel_has_keys(Some(DrawerTab::Terminal), true));
+        assert!(!panel_has_keys(Some(DrawerTab::Terminal), false));
+        assert!(!panel_has_keys(Some(DrawerTab::Problems), true));
+        assert!(!panel_has_keys(None, false));
+    }
 
     #[test]
     fn ctrl_backtick_hides_a_focused_panel_terminal_and_otherwise_brings_one_up() {
