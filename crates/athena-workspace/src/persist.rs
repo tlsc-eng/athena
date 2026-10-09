@@ -14,7 +14,7 @@ pub fn load(path: &Path) -> Result<Workspace> {
         Ok(bytes) => {
             let mut workspace: Workspace = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse {}", path.display()))?;
-            for project in &mut workspace.projects {
+            for project in workspace.projects.iter_mut().chain(&mut workspace.parked) {
                 project.migrate();
                 project.layout = project.layout.take().and_then(Layout::validated);
             }
@@ -229,6 +229,124 @@ mod tests {
         let partial: ViewState = serde_json::from_str(r#"{"cursor":[5,2]}"#).unwrap();
         assert_eq!((partial.cursor, partial.scroll_top), ((5, 2), None));
         assert!(partial.folds.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const FIXTURES: [(&str, &str); 8] = [
+        ("v0.2", include_str!("../fixtures/workspace-v0.2.json")),
+        ("v0.3", include_str!("../fixtures/workspace-v0.3.json")),
+        ("v0.4", include_str!("../fixtures/workspace-v0.4.json")),
+        ("v0.5", include_str!("../fixtures/workspace-v0.5.json")),
+        ("v0.6", include_str!("../fixtures/workspace-v0.6.json")),
+        ("v0.7", include_str!("../fixtures/workspace-v0.7.json")),
+        ("v0.8", include_str!("../fixtures/workspace-v0.8.json")),
+        ("v0.9", include_str!("../fixtures/workspace-v0.9.json")),
+    ];
+
+    /// Every value `old` holds is in `new` at the same place; `new` may hold more.
+    fn assert_kept(old: &serde_json::Value, new: &serde_json::Value, at: &str) {
+        use serde_json::Value;
+        match (old, new) {
+            (Value::Object(o), Value::Object(n)) => {
+                for (key, value) in o {
+                    let found = n.get(key).unwrap_or_else(|| panic!("{at}.{key} was lost"));
+                    assert_kept(value, found, &format!("{at}.{key}"));
+                }
+            }
+            (Value::Array(o), Value::Array(n)) => {
+                assert_eq!(o.len(), n.len(), "{at} changed length");
+                for (i, (o, n)) in o.iter().zip(n).enumerate() {
+                    assert_kept(o, n, &format!("{at}[{i}]"));
+                }
+            }
+            (Value::Number(o), Value::Number(n)) => {
+                assert_eq!(o.as_f64(), n.as_f64(), "{at}");
+            }
+            _ => assert_eq!(old, new, "{at}"),
+        }
+    }
+
+    #[test]
+    fn files_written_by_every_earlier_release_open_as_one_window_and_lose_nothing() {
+        let dir = std::env::temp_dir().join(format!("athena-fixtures-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for (version, text) in FIXTURES {
+            let path = dir.join(format!("{version}.json"));
+            fs::write(&path, text).unwrap();
+            let raw: serde_json::Value = serde_json::from_str(text).unwrap();
+            let loaded = load(&path).unwrap();
+            assert_kept(&raw, &serde_json::to_value(&loaded).unwrap(), version);
+
+            let (windows, parked) = loaded.clone().into_windows();
+            assert!(parked.is_empty());
+            assert_eq!(windows.len(), 1, "{version}");
+            assert_eq!(windows[0], loaded, "{version}");
+            let window = &windows[0];
+            assert_eq!(window.projects.len(), 3, "{version}");
+            assert_eq!(
+                window.active_project().map(|p| p.root.clone()),
+                Some(PathBuf::from("/athena-fixture/beta")),
+                "{version}"
+            );
+            assert_eq!(window.window.map(|w| (w.x, w.width)), Some((100., 1400.)));
+            let sessions: Vec<_> = window
+                .projects
+                .iter()
+                .flat_map(|p| p.items())
+                .filter_map(|i| match i.kind {
+                    ItemKind::Terminal { session } => session,
+                    _ => None,
+                })
+                .collect();
+            assert!(sessions.contains(&1700000000000001), "{version}");
+
+            save(&path, &Workspace::join(&windows[0], &windows, &[])).unwrap();
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                serde_json::to_string_pretty(&loaded).unwrap()
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fixture_split_into_two_windows_and_back_keeps_every_project() {
+        let dir = std::env::temp_dir().join(format!("athena-split-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        for (version, text) in FIXTURES {
+            fs::write(&path, text).unwrap();
+            let loaded = load(&path).unwrap();
+            let (mut windows, _) = loaded.clone().into_windows();
+            let mut second = windows[0].clone();
+            second.projects = vec![windows[0].projects.pop().unwrap()];
+            second.active = Some(0);
+            second.window = None;
+            let parked = vec![windows[0].projects.remove(0)];
+            windows[0].active = Some(0);
+            windows.push(second);
+            save(&path, &Workspace::join(&windows[0], &windows, &parked)).unwrap();
+
+            let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let top: Vec<_> = raw["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| &p["root"])
+                .collect();
+            assert_eq!(
+                top,
+                ["/athena-fixture/beta", "/athena-fixture/gamma"],
+                "{version}"
+            );
+            let (again, kept) = load(&path).unwrap().into_windows();
+            assert_eq!(again, windows, "{version}");
+            assert_eq!(kept, parked, "{version}");
+            assert_eq!(
+                kept[0], loaded.projects[0],
+                "{version}: a parked project keeps its tabs"
+            );
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 

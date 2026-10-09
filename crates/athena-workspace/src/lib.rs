@@ -5,6 +5,7 @@ mod persist;
 mod project;
 mod scope;
 pub mod watch;
+mod windows;
 
 pub use layout::{
     Axis, DiffBase, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath,
@@ -13,6 +14,7 @@ pub use layout::{
 pub use persist::{is_corrupt, load, save, set_aside};
 pub use project::{LinterTrust, PANEL_IDS, Panel, Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
+pub use windows::{WindowEntry, retain_parked, take_parked};
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +47,13 @@ pub struct Workspace {
     pub recent: Vec<PathBuf>,
     #[serde(default)]
     pub theme: ThemeChoice,
+    /// Every window's share of `projects` when more than one is open; the top-level fields
+    /// repeat the first window's, so a build without windows sees all the projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<WindowEntry>,
+    /// Projects of windows closed while Athena kept running, newest first; their shells still run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<Project>,
 }
 
 /// The workspace fields settings.json may set; workspace.json keeps them as the fallback.
@@ -133,6 +142,8 @@ impl Default for Workspace {
             ui: UiState::default(),
             recent: Vec::new(),
             theme: ThemeChoice::System,
+            windows: Vec::new(),
+            parked: Vec::new(),
         }
     }
 }
@@ -176,20 +187,48 @@ impl Workspace {
         index
     }
 
+    /// Takes in a project with its tabs, as when it moves from another window, and focuses it.
+    pub fn adopt_project(&mut self, project: Project) -> usize {
+        let root = canonical(&project.root);
+        let index = match self
+            .projects
+            .iter()
+            .position(|p| canonical(&p.root) == root)
+        {
+            Some(i) => i,
+            None => {
+                self.projects.push(project);
+                self.projects.len() - 1
+            }
+        };
+        self.recent.retain(|r| canonical(r) != root);
+        self.active = Some(index);
+        index
+    }
+
     pub fn close_project(&mut self, index: usize) {
-        if index >= self.projects.len() {
+        let Some(closed) = self.detach_project(index) else {
             return;
-        }
-        let closed = self.projects.remove(index).root;
+        };
+        let closed = closed.root;
         self.recent.retain(|r| *r != closed);
         self.recent.insert(0, closed);
         self.recent.truncate(MAX_RECENT);
+    }
+
+    /// Takes a project out without adding it to Open Recent, as when it moves to another window.
+    pub fn detach_project(&mut self, index: usize) -> Option<Project> {
+        if index >= self.projects.len() {
+            return None;
+        }
+        let project = self.projects.remove(index);
         self.active = match self.active {
             _ if self.projects.is_empty() => None,
             Some(a) if a > index => Some(a - 1),
             Some(a) if a == index => Some(index.min(self.projects.len() - 1)),
             other => other,
         };
+        Some(project)
     }
 
     pub fn activate(&mut self, index: usize) {
@@ -279,6 +318,7 @@ impl Workspace {
             }
         }
         self.projects = kept;
+        self.parked.retain(|p| p.root.is_dir());
         self.active = kept_active.or(if self.projects.is_empty() {
             None
         } else {

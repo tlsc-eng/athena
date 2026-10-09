@@ -1,0 +1,121 @@
+{
+  "projects": [
+    {
+      "root": "/athena-fixture/alpha",
+      "layout": {
+        "tree": {
+          "Split": {
+            "axis": "Horizontal",
+            "ratio": 0.5,
+            "first": {
+              "Leaf": {
+                "id": 1,
+                "items": [
+                  {
+                    "id": 2,
+                    "kind": {
+                      "Terminal": {
+                        "session": 1700000000000001
+                      }
+                    }
+                  },
+                  {
+                    "id": 3,
+                    "kind": {
+                      "Editor": {
+                        "path": "/athena-fixture/alpha/src/main.rs"
+                      }
+                    }
+                  }
+                ],
+                "active": 1
+              }
+            },
+            "second": {
+              "Leaf": {
+                "id": 4,
+                "items": [
+                  {
+                    "id": 5,
+                    "kind": {
+                      "Editor": {
+                        "path": "/athena-fixture/alpha/src/lib.rs"
+                      }
+                    }
+                  }
+                ],
+                "active": 0
+              }
+            }
+          }
+        },
+        "focused": 4,
+        "next_id": 6
+      }
+    },
+    {
+      "root": "/athena-fixture/beta",
+      "layout": {
+        "tree": {
+          "Leaf": {
+            "id": 1,
+            "items": [
+              {
+                "id": 2,
+                "kind": {
+                  "Editor": {
+                    "path": "/athena-fixture/beta/README.md"
+                  }
+                }
+              },
+              {
+                "id": 3,
+                "kind": {
+                  "Preview": {
+                    "url": "http://localhost:5173/"
+                  }
+                }
+              }
+            ],
+            "active": 1
+          }
+        },
+        "focused": 1,
+        "next_id": 4
+      },
+      "claude_command": "claude-fixture"
+    },
+    {
+      "root": "/athena-fixture/gamma",
+      "layout": {
+        "tree": {
+          "Leaf": {
+            "id": 1,
+            "items": [
+              {
+                "id": 2,
+                "kind": {
+                  "Terminal": {
+                    "session": null
+                  }
+                }
+              }
+            ],
+            "active": 0
+          }
+        },
+        "focused": 1,
+        "next_id": 3
+      }
+    }
+  ],
+  "active": 1,
+  "window": {
+    "x": 100.0,
+    "y": 80.0,
+    "width": 1400.0,
+    "height": 900.0,
+    "mode": "Windowed"
+  },
+  "usage_indicator": true
+}

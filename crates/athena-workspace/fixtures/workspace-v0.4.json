@@ -1,0 +1,154 @@
+{
+  "projects": [
+    {
+      "root": "/athena-fixture/alpha",
+      "layout": {
+        "tree": {
+          "Split": {
+            "axis": "Horizontal",
+            "ratio": 0.5,
+            "first": {
+              "Leaf": {
+                "id": 1,
+                "items": [
+                  {
+                    "id": 2,
+                    "kind": {
+                      "Terminal": {
+                        "session": 1700000000000001
+                      }
+                    }
+                  },
+                  {
+                    "id": 3,
+                    "kind": {
+                      "Editor": {
+                        "path": "/athena-fixture/alpha/src/main.rs"
+                      }
+                    }
+                  }
+                ],
+                "active": 1
+              }
+            },
+            "second": {
+              "Leaf": {
+                "id": 5,
+                "items": [
+                  {
+                    "id": 4,
+                    "kind": {
+                      "Editor": {
+                        "path": "/athena-fixture/alpha/src/lib.rs"
+                      }
+                    }
+                  }
+                ],
+                "active": 0
+              }
+            }
+          }
+        },
+        "focused": 5,
+        "next_id": 6
+      }
+    },
+    {
+      "root": "/athena-fixture/beta",
+      "layout": {
+        "tree": {
+          "Leaf": {
+            "id": 1,
+            "items": [
+              {
+                "id": 2,
+                "kind": {
+                  "Editor": {
+                    "path": "/athena-fixture/beta/README.md"
+                  }
+                }
+              },
+              {
+                "id": 3,
+                "kind": {
+                  "Preview": {
+                    "url": "http://localhost:5173/"
+                  }
+                }
+              },
+              {
+                "id": 4,
+                "kind": {
+                  "Image": {
+                    "path": "/athena-fixture/beta/logo.png"
+                  }
+                }
+              },
+              {
+                "id": 5,
+                "kind": {
+                  "Rendered": {
+                    "path": "/athena-fixture/beta/docs/guide.md"
+                  }
+                }
+              },
+              {
+                "id": 6,
+                "kind": {
+                  "Diff": {
+                    "path": "/athena-fixture/beta/src/app.ts",
+                    "base": "Head"
+                  }
+                }
+              }
+            ],
+            "active": 4
+          }
+        },
+        "focused": 1,
+        "next_id": 7
+      },
+      "claude_command": "claude-fixture"
+    },
+    {
+      "root": "/athena-fixture/gamma",
+      "layout": {
+        "tree": {
+          "Leaf": {
+            "id": 1,
+            "items": [
+              {
+                "id": 2,
+                "kind": {
+                  "Terminal": {
+                    "session": null
+                  }
+                }
+              }
+            ],
+            "active": 0
+          }
+        },
+        "focused": 1,
+        "next_id": 3
+      }
+    }
+  ],
+  "active": 1,
+  "window": {
+    "x": 100.0,
+    "y": 80.0,
+    "width": 1400.0,
+    "height": 900.0,
+    "mode": "Windowed"
+  },
+  "usage_indicator": true,
+  "autosave_delay_ms": 0,
+  "format_on_save": false,
+  "ui": {
+    "tree_width": 320.0,
+    "drawer_height": 280.0,
+    "tree_visible": false,
+    "font_zoom": 2
+  }
+}
