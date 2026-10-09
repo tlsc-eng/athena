@@ -54,12 +54,12 @@ struct Proposal {
     view: Option<EntityId>,
 }
 
-/// Tabs that mean nothing to a later run: Claude's proposals and project search replace previews.
+/// Tabs that mean nothing to a later run: Claude's proposals, replace previews and conflict compares.
 fn never_saved(kind: &ItemKind) -> bool {
     matches!(
         kind,
         ItemKind::Diff {
-            base: DiffBase::Proposal { .. } | DiffBase::SearchReplace,
+            base: DiffBase::Proposal { .. } | DiffBase::SearchReplace | DiffBase::Conflict,
             ..
         }
     )
