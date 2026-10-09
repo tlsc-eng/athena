@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::SystemTime;
@@ -13,6 +13,8 @@ use serde::de::IgnoredAny;
 use serde_json::Value;
 
 const TITLE_CHARS: usize = 200;
+/// A transcript line longer than this is skipped unread, as a pasted file or image can make one.
+const MAX_LINE: u64 = 8 << 20;
 /// Claude Code shortens longer folder names and adds a hash, so those are matched by prefix.
 const MAX_FOLDER: usize = 200;
 
@@ -45,10 +47,14 @@ pub fn profiles(home: &Path) -> Vec<Profile> {
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let dir = e.path();
-            (name.starts_with(".claude-") && dir.join("projects").is_dir()).then(|| Profile {
-                name: name.trim_start_matches('.').into(),
-                config_dir: Some(dir.clone()),
-                dir,
+            // Its path is typed into a terminal to resume a session there.
+            let typable = !name.chars().any(char::is_control);
+            (name.starts_with(".claude-") && typable && dir.join("projects").is_dir()).then(|| {
+                Profile {
+                    name: name.trim_start_matches('.').into(),
+                    config_dir: Some(dir.clone()),
+                    dir,
+                }
             })
         })
         .collect();
@@ -76,15 +82,22 @@ pub struct Tokens {
 
 impl Tokens {
     pub fn total(&self) -> u64 {
-        self.input + self.output + self.cache_write_5m + self.cache_write_1h + self.cache_read
+        [
+            self.output,
+            self.cache_write_5m,
+            self.cache_write_1h,
+            self.cache_read,
+        ]
+        .into_iter()
+        .fold(self.input, u64::saturating_add)
     }
 
     fn add(&mut self, other: &Tokens) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_write_5m += other.cache_write_5m;
-        self.cache_write_1h += other.cache_write_1h;
-        self.cache_read += other.cache_read;
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_write_5m = self.cache_write_5m.saturating_add(other.cache_write_5m);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
     }
 }
 
@@ -162,7 +175,7 @@ struct CacheCreation {
 impl Usage {
     fn tokens(&self) -> Tokens {
         let (five, hour) = match &self.cache_creation {
-            Some(c) if c.ephemeral_5m_input_tokens + c.ephemeral_1h_input_tokens > 0 => {
+            Some(c) if c.ephemeral_5m_input_tokens > 0 || c.ephemeral_1h_input_tokens > 0 => {
                 (c.ephemeral_5m_input_tokens, c.ephemeral_1h_input_tokens)
             }
             _ => (self.cache_creation_input_tokens, 0),
@@ -298,10 +311,40 @@ fn subagent_tokens(path: &Path) -> BTreeMap<String, Tokens> {
         return BTreeMap::new();
     };
     let mut reader = Reader::default();
-    for line in BufReader::new(file).split(b'\n').map_while(Result::ok) {
-        reader.line(&String::from_utf8_lossy(&line), false);
+    let (mut input, mut buf) = (BufReader::new(file), Vec::new());
+    while next_line(&mut input, &mut buf).is_some() {
+        reader.line(&String::from_utf8_lossy(&buf), false);
     }
     reader.tokens()
+}
+
+/// Reads the next whole line into `buf` and returns its length on disk, or `None` at the end or
+/// at a line still being written. Past [`MAX_LINE`] only that much is kept, which reads as malformed.
+fn next_line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> Option<u64> {
+    buf.clear();
+    let n = input.by_ref().take(MAX_LINE).read_until(b'\n', buf).ok()? as u64;
+    if buf.ends_with(b"\n") {
+        return Some(n);
+    }
+    if n < MAX_LINE {
+        return None;
+    }
+    let mut skipped = 0;
+    loop {
+        let chunk = input.fill_buf().ok()?;
+        if chunk.is_empty() {
+            return None;
+        }
+        let (len, end) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        input.consume(len);
+        skipped += len as u64;
+        if end {
+            return Some(n + skipped);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -349,16 +392,10 @@ fn read_cached(path: &Path, len: u64, modified: SystemTime) -> Summary {
     {
         let mut input = BufReader::new(file);
         let mut buf = Vec::new();
-        loop {
-            buf.clear();
-            match input.read_until(b'\n', &mut buf) {
-                // A line still being written is read again next time.
-                Ok(n) if n > 0 && buf.ends_with(b"\n") => {
-                    entry.offset += n as u64;
-                    entry.reader.line(&String::from_utf8_lossy(&buf), true);
-                }
-                _ => break,
-            }
+        // A line still being written is read again next time.
+        while let Some(n) = next_line(&mut input, &mut buf) {
+            entry.offset += n;
+            entry.reader.line(&String::from_utf8_lossy(&buf), true);
         }
     }
     entry.len = len;
@@ -648,6 +685,55 @@ mod tests {
         assert_eq!(s.malformed, 3);
         assert_eq!(s.messages, 2);
         assert_eq!(s.tokens.len(), 1);
+    }
+
+    #[test]
+    fn a_line_past_the_cap_is_skipped_whole_and_reading_goes_on() {
+        let long = format!("{{\"x\":\"{}\"}}\n", "a".repeat(MAX_LINE as usize));
+        let after = lines(&[reply("m", "claude-opus-5", 1, 1)]);
+        let text = format!("{long}{after}");
+        let mut input = BufReader::new(text.as_bytes());
+        let mut buf = Vec::new();
+        assert_eq!(next_line(&mut input, &mut buf), Some(long.len() as u64));
+        assert_eq!(buf.len() as u64, MAX_LINE, "only the cap is kept");
+        assert_eq!(next_line(&mut input, &mut buf), Some(after.len() as u64));
+        assert_eq!(buf, after.as_bytes());
+        assert_eq!(next_line(&mut input, &mut buf), None);
+        let cut_off = &long[..long.len() - 1];
+        assert_eq!(
+            next_line(&mut BufReader::new(cut_off.as_bytes()), &mut buf),
+            None
+        );
+    }
+
+    #[test]
+    fn a_config_folder_named_with_control_characters_is_not_a_profile() {
+        let home = temp("control");
+        fs::create_dir_all(home.join(".claude-ok/projects")).unwrap();
+        fs::create_dir_all(home.join(".claude-x\n\x1b[2J/projects")).unwrap();
+        let names: Vec<String> = profiles(&home).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["claude-ok"]);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn token_sums_saturate_instead_of_overflowing() {
+        let mut t = Tokens {
+            input: u64::MAX,
+            output: 1,
+            ..Tokens::default()
+        };
+        assert_eq!(t.total(), u64::MAX);
+        t.add(&t.clone());
+        assert_eq!(t.input, u64::MAX);
+        let usage: Usage = serde_json::from_value(json!({
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": u64::MAX,
+                "ephemeral_1h_input_tokens": 1
+            }
+        }))
+        .unwrap();
+        assert_eq!(usage.tokens().cache_write_5m, u64::MAX);
     }
 
     #[test]

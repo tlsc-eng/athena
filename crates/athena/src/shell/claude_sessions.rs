@@ -262,7 +262,8 @@ fn usage_tooltip(row: &SessionRow, prices: &HashMap<String, transcripts::Price>)
 
 /// What Resume types: the profile's config folder, then Claude Code resuming the session.
 pub(super) fn resume_command(id: &str, config_dir: Option<&Path>) -> Option<String> {
-    if !snapshots::valid_session(id) {
+    let typable = |dir: &Path| !dir.to_string_lossy().chars().any(char::is_control);
+    if !snapshots::valid_session(id) || !config_dir.is_none_or(typable) {
         return None;
     }
     let env = config_dir.map(|dir| {
@@ -1119,6 +1120,11 @@ mod tests {
             resume_command("--dangerously-skip-permissions", None),
             None,
             "a transcript named like a flag"
+        );
+        assert_eq!(
+            resume_command(id, Some(Path::new("/x/a\nrm -rf ~"))),
+            None,
+            "a newline would run what follows"
         );
     }
 

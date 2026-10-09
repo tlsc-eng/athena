@@ -11,6 +11,10 @@ const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux statu
 /// Hook input past this is cut off; a Write of a file up to the snapshot limit fits easily.
 const MAX_HOOK_INPUT: u64 = 256 * 1024 * 1024;
 
+/// Todos and plan text past these are cut off before they reach the window.
+const MAX_TODOS: usize = 200;
+const MAX_PLAN: usize = 64 * 1024;
+
 /// The fields Athena reads from a Claude Code hook's input; the rest, such as a Write's whole
 /// file content, is skipped while parsing rather than held in memory.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -51,6 +55,7 @@ fn plan_message(input: HookInput) -> Option<AppMsg> {
             todos: tool
                 .todos?
                 .into_iter()
+                .take(MAX_TODOS)
                 .map(|t| athena_proto::TodoInfo {
                     content: t.content,
                     status: t.status,
@@ -58,10 +63,11 @@ fn plan_message(input: HookInput) -> Option<AppMsg> {
                 })
                 .collect(),
         }),
-        "ExitPlanMode" => Some(AppMsg::ClaudePlan {
-            session,
-            plan: tool.plan?,
-        }),
+        "ExitPlanMode" => {
+            let mut plan = tool.plan?;
+            plan.truncate(plan.floor_char_boundary(MAX_PLAN));
+            Some(AppMsg::ClaudePlan { session, plan })
+        }
         _ => None,
     }
 }
@@ -392,6 +398,31 @@ mod tests {
         ] {
             assert_eq!(plan_message(hook_input(odd)), None);
         }
+    }
+
+    #[test]
+    fn long_todo_lists_and_plans_are_cut_off() {
+        let todos: Vec<_> = (0..MAX_TODOS + 5)
+            .map(|i| serde_json::json!({ "content": format!("t{i}"), "status": "pending" }))
+            .collect();
+        let input = hook_input(serde_json::json!({
+            "session_id": "abc-123",
+            "tool_name": "TodoWrite",
+            "tool_input": { "todos": todos }
+        }));
+        let Some(AppMsg::ClaudeTodos { todos, .. }) = plan_message(input) else {
+            panic!("expected todos");
+        };
+        assert_eq!(todos.len(), MAX_TODOS);
+        let input = hook_input(serde_json::json!({
+            "session_id": "abc-123",
+            "tool_name": "ExitPlanMode",
+            "tool_input": { "plan": format!("a{}", "é".repeat(MAX_PLAN)) }
+        }));
+        let Some(AppMsg::ClaudePlan { plan, .. }) = plan_message(input) else {
+            panic!("expected a plan");
+        };
+        assert_eq!(plan.len(), MAX_PLAN - 1, "cut on a character boundary");
     }
 
     #[test]
