@@ -94,6 +94,14 @@ const TAGS: u32 = 0xFFFE;
 /// Commands remembered at once; the scrollback holds far fewer prompts.
 const MAX_COMMANDS: usize = 4096;
 
+/// Put on the newest scrollback line while output is parsed, to count the lines that scroll past.
+pub const PROBE: char = '\u{10FFFE}';
+
+/// Whether a zero-width character is Athena's own rather than the program's.
+pub fn is_athenas(c: char) -> bool {
+    c == PROBE || tag_id(c).is_some()
+}
+
 /// The zero-width character tagging a prompt line with `id`.
 pub fn tag(id: u32) -> char {
     char::from_u32(TAG_BASE + id % TAGS).unwrap_or('\u{100000}')
@@ -116,6 +124,8 @@ pub struct Command {
     pub output_start: Option<i32>,
     /// Lines from the prompt line to just past the output.
     pub output_end: Option<i32>,
+    /// The width changed since it ran, so the lines rewrapped and the counts no longer hold.
+    pub reflowed: bool,
 }
 
 /// What is known about the commands whose prompts are tagged in the grid.
@@ -146,6 +156,13 @@ impl Commands {
     pub fn forget(&mut self, id: u32) {
         self.by_id.remove(&id);
         self.order.retain(|&old| old != id);
+    }
+
+    /// Called when lines rewrap to a new width.
+    pub fn reflow(&mut self) {
+        for command in self.by_id.values_mut() {
+            command.reflowed = true;
+        }
     }
 
     pub fn get(&self, id: u32) -> Option<&Command> {
@@ -227,6 +244,7 @@ mod tests {
         assert_eq!(tag_id('\u{301}'), None);
         assert_eq!(tag_id('a'), None);
         assert_eq!(tag_id('\u{F0493}'), None, "a Nerd Font icon");
+        assert!(is_athenas(PROBE) && is_athenas(tag(7)) && !is_athenas('\u{F0493}'));
     }
 
     #[test]

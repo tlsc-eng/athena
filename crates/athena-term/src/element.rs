@@ -334,7 +334,7 @@ impl RowBuilder<'_> {
                 .into_iter()
                 .flatten()
                 .copied()
-                .filter(|&c| marks::tag_id(c).is_none())
+                .filter(|&c| !marks::is_athenas(c))
                 .peekable();
             let simple = !flags.contains(Flags::WIDE_CHAR) && extra.peek().is_none();
             if simple

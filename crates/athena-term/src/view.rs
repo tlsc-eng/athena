@@ -1147,6 +1147,9 @@ impl TerminalView {
                 "The shell did not mark where the output started (OSC 133;C)."
             }
             Err(NoOutput::Gone) => "The command's output has scrolled out of the scrollback.",
+            Err(NoOutput::Reflowed) => {
+                "The terminal's width changed since the command ran, so its output rewrapped."
+            }
         };
         cx.emit(TerminalEvent::Notice {
             title: "Nothing to copy".into(),

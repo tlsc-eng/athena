@@ -78,10 +78,14 @@ pub struct Terminal {
     pub blocked_clipboard: Option<String>,
     marks: Scanner,
     commands: Commands,
-    /// Where the last `A` mark put the prompt, as history size plus screen line, until it is tagged.
+    /// Where the last `A` mark put the prompt, from [`Self::cursor_abs`], until it is tagged.
     prompt_start: Option<usize>,
-    /// The newest tagged prompt: its command id and where it was tagged.
-    prompt: Option<(u32, usize)>,
+    /// The newest tagged prompt: its command id and, until its command starts, where it was tagged.
+    prompt: Option<(u32, Option<usize>)>,
+    /// Lines pushed out of the full scrollback while a position was held.
+    dropped: usize,
+    /// A [`marks::PROBE`] is still in the main screen's scrollback.
+    probe_out: bool,
 }
 
 /// Why the last command's output cannot be copied.
@@ -93,6 +97,8 @@ pub enum NoOutput {
     Unmarked,
     /// The command's prompt has scrolled out of the scrollback.
     Gone,
+    /// The terminal's width changed since, so its output rewrapped.
+    Reflowed,
 }
 
 /// A link under the pointer: viewport row, column range and target.
@@ -134,6 +140,8 @@ impl Terminal {
             commands: Commands::default(),
             prompt_start: None,
             prompt: None,
+            dropped: 0,
+            probe_out: false,
         }
     }
 
@@ -176,11 +184,11 @@ impl Terminal {
                 // Each mark is recorded where the cursor is once the bytes before it are parsed.
                 let mut from = 0;
                 for (end, mark) in self.marks.feed(&bytes) {
-                    self.parser.advance(&mut self.term, &bytes[from..end]);
+                    self.parse(&bytes[from..end]);
                     from = end;
                     self.on_mark(mark);
                 }
-                self.parser.advance(&mut self.term, &bytes[from..]);
+                self.parse(&bytes[from..]);
                 self.tag_prompt(false);
                 self.drain_events(palette);
             }
@@ -213,6 +221,10 @@ impl Terminal {
                 {
                     command.output_start = Some(cursor.0 - line.0);
                 }
+                // Only a redraw before the command starts needs it, and holding it costs a probe.
+                if let Some((_, abs)) = &mut self.prompt {
+                    *abs = None;
+                }
             }
             Mark::Finished(code) => {
                 let cursor = self.term.grid().cursor.point;
@@ -229,13 +241,97 @@ impl Terminal {
 
     fn cursor_abs(&self) -> usize {
         let grid = self.term.grid();
-        grid.history_size() + grid.cursor.point.line.0.max(0) as usize
+        self.dropped + grid.history_size() + grid.cursor.point.line.0.max(0) as usize
     }
 
     /// The grid line an absolute position from [`Self::cursor_abs`] is on now, if still shown.
     fn line_at_abs(&self, abs: usize) -> Option<Line> {
-        let line = Line(abs as i32 - self.term.grid().history_size() as i32);
+        let from_top = i32::try_from(abs.checked_sub(self.dropped)?).ok()?;
+        let line = Line(from_top - self.term.grid().history_size() as i32);
         (self.term.topmost_line() <= line && line <= self.term.bottommost_line()).then_some(line)
+    }
+
+    fn holds_position(&self) -> bool {
+        self.prompt_start.is_some() || self.prompt.is_some_and(|(_, abs)| abs.is_some())
+    }
+
+    fn forget_positions(&mut self) {
+        self.prompt_start = None;
+        if let Some((_, abs)) = &mut self.prompt {
+            *abs = None;
+        }
+    }
+
+    fn parse(&mut self, bytes: &[u8]) {
+        self.counting_drops(|t| t.parser.advance(&mut t.term, bytes));
+    }
+
+    /// Runs `change`, adding the lines it pushed out of a full scrollback to `dropped`, which
+    /// alacritty does not count; held positions are forgotten when that cannot be told.
+    fn counting_drops(&mut self, change: impl FnOnce(&mut Self)) {
+        let main = !self.mode().contains(TermMode::ALT_SCREEN);
+        if main && self.probe_out {
+            // Left behind when a program switched to the alternate screen.
+            self.take_probe();
+        }
+        let held = self.holds_position();
+        let before = self.term.grid().history_size();
+        if held && main && before > 0 {
+            self.term.grid_mut()[Line(-1)][Column(0)].push_zerowidth(marks::PROBE);
+            self.probe_out = true;
+        }
+        change(self);
+        if !held {
+            return;
+        }
+        if self.mode().contains(TermMode::ALT_SCREEN) {
+            if main {
+                self.forget_positions();
+            }
+            return;
+        }
+        let after = self.term.grid().history_size();
+        let moved = if self.probe_out {
+            self.take_probe()
+        } else {
+            None
+        };
+        let gone = match moved {
+            Some(up) if main => usize::try_from(before as isize + up - after as isize).ok(),
+            None if main && before == 0 && after < SCROLLBACK_LINES => Some(0),
+            _ => None,
+        };
+        match gone {
+            Some(lines) => self.dropped += lines,
+            None => self.forget_positions(),
+        }
+    }
+
+    /// Removes the probe and returns how many lines above the newest scrollback line it now is.
+    fn take_probe(&mut self) -> Option<isize> {
+        self.probe_out = false;
+        let top = self.term.topmost_line();
+        let mut line = self.term.bottommost_line();
+        while line >= top {
+            let cell = &mut self.term.grid_mut()[line][Column(0)];
+            if let Some(zerowidth) = cell.zerowidth()
+                && zerowidth.contains(&marks::PROBE)
+            {
+                let kept: Vec<char> = zerowidth
+                    .iter()
+                    .copied()
+                    .filter(|&c| c != marks::PROBE)
+                    .collect();
+                // Cell has no way to remove one zero-width character, only all of them.
+                let (c, flags) = (cell.c, cell.flags);
+                cell.clear_wide();
+                (cell.c, cell.flags) = (c, flags);
+                kept.into_iter().for_each(|c| cell.push_zerowidth(c));
+                return Some(-1 - line.0 as isize);
+            }
+            line -= 1;
+        }
+        None
     }
 
     /// Tags the line the last `A` mark started on, once the prompt is drawn there or `now`.
@@ -249,7 +345,7 @@ impl Terminal {
         }
         let id = self.commands.start();
         self.term.grid_mut()[line][Column(0)].push_zerowidth(marks::tag(id));
-        self.prompt = self.prompt_start.take().map(|abs| (id, abs));
+        self.prompt = self.prompt_start.take().map(|abs| (id, Some(abs)));
     }
 
     /// The command tagged on a grid line.
@@ -272,7 +368,9 @@ impl Terminal {
             }
             line -= 1;
         }
-        let line = self.line_at_abs(abs).filter(|_| retag)?;
+        let line = abs
+            .and_then(|abs| self.line_at_abs(abs))
+            .filter(|_| retag)?;
         self.term.grid_mut()[line][Column(0)].push_zerowidth(marks::tag(id));
         Some((id, line))
     }
@@ -313,6 +411,9 @@ impl Terminal {
             .newest_first()
             .find_map(|id| Some((id, *self.commands.get(id)?)).filter(|(_, c)| c.exit.is_some()))
             .ok_or(NoOutput::NoCommand)?;
+        if command.reflowed {
+            return Err(NoOutput::Reflowed);
+        }
         let (Some(start), Some(end)) = (command.output_start, command.output_end) else {
             return Err(if command.output_start.is_none() {
                 NoOutput::Unmarked
@@ -539,6 +640,7 @@ impl Terminal {
     /// Clears scrollback and, outside full-screen programs, the screen above the cursor line.
     pub fn clear_scrollback(&mut self, at_prompt: bool) {
         self.term.clear_screen(ClearMode::Saved);
+        self.forget_positions();
         if self.mode().contains(TermMode::ALT_SCREEN) {
             return;
         }
@@ -601,11 +703,20 @@ impl Terminal {
         if size == self.size {
             return;
         }
-        let grid_changed = (size.cols, size.rows) != (self.size.cols, self.size.rows);
+        let reflow = size.cols != self.size.cols;
+        let grid_changed = reflow || size.rows != self.size.rows;
         self.size = size;
         if grid_changed {
-            self.term
-                .resize(TermSize::new(size.cols as usize, size.rows as usize));
+            let dims = TermSize::new(size.cols as usize, size.rows as usize);
+            if reflow || self.mode().contains(TermMode::ALT_SCREEN) {
+                self.term.resize(dims);
+                self.forget_positions();
+            } else {
+                self.counting_drops(|t| t.term.resize(dims));
+            }
+            if reflow {
+                self.commands.reflow();
+            }
             self.transport.resize(size.rows, size.cols);
         }
     }
@@ -622,9 +733,7 @@ impl Terminal {
 
 /// `text` without the zero-width tags marking prompt lines.
 fn strip_tags(text: &str) -> String {
-    text.chars()
-        .filter(|&c| marks::tag_id(c).is_none())
-        .collect()
+    text.chars().filter(|&c| !marks::is_athenas(c)).collect()
 }
 
 fn sanitize_title(title: &str) -> String {
@@ -1022,6 +1131,57 @@ mod tests {
         );
         assert_eq!(t.term.grid().display_offset(), 0);
         assert!(!t.scroll_to_prompt(false));
+    }
+
+    fn fill_scrollback(t: &mut Terminal) {
+        feed(t, "x\r\n".repeat(SCROLLBACK_LINES + 10).as_bytes());
+        assert_eq!(t.term.grid().history_size(), SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn a_redrawn_prompt_is_found_once_the_scrollback_is_full() {
+        let (mut t, _) = terminal();
+        fill_scrollback(&mut t);
+        for _ in 0..2 {
+            feed(&mut t, PROMPT);
+            feed(
+                &mut t,
+                b"ls\r\x1b[2K> ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+            );
+            assert_eq!(t.last_output(), Ok("out".to_string()));
+        }
+        let shown = t.term.topmost_line().0..=t.term.bottommost_line().0;
+        let probes = shown
+            .flat_map(|l| {
+                t.term.grid()[Line(l)][Column(0)]
+                    .zerowidth()
+                    .unwrap_or_default()
+                    .to_vec()
+            })
+            .filter(|&c| c == marks::PROBE)
+            .count();
+        assert_eq!(probes, 0, "no probe is left in the grid");
+    }
+
+    #[test]
+    fn growing_the_window_keeps_a_held_prompt_and_rewrapping_forgets_output_lines() {
+        let (mut t, _) = terminal();
+        fill_scrollback(&mut t);
+        feed(&mut t, PROMPT);
+        let mut taller = t.size();
+        taller.rows += 3;
+        t.resize(taller);
+        feed(
+            &mut t,
+            b"ls\r\x1b[2K> ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+        );
+        assert_eq!(t.last_output(), Ok("out".to_string()));
+        let mut narrower = t.size();
+        narrower.cols -= 10;
+        t.resize(narrower);
+        assert_eq!(t.last_output(), Err(NoOutput::Reflowed));
+        run(&mut t, "ls", &["a"], 0);
+        assert_eq!(t.last_output(), Ok("a".to_string()));
     }
 
     #[test]
