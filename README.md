@@ -562,7 +562,7 @@ keys while the image viewer has focus.
 | `cmd`-click | Open a link, or a `file:line:col` reference in the editor |
 
 In the terminal's find bar, `enter` and `up` go to the next older match, `shift-enter` and
-`down` to the next newer one, `alt-c` toggles match case, `alt-r` toggles regex and `escape`
+`down` to the next newer one, `cmd-alt-c` toggles match case, `cmd-alt-r` toggles regex and `escape`
 closes it.
 
 ### Your own shortcuts

@@ -80,9 +80,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-up", ScrollToPreviousCommand, Some("Terminal")),
         KeyBinding::new("cmd-down", ScrollToNextCommand, Some("Terminal")),
         KeyBinding::new("shift-enter", FindPrevious, find),
-        KeyBinding::new("alt-c", ToggleMatchCase, find),
-        KeyBinding::new("alt-r", ToggleRegex, find),
     ]);
+    cx.bind_keys(find_toggle_bindings());
+}
+
+// Bare alt-c/r would swallow ç and ® typed into the query, so only VS Code's cmd-alt ones.
+fn find_toggle_bindings() -> [KeyBinding; 2] {
+    let find = Some("TerminalFind");
+    [
+        KeyBinding::new("cmd-alt-c", ToggleMatchCase, find),
+        KeyBinding::new("cmd-alt-r", ToggleRegex, find),
+    ]
 }
 
 pub enum TerminalEvent {
@@ -1423,7 +1431,7 @@ impl TerminalView {
                     .child(find.input.clone()),
             )
             .child(
-                button("find-case", "Aa", "Match Case  ⌥C", search.case_sensitive).on_click(
+                button("find-case", "Aa", "Match Case  ⌥⌘C", search.case_sensitive).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.toggle_search(|s| s.case_sensitive = !s.case_sensitive, cx)
                     }),
@@ -1433,7 +1441,7 @@ impl TerminalView {
                 button(
                     "find-regex",
                     ".*",
-                    "Use Regular Expression  ⌥R",
+                    "Use Regular Expression  ⌥⌘R",
                     search.regex,
                 )
                 .on_click(
@@ -1887,6 +1895,14 @@ impl TerminalView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_toggles_leave_option_letters_to_the_query() {
+        for binding in find_toggle_bindings() {
+            let m = binding.keystrokes()[0].modifiers();
+            assert!(m.platform && m.alt, "{:?}", binding.keystrokes());
+        }
+    }
 
     #[test]
     fn an_older_daemon_with_shells_marks_the_terminal_stale() {

@@ -182,16 +182,18 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-z", ToggleWordWrap, ctx),
     ]);
     // The shell's Search tab names its field row ProjectSearch to share these.
-    for bar in [Some("FindBar"), Some("ProjectSearch")] {
-        cx.bind_keys([
-            KeyBinding::new("alt-c", ToggleMatchCase, bar),
-            KeyBinding::new("alt-w", ToggleWholeWord, bar),
-            KeyBinding::new("alt-r", ToggleRegex, bar),
-            KeyBinding::new("cmd-alt-c", ToggleMatchCase, bar),
-            KeyBinding::new("cmd-alt-w", ToggleWholeWord, bar),
-            KeyBinding::new("cmd-alt-r", ToggleRegex, bar),
-        ]);
+    for bar in ["FindBar", "ProjectSearch"] {
+        cx.bind_keys(find_toggle_bindings(bar));
     }
+}
+
+// Bare alt-c/w/r would swallow ç, ∑ and ® typed into the query, so only VS Code's cmd-alt ones.
+fn find_toggle_bindings(bar: &str) -> [KeyBinding; 3] {
+    [
+        KeyBinding::new("cmd-alt-c", ToggleMatchCase, Some(bar)),
+        KeyBinding::new("cmd-alt-w", ToggleWholeWord, Some(bar)),
+        KeyBinding::new("cmd-alt-r", ToggleRegex, Some(bar)),
+    ]
 }
 
 pub enum EditorEvent {
@@ -2714,6 +2716,14 @@ mod tests {
         assert!(k.modifiers.platform && k.modifiers.alt && k.key == "f");
         assert!(parse("shift-tab").modifiers.shift);
         assert_eq!(parse("cmd-enter").key, "enter");
+    }
+
+    #[test]
+    fn find_toggles_leave_option_letters_to_the_query() {
+        for binding in find_toggle_bindings("FindBar") {
+            let m = binding.keystrokes()[0].modifiers();
+            assert!(m.platform && m.alt, "{:?}", binding.keystrokes());
+        }
     }
 
     #[test]
