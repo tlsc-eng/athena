@@ -16,6 +16,7 @@ mod line_jump;
 mod lines;
 mod lsp_ui;
 mod merge_conflicts;
+mod minimap;
 mod multi;
 mod pairs;
 mod peek;

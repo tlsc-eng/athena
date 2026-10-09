@@ -458,6 +458,8 @@ pub struct Buffer {
     round_trips: bool,
     /// Set when the user picked the encoding, so reloads keep it instead of detecting again.
     encoding_pinned: bool,
+    /// Background parses taken in, so highlight caches notice a new tree under the same text.
+    parses: u64,
 }
 
 /// What a file looked like on disk; tools that keep the modification time still change its size.
@@ -523,6 +525,7 @@ impl Buffer {
             encoding: FileEncoding::utf8(),
             round_trips: true,
             encoding_pinned: false,
+            parses: 0,
         }
     }
 
@@ -894,9 +897,16 @@ impl Buffer {
 
     /// Swaps in a background parse's tree; false if it was superseded.
     pub(crate) fn finish_parse(&mut self, parsed: Parsed) -> bool {
-        self.syntax
+        let taken = self
+            .syntax
             .as_mut()
-            .is_some_and(|syntax| syntax.finish_parse(parsed))
+            .is_some_and(|syntax| syntax.finish_parse(parsed));
+        self.parses += u64::from(taken);
+        taken
+    }
+
+    pub(crate) fn parses(&self) -> u64 {
+        self.parses
     }
 
     /// Parses now if the tree lags the text, for checks that must see the last keystroke's tokens.

@@ -254,6 +254,10 @@ fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
     }
 }
 
+pub(crate) fn token_color(token: Token, syntax: &SyntaxColors) -> Hsla {
+    style_for(token, syntax).color
+}
+
 const LINE_HEIGHT_RATIO: f32 = 1.5;
 pub(crate) const GUTTER_PAD: f32 = 16.;
 /// Width of the gutter column right of the line numbers that holds fold chevrons.
@@ -286,6 +290,7 @@ pub struct Frame {
     sticky_gutter: Vec<(Point<Pixels>, ShapedLine)>,
     line_height: Pixels,
     gutter_bg: Hsla,
+    minimap: Vec<PaintQuad>,
 }
 
 impl IntoElement for EditorElement {
@@ -411,6 +416,7 @@ impl Element for EditorElement {
             sticky_gutter: Vec::new(),
             line_height: lh,
             gutter_bg: theme.color.surface_sunken,
+            minimap: Vec::new(),
         };
 
         let blame_w = blame_width(self.view.read(cx), cell);
@@ -430,7 +436,8 @@ impl Element for EditorElement {
                 return;
             };
             let (_, _, text_left) = gutter(total);
-            let cols = ((bounds.right() - text_left - cell) / cell)
+            let minimap = crate::minimap::width(view, bounds.size.width);
+            let cols = ((bounds.right() - text_left - cell - minimap) / cell)
                 .floor()
                 .max(10.) as usize;
             view.display.set_wrap(view.word_wrap().then_some(cols));
@@ -468,9 +475,10 @@ impl Element for EditorElement {
         let (numbers_right, fold_column, text_left) = gutter(total);
         let gutter_w = fold_column.1 + blame_w - bounds.left();
         frame.gutter_bounds = Bounds::new(bounds.origin, size(gutter_w, bounds.size.height));
+        let minimap_w = crate::minimap::width(view, bounds.size.width);
         frame.text_bounds = Bounds::from_corners(
             point(bounds.left() + gutter_w, bounds.top()),
-            bounds.bottom_right(),
+            point(bounds.right() - minimap_w, bounds.bottom()),
         );
 
         let first = (view.scroll.y / f32::from(lh)).floor().max(0.) as usize;
@@ -583,7 +591,7 @@ impl Element for EditorElement {
             && let Some((start, _, r)) = rows.iter().find(|(_, _, r)| r.line == head_line)
         {
             let x = f32::from(r.x_for(head - start));
-            let width = f32::from(bounds.right() - text_left) - f32::from(cell) * 2.;
+            let width = f32::from(bounds.right() - minimap_w - text_left) - f32::from(cell) * 2.;
             if x < scroll_x {
                 scroll_x = (x - f32::from(cell) * 4.).max(0.);
             } else if x > scroll_x + width {
@@ -976,6 +984,22 @@ impl Element for EditorElement {
             ));
         }
 
+        frame.minimap = crate::minimap::quads(
+            view,
+            &buffer,
+            bounds,
+            view.scroll.y / f32::from(lh),
+            bounds.size.height / lh,
+            &crate::minimap::Palette {
+                syntax: &syntax,
+                token: token_color,
+                background: theme.color.surface_sunken,
+                border: theme.color.border,
+                slider: theme.color.content.opacity(0.1),
+                caret: theme.color.accent.opacity(0.3),
+            },
+        );
+
         let stored = rows.into_iter().map(|(_, _, r)| r).collect();
         self.view.update(cx, |view, _| {
             view.scroll.x = scroll_x;
@@ -1053,6 +1077,9 @@ impl Element for EditorElement {
             );
             for (origin, line) in &frame.sticky_gutter {
                 let _ = line.paint(*origin, lh, window, cx);
+            }
+            for quad in frame.minimap.drain(..) {
+                window.paint_quad(quad);
             }
         });
     }

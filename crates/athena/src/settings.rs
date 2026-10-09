@@ -60,6 +60,8 @@ pub struct EditorSettings {
     pub lightbulb: Option<Lightbulb>,
     /// VS Code's `editor.linkedEditing`: typing in a tag name renames its matching tag.
     pub linked_editing: Option<bool>,
+    /// VS Code's `editor.minimap.enabled`; on unless turned off.
+    pub minimap: Option<bool>,
 }
 
 /// Which code actions put a lightbulb beside the cursor's line; the rest wait for Cmd+.
@@ -94,6 +96,7 @@ impl EditorSettings {
             fix_all_on_save: over.fix_all_on_save.or(self.fix_all_on_save),
             lightbulb: over.lightbulb.or(self.lightbulb),
             linked_editing: over.linked_editing.or(self.linked_editing),
+            minimap: over.minimap.or(self.minimap),
         }
     }
 
@@ -112,6 +115,11 @@ impl EditorSettings {
                 });
             }
             "linked_editing" => self.linked_editing = Some(flag()?),
+            // `"editor": {"minimap": {"enabled": false}}` nests the flag VS Code keys flat.
+            "minimap" => {
+                let flag = value.get("enabled").unwrap_or(value).as_bool();
+                self.minimap = Some(flag.ok_or("must be true or false")?);
+            }
             "lightbulb" => {
                 self.lightbulb = Some(match (value.as_str(), value.as_bool()) {
                     (Some("off"), _) | (_, Some(false)) => Lightbulb::Off,
@@ -162,6 +170,7 @@ fn editor_key(key: &str) -> &str {
         }
         "wordWrap" => "word_wrap",
         "linkedEditing" => "linked_editing",
+        "minimap.enabled" => "minimap",
         "lightbulb.enabled" => "lightbulb",
         "codeActionsOnSave" => "code_actions_on_save",
         other => other,
@@ -1143,6 +1152,23 @@ mod tests {
             let (_, problems) = parse(bad).unwrap();
             assert_eq!(problems.len(), 1, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_minimap_reads_vs_codes_flat_and_nested_keys_and_by_language() {
+        let (s, problems) =
+            parse(r#"{"editor.minimap.enabled": false, "[go]": {"editor.minimap.enabled": true}}"#)
+                .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.editor.minimap, Some(false));
+        assert_eq!(s.editor_for(Some(Lang::Go)).minimap, Some(true));
+        let (s, _) = parse(r#"{"editor": {"minimap": {"enabled": false}}}"#).unwrap();
+        assert_eq!(s.editor.minimap, Some(false));
+        let (s, _) = parse(r#"{"editor": {"minimap": true}}"#).unwrap();
+        assert_eq!(s.editor.minimap, Some(true));
+        let (_, problems) = parse(r#"{"editor": {"minimap": "on"}}"#).unwrap();
+        assert_eq!(problems.len(), 1);
+        assert_eq!(Settings::default().editor.minimap, None);
     }
 
     #[test]

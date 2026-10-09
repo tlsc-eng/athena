@@ -468,6 +468,7 @@ pub struct EditorView {
     was_dirty: bool,
     pub(crate) markers: Vec<Marker>,
     pub(crate) display: DisplayMap,
+    pub(crate) minimap: crate::minimap::Minimap,
     /// Foldable regions by header line, valid for one buffer version.
     fold_cache: RefCell<(u64, HashMap<usize, Option<Fold>>)>,
     pub(crate) gutter_hover: bool,
@@ -577,6 +578,7 @@ impl EditorView {
             was_dirty: false,
             markers: Vec::new(),
             display: DisplayMap::default(),
+            minimap: Default::default(),
             fold_cache: RefCell::default(),
             gutter_hover: false,
             autosave: None,
@@ -985,6 +987,9 @@ impl EditorView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
+        if self.click_minimap(event, cx) {
+            return;
+        }
         self.hide_hover(cx);
         self.dismiss_completion(cx);
         if self.click_sticky(event.position, cx) {
@@ -1046,6 +1051,9 @@ impl EditorView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_minimap(event, cx) {
+            return;
+        }
         let hover = self
             .layout
             .as_ref()

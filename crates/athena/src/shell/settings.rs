@@ -362,6 +362,7 @@ impl Shell {
         let inlays = e.inlay_hints != Some(false);
         let brackets = e.bracket_pair_colorization != Some(false);
         let linked = e.linked_editing == Some(true);
+        let minimap = e.minimap != Some(false);
         let tidy = SaveSettings {
             trim_trailing_whitespace: e.trim_trailing_whitespace,
             insert_final_newline: e.insert_final_newline,
@@ -374,6 +375,7 @@ impl Shell {
             v.set_inlay_hints(inlays, cx);
             v.set_bracket_pair_colorization(brackets, cx);
             v.set_linked_editing(linked, cx);
+            v.set_minimap(minimap, cx);
             v.set_save_settings(tidy);
         });
     }
