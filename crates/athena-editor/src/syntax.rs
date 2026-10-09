@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ropey::Rope;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{
-    InputEdit, Language, Node, Parser, Query, QueryCursor, Range as TreeRange, TextProvider, Tree,
+    InputEdit, Language, Node, Parser, Point, Query, QueryCursor, Range as TreeRange, TextProvider,
+    Tree,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,6 +542,9 @@ pub struct Syntax {
     stale: bool,
     /// The background parse in flight, and the edits made since its snapshot to replay on its tree.
     parsing: Option<(u64, Vec<InputEdit>)>,
+    /// What has been read of the bracket tokens under each node with many children, by node
+    /// id, for the tree as it is now; a 300k-element JSON array is otherwise walked every frame.
+    brackets: RefCell<HashMap<usize, BracketScan>>,
 }
 
 /// A parse to run off the UI thread, over a snapshot of the text and the edited tree it reuses.
@@ -604,6 +608,7 @@ impl Syntax {
             backend,
             stale: false,
             parsing: None,
+            brackets: RefCell::default(),
         };
         syntax.reparse(rope);
         syntax
@@ -625,6 +630,7 @@ impl Syntax {
         } = &mut self.backend
         {
             tree.edit(edit);
+            self.brackets.get_mut().clear();
             self.stale = true;
             if let Some((_, edits)) = &mut self.parsing {
                 edits.push(*edit);
@@ -637,6 +643,7 @@ impl Syntax {
             return;
         };
         *tree = parse_rope(parser, rope, tree.as_ref());
+        self.brackets.get_mut().clear();
         self.stale = false;
         // Whatever is in flight started from an older tree than this one.
         self.parsing = None;
@@ -691,6 +698,7 @@ impl Syntax {
                 fresh.edit(edit);
             }
             *tree = Some(fresh);
+            self.brackets.get_mut().clear();
         }
         true
     }
@@ -783,10 +791,11 @@ fn markdown_inline(
     let mut cursor = QueryCursor::new();
     cursor.set_byte_range(bytes.clone());
     let mut matches = cursor.matches(nodes, block.root_node(), RopeText(rope));
+    let window = inline_window(rope, &bytes);
     let mut ranges = Vec::new();
     while let Some(m) = matches.next() {
         for capture in m.captures() {
-            ranges.push(inline_ranges(capture.node));
+            ranges.push(inline_ranges(capture.node, &window));
         }
     }
     PARSER.with_borrow_mut(|parser| {
@@ -801,31 +810,67 @@ fn markdown_inline(
     });
 }
 
-/// `node`'s text without the `>` or indent that continues a quote or list item on a later line.
-fn inline_ranges(node: Node) -> Vec<TreeRange> {
+/// Lines either side of the painted ones an inline parse still reads, for emphasis or a code
+/// span that starts above the view; a paragraph is never parsed whole, however long.
+const INLINE_CONTEXT_LINES: usize = 20;
+
+/// The whole lines from `INLINE_CONTEXT_LINES` above `bytes` to as many below it.
+fn inline_window(rope: &Rope, bytes: &Range<usize>) -> TreeRange {
+    let len = rope.len_bytes();
+    let first = rope
+        .byte_to_line(bytes.start.min(len))
+        .saturating_sub(INLINE_CONTEXT_LINES);
+    let last =
+        (rope.byte_to_line(bytes.end.min(len)) + INLINE_CONTEXT_LINES + 1).min(rope.len_lines());
+    let at = |row: usize| (rope.line_to_byte(row), Point { row, column: 0 });
+    let ((start_byte, start_point), (end_byte, end_point)) = (at(first), at(last));
+    TreeRange {
+        start_byte,
+        end_byte,
+        start_point,
+        end_point,
+    }
+}
+
+/// `node`'s text within `window`, without the `>` or indent that continues a quote or list item
+/// on a later line.
+fn inline_ranges(node: Node, window: &TreeRange) -> Vec<TreeRange> {
     let mut out = Vec::new();
     let (mut start_byte, mut start_point) = (node.start_byte(), node.start_position());
-    let mut walker = node.walk();
-    let continuations = node
-        .children(&mut walker)
-        .filter(|c| c.kind() == "block_continuation");
-    for child in continuations {
-        if child.start_byte() > start_byte {
-            out.push(TreeRange {
-                start_byte,
-                end_byte: child.start_byte(),
-                start_point,
-                end_point: child.start_position(),
-            });
-        }
-        (start_byte, start_point) = (child.end_byte(), child.end_position());
+    if window.start_byte > start_byte {
+        (start_byte, start_point) = (window.start_byte, window.start_point);
     }
-    if node.end_byte() > start_byte {
+    let (end_byte, end_point) = match node.end_byte() > window.end_byte {
+        true => (window.end_byte, window.end_point),
+        false => (node.end_byte(), node.end_position()),
+    };
+    // Only the children inside the window: a long paragraph has one per line.
+    let mut cursor = node.walk();
+    let mut more = cursor.goto_first_child_for_byte(start_byte).is_some();
+    while more {
+        let child = cursor.node();
+        if child.start_byte() >= end_byte {
+            break;
+        }
+        if child.kind() == "block_continuation" {
+            if child.start_byte() > start_byte {
+                out.push(TreeRange {
+                    start_byte,
+                    end_byte: child.start_byte(),
+                    start_point,
+                    end_point: child.start_position(),
+                });
+            }
+            (start_byte, start_point) = (child.end_byte(), child.end_position());
+        }
+        more = cursor.goto_next_sibling();
+    }
+    if end_byte > start_byte {
         out.push(TreeRange {
             start_byte,
-            end_byte: node.end_byte(),
+            end_byte,
             start_point,
-            end_point: node.end_position(),
+            end_point,
         });
     }
     out
@@ -898,28 +943,74 @@ impl Syntax {
         };
         let mut node = Some(tree.root_node().descendant_for_byte_range(byte, byte)?);
         let mut levels: Vec<Vec<char>> = Vec::new();
+        let mut scans = self.brackets.borrow_mut();
         while let Some(n) = node {
-            let mut open = Vec::new();
-            let mut cursor = n.walk();
-            for child in n.children(&mut cursor) {
-                if child.start_byte() >= byte {
-                    break;
-                }
-                if child.is_named() {
-                    continue;
-                }
-                match (bracket_pair(child.kind()), child.kind().chars().next()) {
-                    (Some((o, _)), Some(c)) if o.starts_with(c) => open.push(c),
-                    (Some((o, _)), Some(_)) if open.last().is_some_and(|&l| o.starts_with(l)) => {
-                        open.pop();
-                    }
-                    _ => {}
-                }
-            }
+            let open = if n.child_count() < CACHED_FROM {
+                let mut scan = BracketScan::default();
+                scan.read_to(n, byte);
+                scan.open_before(byte)
+            } else {
+                let scan = scans.entry(n.id()).or_default();
+                scan.read_to(n, byte);
+                scan.open_before(byte)
+            };
             levels.push(open);
             node = n.parent();
         }
         Some(levels.into_iter().rev().flatten().collect())
+    }
+}
+
+/// Nodes with this many children keep what has been read of them until the tree changes.
+const CACHED_FROM: u32 = 64;
+
+/// The unnamed bracket tokens directly under one node, read from its start so far.
+#[derive(Default)]
+struct BracketScan {
+    found: Vec<(usize, char)>,
+    /// Every child starting before this byte has been read.
+    through: usize,
+    done: bool,
+}
+
+impl BracketScan {
+    fn read_to(&mut self, node: Node, byte: usize) {
+        if self.done || byte <= self.through {
+            return;
+        }
+        let mut cursor = node.walk();
+        let mut more = cursor.goto_first_child_for_byte(self.through).is_some();
+        while more {
+            let child = cursor.node();
+            if child.start_byte() >= byte {
+                self.through = byte;
+                return;
+            }
+            if child.start_byte() >= self.through
+                && !child.is_named()
+                && bracket_pair(child.kind()).is_some()
+                && let Some(c) = child.kind().chars().next()
+            {
+                self.found.push((child.start_byte(), c));
+            }
+            more = cursor.goto_next_sibling();
+        }
+        self.done = true;
+    }
+
+    /// The brackets read so far that open before `byte` and do not close before it.
+    fn open_before(&self, byte: usize) -> Vec<char> {
+        let mut open = Vec::new();
+        for &(_, c) in self.found.iter().take_while(|(start, _)| *start < byte) {
+            match bracket_pair(c.encode_utf8(&mut [0; 4])) {
+                Some((o, _)) if o.starts_with(c) => open.push(c),
+                Some((o, _)) if open.last().is_some_and(|&l| o.starts_with(l)) => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        open
     }
 }
 
@@ -989,6 +1080,112 @@ mod tests {
             .into_iter()
             .rfind(|(r, _)| r.contains(&at))
             .map(|(_, t)| t)
+    }
+
+    fn timed(runs: usize, mut f: impl FnMut()) -> (f64, f64) {
+        let mut ms: Vec<f64> = (0..runs)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                f();
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        (ms.iter().sum::<f64>() / ms.len() as f64, ms[ms.len() - 1])
+    }
+
+    /// The paint-time cost of a huge Markdown paragraph and a huge JSON array, per call:
+    /// `cargo test -p athena-editor --release --lib -- --ignored paint_cost --nocapture`
+    #[test]
+    #[ignore]
+    fn paint_cost_of_huge_paragraphs_and_arrays() {
+        let md: String = (0..20_000)
+            .map(|i| format!("line {i} has *soft* and **loud** words with `code` in it\n"))
+            .collect();
+        let rope = Rope::from_str(&md);
+        let syntax = Syntax::new(Lang::Markdown, &rope);
+        let (start, end) = (rope.line_to_byte(10_000), rope.line_to_byte(10_060));
+        let (avg, max) = timed(20, || {
+            assert!(!syntax.highlights(&rope, start..end).is_empty());
+        });
+        eprintln!(
+            "markdown, 20k-line paragraph, 60 lines highlighted: avg {avg:.2} ms, max {max:.2} ms"
+        );
+
+        let json = format!(
+            "[\n{}  0\n]\n",
+            (1..300_000)
+                .map(|i| format!("  {i},\n"))
+                .collect::<String>()
+        );
+        let rope = Rope::from_str(&json);
+        let syntax = Syntax::new(Lang::Json, &rope);
+        let mut line = 150_000;
+        let (first, _) = timed(1, || {
+            assert_eq!(
+                syntax.open_brackets_at(rope.line_to_byte(line)),
+                Some(vec!['['])
+            );
+        });
+        let (avg, max) = timed(60, || {
+            line += 1;
+            let at = rope.line_to_byte(line);
+            assert_eq!(syntax.open_brackets_at(at), Some(vec!['[']));
+        });
+        eprintln!(
+            "json, 300k-element array, open brackets mid-array: first call {first:.2} ms; then a line further each call (scrolling): avg {avg:.3} ms, max {max:.3} ms"
+        );
+    }
+
+    #[test]
+    fn open_brackets_of_a_long_array_follow_edits() {
+        let rows: String = (0..100).map(|_| "  [1],\n").collect();
+        let src = format!("{{\"a\": [\n{rows}  0\n]}}\n");
+        let mut rope = Rope::from_str(&src);
+        let mut syntax = Syntax::new(Lang::Json, &rope);
+        let inner = src.find("[1]").unwrap() + 1;
+        let last = src.find("  0").unwrap();
+        assert_eq!(syntax.open_brackets_at(last), Some(vec!['{', '[']));
+        assert_eq!(syntax.open_brackets_at(inner), Some(vec!['{', '[', '[']));
+        assert_eq!(syntax.open_brackets_at(9), Some(vec!['{', '[']));
+        rope.insert(last, "[");
+        syntax.edit(
+            &InputEdit {
+                start_byte: last,
+                old_end_byte: last,
+                new_end_byte: last + 1,
+                start_position: Point::new(101, 0),
+                old_end_position: Point::new(101, 0),
+                new_end_position: Point::new(101, 1),
+            },
+            &rope,
+        );
+        let src = rope.to_string();
+        let tail = src.rfind('0').unwrap();
+        assert_eq!(
+            syntax.open_brackets_at(tail),
+            Some(vec!['{', '[', '[']),
+            "read again after the edit"
+        );
+    }
+
+    #[test]
+    fn inline_markdown_in_a_long_paragraph_is_painted_where_it_is_shown() {
+        let src: String = (0..3_000)
+            .map(|i| format!("line {i} with *soft* and `code`\n"))
+            .collect();
+        let rope = Rope::from_str(&src);
+        let syntax = Syntax::new(Lang::Markdown, &rope);
+        let (start, end) = (rope.line_to_byte(1_500), rope.line_to_byte(1_501));
+        let tokens = syntax.highlights(&rope, start..end);
+        let shown = |t: Token| {
+            tokens
+                .iter()
+                .filter(|(r, tok)| *tok == t && r.start >= start && r.end <= end)
+                .count()
+        };
+        assert_eq!(shown(Token::Emphasis), 1);
+        assert_eq!(shown(Token::String), 1);
     }
 
     #[test]
