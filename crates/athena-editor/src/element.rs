@@ -268,17 +268,22 @@ impl Element for EditorElement {
                 view.scroll.y = view.display.row_of(top) as f32 * f32::from(lh);
             }
             if view.autoscroll {
-                let Some(row) = view.buf().map(|b| view.caret_row(&b, view.cursor.head())) else {
+                let head = view.cursor.head();
+                let Some((row, at)) = view
+                    .buf()
+                    .map(|b| (view.caret_row(&b, head), b.line_of(head)))
+                else {
                     return;
                 };
                 let line = row as f32 * f32::from(lh);
                 let height = f32::from(bounds.size.height);
                 if std::mem::take(&mut view.center_cursor) {
                     view.scroll.y = (line - (height - f32::from(lh)) / 2.).max(0.);
-                } else if line < view.scroll.y {
-                    view.scroll.y = line;
-                } else if line + f32::from(lh) > view.scroll.y + height {
-                    view.scroll.y = line + f32::from(lh) - height;
+                } else {
+                    let visible = (height / f32::from(lh)).ceil() as usize + 1;
+                    let pinned = view.sticky_lines(at, sticky_max(visible)).len();
+                    let inset = pinned as f32 * f32::from(lh);
+                    view.scroll.y = reveal(view.scroll.y, line, f32::from(lh), height, inset);
                 }
             }
         });
@@ -661,8 +666,7 @@ impl Element for EditorElement {
             }
         }
 
-        // At most a third of the view, so pinned headers never crowd out the text.
-        let max = (visible / 3).min(5);
+        let max = sticky_max(visible);
         let row_count = view.display.row_count(total);
         let mut sticky = view.sticky_lines(view.display.line_of(first), max);
         if !sticky.is_empty() {
@@ -792,5 +796,47 @@ impl Element for EditorElement {
                 let _ = line.paint(*origin, lh, window, cx);
             }
         });
+    }
+}
+
+/// How many scope headers may stick: at most a third of the view, so they never crowd out the text.
+fn sticky_max(visible_rows: usize) -> usize {
+    (visible_rows / 3).min(5)
+}
+
+/// The scroll offset that shows the row at `line` in a view `height` tall, its top `inset`
+/// covered by pinned headers, moving as little as it can.
+fn reveal(scroll: f32, line: f32, lh: f32, height: f32, inset: f32) -> f32 {
+    if line < scroll + inset {
+        (line - inset).max(0.)
+    } else if line + lh > scroll + height {
+        line + lh - height
+    } else {
+        scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revealing_a_caret_keeps_it_out_from_under_sticky_headers() {
+        assert_eq!(
+            reveal(100., 120., 20., 400., 40.),
+            80.,
+            "row under two headers"
+        );
+        assert_eq!(
+            reveal(100., 140., 20., 400., 40.),
+            100.,
+            "first row below them stays"
+        );
+        assert_eq!(reveal(100., 20., 20., 400., 40.), 0.);
+        assert_eq!(
+            reveal(0., 500., 20., 400., 40.),
+            120.,
+            "scrolling down is unchanged"
+        );
     }
 }
