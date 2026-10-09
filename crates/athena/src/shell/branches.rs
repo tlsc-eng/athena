@@ -14,7 +14,8 @@ pub(super) enum BranchPick {
     Stash {
         untracked: bool,
     },
-    PopStash(usize),
+    /// The stash's commit, as its index shifts when another is pushed.
+    PopStash(String),
 }
 
 /// One picker row: label, detail, the text the query is matched against, and what it does.
@@ -91,7 +92,7 @@ pub(super) fn stash_entries(stashes: &[Stash]) -> Vec<BranchEntry> {
                 key: label.clone(),
                 label,
                 detail: Some(s.when.clone()),
-                pick: BranchPick::PopStash(s.index),
+                pick: BranchPick::PopStash(s.commit.clone()),
             }
         })
         .collect()
@@ -161,7 +162,7 @@ impl Shell {
             BranchPick::Track(name) => (name, Switch::Track),
             BranchPick::Create(name) => (name, Switch::Create),
             BranchPick::Stash { untracked } => return self.git_stash(untracked, cx),
-            BranchPick::PopStash(index) => return self.git_stash_pop(index, cx),
+            BranchPick::PopStash(commit) => return self.git_stash_pop(commit, cx),
         };
         cx.spawn(async move |this, cx| {
             let task_name = name.clone();
@@ -234,6 +235,7 @@ mod tests {
     fn stashing_and_each_stash_follow_the_branches() {
         let stash = Stash {
             index: 0,
+            commit: "c0ffee".into(),
             message: "On main: wip".into(),
             when: "1 hour ago".into(),
         };
@@ -249,7 +251,7 @@ mod tests {
                 &BranchPick::Switch("main".into()),
                 &BranchPick::Stash { untracked: false },
                 &BranchPick::Stash { untracked: true },
-                &BranchPick::PopStash(0),
+                &BranchPick::PopStash("c0ffee".into()),
             ]
         );
         assert_eq!(rows[3].label, "Pop stash@{0}: On main: wip");

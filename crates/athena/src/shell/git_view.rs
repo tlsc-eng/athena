@@ -428,13 +428,13 @@ impl Shell {
     }
 
     /// `git stash pop` of the stash at `index`.
-    pub(super) fn git_stash_pop(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn git_stash_pop(&mut self, commit: String, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else {
             return;
         };
         self.git_background(
             "Could not pop the stash",
-            move || git::stash_pop(&root, index),
+            move || git::stash_pop(&root, &commit),
             cx,
         );
     }

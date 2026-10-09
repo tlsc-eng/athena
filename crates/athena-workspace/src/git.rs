@@ -779,13 +779,15 @@ pub fn remotes(root: &Path) -> Result<Vec<String>> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stash {
     pub index: usize,
+    /// The stash's commit, which keeps naming it as newer stashes renumber the list.
+    pub commit: String,
     /// "WIP on main: 1a2b3c Fix the parser", or the message it was stashed with.
     pub message: String,
     /// "3 days ago".
     pub when: String,
 }
 
-/// Parses `stash list` records of the reflog selector, subject and relative date.
+/// Parses `stash list` records of the reflog selector, commit, subject and relative date.
 pub fn parse_stashes(out: &str) -> Vec<Stash> {
     out.lines()
         .filter_map(|line| {
@@ -798,6 +800,7 @@ pub fn parse_stashes(out: &str) -> Vec<Stash> {
                 .ok()?;
             Some(Stash {
                 index,
+                commit: f.next()?.to_string(),
                 message: f.next().unwrap_or_default().to_string(),
                 when: f.next().unwrap_or_default().to_string(),
             })
@@ -807,7 +810,7 @@ pub fn parse_stashes(out: &str) -> Vec<Stash> {
 
 pub fn stashes(root: &Path) -> Result<Vec<Stash>> {
     let mut cmd = git(root);
-    cmd.args(["stash", "list", "--format=%gd%x00%s%x00%cr"]);
+    cmd.args(["stash", "list", "--format=%gd%x00%H%x00%s%x00%cr"]);
     Ok(parse_stashes(&String::from_utf8_lossy(&run(cmd, None)?)))
 }
 
@@ -826,8 +829,15 @@ pub fn stash_push(root: &Path, include_untracked: bool, message: Option<&str>) -
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
-/// `git stash pop stash@{index}`; git keeps the stash when applying it conflicts.
-pub fn stash_pop(root: &Path, index: usize) -> Result<()> {
+/// Pops the stash whose commit is `commit`; git keeps the stash when applying it conflicts.
+pub fn stash_pop(root: &Path, commit: &str) -> Result<()> {
+    // pop takes only stash@{n}, so the index is looked up now, not when the list was shown.
+    let mut list = git(root);
+    list.args(["stash", "list", "--format=%H"]);
+    let out = String::from_utf8_lossy(&run(list, None)?).into_owned();
+    let Some(index) = out.lines().position(|h| h == commit) else {
+        bail!("that stash is no longer in the stash list");
+    };
     let mut cmd = git(root);
     cmd.args(["stash", "pop", &format!("stash@{{{index}}}")]);
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
@@ -1520,10 +1530,11 @@ mod tests {
 
     #[test]
     fn stash_records_parse() {
-        let out = "stash@{0}\0On main: mine\x002 minutes ago\nstash@{1}\0WIP on main: 1a2b Fix\x001 day ago\nnoise\n";
+        let out = "stash@{0}\0aaa\0On main: mine\x002 minutes ago\nstash@{1}\0bbb\0WIP on main: 1a2b Fix\x001 day ago\nnoise\n";
         let list = parse_stashes(out);
         assert_eq!(list.len(), 2);
         assert_eq!(list[1].index, 1);
+        assert_eq!(list[1].commit, "bbb");
         assert_eq!(list[0].message, "On main: mine");
         assert_eq!(list[1].when, "1 day ago");
     }
@@ -1628,13 +1639,21 @@ mod tests {
         let list = stashes(&dir).unwrap();
         assert_eq!(list.len(), 2);
         assert!(list[1].message.ends_with("mine"), "{list:?}");
-        stash_pop(&dir, 1).unwrap();
+        // A stash pushed after the list was read renumbers "mine" to stash@{2}.
+        std::fs::write(dir.join("f.txt"), "later\n").unwrap();
+        stash_push(&dir, false, Some("later")).unwrap();
+        stash_pop(&dir, &list[1].commit).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "mine\n"
         );
-        assert_eq!(stashes(&dir).unwrap().len(), 1);
-        assert!(stash_pop(&dir, 5).is_err());
+        let left = stashes(&dir).unwrap();
+        assert_eq!(left.len(), 2);
+        assert!(
+            left.iter().all(|s| !s.message.ends_with("mine")),
+            "{left:?}"
+        );
+        assert!(stash_pop(&dir, &list[1].commit).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
