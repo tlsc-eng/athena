@@ -39,6 +39,8 @@ struct Repo {
     slow: bool,
     branch: Option<String>,
     tracking: Option<git::Tracking>,
+    /// Conflicted files and the conflict blocks left in them.
+    conflicts: (usize, usize),
     entries: Rc<Vec<(PathBuf, Entry)>>,
     decorations: Rc<Decorations>,
 }
@@ -73,6 +75,8 @@ pub(super) struct GitState {
     /// The fetch, pull or push under way, as the status bar words it.
     pub(super) remote_busy: Option<&'static str>,
     autofetch: Option<Task<()>>,
+    /// Editors followed for saves that resolve a file's last conflict.
+    pub(super) conflict_watch: HashMap<gpui::EntityId, Subscription>,
 }
 
 /// A remote operation the status bar menu and the palette offer.
@@ -180,7 +184,7 @@ fn signature(path: &Path, status: Option<FileStatus>) -> Signature {
 }
 
 /// `path` spelled under `root`, for files opened by their resolved path (/private/tmp for /tmp).
-fn under_root(root: &Path, path: &Path) -> PathBuf {
+pub(super) fn under_root(root: &Path, path: &Path) -> PathBuf {
     if path.starts_with(root) {
         return path.to_path_buf();
     }
@@ -508,7 +512,8 @@ impl Shell {
                         None => git::prefix(&task_root)?,
                     };
                     let snapshot = git::status(&task_root, &prefix, !slow)?;
-                    anyhow::Ok((prefix, snapshot))
+                    let conflicts = super::conflicts::count_conflicts(&snapshot.entries);
+                    anyhow::Ok((prefix, snapshot, conflicts))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
@@ -516,7 +521,15 @@ impl Shell {
                 _ if !this.workspace.projects.iter().any(|p| p.root == root) => {
                     this.git_finished(cx)
                 }
-                Ok((prefix, snapshot)) => this.git_status_arrived(&root, prefix, snapshot, cx),
+                Ok((prefix, snapshot, conflicts)) => {
+                    if let Some(repo) = this.git.repos.get_mut(&root)
+                        && repo.conflicts != conflicts
+                    {
+                        repo.conflicts = conflicts;
+                        cx.notify();
+                    }
+                    this.git_status_arrived(&root, prefix, snapshot, cx)
+                }
                 Err(err) if err.is::<git::TimedOut>() => {
                     tracing::warn!(root = %root.display(), "git status: {err:#}");
                     this.git_repo(&root).slow = true;
@@ -666,6 +679,7 @@ impl Shell {
 
     /// A new editor shows known marks at once and fresh ones after a quick status run.
     pub(super) fn git_opened(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        self.watch_conflicts(editor, cx);
         let path = editor.read(cx).path().to_path_buf();
         if let Some((_, marks)) = self.git.marks.get(&path) {
             let marks = marks.clone();
@@ -765,7 +779,7 @@ impl Shell {
         }));
     }
 
-    fn git_stage(&mut self, targets: Vec<PathBuf>, stage: bool, cx: &mut Context<Self>) {
+    pub(super) fn git_stage(&mut self, targets: Vec<PathBuf>, stage: bool, cx: &mut Context<Self>) {
         let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else {
             return;
         };
@@ -816,10 +830,17 @@ impl Shell {
             n => format!("{n} changed files"),
         };
         let branch = repo.branch.clone().map(|b| format!("{b} · "));
+        let conflicts = super::conflicts::conflicts_label(repo.conflicts);
+        let t = cx.theme();
         Some(
             div()
-                .text_color(cx.theme().color.content_muted)
+                .flex()
+                .gap(px(6.))
+                .text_color(t.color.content_muted)
                 .child(format!("{}{text}", branch.unwrap_or_default()))
+                .children(
+                    conflicts.map(|c| div().text_color(t.color.danger).child(format!("· {c}"))),
+                )
                 .into_any_element(),
         )
     }

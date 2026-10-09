@@ -68,6 +68,8 @@ pub enum DiffBase {
     Proposal { id: String },
     /// The file against what the project search's Replace All would make of it; never saved.
     SearchReplace,
+    /// A conflicted file's current changes against its incoming ones, from its conflict markers.
+    Conflict,
 }
 
 impl ItemKind {

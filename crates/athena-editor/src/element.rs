@@ -428,6 +428,10 @@ impl Element for EditorElement {
                     syntax.current_line,
                 ));
             }
+            if let Some(band) = view.merge_band(*line, &theme) {
+                let row = Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh));
+                frame.backgrounds.push(fill(row, band));
+            }
             for guide in 0..guides.level(*line) {
                 let color = if guides.is_active(guide, *line) {
                     syntax.indent_guide_active

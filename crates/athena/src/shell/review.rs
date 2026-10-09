@@ -64,6 +64,7 @@ pub(super) fn diff_title(path: &Path, base: &DiffBase) -> String {
         DiffBase::Snapshot { .. } => format!("{name} (Claude's Edits)"),
         DiffBase::Proposal { .. } => format!("{name} (Claude's Proposal)"),
         DiffBase::SearchReplace => format!("{name} (Replace Preview)"),
+        DiffBase::Conflict => format!("{name} (Current ↔ Incoming)"),
     }
 }
 
@@ -96,6 +97,11 @@ fn sides(base: &DiffBase) -> (&'static str, &'static str, HunkActions) {
         ),
         DiffBase::Proposal { .. } => ("On Disk", "Claude's Proposal", HunkActions::default()),
         DiffBase::SearchReplace => ("Current", "After Replace", HunkActions::default()),
+        DiffBase::Conflict => (
+            "Current Changes",
+            "Incoming Changes",
+            HunkActions::default(),
+        ),
     }
 }
 
@@ -176,6 +182,14 @@ fn load_with(
         }
         DiffBase::Proposal { .. } => bail!("Claude's proposed change is no longer waiting."),
         DiffBase::SearchReplace => bail!("A replace preview comes from the search."),
+        DiffBase::Conflict => {
+            let both = text(read_file(path)?)?;
+            return Ok(Sides {
+                old: athena_editor::resolve_all(&both, athena_editor::Resolution::Current),
+                new: athena_editor::resolve_all(&both, athena_editor::Resolution::Incoming),
+                against_index: false,
+            });
+        }
     };
     Ok(Sides {
         old: text(old)?,

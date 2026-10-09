@@ -12,6 +12,7 @@ mod image;
 mod line_jump;
 mod lines;
 mod lsp_ui;
+mod merge_conflicts;
 mod multi;
 mod pairs;
 pub mod recovery;
@@ -32,6 +33,9 @@ pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
 pub use lsp_ui::{
     ConfirmRename, GoToImplementation, GoToTypeDefinition, RenameSymbol, ShowCodeActions,
+};
+pub use merge_conflicts::{
+    CompareMergeConflicts, ConflictBlock, Resolution, find_merge_conflicts, resolve_all,
 };
 pub use save::{SaveSettings, Tidy, resolve_tidy, save_defaults};
 pub use signature::Signature;

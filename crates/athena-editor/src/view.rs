@@ -473,6 +473,7 @@ pub struct EditorView {
     /// This tab's word wrap choice; `None` follows `wrap_default`.
     pub(crate) wrap: Option<bool>,
     pub(crate) wrap_default: bool,
+    pub(crate) merge: crate::merge_conflicts::MergeCache,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -558,6 +559,7 @@ impl EditorView {
             occurrence: None,
             wrap: None,
             wrap_default: false,
+            merge: Default::default(),
         }
     }
 
@@ -1872,6 +1874,7 @@ impl Render for EditorView {
             )
             .children(self.render_line_jump(cx))
             .children(self.render_hover(cx))
+            .children(self.render_merge_actions(cx))
             .children(self.render_rename(cx))
             .children(focused.then(|| self.render_signature(cx)).flatten())
             .children(focused.then(|| self.render_completion(cx)).flatten())

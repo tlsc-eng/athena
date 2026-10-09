@@ -4,6 +4,7 @@ mod bridge;
 mod claude;
 mod claude_ide;
 mod code_actions;
+mod conflicts;
 mod containers_view;
 mod dnd;
 mod drawer;
@@ -709,7 +710,8 @@ impl Render for Shell {
             |el, d| el.opacity(d).top(px(4. * (1. - d))),
         );
 
-        let root = tasks::bind_run_actions(git_view::bind_git_actions(div(), cx), cx);
+        let root = git_view::bind_git_actions(div(), cx);
+        let root = conflicts::bind_conflict_actions(tasks::bind_run_actions(root, cx), cx);
         root.track_focus(&self.focus)
             .key_context("Shell")
             .on_action(cx.listener(Self::add_project))
