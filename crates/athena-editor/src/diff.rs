@@ -146,6 +146,105 @@ fn align(
     rows
 }
 
+/// What a diff view draws on one line of its list once unchanged stretches are hidden.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// A row of the full list, by index.
+    Row(usize),
+    /// Unchanged rows folded into one "N hidden lines" bar.
+    Hidden(Range<usize>),
+}
+
+/// Unchanged stretches folded down to `context` rows next to each change, as VS Code's "hide
+/// unchanged regions" does; a fold must hide at least 3 rows. `open` holds the old line a
+/// stretch starts at for stretches the user unfolded.
+pub fn collapse(
+    rows: &[Row],
+    context: usize,
+    open: &std::collections::HashSet<usize>,
+) -> Vec<Shown> {
+    const MIN_HIDDEN: usize = 3;
+    let unchanged = |r: &Row| matches!(r, Row::Line { change: None, .. });
+    let mut out = Vec::with_capacity(rows.len());
+    let mut i = 0;
+    while i < rows.len() {
+        if !unchanged(&rows[i]) {
+            out.push(Shown::Row(i));
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < rows.len() && unchanged(&rows[i]) {
+            i += 1;
+        }
+        let keep_top = if start == 0 { 0 } else { context };
+        let keep_bottom = if i == rows.len() { 0 } else { context };
+        let key = match rows[start] {
+            Row::Line { old, .. } => old.unwrap_or(start),
+            Row::Header(_) => start,
+        };
+        let (from, to) = (start + keep_top, i.saturating_sub(keep_bottom));
+        if to < from + MIN_HIDDEN || open.contains(&key) {
+            out.extend((start..i).map(Shown::Row));
+            continue;
+        }
+        out.extend((start..from).map(Shown::Row));
+        out.push(Shown::Hidden(from..to));
+        out.extend((to..i).map(Shown::Row));
+    }
+    out
+}
+
+/// The byte offset in `line` drawn at column `col` with tabs expanded to `tab` stops.
+pub fn byte_at_column(line: &str, col: usize, tab: usize) -> usize {
+    let mut at = 0;
+    for (i, c) in line.char_indices() {
+        if at >= col {
+            return i;
+        }
+        at += if c == '\t' { tab - at % tab } else { 1 };
+    }
+    line.len()
+}
+
+/// The text between two (row, column) points of a diff: `pick` gives the line a row shows on
+/// the selected side. Rows with no line there are skipped; rows hidden in a fold are not.
+pub fn selected_text<'a>(
+    rows: &[Row],
+    pick: impl Fn(&Row) -> Option<&'a str>,
+    from: (usize, usize),
+    to: (usize, usize),
+    tab: usize,
+) -> String {
+    let (from, to) = if from <= to { (from, to) } else { (to, from) };
+    let mut out = String::new();
+    let last = to.0.min(rows.len().saturating_sub(1));
+    for (row, r) in rows.iter().enumerate().take(last + 1).skip(from.0) {
+        let Some(line) = pick(r) else {
+            continue;
+        };
+        let text = display(line);
+        let a = if row == from.0 {
+            byte_at_column(text, from.1, tab)
+        } else {
+            0
+        };
+        let b = if row == to.0 {
+            byte_at_column(text, to.1, tab)
+        } else {
+            text.len()
+        };
+        out.push_str(&text[a.min(b)..b]);
+        if row != to.0 {
+            out.push_str(&line[text.len()..]);
+            if line.len() == text.len() {
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 fn push_merged(out: &mut Vec<Range<usize>>, r: Range<usize>) {
     match out.last_mut() {
         Some(last) if last.end >= r.start => last.end = last.end.max(r.end),
@@ -543,5 +642,74 @@ mod tests {
         let elapsed = started.elapsed();
         // Debug builds are slow; this catches quadratic blow-ups, not small regressions.
         assert!(elapsed.as_secs() < 5, "took {elapsed:?}");
+    }
+
+    #[test]
+    fn long_unchanged_stretches_fold_to_three_lines_of_context() {
+        let changes = vec![ch(10..11, 10..11), ch(14..15, 14..15)];
+        let rows = side_by_side(&changes, 30, 30);
+        let none = std::collections::HashSet::new();
+        let shown = collapse(&rows, 3, &none);
+        assert_eq!(
+            shown[0],
+            Shown::Hidden(0..7),
+            "the top keeps only the lines above the change"
+        );
+        assert_eq!(shown[1], Shown::Row(7));
+        assert!(
+            !shown
+                .iter()
+                .skip(1)
+                .take(10)
+                .any(|s| matches!(s, Shown::Hidden(_))),
+            "three lines between changes stay"
+        );
+        let tail = shown.last().unwrap();
+        assert!(
+            matches!(tail, Shown::Hidden(r) if r.end == rows.len()),
+            "{tail:?}"
+        );
+        let count = |s: &[Shown]| -> usize {
+            s.iter()
+                .map(|x| match x {
+                    Shown::Row(_) => 1,
+                    Shown::Hidden(r) => r.len(),
+                })
+                .sum()
+        };
+        assert_eq!(
+            count(&shown),
+            rows.len(),
+            "every row is shown or hidden once"
+        );
+        let open: std::collections::HashSet<usize> = [0].into();
+        assert_eq!(collapse(&rows, 3, &open)[0], Shown::Row(0));
+        let tiny = side_by_side(&[ch(3..4, 3..4)], 8, 8);
+        assert!(
+            collapse(&tiny, 3, &none)
+                .iter()
+                .all(|s| matches!(s, Shown::Row(_)))
+        );
+    }
+
+    #[test]
+    fn copying_a_selection_takes_one_side_and_the_hidden_lines_between() {
+        let old = lines("a\nb\nc\nd\ne\nf\ng\n");
+        let new = lines("a\nb\nc\nd\ne\nf\n\tG!\n");
+        let changes = diff_lines(&old, &new);
+        let rows = side_by_side(&changes, old.len(), new.len());
+        let none = std::collections::HashSet::new();
+        assert!(matches!(collapse(&rows, 3, &none)[0], Shown::Hidden(_)));
+        let new_side = |r: &Row| match r {
+            Row::Line { new: Some(n), .. } => Some(new[*n]),
+            _ => None,
+        };
+        let last = rows.len() - 1;
+        let text = selected_text(&rows, new_side, (1, 0), (last, 5), 4);
+        assert_eq!(text, "b\nc\nd\ne\nf\n\tG");
+        let back = selected_text(&rows, new_side, (last, 5), (1, 0), 4);
+        assert_eq!(back, text, "a backwards drag copies the same");
+        assert_eq!(byte_at_column("\tG!", 4, 4), 1);
+        assert_eq!(byte_at_column("ab", 9, 4), 2);
     }
 }

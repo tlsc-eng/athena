@@ -1,17 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use athena_ui::{ActiveTheme, SyntaxColors, Theme, Tooltip, empty_state};
+use athena_ui::{ActiveTheme, ContextMenu, MenuItem, SyntaxColors, Theme, Tooltip, empty_state};
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla,
-    IntoElement, KeyBinding, Render, ScrollStrategy, ScrollWheelEvent, SharedString, StyledText,
-    Task, UniformListScrollHandle, Window, actions, div, point, prelude::*, px, uniform_list,
+    App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, HighlightStyle, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString,
+    StyledText, Subscription, Task, UniformListScrollHandle, Window, actions, div, point,
+    prelude::*, px, uniform_list,
 };
 use ropey::Rope;
 
-use crate::diff::{self, Change, Row};
+use crate::diff::{self, Change, Row, Shown};
 use crate::syntax::{Lang, Syntax, Token};
 
 actions!(
@@ -27,7 +29,10 @@ actions!(
         Top,
         Bottom,
         AcceptProposal,
-        RejectProposal
+        RejectProposal,
+        CopySelection,
+        SelectAllLines,
+        ToggleUnchanged
     ]
 );
 
@@ -44,6 +49,8 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-down", Bottom, ctx),
         KeyBinding::new("cmd-enter", AcceptProposal, ctx),
         KeyBinding::new("cmd-backspace", RejectProposal, ctx),
+        KeyBinding::new("cmd-c", CopySelection, ctx),
+        KeyBinding::new("cmd-a", SelectAllLines, ctx),
     ]);
 }
 
@@ -53,6 +60,11 @@ const MAX_DRAWN: usize = 4_000;
 const MAX_WORD_PAIRS: usize = 20_000;
 const TAB_WIDTH: usize = 4;
 const TOOLBAR: f32 = 32.;
+/// Unchanged lines kept next to each change when the rest are hidden, as VS Code keeps.
+const CONTEXT: usize = 3;
+/// Diffs with more rows than this start with unchanged regions hidden.
+const LARGE_DIFF: usize = 500;
+const SIGN_WIDTH: f32 = 14.;
 
 /// A hunk action, carrying the full text the file or index should have afterwards.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +239,45 @@ pub struct DiffView {
     scroll: UniformListScrollHandle,
     h_offset: f32,
     focus: FocusHandle,
+    /// The user's Hide Unchanged choice; `None` hides them in large diffs only.
+    hide_unchanged: Option<bool>,
+    /// Old lines starting unchanged stretches the user unfolded.
+    unfolded: HashSet<usize>,
+    /// What the list draws: rows of the current layout, with folded stretches.
+    shown: Rc<Vec<Shown>>,
+    selection: Option<Selection>,
+    selecting: bool,
+    /// Width of one column of the code font, measured each frame.
+    cell: f32,
+    context_menu: Option<(Entity<ContextMenu>, Subscription)>,
+}
+
+/// Selected text on one side, between two (row, column) points of the current layout's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Selection {
+    side: Which,
+    anchor: (usize, usize),
+    head: (usize, usize),
+}
+
+impl Selection {
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        match self.anchor <= self.head {
+            true => (self.anchor, self.head),
+            false => (self.head, self.anchor),
+        }
+    }
+
+    /// The drawn columns selected on row `row`, if any.
+    fn columns(&self, row: usize) -> Option<Range<usize>> {
+        let (from, to) = self.ordered();
+        if row < from.0 || row > to.0 {
+            return None;
+        }
+        let a = if row == from.0 { from.1 } else { 0 };
+        let b = if row == to.0 { to.1 } else { usize::MAX };
+        (a < b).then_some(a..b)
+    }
 }
 
 impl EventEmitter<DiffEvent> for DiffView {}
@@ -264,6 +315,13 @@ impl DiffView {
             scroll: UniformListScrollHandle::new(),
             h_offset: 0.,
             focus: cx.focus_handle(),
+            hide_unchanged: None,
+            unfolded: HashSet::new(),
+            shown: Rc::default(),
+            selection: None,
+            selecting: false,
+            cell: 0.,
+            context_menu: None,
         }
     }
 
@@ -341,6 +399,8 @@ impl DiffView {
                 this.computing = None;
                 this.error = None;
                 this.loaded = Some(Rc::new(loaded));
+                this.selection = None;
+                this.refresh_shown();
                 if this
                     .current
                     .is_some_and(|c| c >= this.loaded.as_ref().map_or(0, |l| l.changes.len()))
@@ -374,8 +434,59 @@ impl DiffView {
         })
     }
 
+    /// Whether unchanged regions are folded: the user's choice, else on for large diffs.
+    fn hiding(&self) -> bool {
+        self.hide_unchanged
+            .unwrap_or_else(|| self.rows().is_some_and(|r| r.len() > LARGE_DIFF))
+    }
+
+    fn refresh_shown(&mut self) {
+        let Some(rows) = self.rows() else {
+            self.shown = Rc::default();
+            return;
+        };
+        self.shown = Rc::new(match self.hiding() {
+            true => diff::collapse(rows, CONTEXT, &self.unfolded),
+            false => (0..rows.len()).map(Shown::Row).collect(),
+        });
+    }
+
+    fn toggle_unchanged(&mut self, cx: &mut Context<Self>) {
+        self.hide_unchanged = Some(!self.hiding());
+        self.unfolded.clear();
+        self.refresh_shown();
+        if let Some(change) = self.current {
+            self.go_to_change(change, cx);
+        }
+        cx.notify();
+    }
+
+    fn unfold(&mut self, rows: Range<usize>, cx: &mut Context<Self>) {
+        let key = match self.rows().and_then(|r| r.get(rows.start)) {
+            Some(Row::Line { old: Some(o), .. }) => *o,
+            _ => return,
+        };
+        // A fold shown after its stretch's top context starts below the stretch's first line.
+        let first = self.rows().map_or(0, |r| {
+            let mut i = rows.start;
+            while i > 0 && matches!(r[i - 1], Row::Line { change: None, .. }) {
+                i -= 1;
+            }
+            match r[i] {
+                Row::Line { old: Some(o), .. } => o,
+                _ => key,
+            }
+        });
+        self.unfolded.insert(first);
+        self.refresh_shown();
+        cx.notify();
+    }
+
     fn header_row(&self, change: usize) -> Option<usize> {
-        self.rows()?.iter().position(|r| *r == Row::Header(change))
+        let rows = self.rows()?;
+        self.shown
+            .iter()
+            .position(|s| matches!(s, Shown::Row(i) if rows[*i] == Row::Header(change)))
     }
 
     fn go_to_change(&mut self, change: usize, cx: &mut Context<Self>) {
@@ -402,14 +513,17 @@ impl DiffView {
             None => {
                 // From where the view is scrolled to, counting the context rows left above a change.
                 let top = self.top_row(cx) + 3;
+                let rows = self.rows().unwrap_or_default();
                 let headers: Vec<(usize, usize)> = self
-                    .rows()
-                    .unwrap_or_default()
+                    .shown
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, r)| match r {
-                        Row::Header(c) => Some((i, *c)),
-                        Row::Line { .. } => None,
+                    .filter_map(|(i, s)| match s {
+                        Shown::Row(r) => match rows[*r] {
+                            Row::Header(c) => Some((i, c)),
+                            Row::Line { .. } => None,
+                        },
+                        Shown::Hidden(_) => None,
                     })
                     .collect();
                 let found = if forward {
@@ -465,7 +579,192 @@ impl DiffView {
     }
 
     fn char_width(&self, cx: &App) -> f32 {
-        f32::from(cx.theme().typography.code) * 0.6
+        match self.cell > 0. {
+            true => self.cell,
+            false => f32::from(cx.theme().typography.code) * 0.6,
+        }
+    }
+
+    fn gutter_width(&self, loaded: &Loaded, cx: &App) -> f32 {
+        let digits = loaded
+            .old
+            .lines
+            .len()
+            .max(loaded.new.lines.len())
+            .max(1)
+            .ilog10()
+            + 1;
+        (digits as f32 + 1.) * self.char_width(cx) + 8.
+    }
+
+    /// The row, side and drawn column under a window position, from the list's last layout.
+    fn point_at(&self, position: Point<Pixels>, cx: &App) -> Option<(usize, Which, usize)> {
+        let loaded = self.loaded.as_ref()?;
+        let rows = self.rows()?;
+        let handle = self.scroll.0.borrow().base_handle.clone();
+        let bounds = handle.bounds();
+        let y = f32::from(position.y - bounds.top() - handle.offset().y);
+        let at = (y / self.row_height(cx)).floor().max(0.) as usize;
+        let shown = self.shown.get(at.min(self.shown.len().checked_sub(1)?))?;
+        let row = match shown {
+            Shown::Row(r) => *r,
+            Shown::Hidden(r) => return Some((r.start, Which::New, 0)),
+        };
+        let x = f32::from(position.x - bounds.left());
+        let gutter = self.gutter_width(loaded, cx);
+        let (which, text_left) = if self.inline {
+            let which = match rows[row] {
+                Row::Line {
+                    old: Some(_),
+                    new: None,
+                    change: Some(_),
+                } => Which::Old,
+                _ => Which::New,
+            };
+            (which, 2. * gutter + SIGN_WIDTH)
+        } else {
+            let half = (f32::from(bounds.size.width) - 1.) / 2.;
+            match x < half {
+                true => (Which::Old, gutter + SIGN_WIDTH),
+                false => (Which::New, half + 1. + gutter + SIGN_WIDTH),
+            }
+        };
+        let col = ((x - text_left + self.h_offset) / self.char_width(cx))
+            .round()
+            .max(0.) as usize;
+        Some((row, which, col))
+    }
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        let Some((row, which, col)) = self.point_at(event.position, cx) else {
+            return;
+        };
+        let side = if self.inline { Which::New } else { which };
+        self.selection = match self.selection {
+            Some(s) if event.modifiers.shift && s.side == side => Some(Selection {
+                head: (row, col),
+                ..s
+            }),
+            _ => Some(Selection {
+                side,
+                anchor: (row, col),
+                head: (row, col),
+            }),
+        };
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            self.selecting = false;
+            return;
+        }
+        let Some((row, _, col)) = self.point_at(event.position, cx) else {
+            return;
+        };
+        if let Some(s) = self.selection.as_mut()
+            && s.head != (row, col)
+        {
+            s.head = (row, col);
+            cx.notify();
+        }
+    }
+
+    /// The selected text, with lines folded away inside the selection included.
+    fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let loaded = self.loaded.as_ref()?;
+        let rows = self.rows()?;
+        let inline = self.inline;
+        let pick = |row: &Row| -> Option<&str> {
+            let Row::Line { old, new, change } = *row else {
+                return None;
+            };
+            let old_only = old.is_some() && new.is_none() && change.is_some();
+            match (inline, selection.side) {
+                (true, _) if old_only => old.map(|o| loaded.old.line(o)),
+                (true, _) => new.map(|n| loaded.new.line(n)),
+                (false, Which::Old) => old.map(|o| loaded.old.line(o)),
+                (false, Which::New) => new.map(|n| loaded.new.line(n)),
+            }
+        };
+        let text = diff::selected_text(rows, pick, selection.anchor, selection.head, TAB_WIDTH);
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let Some(last) = self.rows().and_then(|r| r.len().checked_sub(1)) else {
+            return;
+        };
+        let side = self.selection.map_or(Which::New, |s| s.side);
+        self.selection = Some(Selection {
+            side,
+            anchor: (0, 0),
+            head: (last, usize::MAX),
+        });
+        cx.notify();
+    }
+
+    fn open_menu(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        let change = self.point_at(event.position, cx).and_then(|(row, _, _)| {
+            match self.rows()?.get(row)? {
+                Row::Line { change, .. } => *change,
+                Row::Header(c) => Some(*c),
+            }
+        });
+        let this = cx.entity().downgrade();
+        let act = move |label: &'static str, f: fn(&mut Self, &mut Context<Self>)| {
+            let this = this.clone();
+            MenuItem::new(label, move |_, cx| {
+                let _ = this.update(cx, f);
+            })
+        };
+        let mut items = vec![
+            act("Copy", |v, cx| v.copy(cx))
+                .hint("⌘C")
+                .disabled(self.selected_text().is_none()),
+            act("Select All", |v, cx| v.select_all(cx)).hint("⌘A"),
+        ];
+        if let Some(change) = change {
+            let a = self.actions;
+            let mut hunk = Vec::new();
+            let this = cx.entity().downgrade();
+            let mut push = |on: bool, label: &'static str, kind: HunkKind| {
+                if on {
+                    let this = this.clone();
+                    hunk.push(MenuItem::new(label, move |_, cx| {
+                        let _ = this.update(cx, |v, cx| v.emit_action(change, kind, cx));
+                    }));
+                }
+            };
+            push(a.stage, "Stage This Change", HunkKind::Stage);
+            push(a.unstage, "Unstage This Change", HunkKind::Unstage);
+            push(a.revert, "Revert This Change", HunkKind::Revert);
+            if !hunk.is_empty() {
+                items.push(MenuItem::separator());
+                items.extend(hunk);
+            }
+        }
+        items.push(MenuItem::separator());
+        items.push(act("Open File", |_, cx| cx.emit(DiffEvent::OpenFile)));
+        let menu = ContextMenu::build(event.position, items, window, cx);
+        let subscription = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, _, cx| {
+            if this.context_menu.as_ref().is_some_and(|(m, _)| m == menu) {
+                this.context_menu = None;
+                cx.notify();
+            }
+        });
+        self.context_menu = Some((menu, subscription));
+        cx.notify();
     }
 
     fn emit_action(&mut self, change: usize, kind: HunkKind, cx: &mut Context<Self>) {
@@ -603,6 +902,43 @@ fn styled_line(
     (text.into(), highlights)
 }
 
+/// Runs with a selection background laid over drawn columns `cols` (one column per char,
+/// since tabs are already expanded).
+fn with_selection(
+    text: &str,
+    runs: Vec<(Range<usize>, HighlightStyle)>,
+    cols: Option<Range<usize>>,
+    bg: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(cols) = cols else {
+        return runs;
+    };
+    let byte = |col: usize| text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
+    let (a, b) = (byte(cols.start), byte(cols.end));
+    if a >= b {
+        return runs;
+    }
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    for (r, style) in runs {
+        let cuts = [
+            r.start,
+            a.clamp(r.start, r.end),
+            b.clamp(r.start, r.end),
+            r.end,
+        ];
+        for w in cuts.windows(2) {
+            if w[0] < w[1] {
+                let mut style = style;
+                if w[0] >= a && w[1] <= b {
+                    style.background_color = Some(bg);
+                }
+                out.push((w[0]..w[1], style));
+            }
+        }
+    }
+    out
+}
+
 struct Palette {
     removed: Hsla,
     removed_word: Hsla,
@@ -623,7 +959,7 @@ impl Palette {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Which {
     Old,
     New,
@@ -637,6 +973,7 @@ impl DiffView {
         which: Which,
         line: Option<usize>,
         partner: Option<(usize, usize)>,
+        selected: Option<Range<usize>>,
         gutter: f32,
         t: &Theme,
         p: &Palette,
@@ -655,6 +992,7 @@ impl DiffView {
             .map(Vec::as_slice)
             .unwrap_or_default();
         let (text, runs) = styled_line(side, line, words, word_bg, t);
+        let runs = with_selection(&text, runs, selected, t.color.surface_accent);
         div()
             .flex_1()
             .min_w_0()
@@ -687,7 +1025,11 @@ impl DiffView {
             Some(Which::New) => ("+", t.color.success),
             None => ("", t.color.content_muted),
         };
-        div().w(px(14.)).flex_none().text_color(color).child(glyph)
+        div()
+            .w(px(SIGN_WIDTH))
+            .flex_none()
+            .text_color(color)
+            .child(glyph)
     }
 
     fn text(&self, text: SharedString, runs: Vec<(Range<usize>, HighlightStyle)>) -> gpui::Div {
@@ -777,6 +1119,38 @@ impl DiffView {
             .into_any_element()
     }
 
+    /// The bar standing in for folded unchanged lines; clicking it shows them.
+    fn fold_bar(
+        &self,
+        at: usize,
+        hidden: Range<usize>,
+        row: gpui::Div,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let n = hidden.len();
+        let label = format!("⋯ {n} unchanged line{}", if n == 1 { "" } else { "s" });
+        row.child(
+            div()
+                .id(("diff-fold", at))
+                .size_full()
+                .flex()
+                .items_center()
+                .pl(px(12.))
+                .bg(t.color.surface)
+                .font_family(t.typography.ui.clone())
+                .text_size(t.typography.caption)
+                .text_color(t.color.content_muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                .tooltip(|_, cx| Tooltip::view("Show these lines", cx))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| this.unfold(hidden.clone(), cx)))
+                .child(label),
+        )
+        .into_any_element()
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let stats = self.loaded.as_ref().map(|l| {
@@ -858,6 +1232,18 @@ impl DiffView {
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_inline(cx))),
             )
             .child(
+                tool(
+                    "diff-unchanged",
+                    if self.hiding() {
+                        "Show Unchanged"
+                    } else {
+                        "Hide Unchanged"
+                    },
+                    "Fold unchanged lines down to 3 lines around each change",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_unchanged(cx))),
+            )
+            .child(
                 tool("diff-open", "Open File", "Open the file in the editor")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffEvent::OpenFile))),
             )
@@ -889,6 +1275,8 @@ impl DiffView {
 
     fn toggle_inline(&mut self, cx: &mut Context<Self>) {
         self.inline = !self.inline;
+        self.selection = None;
+        self.refresh_shown();
         if let Some(change) = self.current {
             self.go_to_change(change, cx);
         }
@@ -920,24 +1308,13 @@ impl DiffView {
         }
         let t = cx.theme().clone();
         let row_h = self.row_height(cx);
-        let digits = loaded
-            .old
-            .lines
-            .len()
-            .max(loaded.new.lines.len())
-            .max(1)
-            .ilog10()
-            + 1;
-        let gutter = (digits as f32 + 1.) * self.char_width(cx) + 8.;
+        let gutter = self.gutter_width(&loaded, cx);
         let inline = self.inline;
-        let count = if inline {
-            loaded.unified.len()
-        } else {
-            loaded.split.len()
-        };
+        let shown = self.shown.clone();
+        let selection = self.selection;
         uniform_list(
             "diff-rows",
-            count,
+            shown.len(),
             cx.processor(move |this, range: Range<usize>, _window, cx| {
                 let p = Palette::new(&t);
                 let rows = if inline {
@@ -946,8 +1323,19 @@ impl DiffView {
                     &loaded.split
                 };
                 range
-                    .map(|ix| {
+                    .map(|at| {
                         let row = div().h(px(row_h)).w_full().flex();
+                        let ix = match &shown[at] {
+                            Shown::Row(ix) => *ix,
+                            Shown::Hidden(hidden) => {
+                                return this.fold_bar(at, hidden.clone(), row, &t, cx);
+                            }
+                        };
+                        let selected = |which: Which| {
+                            selection
+                                .filter(|s| inline || s.side == which)
+                                .and_then(|s| s.columns(ix))
+                        };
                         match rows[ix] {
                             Row::Header(change) => row
                                 .child(this.header(ix, change, &loaded, &t, cx))
@@ -961,20 +1349,9 @@ impl DiffView {
                                     };
                                     let line = if which == Which::Old { old } else { new };
                                     let changed = change.is_some();
-                                    let bg = if which == Which::Old {
-                                        p.removed
-                                    } else {
-                                        p.added
-                                    };
-                                    let word_bg = if which == Which::Old {
-                                        p.removed_word
-                                    } else {
-                                        p.added_word
-                                    };
-                                    let side = if which == Which::Old {
-                                        &loaded.old
-                                    } else {
-                                        &loaded.new
+                                    let (bg, word_bg, side) = match which {
+                                        Which::Old => (p.removed, p.removed_word, &loaded.old),
+                                        Which::New => (p.added, p.added_word, &loaded.new),
                                     };
                                     let words = pair
                                         .and_then(|pair| loaded.words.get(&pair))
@@ -985,6 +1362,12 @@ impl DiffView {
                                         Some(l) => styled_line(side, l, words, word_bg, &t),
                                         None => (SharedString::default(), Vec::new()),
                                     };
+                                    let runs = with_selection(
+                                        &text,
+                                        runs,
+                                        selected(which),
+                                        t.color.surface_accent,
+                                    );
                                     row.when(changed, |el| el.bg(bg))
                                         .child(this.number(old, gutter, changed, &t))
                                         .child(this.number(new, gutter, changed, &t))
@@ -997,6 +1380,7 @@ impl DiffView {
                                         Which::Old,
                                         old,
                                         pair,
+                                        selected(Which::Old),
                                         gutter,
                                         &t,
                                         &p,
@@ -1007,6 +1391,7 @@ impl DiffView {
                                         Which::New,
                                         new,
                                         pair,
+                                        selected(Which::New),
                                         gutter,
                                         &t,
                                         &p,
@@ -1028,8 +1413,15 @@ impl DiffView {
 }
 
 impl Render for DiffView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
+        let text_system = window.text_system().clone();
+        let font = gpui::font(t.typography.mono.clone());
+        if let Ok(size) =
+            text_system.advance(text_system.resolve_font(&font), t.typography.code, 'm')
+        {
+            self.cell = f32::from(size.width);
+        }
         div()
             .id("diff-view")
             .size_full()
@@ -1055,8 +1447,11 @@ impl Render for DiffView {
             .on_action(cx.listener(|this, _: &Bottom, _, cx| this.scroll_rows(isize::MAX / 2, cx)))
             .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.decide(true, cx)))
             .on_action(cx.listener(|this, _: &RejectProposal, _, cx| this.decide(false, cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &SelectAllLines, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &ToggleUnchanged, _, cx| this.toggle_unchanged(cx)))
             .on_mouse_down(
-                gpui::MouseButton::Left,
+                MouseButton::Left,
                 cx.listener(|this, _, window, _| window.focus(&this.focus)),
             )
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
@@ -1073,7 +1468,24 @@ impl Render for DiffView {
                     .text_color(t.color.content_secondary)
                     .child(note)
             }))
-            .child(self.render_body(cx))
+            .child(
+                div()
+                    .id("diff-body")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .cursor_text()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::open_menu))
+                    .on_mouse_move(cx.listener(Self::mouse_move))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.selecting = false),
+                    )
+                    .child(self.render_body(cx)),
+            )
+            .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
     }
 }
 
@@ -1113,6 +1525,27 @@ mod tests {
             .map(|(r, _)| &text[r.clone()])
             .collect();
         assert_eq!(marked, "1");
+    }
+
+    #[test]
+    fn a_selection_covers_whole_middle_rows_and_splits_runs_at_its_ends() {
+        let s = Selection {
+            side: Which::New,
+            anchor: (5, 2),
+            head: (3, 4),
+        };
+        assert_eq!(s.columns(3), Some(4..usize::MAX));
+        assert_eq!(s.columns(4), Some(0..usize::MAX));
+        assert_eq!(s.columns(5), Some(0..2));
+        assert_eq!(s.columns(6), None);
+        let t = Theme::dark(true);
+        let style = HighlightStyle::default();
+        let runs = with_selection("héllo", vec![(0..6, style)], Some(1..3), t.color.accent);
+        let marked: Vec<_> = runs
+            .iter()
+            .map(|(r, h)| (r.clone(), h.background_color.is_some()))
+            .collect();
+        assert_eq!(marked, vec![(0..1, false), (1..4, true), (4..6, false)]);
     }
 
     #[test]
