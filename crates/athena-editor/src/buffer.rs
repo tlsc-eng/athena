@@ -1270,10 +1270,17 @@ impl Buffer {
         after: Vec<Selection>,
     ) {
         let before = cs.carets();
+        let len = changes.iter().fold(self.len_chars(), |len, (r, t)| {
+            len + t.chars().count() - r.len()
+        });
+        // A block moved below a last line without a break ends one char sooner than it began.
         let all = after
             .into_iter()
-            .map(|selection| Cursor {
-                selection,
+            .map(|s| Cursor {
+                selection: Selection {
+                    anchor: s.anchor.min(len),
+                    head: s.head.min(len),
+                },
                 ..Cursor::default()
             })
             .collect();
@@ -3029,6 +3036,21 @@ mod tests {
             "a selection ending at a line start leaves it out"
         );
         assert_eq!(c.selection, select(0, b.line_start(2)).selection);
+    }
+
+    #[test]
+    fn moving_a_line_below_the_last_keeps_the_selection_inside_the_text() {
+        let mut b = buf("a\nb", "/x/a.txt");
+        let mut c = select(0, 2);
+        one_step(&mut b, &mut c, |b, c| b.move_lines(c, true));
+        assert_eq!(b.full_text(), "b\na");
+        assert_eq!(c.selection, select(2, 3).selection);
+        b.type_char(&mut c, 'x');
+        assert_eq!(
+            b.full_text(),
+            "b\nx",
+            "the next key replaces the moved line"
+        );
     }
 
     #[test]
