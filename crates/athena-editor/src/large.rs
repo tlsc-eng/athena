@@ -79,18 +79,19 @@ impl Index {
 
     /// Reads up to `budget` more bytes of `file`, which is `len` long.
     fn step(&mut self, file: &File, len: u64, budget: u64) -> io::Result<()> {
-        let mut buf = vec![0; BLOCK];
+        let mut buf = vec![0; BLOCK + 1];
         let end = (self.scanned + budget).min(len);
         let mut last = *self.marks.last().unwrap_or(&(0, 0));
         while self.scanned < end {
             let want = ((end - self.scanned) as usize).min(BLOCK);
-            let n = file.read_at(&mut buf[..want], self.scanned)?;
+            let read = read_full_at(file, &mut buf[..want + 1], self.scanned)?;
+            let n = read.min(want);
             if n == 0 {
                 // The file shrank since it was measured.
                 self.done = true;
                 return Ok(());
             }
-            for (i, _) in buf[..n].iter().enumerate().filter(|(_, b)| **b == b'\n') {
+            for i in line_breaks(&buf[..read], n) {
                 self.breaks += 1;
                 let start = self.scanned + i as u64 + 1;
                 if self.breaks - last.0 >= STRIDE || start - last.1 >= MARK_BYTES {
@@ -120,6 +121,16 @@ impl Index {
     }
 }
 
+/// Where lines end in `buf[..used]`: at each `\n`, and at each `\r` not followed by one, as VS
+/// Code reads line breaks; `buf` holds the byte after `used`, when there is one, to tell.
+fn line_breaks(buf: &[u8], used: usize) -> impl Iterator<Item = usize> + '_ {
+    buf[..used]
+        .iter()
+        .enumerate()
+        .filter(|&(i, b)| *b == b'\n' || *b == b'\r' && buf.get(i + 1) != Some(&b'\n'))
+        .map(|(i, _)| i)
+}
+
 /// Fills `buf` from `offset` unless the file ends first; the bytes read.
 fn read_full_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
     let mut n = 0;
@@ -138,13 +149,14 @@ fn line_start(file: &File, index: &Index, line: u64) -> io::Result<Option<u64>> 
         return Ok(None);
     }
     let (mut at, mut offset) = index.mark_at_line(line);
-    let mut buf = vec![0; MARK_BYTES as usize];
+    let mut buf = vec![0; MARK_BYTES as usize + 1];
     while at < line {
-        let n = file.read_at(&mut buf, offset)?;
+        let read = read_full_at(file, &mut buf, offset)?;
+        let n = read.min(MARK_BYTES as usize);
         if n == 0 {
             return Ok(None);
         }
-        for (i, _) in buf[..n].iter().enumerate().filter(|(_, b)| **b == b'\n') {
+        for i in line_breaks(&buf[..read], n) {
             at += 1;
             if at == line {
                 return Ok(Some(offset + i as u64 + 1));
@@ -158,14 +170,15 @@ fn line_start(file: &File, index: &Index, line: u64) -> io::Result<Option<u64>> 
 /// The line holding byte `offset`.
 fn line_of(file: &File, index: &Index, offset: u64) -> io::Result<u64> {
     let (mut line, mut at) = index.mark_at_offset(offset);
-    let mut buf = vec![0; BLOCK];
+    let mut buf = vec![0; BLOCK + 1];
     while at < offset {
         let want = ((offset - at) as usize).min(BLOCK);
-        let n = file.read_at(&mut buf[..want], at)?;
+        let read = read_full_at(file, &mut buf[..want + 1], at)?;
+        let n = read.min(want);
         if n == 0 {
             break;
         }
-        line += buf[..n].iter().filter(|b| **b == b'\n').count() as u64;
+        line += line_breaks(&buf[..read], n).count() as u64;
         at += n as u64;
     }
     Ok(line)
@@ -183,10 +196,10 @@ fn read_lines(file: &File, index: &Index, first: u64, count: usize) -> io::Resul
     let Some(mut start) = line_start(file, index, first)? else {
         return Ok(out);
     };
-    let mut buf = vec![0; SHOWN_BYTES + 1];
+    let mut buf = vec![0; SHOWN_BYTES + 2];
     for line in first..(first + count as u64).min(index.lines()) {
         let n = read_full_at(file, &mut buf, start)?;
-        let (mut shown, next) = match buf[..n].iter().position(|b| *b == b'\n') {
+        let (mut shown, next) = match line_breaks(&buf[..n], n.min(SHOWN_BYTES + 1)).next() {
             Some(i) => (&buf[..i], Some(start + i as u64 + 1)),
             None => (&buf[..n.min(SHOWN_BYTES)], None),
         };
@@ -971,6 +984,47 @@ mod tests {
             find_forward(&o.file, o.len, &re("absent"), 0).unwrap(),
             None
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_lone_cr_ends_a_line_and_crlf_ends_one_even_across_reads() {
+        let dir = std::env::temp_dir().join(format!("athena-large-cr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mac.txt");
+        let mut text: Vec<u8> = b"a\rb\r\nc\nd\re".to_vec();
+        for i in 0..3000 {
+            text.extend(format!("\rline {i}").bytes());
+        }
+        text.extend(b"\n\r");
+        std::fs::write(&path, &text).unwrap();
+        for budget in [1, 3, 7 * 1024] {
+            let mut o = open_file(&path).unwrap();
+            while !o.index.done {
+                o.index.step(&o.file, o.len, budget).unwrap();
+            }
+            assert_eq!(o.index.lines(), 3007, "read {budget} bytes at a time");
+            assert_eq!(texts(&o, 0, 6), ["a", "b", "c", "d", "e", "line 0"]);
+            assert_eq!(texts(&o, 3004, 5), ["line 2999", "", ""]);
+            let at = line_start(&o.file, &o.index, 2005).unwrap().unwrap();
+            assert_eq!(line_of(&o.file, &o.index, at).unwrap(), 2005);
+            assert_eq!(
+                line_of(&o.file, &o.index, 3).unwrap(),
+                1,
+                "the \\n of a CRLF"
+            );
+        }
+        // The block read before the last leaves a "\n" in the buffer just past the final "\r".
+        let mut long = b"0123456789\n".to_vec();
+        long.resize(BLOCK + 9, b'x');
+        long.push(b'\r');
+        let long_file = dir.join("long.txt");
+        std::fs::write(&long_file, &long).unwrap();
+        let mut o = open_file(&long_file).unwrap();
+        o.index.step(&o.file, o.len, o.len).unwrap();
+        assert_eq!(o.index.lines(), 3);
+        assert_eq!(line_of(&o.file, &o.index, o.len).unwrap(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
