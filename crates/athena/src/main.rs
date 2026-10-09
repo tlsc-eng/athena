@@ -15,11 +15,8 @@ mod usage;
 
 use std::path::PathBuf;
 
-use athena_workspace::{WindowMode, WindowState, Workspace};
-use gpui::{
-    App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, prelude::*, px,
-    size,
-};
+use athena_workspace::Workspace;
+use gpui::{App, Application};
 
 fn main() {
     if let Some(code) = cli::run(std::env::args().skip(1).collect()) {
@@ -64,38 +61,7 @@ fn main() {
                 Workspace::default()
             });
             workspace.prune_missing();
-
-            // For automation: run the window's logic without showing it or taking focus.
-            let hidden = std::env::var_os("ATHENA_HIDDEN").is_some();
-            let window_bounds = restore_bounds(workspace.window, cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(window_bounds),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Athena".into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.), px(12.))),
-                    }),
-                    window_min_size: Some(size(px(640.), px(400.))),
-                    show: !hidden,
-                    focus: !hidden,
-                    ..Default::default()
-                },
-                |window, cx| {
-                    cx.new(|cx| {
-                        let mut shell = shell::Shell::new(workspace, path, window, cx);
-                        if let Some(folder) = cli::startup_folder() {
-                            shell.open_folder(folder, cx);
-                        }
-                        shell
-                    })
-                },
-            )
-            .expect("open main window");
-            cx.on_window_closed(|cx| cx.quit()).detach();
-            if !hidden {
-                cx.activate(true);
-            }
+            shell::start(path, workspace, cli::startup_folder(), cx);
         });
 }
 
@@ -121,19 +87,4 @@ fn workspace_path() -> PathBuf {
     athena_proto::data_dir()
         .expect("application support directory")
         .join("workspace.json")
-}
-
-/// Saved bounds are used only if they still land on a connected display.
-fn restore_bounds(saved: Option<WindowState>, cx: &App) -> WindowBounds {
-    let fallback = || WindowBounds::Windowed(Bounds::centered(None, size(px(1280.), px(820.)), cx));
-    let Some(s) = saved else { return fallback() };
-    let bounds = Bounds::new(point(px(s.x), px(s.y)), size(px(s.width), px(s.height)));
-    if !cx.displays().iter().any(|d| d.bounds().intersects(&bounds)) {
-        return fallback();
-    }
-    match s.mode {
-        WindowMode::Windowed => WindowBounds::Windowed(bounds),
-        WindowMode::Maximized => WindowBounds::Maximized(bounds),
-        WindowMode::Fullscreen => WindowBounds::Fullscreen(bounds),
-    }
 }

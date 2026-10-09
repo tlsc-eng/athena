@@ -232,12 +232,17 @@ impl DebugState {
             return;
         };
         let mut saved = read_saved(path);
-        let key = document_key(root);
-        self.breakpoints.retain(|file, _| !file.starts_with(&key));
-        self.watch.remove(root);
+        self.forget_project(root);
         if let Some(project) = saved.projects.remove(root) {
             self.take_in(root.to_path_buf(), project);
         }
+    }
+
+    /// Drops `root`'s breakpoints from memory once another window owns the project.
+    pub(super) fn forget_project(&mut self, root: &Path) {
+        let key = document_key(root);
+        self.breakpoints.retain(|file, _| !file.starts_with(&key));
+        self.watch.remove(root);
     }
 
     /// Writes this window's projects' breakpoints, keeping the other windows' entries in the file.

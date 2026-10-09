@@ -123,6 +123,17 @@ impl Workspace {
     }
 }
 
+/// Parks a closed window's projects with their tabs and shells, and lists them in Open Recent.
+pub fn park(parked: &mut Vec<Project>, recent: &mut Vec<PathBuf>, projects: Vec<Project>) {
+    for project in projects.into_iter().rev() {
+        recent.retain(|r| *r != project.root);
+        recent.insert(0, project.root.clone());
+        parked.retain(|p| p.root != project.root);
+        parked.insert(0, project);
+    }
+    recent.truncate(crate::MAX_RECENT);
+}
+
 /// Removes and returns the parked project at `root`, so reopening it keeps its tabs and shells.
 pub fn take_parked(parked: &mut Vec<Project>, root: &Path) -> Option<Project> {
     let root = canonical(root);
@@ -290,6 +301,40 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert!(windows[0].projects.is_empty());
         assert_eq!(windows[0].window, bounds(30.));
+    }
+
+    #[test]
+    fn closing_a_window_parks_its_projects_with_their_shells_across_a_restart() {
+        let terminal = |session| {
+            Layout::new(ItemKind::Terminal {
+                session: Some(session),
+            })
+        };
+        let mut first = window(&["/n/a"], 0, 10.);
+        first.recent = vec![PathBuf::from("/n/old"), "/n/b".into()];
+        let mut closing = window(&["/n/b", "/n/c"], 1, 500.);
+        closing.projects[0].layout = Some(terminal(11));
+        closing.projects[1].layout = Some(terminal(12));
+
+        let mut parked = Vec::new();
+        park(&mut parked, &mut first.recent, closing.projects.clone());
+        assert_eq!(
+            first.recent,
+            [PathBuf::from("/n/b"), "/n/c".into(), "/n/old".into()]
+        );
+        assert!(retain_parked(&mut parked, &first.recent).is_empty());
+
+        let text =
+            serde_json::to_string(&Workspace::join(&first, &[first.clone()], &parked)).unwrap();
+        let (windows, mut parked) = serde_json::from_str::<Workspace>(&text)
+            .unwrap()
+            .into_windows();
+        assert_eq!(windows, [first]);
+        let back = take_parked(&mut parked, Path::new("/n/c")).unwrap();
+        assert_eq!(
+            back, closing.projects[1],
+            "its shell is reattached on reopening"
+        );
     }
 
     #[test]

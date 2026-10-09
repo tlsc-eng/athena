@@ -370,6 +370,17 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Open recent…", Box::new(actions::OpenRecent)),
         ("Clear recently opened", Box::new(actions::ClearRecent)),
         ("Close project", Box::new(actions::CloseProject)),
+        ("New window", Box::new(actions::NewWindow)),
+        (
+            "Open project in new window",
+            Box::new(actions::OpenProjectInNewWindow),
+        ),
+        (
+            "Move project to new window",
+            Box::new(actions::MoveProjectToNewWindow),
+        ),
+        ("Merge all windows", Box::new(actions::MergeAllWindows)),
+        ("Close window", Box::new(actions::CloseWindow)),
         ("Next project", Box::new(actions::NextProject)),
         ("Previous project", Box::new(actions::PrevProject)),
         ("Toggle full screen", Box::new(actions::ToggleFullScreen)),

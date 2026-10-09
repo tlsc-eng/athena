@@ -2261,6 +2261,13 @@ impl Shell {
             })
             .unwrap_or_default();
         athena_term::kill_sessions(orphans);
+        for view in self.release_project_items(root) {
+            view.close(cx);
+        }
+    }
+
+    /// Forgets a project's tabs without ending their shells, which keep running in the daemon.
+    pub(super) fn release_project_items(&mut self, root: &Path) -> Vec<ItemView> {
         self.tab_scroll.retain(|(r, _), _| r != root);
         self.content_switches.retain(|(r, _)| r != root);
         self.item_menus.retain(|(r, _)| r != root);
@@ -2270,11 +2277,9 @@ impl Shell {
             .filter(|(r, _)| r == root)
             .cloned()
             .collect();
-        for key in keys {
-            if let Some(view) = self.items.remove(&key) {
-                view.close(cx);
-            }
-        }
+        keys.iter()
+            .filter_map(|key| self.items.remove(key))
+            .collect()
     }
 }
 

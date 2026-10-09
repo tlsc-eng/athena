@@ -123,7 +123,7 @@ impl Shell {
         &self,
         claimed: Option<PaneId>,
         lineage: &[i32],
-        cx: &Context<Self>,
+        cx: &gpui::App,
     ) -> Option<PaneId> {
         let session = claimed?;
         let foreground = self.items.values().find_map(|v| match v {

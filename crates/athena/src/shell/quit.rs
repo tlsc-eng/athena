@@ -8,7 +8,11 @@ use super::item::ItemView;
 
 impl Shell {
     /// Editors with unsaved changes, in every project or only the one at `root`.
-    fn dirty_editors(&self, root: Option<&Path>, cx: &Context<Self>) -> Vec<Entity<EditorView>> {
+    pub(super) fn dirty_editors(
+        &self,
+        root: Option<&Path>,
+        cx: &Context<Self>,
+    ) -> Vec<Entity<EditorView>> {
         // Tabs on the same file share one buffer; list and save it once.
         let mut paths = std::collections::HashSet::new();
         self.items
@@ -26,13 +30,26 @@ impl Shell {
             .collect()
     }
 
-    /// Quits, first asking what to do with unsaved files. Shells keep running in the daemon.
-    pub(super) fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Quits, first asking each window what to do with its unsaved files. Shells keep running in
+    /// the daemon.
+    pub(super) fn quit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.defer(super::windows::quit);
+    }
+
+    /// Settles this window's unsaved files for quitting, then runs `then` unless cancelled.
+    pub(super) fn settle_for_quit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut gpui::App) + 'static,
+    ) {
         let dirty = self.dirty_editors(None, cx);
+        if !dirty.is_empty() {
+            window.activate_window();
+        }
         self.settle_unsaved(dirty, "quitting", window, cx, |this, cx| {
-            this.quit_settled = true;
             this.save_now(cx);
-            cx.quit();
+            cx.defer(then);
         });
     }
 
@@ -74,7 +91,7 @@ impl Shell {
 
     /// Runs `then` at once if nothing is unsaved, else after Save (when every save worked) or
     /// Don't Save; `before` ends the question "Save changes to … before …?".
-    fn settle_unsaved(
+    pub(super) fn settle_unsaved(
         &mut self,
         dirty: Vec<Entity<EditorView>>,
         before: &str,

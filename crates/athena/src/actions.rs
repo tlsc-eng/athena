@@ -124,6 +124,17 @@ actions!(
     ]
 );
 
+actions!(
+    athena,
+    [
+        NewWindow,
+        OpenProjectInNewWindow,
+        MoveProjectToNewWindow,
+        MergeAllWindows,
+        CloseWindow,
+    ]
+);
+
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = athena, no_json)]
 pub struct SelectProject(pub usize);
@@ -155,6 +166,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("cmd-o", AddProject, None),
+        KeyBinding::new("cmd-shift-n", NewWindow, None),
         KeyBinding::new("cmd-shift-w", CloseProject, None),
         KeyBinding::new("cmd-alt-[", PrevProject, None),
         KeyBinding::new("cmd-alt-]", NextProject, None),
@@ -299,7 +311,9 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
             items: vec![
                 MenuItem::action("New Terminal", NewTerminal),
                 MenuItem::action("New Claude Session", NewClaudeSession),
+                MenuItem::action("New Window", NewWindow),
                 MenuItem::action("Open Project…", AddProject),
+                MenuItem::action("Open Project in New Window…", OpenProjectInNewWindow),
                 MenuItem::submenu(recent_menu(recent)),
                 MenuItem::separator(),
                 MenuItem::action("Save As…", SaveAs),
@@ -311,6 +325,7 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close Project", CloseProject),
+                MenuItem::action("Close Window", CloseWindow),
             ],
         },
         Menu {
@@ -411,6 +426,9 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Previous Project", PrevProject),
                 MenuItem::action("Next Project", NextProject),
+                MenuItem::separator(),
+                MenuItem::action("Move Project to New Window", MoveProjectToNewWindow),
+                MenuItem::action("Merge All Windows", MergeAllWindows),
             ],
         },
     ]

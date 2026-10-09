@@ -7,8 +7,8 @@ use athena_ui::ActiveTheme;
 use athena_ui::motion::{self, Closing};
 use athena_workspace::{ItemId, ItemKind, Panel, Project, Rect};
 use gpui::{
-    Animation, AnyElement, Bounds, Context, FontWeight, Hsla, Pixels, Task, Window, canvas, div,
-    prelude::*, px,
+    Animation, AnyElement, App, Bounds, Context, FontWeight, Hsla, Pixels, Task, Window, canvas,
+    div, prelude::*, px,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,12 +36,6 @@ pub(super) struct Notification {
     read: bool,
 }
 
-impl Notification {
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-}
-
 pub(super) struct Toast {
     id: u64,
     /// Title and body of a toast that is not kept in the Notifications list.
@@ -62,12 +56,43 @@ pub(super) struct ToastAction {
     pub run: std::rc::Rc<ShellAction>,
 }
 
-/// Loads saved notifications; a missing or unreadable file starts empty.
-pub(super) fn load(path: &Path) -> Vec<Notification> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+/// The Notifications list every window shows, and the ids toasts and banners share.
+#[derive(Default)]
+pub(super) struct Log {
+    pub list: Vec<Notification>,
+    next: u64,
+}
+
+impl Log {
+    /// Loads saved notifications; a missing or unreadable file starts empty.
+    pub fn load(path: &Path) -> Self {
+        let list: Vec<Notification> = std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let next = list.iter().map(|n| n.id).max().unwrap_or(0);
+        Self { list, next }
+    }
+
+    pub fn next_id(&mut self) -> u64 {
+        self.next += 1;
+        self.next
+    }
+
+    fn push(&mut self, notification: Notification) {
+        self.list.push(notification);
+        if self.list.len() > KEEP {
+            self.list.remove(0);
+        }
+    }
+
+    /// The project a notification is about; `None` once it has left the list.
+    pub fn project(&self, id: u64) -> Option<Option<PathBuf>> {
+        self.list
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.project.clone())
+    }
 }
 
 /// Saves without command text, which can hold secrets typed on the command line.
@@ -160,39 +185,38 @@ pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, Str
     }
 }
 
-impl Shell {
-    pub(super) fn start_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self._notices = Some(cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let connected = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let (conn, reader) = athena_term::open_connection()?;
-                        conn.send(&ClientMsg::Subscribe)?;
-                        anyhow::Ok((conn, reader))
-                    })
-                    .await;
-                if let Ok((_conn, reader)) = connected {
-                    let messages = athena_term::read_messages(reader);
-                    while let Ok(msg) = messages.recv().await {
-                        if let ServerMsg::Notice(notice) = msg
-                            && this
-                                .update_in(cx, |this, window, cx| {
-                                    this.on_notice(notice, window, cx)
-                                })
-                                .is_err()
-                        {
-                            return;
-                        }
+/// Listens for the daemon's notices for as long as Athena runs, handing each to its window.
+pub(super) fn subscribe(cx: &mut App) -> Task<()> {
+    cx.spawn(async move |cx| {
+        loop {
+            let connected = cx
+                .background_executor()
+                .spawn(async move {
+                    let (conn, reader) = athena_term::open_connection()?;
+                    conn.send(&ClientMsg::Subscribe)?;
+                    anyhow::Ok((conn, reader))
+                })
+                .await;
+            if let Ok((_conn, reader)) = connected {
+                let messages = athena_term::read_messages(reader);
+                while let Ok(msg) = messages.recv().await {
+                    if let ServerMsg::Notice(notice) = msg
+                        && cx
+                            .update(|cx| super::windows::route_notice(notice, cx))
+                            .is_err()
+                    {
+                        return;
                     }
                 }
-                cx.background_executor().timer(RECONNECT_AFTER).await;
             }
-        }));
-    }
+            cx.background_executor().timer(RECONNECT_AFTER).await;
+        }
+    })
+}
 
+impl Shell {
     /// Project and tab showing a daemon session, if any project holds it.
-    fn find_session(&self, session: Session) -> Option<(PathBuf, ItemId)> {
+    pub(super) fn find_session(&self, session: Session) -> Option<(PathBuf, ItemId)> {
         find_session(&self.workspace.projects, session)
     }
 
@@ -220,7 +244,12 @@ impl Shell {
             })
     }
 
-    fn on_notice(&mut self, notice: Notice, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_notice(
+        &mut self,
+        notice: Notice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let target = notice.pane.and_then(|s| self.find_session(s));
         let view = target
             .as_ref()
@@ -242,9 +271,8 @@ impl Shell {
         }
 
         let watching = self.is_watching(&target, window);
-        self.next_notice += 1;
         let notification = Notification {
-            id: self.next_notice,
+            id: self.notices.borrow_mut().next_id(),
             project: target.as_ref().map(|(r, _)| r.clone()),
             session: target.as_ref().and(notice.pane),
             kind: notice.kind,
@@ -265,10 +293,7 @@ impl Shell {
                 crate::system_notify::post(notification.id, &title, &body);
             }
         }
-        self.notifications.push(notification);
-        if self.notifications.len() > KEEP {
-            self.notifications.remove(0);
-        }
+        self.notices.borrow_mut().push(notification);
         self.notices_changed(cx);
     }
 
@@ -280,9 +305,8 @@ impl Shell {
 
     /// A notice raised by Athena itself (not a terminal), shown as a toast and kept in the list.
     pub(super) fn local_notice(&mut self, kind: NoticeKind, cx: &mut Context<Self>) {
-        self.next_notice += 1;
-        let id = self.next_notice;
-        self.notifications.push(Notification {
+        let id = self.notices.borrow_mut().next_id();
+        self.notices.borrow_mut().push(Notification {
             id,
             project: None,
             session: None,
@@ -290,9 +314,6 @@ impl Shell {
             at: now_ms(),
             read: true,
         });
-        if self.notifications.len() > KEEP {
-            self.notifications.remove(0);
-        }
         self.show_toast(id, None, TOAST_FOR, cx);
         self.notices_changed(cx);
     }
@@ -316,8 +337,7 @@ impl Shell {
             n => format!("Recovered unsaved changes in {n} files"),
         };
         let body = format!("Click to open them. Copies stay in {}", dir.display());
-        self.next_notice += 1;
-        let id = self.next_notice;
+        let id = self.notices.borrow_mut().next_id();
         self.show_toast(id, Some((title, body)), RECOVERY_TOAST_FOR, cx);
         if let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id) {
             toast.open = files;
@@ -332,8 +352,7 @@ impl Shell {
         body: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        self.next_notice += 1;
-        let id = self.next_notice;
+        let id = self.notices.borrow_mut().next_id();
         self.show_toast(id, Some((title.into(), body.into())), TOAST_FOR, cx);
         cx.notify();
     }
@@ -346,8 +365,7 @@ impl Shell {
         action: ToastAction,
         cx: &mut Context<Self>,
     ) -> u64 {
-        self.next_notice += 1;
-        let id = self.next_notice;
+        let id = self.notices.borrow_mut().next_id();
         self.show_toast(id, Some((title.into(), body.into())), ACTION_TOAST_FOR, cx);
         if let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id) {
             toast.action = Some(action);
@@ -362,13 +380,19 @@ impl Shell {
     }
 
     pub(super) fn unread(&self) -> usize {
-        self.notifications.iter().filter(|n| !n.read).count()
+        self.notices
+            .borrow()
+            .list
+            .iter()
+            .filter(|n| !n.read)
+            .count()
     }
 
     pub(super) fn notices_changed(&mut self, cx: &mut Context<Self>) {
         crate::system_notify::set_badge(self.unread());
         self.schedule_save(cx);
-        cx.notify();
+        // Every window shows the same list and count.
+        cx.refresh_windows();
     }
 
     fn show_toast(
@@ -430,19 +454,32 @@ impl Shell {
         if !files.is_empty() {
             return self.open_recovered(files, window, cx);
         }
-        let Some(n) = self.notifications.iter_mut().find(|n| n.id == id) else {
+        let found = self
+            .notices
+            .borrow_mut()
+            .list
+            .iter_mut()
+            .find(|n| n.id == id)
+            .map(|n| {
+                n.read = true;
+                (n.project.clone(), n.session)
+            });
+        let Some((project, session)) = found else {
             cx.notify();
             return;
         };
-        n.read = true;
-        let (project, session) = (n.project.clone(), n.session);
         match session.and_then(|s| self.find_session(s)) {
             Some((root, item)) => self.focus_item(&root, item, window, cx),
             None => {
-                let index =
-                    project.and_then(|r| self.workspace.projects.iter().position(|p| p.root == r));
-                if let Some(index) = index {
-                    self.switch_to(index, cx);
+                let index = project
+                    .as_ref()
+                    .and_then(|r| self.workspace.projects.iter().position(|p| p.root == *r));
+                match index {
+                    Some(index) => self.switch_to(index, cx),
+                    None if project.is_some() => {
+                        super::windows::open_notification_elsewhere(id, window.window_handle(), cx)
+                    }
+                    None => {}
                 }
             }
         }
@@ -509,6 +546,7 @@ impl Shell {
             return None;
         }
         let t = cx.theme().clone();
+        let log = self.notices.borrow();
         let cards: Vec<AnyElement> = self
             .toasts
             .iter()
@@ -521,22 +559,17 @@ impl Shell {
                     t.color.content_muted,
                     toast.action.as_ref().map(|a| a.label),
                 )),
-                None => self
-                    .notifications
-                    .iter()
-                    .find(|n| n.id == toast.id)
-                    .map(|n| {
-                        let (title, body) =
-                            describe(&n.kind, self.project_name(&n.project).as_deref());
-                        (
-                            n.id,
-                            toast.closing,
-                            title,
-                            body,
-                            self.kind_color(&n.kind, cx),
-                            None,
-                        )
-                    }),
+                None => log.list.iter().find(|n| n.id == toast.id).map(|n| {
+                    let (title, body) = describe(&n.kind, self.project_name(&n.project).as_deref());
+                    (
+                        n.id,
+                        toast.closing,
+                        title,
+                        body,
+                        self.kind_color(&n.kind, cx),
+                        None,
+                    )
+                }),
             })
             .map(|(id, closing, title, body, color, action)| {
                 let card = div()
@@ -631,8 +664,9 @@ impl Shell {
     /// The Notifications tab's list, newest first.
     pub(super) fn render_notifications(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
-        let rows: Vec<AnyElement> = self
-            .notifications
+        let log = self.notices.borrow();
+        let rows: Vec<AnyElement> = log
+            .list
             .iter()
             .rev()
             .map(|n| {
@@ -682,6 +716,7 @@ impl Shell {
                     .into_any_element()
             })
             .collect();
+        drop(log);
         let empty = rows.is_empty();
         div()
             .id("notices")
@@ -703,13 +738,18 @@ impl Shell {
     }
 
     pub(super) fn clear_notifications(&mut self, cx: &mut Context<Self>) {
-        self.notifications.clear();
+        self.notices.borrow_mut().list.clear();
         self.notices_changed(cx);
     }
 
     pub(super) fn mark_all_read(&mut self, cx: &mut Context<Self>) {
-        if self.notifications.iter().any(|n| !n.read) {
-            self.notifications.iter_mut().for_each(|n| n.read = true);
+        let unread = self.notices.borrow().list.iter().any(|n| !n.read);
+        if unread {
+            self.notices
+                .borrow_mut()
+                .list
+                .iter_mut()
+                .for_each(|n| n.read = true);
             self.notices_changed(cx);
         }
     }

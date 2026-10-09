@@ -6,14 +6,15 @@ use std::time::Duration;
 
 use athena_editor::{DiffEvent, DiffView, EditorView, HunkActions};
 use athena_workspace::{DiffBase, ItemId, ItemKind, Workspace};
-use gpui::{AnyWindowHandle, AppContext as _, Context, Entity, EntityId, Task, Window};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, Task, Window};
 use serde_json::{Value, json};
 
 use super::Shell;
 use super::item::ItemView;
 use super::notices::ToastAction;
 use super::review::{self, diff_title};
-use crate::ide::{self, DiffKey, Event, Verdict};
+use super::windows;
+use crate::ide::{self, DiffKey, Verdict};
 
 /// How often the focused editor's selection is checked while Claude Code is connected; this
 /// also debounces a drag or a held arrow key into one update.
@@ -24,19 +25,13 @@ const WAITING_NOTE: &str = "Claude Code is waiting for your answer. Accept (âŒ˜â
 
 #[derive(Default)]
 pub(super) struct IdeState {
-    server: Option<ide::Server>,
-    _events: Option<Task<()>>,
     /// Proposals Claude Code waits on, by the id their tab carries.
-    proposals: HashMap<String, Proposal>,
-    /// Connected sessions and the pid each reported.
-    clients: HashMap<u64, Option<i32>>,
-    _selection: Option<Task<()>>,
+    pub(super) proposals: HashMap<String, Proposal>,
+    pub(super) _selection: Option<Task<()>>,
     /// The selection last sent, so an unchanged one is not sent again.
     sent: Option<Value>,
     /// What the selection was last built from, so a poll that finds nothing new copies no text.
     seen: Option<SelectionKey>,
-    /// Where proposal tabs live, to close one answered from its own toolbar.
-    window: Option<AnyWindowHandle>,
 }
 
 #[derive(PartialEq)]
@@ -47,7 +42,7 @@ struct SelectionKey {
     selected: Option<usize>,
 }
 
-struct Proposal {
+pub(super) struct Proposal {
     key: DiffKey,
     contents: String,
     /// The tab showing it; closing that tab rejects the change.
@@ -117,7 +112,7 @@ fn proposal_target(roots: &[&Path], path: &Path) -> Option<(usize, PathBuf)> {
 }
 
 /// A copy of `workspace` without proposal tabs, or `None` when it has none.
-fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
+pub(super) fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
     let any = workspace
         .projects
         .iter()
@@ -213,28 +208,25 @@ impl Shell {
             }
             return;
         }
+        // One server serves every window, as the env file names a single port.
+        if windows::ide(cx).is_some() {
+            if !windows::ide_clients(cx).is_empty() {
+                self.watch_selection(cx);
+            }
+            return;
+        }
         let Some(lock_dir) = ide::default_lock_dir() else {
             return;
         };
+        let mut folders = self.ide_folders();
+        folders.extend(windows::other_roots(window.window_handle(), cx));
         let config = ide::Config {
             lock_dir,
             env_file: ide::env_file(),
-            folders: self.ide_folders(),
+            folders,
         };
         match ide::Server::start(config) {
-            Ok((server, events)) => {
-                self.ide.server = Some(server);
-                self.ide.window = Some(window.window_handle());
-                self.ide._events = Some(cx.spawn_in(window, async move |this, cx| {
-                    while let Ok(event) = events.recv().await {
-                        let handled = this
-                            .update_in(cx, |this, window, cx| this.ide_event(event, window, cx));
-                        if handled.is_err() {
-                            return;
-                        }
-                    }
-                }));
-            }
+            Ok((server, events)) => windows::set_ide(server, events, cx),
             Err(e) => {
                 tracing::error!("could not start the Claude Code IDE server: {e}");
                 self.transient_notice(
@@ -259,7 +251,7 @@ impl Shell {
             );
         }
         self.start_ide(window, cx);
-        if self.ide.server.is_none() {
+        if windows::ide(cx).is_none() {
             self.workspace.ide_integration = false;
             return;
         }
@@ -274,25 +266,16 @@ impl Shell {
     }
 
     pub(super) fn stop_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ide._events = None;
         self.ide._selection = None;
-        self.ide.clients.clear();
         self.ide.sent = None;
-        if let Some(server) = self.ide.server.take() {
-            server.turn_off();
-        }
+        windows::stop_ide(cx);
         let ids: Vec<String> = self.ide.proposals.drain().map(|(id, _)| id).collect();
         for id in ids {
             self.close_proposal_tab(&id, window, cx);
         }
     }
 
-    /// Claude Code hears that pending proposals were rejected, and the lock file goes.
-    pub(super) fn ide_quit(&mut self) {
-        self.ide.server = None;
-    }
-
-    fn ide_folders(&self) -> Vec<PathBuf> {
+    pub(super) fn ide_folders(&self) -> Vec<PathBuf> {
         self.workspace
             .projects
             .iter()
@@ -300,48 +283,12 @@ impl Shell {
             .collect()
     }
 
-    /// Keeps the lock file's folders in step with the open projects.
-    pub(super) fn sync_ide_folders(&mut self) {
-        let folders = self.ide_folders();
-        if let Some(server) = self.ide.server.as_mut() {
-            server.set_folders(folders);
-        }
-    }
-
     /// The workspace as saved: a proposal cannot outlive the request that opened it.
     pub(super) fn persisted_workspace(&self) -> Cow<'_, Workspace> {
         without_proposals(&self.workspace).map_or(Cow::Borrowed(&self.workspace), Cow::Owned)
     }
 
-    fn ide_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
-        match event {
-            Event::OpenDiff {
-                key,
-                path,
-                contents,
-            } => self.show_proposal(key, path, contents, window, cx),
-            Event::CloseDiff { key } => {
-                let id = key.id();
-                self.ide.proposals.remove(&id);
-                self.close_proposal_tab(&id, window, cx);
-            }
-            Event::Diagnostics { path, reply } => {
-                let _ = reply.send(self.ide_diagnostics(path.as_deref()));
-            }
-            Event::Client { client, pid } => {
-                self.ide.clients.insert(client, pid);
-                self.watch_selection(cx);
-            }
-            Event::Disconnected { client } => {
-                self.ide.clients.remove(&client);
-                if self.ide.clients.is_empty() {
-                    self.ide._selection = None;
-                }
-            }
-        }
-    }
-
-    fn show_proposal(
+    pub(super) fn show_proposal(
         &mut self,
         key: DiffKey,
         path: PathBuf,
@@ -357,7 +304,7 @@ impl Shell {
             .collect();
         let Some((project, path)) = proposal_target(&roots, &path) else {
             // Claude Code then asks in the terminal instead.
-            if let Some(server) = &self.ide.server {
+            if let Some(server) = windows::ide(cx) {
                 server.resolve(&key, Verdict::Unavailable);
             }
             return;
@@ -459,12 +406,10 @@ impl Shell {
             true => Verdict::Accepted(proposal.contents),
             false => Verdict::Rejected,
         };
-        if let Some(server) = &self.ide.server {
+        if let Some(server) = windows::ide(cx) {
             server.resolve(&proposal.key, verdict);
         }
-        let Some(handle) = self.ide.window else {
-            return;
-        };
+        let handle = self.window_handle;
         // Answered from inside the tab's own event, while the window is busy dispatching it.
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
@@ -475,7 +420,12 @@ impl Shell {
         .detach();
     }
 
-    fn close_proposal_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_proposal_tab(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tabs: Vec<(PathBuf, ItemId)> = self
             .workspace
             .projects
@@ -494,7 +444,7 @@ impl Shell {
         }
     }
 
-    fn ide_diagnostics(&self, path: Option<&Path>) -> Vec<ide::FileDiagnostics> {
+    pub(super) fn ide_diagnostics(&self, path: Option<&Path>) -> Vec<ide::FileDiagnostics> {
         let wanted = path.map(|p| (p.to_path_buf(), p.canonicalize().ok()));
         self.lsp
             .diagnostics
@@ -514,7 +464,11 @@ impl Shell {
             .collect()
     }
 
-    fn watch_selection(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn ide_selection_stale(&mut self) {
+        self.ide.sent = None;
+    }
+
+    pub(super) fn watch_selection(&mut self, cx: &mut Context<Self>) {
         // A session that just connected has not seen the current selection.
         self.ide.sent = None;
         if self.ide._selection.is_some() {
@@ -538,6 +492,10 @@ impl Shell {
     /// Sends the editor selection when it changed; a focused terminal keeps the last one, as in
     /// VS Code, so it stays attached while the user types to Claude.
     fn push_selection(&mut self, cx: &mut Context<Self>) {
+        // Only the window in use speaks for the selection, as Claude Code follows one editor.
+        if !windows::is_focused(self.window_handle, cx) {
+            return;
+        }
         let Some((root, editor)) = self.focused_editor_in() else {
             return;
         };
@@ -563,14 +521,14 @@ impl Shell {
             return;
         };
         let targets = self.ide_targets(&root, cx);
-        if let Some(server) = &self.ide.server {
+        if let Some(server) = windows::ide(cx) {
             server.notify(&targets, "selection_changed", next.clone());
         }
         self.ide.sent = Some(next);
     }
 
     /// The terminal a Claude Code process runs in, from the process tree.
-    fn claude_terminal(&self, pid: i32, cx: &Context<Self>) -> Option<(PathBuf, ItemId)> {
+    pub(super) fn claude_terminal(&self, pid: i32, cx: &App) -> Option<(PathBuf, ItemId)> {
         let above = crate::procinfo::ancestry(pid);
         self.items.iter().find_map(|((root, id), view)| {
             let ItemView::Terminal(t) = view else {
@@ -584,15 +542,17 @@ impl Shell {
 
     /// Sessions running in `root`'s terminals, plus any whose terminal is not known.
     fn ide_targets(&self, root: &Path, cx: &Context<Self>) -> Vec<u64> {
-        let mut targets: Vec<u64> = self
-            .ide
-            .clients
-            .iter()
+        let mut targets: Vec<u64> = windows::ide_clients(cx)
+            .into_iter()
             .filter(|(_, pid)| {
-                pid.and_then(|pid| self.claude_terminal(pid, cx))
-                    .is_none_or(|(r, _)| r == root)
+                pid.and_then(|pid| {
+                    self.claude_terminal(pid, cx)
+                        .map(|(r, _)| r)
+                        .or_else(|| windows::claude_root_elsewhere(pid, self.window_handle, cx))
+                })
+                .is_none_or(|r| r == root)
             })
-            .map(|(client, _)| *client)
+            .map(|(client, _)| client)
             .collect();
         targets.sort_unstable();
         targets
@@ -600,7 +560,7 @@ impl Shell {
 
     /// Mentions the focused file and its selected lines in the Claude Code session of its project.
     pub(super) fn send_to_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(server) = &self.ide.server else {
+        if windows::ide(cx).is_none() {
             let action = ToastAction {
                 label: "Turn On",
                 run: Rc::new(|this: &mut Shell, window, cx| {
@@ -614,7 +574,7 @@ impl Shell {
                 cx,
             );
             return;
-        };
+        }
         let Some((root, editor)) = self.focused_editor_in() else {
             return self.transient_notice(
                 "Nothing to send to Claude",
@@ -637,11 +597,13 @@ impl Shell {
                 cx,
             );
         }
-        server.notify(&targets, "at_mentioned", mention_json(&path, start, end));
+        if let Some(server) = windows::ide(cx) {
+            server.notify(&targets, "at_mentioned", mention_json(&path, start, end));
+        }
         // Typing goes on in the session that got the mention, as in VS Code.
         let terminal = targets
             .iter()
-            .filter_map(|c| self.ide.clients.get(c).copied().flatten())
+            .filter_map(|c| windows::ide_clients(cx).get(c).copied().flatten())
             .find_map(|pid| self.claude_terminal(pid, cx))
             .filter(|(r, _)| *r == root);
         if let Some((_, item)) = terminal

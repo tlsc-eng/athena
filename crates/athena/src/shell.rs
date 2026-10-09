@@ -48,8 +48,11 @@ mod timeline;
 mod tree;
 mod usage_view;
 mod watch;
+mod windows;
 mod worktrees;
 mod zoom;
+
+pub use windows::start;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -57,7 +60,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_proto::AppMsg;
 use athena_term::ClaudeState;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
@@ -91,7 +93,8 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub struct Shell {
     workspace: Workspace,
-    path: PathBuf,
+    /// This shell's own window, which other windows' requests are told apart from.
+    window_handle: gpui::AnyWindowHandle,
     focus: FocusHandle,
     drawer_focus: FocusHandle,
     items: HashMap<(PathBuf, ItemId), item::ItemView>,
@@ -107,9 +110,8 @@ pub struct Shell {
     tree: tree::FileTree,
     tree_opening: Option<motion::Opening>,
     tree_closing: Option<motion::Closing>,
-    notifications: Vec<notices::Notification>,
-    notices_path: PathBuf,
-    next_notice: u64,
+    /// The Notifications list, shared with the other windows.
+    notices: Rc<RefCell<notices::Log>>,
     toasts: Vec<notices::Toast>,
     /// Where the toasts were last drawn, so web previews under them can step aside.
     toast_area: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
@@ -139,9 +141,6 @@ pub struct Shell {
     window_title: String,
     /// A file a rendered document's link asked for, opened at the next frame.
     pending_open: Option<PathBuf>,
-    _notices: Option<Task<()>>,
-    _clicks: Task<()>,
-    _app_socket: Task<()>,
     ide: claude_ide::IdeState,
     usage: usage_view::UsageState,
     _usage: Option<Task<()>>,
@@ -170,12 +169,7 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(
-        mut workspace: Workspace,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(mut workspace: Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
         let settings = settings::SettingsState::load(&mut workspace);
@@ -192,6 +186,9 @@ impl Shell {
             }),
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
+                    windows::set_focused(window.window_handle(), cx);
+                    // Claude Code hears this window's selection now, even if it has not moved.
+                    this.ide_selection_stale();
                     this.tree.invalidate();
                     this.reload_changed_files(cx);
                     this.git_kick(cx);
@@ -204,57 +201,17 @@ impl Shell {
             cx.on_app_quit(|this, cx| {
                 this.flush_unsaved(cx);
                 this.save_now(cx);
-                this.ide_quit();
+                windows::quit_ide(cx);
                 this.tests_quit();
                 this.debug_quit();
                 async {}
             }),
         ];
-        let notices_path = path.with_file_name("notifications.json");
-        let notifications = notices::load(&notices_path);
-        let (clicks, banner_clicks) = async_channel::unbounded::<u64>();
-        crate::system_notify::init(clicks);
-        let clicks_task = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(id) = banner_clicks.recv().await {
-                let opened = this.update_in(cx, |this, window, cx| {
-                    cx.activate(true);
-                    this.open_notification(id, window, cx);
-                });
-                if opened.is_err() {
-                    return;
-                }
-            }
-        });
-        let requests = crate::app_socket::listen();
-        let app_socket = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(request) = requests.recv().await {
-                let answered = this.update_in(cx, |this, window, cx| {
-                    let caller = this.verify_caller(request.claimed, &request.lineage, cx);
-                    if let AppMsg::RunInTerminal {
-                        session,
-                        text,
-                        newline,
-                    } = request.msg
-                    {
-                        this.confirm_run(session, text, newline, caller, request.reply, window, cx);
-                        return;
-                    }
-                    if this.answer_later(&request.msg, &request.reply, cx) {
-                        return;
-                    }
-                    let reply = this.handle_app(request.msg, caller, window, cx);
-                    let _ = request.reply.send(reply);
-                });
-                if answered.is_err() {
-                    return;
-                }
-            }
-        });
-        let debug = debug::DebugState::load(&path);
+        let debug = debug::DebugState::load(&windows::workspace_path(cx));
         let mut shell = Self {
             rail_from: workspace.active.unwrap_or(0),
             workspace,
-            path,
+            window_handle: window.window_handle(),
             focus,
             drawer_focus: cx.focus_handle(),
             items: HashMap::new(),
@@ -268,9 +225,7 @@ impl Shell {
             tree: tree::FileTree::default(),
             tree_opening: None,
             tree_closing: None,
-            next_notice: notifications.iter().map(|n| n.id()).max().unwrap_or(0),
-            notifications,
-            notices_path,
+            notices: cx.global::<windows::Windows>().notices.clone(),
             toasts: Vec::new(),
             toast_area: Rc::default(),
             drawer: None,
@@ -296,9 +251,6 @@ impl Shell {
             last_editor_pane: HashMap::new(),
             window_title: String::new(),
             pending_open: None,
-            _notices: None,
-            _clicks: clicks_task,
-            _app_socket: app_socket,
             ide: claude_ide::IdeState::default(),
             usage: usage_view::UsageState::default(),
             _usage: None,
@@ -321,11 +273,10 @@ impl Shell {
         };
         let this = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
-            // Closing the only window quits, so unsaved files get the same question as Cmd+Q.
-            this.update(cx, |this, cx| this.quit(window, cx)).is_err()
+            this.update(cx, |this, cx| this.close_window(window, cx))
+                .is_err()
         });
         shell.restore_terminal_panel();
-        shell.start_notices(window, cx);
         shell.announce_recovery(cx);
         shell.start_usage(window, cx);
         shell.start_git(window, cx);
@@ -342,23 +293,25 @@ impl Shell {
     }
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        windows::publish(
+            Some(self.window_handle),
+            windows::AppFields::of(&self.workspace),
+            cx,
+        );
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DEBOUNCE).await;
             this.update(cx, |this, cx| this.save_now(cx)).ok();
         }));
     }
 
-    fn save_now(&mut self, cx: &gpui::App) {
+    fn save_now(&mut self, cx: &mut Context<Self>) {
         self.save_task = None;
-        self.sync_ide_folders();
         self.capture_view_states(cx);
-        let persisted = self.settings.persisted(self.persisted_workspace());
-        if let Err(err) = athena_workspace::save(&self.path, &persisted) {
-            tracing::error!("could not save the workspace: {err:#}");
-        }
-        if let Err(err) = notices::save(&self.notices_path, &self.notifications) {
-            tracing::error!("could not save notifications: {err:#}");
-        }
+        let persisted = self
+            .settings
+            .persisted(self.persisted_workspace())
+            .into_owned();
+        windows::store(self.window_handle, persisted, cx);
     }
 
     fn switch_to(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -394,11 +347,19 @@ impl Shell {
         .detach();
     }
 
-    /// Opens a folder as a project, or switches to it if it is already open.
+    /// Opens a folder as a project, or switches to it if it is already open, in this window or
+    /// another, as VS Code does.
     pub fn open_folder(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if let Some(holder) = windows::holder_of(&root, self.window_handle, cx) {
+            return windows::focus_project(holder, root, cx);
+        }
         let previous = self.workspace.active;
-        let index = self.workspace.add_project(root);
+        let index = match windows::take_parked(&root, cx) {
+            Some(project) => self.workspace.adopt_project(project),
+            None => self.workspace.add_project(root),
+        };
         let root = self.workspace.projects[index].root.clone();
+        self.debug.reload_project(&root);
         self.workspace.active = previous;
         self.group_worktrees();
         if let Some(index) = self.workspace.projects.iter().position(|p| p.root == root) {
@@ -597,6 +558,12 @@ impl Shell {
                     })
                     .tooltip(move |_, cx| Tooltip::view(root.clone(), cx))
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_to(i, cx)))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
+                            this.open_rail_menu(i, e.position, window, cx)
+                        }),
+                    )
                     .relative()
                     .child(monogram)
                     .children(main.map(|_| {
@@ -1060,6 +1027,27 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &crate::actions::ToggleMinimap, _, cx| {
                     this.toggle_minimap(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::MoveProjectToNewWindow, _, cx| {
+                    this.move_active_to_new_window(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenProjectInNewWindow, _, cx| {
+                    this.open_in_new_window(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::CloseWindow, w, cx| {
+                    this.close_window(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::MergeAllWindows, _, cx| {
+                    let into = this.window_handle;
+                    cx.defer(move |cx| windows::merge_into(into, cx));
                 }),
             )
             .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {
