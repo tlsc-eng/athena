@@ -299,6 +299,8 @@ impl Shell {
             windows::AppFields::of(&self.workspace),
             cx,
         );
+        // Claude Code sees a project open or close now, not when the debounced save lands.
+        cx.defer(windows::refresh_ide_folders);
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DEBOUNCE).await;
             this.update(cx, |this, cx| this.save_now(cx)).ok();

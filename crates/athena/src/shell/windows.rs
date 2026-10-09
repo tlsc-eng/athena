@@ -239,20 +239,31 @@ pub(super) fn store(window: AnyWindowHandle, workspace: Workspace, cx: &mut App)
     if let Err(err) = notices::save(&windows.notices_path, &windows.notices.borrow().list) {
         tracing::error!("could not save notifications: {err:#}");
     }
-    refresh_ide_folders(cx);
+    cx.defer(refresh_ide_folders);
 }
 
 /// Keeps the IDE lock file's folders in step with every window's projects.
-fn refresh_ide_folders(cx: &mut App) {
-    let windows = cx.global_mut::<Windows>();
-    let folders: Vec<PathBuf> = windows
-        .open
-        .iter()
-        .flat_map(|o| o.saved.projects.iter().map(|p| p.root.clone()))
-        .collect();
-    if let Some(server) = windows.ide.as_mut() {
+pub(super) fn refresh_ide_folders(cx: &mut App) {
+    let folders = open_roots(None, cx);
+    if let Some(server) = cx.global_mut::<Windows>().ide.as_mut() {
         server.set_folders(folders);
     }
+}
+
+/// The roots open in every window but `except`, as they are now; a window in the middle of an
+/// update gives those it last saved.
+fn open_roots(except: Option<AnyWindowHandle>, cx: &App) -> Vec<PathBuf> {
+    let roots =
+        |w: &Workspace| -> Vec<PathBuf> { w.projects.iter().map(|p| p.root.clone()).collect() };
+    cx.global::<Windows>()
+        .open
+        .iter()
+        .filter(|o| Some(AnyWindowHandle::from(o.handle)) != except)
+        .flat_map(|o| match o.handle.read(cx) {
+            Ok(shell) => roots(&shell.workspace),
+            Err(_) => roots(&o.saved),
+        })
+        .collect()
 }
 
 /// Hands changed app-wide fields to the other windows, so none of them saves them back.
@@ -308,14 +319,9 @@ pub(super) fn take_parked(root: &Path, cx: &mut App) -> Option<Project> {
     athena_workspace::take_parked(&mut cx.global_mut::<Windows>().parked, root)
 }
 
-/// Roots open in windows other than `except`, for the IDE server's lock file.
+/// Roots open in windows other than `except`, for the IDE server's lock file and breakpoints.
 pub(super) fn other_roots(except: AnyWindowHandle, cx: &App) -> Vec<PathBuf> {
-    cx.global::<Windows>()
-        .open
-        .iter()
-        .filter(|o| AnyWindowHandle::from(o.handle) != except)
-        .flat_map(|o| o.saved.projects.iter().map(|p| p.root.clone()))
-        .collect()
+    open_roots(Some(except), cx)
 }
 
 /// Opens a window: empty, or showing `project` (taken from another window or picked).
