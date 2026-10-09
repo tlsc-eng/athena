@@ -2095,6 +2095,8 @@ impl EditorView {
             && self.error.is_none()
             && self.save_error.is_none()
             && self.conflict.is_none()
+            // Tidying now would move the version and make the pending format's edits be dropped.
+            && self.formatting.is_none()
         {
             self.save_with(true, cx);
         }
