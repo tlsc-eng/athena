@@ -5,6 +5,7 @@ use gpui::{Context, PromptLevel, Window, actions};
 
 use super::Shell;
 use super::branches::{BranchEntry, BranchPick};
+use super::lsp::{CONFIRMED, confirm_buttons};
 use super::palette::Mode;
 use crate::actions::display_path;
 
@@ -286,11 +287,11 @@ impl Shell {
                         PromptLevel::Warning,
                         &message,
                         Some("Deleting the worktree discards them. Its branch is kept."),
-                        &["Delete Anyway", "Cancel"],
+                        &confirm_buttons("Cancel", "Delete Anyway"),
                         cx,
                     );
                     cx.spawn_in(window, async move |this, cx| {
-                        if answer.await == Ok(0) {
+                        if answer.await == Ok(CONFIRMED) {
                             let _ = this.update_in(cx, |this, window, cx| {
                                 this.remove_worktree(path, true, window, cx)
                             });

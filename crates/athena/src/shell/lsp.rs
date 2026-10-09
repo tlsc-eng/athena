@@ -48,6 +48,18 @@ const CRASH_WINDOW: Duration = Duration::from_secs(180);
 
 type ServerKey = (PathBuf, ServerKind);
 
+/// The answer index of [`confirm_buttons`]' `action`.
+pub(super) const CONFIRMED: usize = 1;
+
+/// Buttons for a prompt whose `action` is risky: Escape cancels and Return picks neither, as
+/// gpui gives Return to the first button unless it is a Cancel one.
+pub(super) fn confirm_buttons(cancel: &str, action: &str) -> [PromptButton; 2] {
+    [
+        PromptButton::cancel(cancel.to_string()),
+        PromptButton::ok(action.to_string()),
+    ]
+}
+
 struct Server {
     client: Rc<Client>,
     config: Config,
@@ -598,10 +610,7 @@ impl Shell {
                         PromptLevel::Warning,
                         &message,
                         Some(&detail),
-                        &[
-                            PromptButton::ok("Allow"),
-                            PromptButton::cancel("Don't Allow"),
-                        ],
+                        &confirm_buttons("Don't Allow", "Allow"),
                         cx,
                     );
                     let root = root.clone();
@@ -611,7 +620,9 @@ impl Shell {
                             let _ = this.update(cx, |this, cx| {
                                 this.lsp.asking_trust.remove(&root);
                                 match answer {
-                                    Ok(0) => this.set_linter_trust(&root, LinterTrust::Allowed, cx),
+                                    Ok(CONFIRMED) => {
+                                        this.set_linter_trust(&root, LinterTrust::Allowed, cx)
+                                    }
                                     Ok(_) => this.set_linter_trust(&root, LinterTrust::Denied, cx),
                                     // The window closed first; ask again next time.
                                     Err(_) => {}
@@ -2091,6 +2102,44 @@ mod tests {
         assert_eq!(message, "Use go-svc's language server settings?");
         assert!(detail.starts_with("go-svc has settings"), "{detail}");
         assert!(detail.contains("can name programs"), "{detail}");
+    }
+
+    /// Return, Escape and Space as gpui 0.2.2's macOS `prompt` maps them onto the buttons.
+    fn alert_keys(buttons: &[PromptButton]) -> [Option<usize>; 3] {
+        let cancel = |i: &usize| matches!(buttons[*i], PromptButton::Cancel(_));
+        let focused = (0..buttons.len())
+            .rev()
+            .find(|i| !cancel(i))
+            .filter(|&i| i > 0);
+        let mut added: Vec<usize> = (0..buttons.len()).filter(|&i| Some(i) != focused).collect();
+        added.extend(focused);
+        // A Cancel button's Escape replaces the Return NSAlert gives its first button.
+        let enter = added.first().copied().filter(|i| !cancel(i));
+        let escape = added.iter().copied().find(cancel);
+        [enter, escape, added.last().copied()]
+    }
+
+    #[test]
+    fn risky_prompts_leave_return_unanswered_and_escape_cancels() {
+        for (cancel, action) in [
+            ("Don't Allow", "Allow"),
+            ("Cancel", "Delete Anyway"),
+            ("Don't Update", "Update Imports"),
+            ("Cancel", "Revert"),
+        ] {
+            let buttons = confirm_buttons(cancel, action);
+            assert_eq!(buttons[CONFIRMED].label().as_ref(), action);
+            assert_eq!(
+                alert_keys(&buttons),
+                [None, Some(0), Some(CONFIRMED)],
+                "{action}"
+            );
+        }
+        let before = [
+            PromptButton::ok("Allow"),
+            PromptButton::cancel("Don't Allow"),
+        ];
+        assert_eq!(alert_keys(&before)[0], Some(0), "Return used to allow");
     }
 
     #[test]

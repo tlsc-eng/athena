@@ -18,6 +18,7 @@ use super::Shell;
 use super::drawer::DrawerTab;
 use super::git_view::row_button;
 use super::item::{ItemView, file_label};
+use super::lsp::{CONFIRMED, confirm_buttons};
 use super::menus::shell_item;
 use super::review::backup_dir;
 use crate::snapshots::{self, Before};
@@ -458,11 +459,11 @@ impl Shell {
                 "Athena keeps a copy of the current file in Application Support/athena/discarded \
                  for 30 days.",
             ),
-            &["Revert", "Cancel"],
+            &confirm_buttons("Cancel", "Revert"),
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
+            if answer.await != Ok(CONFIRMED) {
                 return;
             }
             let Ok(store) = snapshots::store() else {

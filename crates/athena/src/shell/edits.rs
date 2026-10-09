@@ -7,12 +7,12 @@ use athena_editor::{Buffer, EditorView, ServerEdit};
 use athena_lsp::{
     Client, EditError, FileChange, FileEvent, TextEdit, WorkspaceEdit, apply_text_edits,
 };
-use gpui::{Context, Entity, PromptButton, PromptLevel, Window};
+use gpui::{Context, Entity, PromptLevel, Window};
 
 use super::Shell;
 use super::fileops;
 use super::item::ItemView;
-use super::lsp::document_key;
+use super::lsp::{CONFIRMED, confirm_buttons, document_key};
 
 /// Closed files larger than this are not edited, as the editor would not open them either.
 const MAX_FILE: u64 = 16 * 1024 * 1024;
@@ -566,16 +566,13 @@ impl Shell {
                             "{} files refer to it and can be updated to its new place.",
                             files.len()
                         )),
-                        &[
-                            PromptButton::ok("Update Imports"),
-                            PromptButton::cancel("Don't Update"),
-                        ],
+                        &confirm_buttons("Don't Update", "Update Imports"),
                         cx,
                     )
                 }) else {
                     return;
                 };
-                apply = matches!(answer.await, Ok(0));
+                apply = answer.await == Ok(CONFIRMED);
             }
             let _ = this.update_in(cx, |this, window, cx| {
                 if apply {
