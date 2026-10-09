@@ -4,14 +4,14 @@ use std::rc::Rc;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use athena_editor::diff;
+use athena_editor::{EditorView, diff};
 use athena_proto::{AppMsg, PaneId, TodoInfo};
 use athena_ui::{ActiveTheme, ButtonKind, MenuItem, Theme, Tooltip, empty_state};
 use athena_workspace::DiffBase;
 use athena_workspace::git::relative_time;
 use gpui::{
-    AnyElement, ClipboardItem, Context, FontWeight, MouseButton, MouseDownEvent, PromptLevel, Task,
-    Window, actions, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
+    PromptLevel, Task, Window, actions, div, prelude::*, px,
 };
 
 use super::Shell;
@@ -189,6 +189,11 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
     rows.sort_by_key(|r| std::cmp::Reverse(r.modified));
     rows.truncate(SESSIONS);
     rows
+}
+
+/// Whether two spellings of a path name the same file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 fn short_id(id: &str) -> &str {
@@ -450,6 +455,9 @@ impl Shell {
         let Some(root) = self.review.sessions.root.clone() else {
             return;
         };
+        if self.refuse_unsaved_revert(&path, cx) {
+            return;
+        }
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!(
@@ -467,6 +475,10 @@ impl Shell {
             if answer.await != Ok(CONFIRMED) {
                 return;
             }
+            let unsaved = this.update(cx, |this, cx| this.refuse_unsaved_revert(&path, cx));
+            if unsaved.unwrap_or(true) {
+                return;
+            }
             let Ok(store) = snapshots::store() else {
                 return;
             };
@@ -478,8 +490,15 @@ impl Shell {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if let Err(err) = done {
-                    this.transient_notice("Could not revert the file", format!("{err:#}"), cx);
+                match done {
+                    Err(err) => {
+                        this.transient_notice("Could not revert the file", format!("{err:#}"), cx)
+                    }
+                    Ok(()) => {
+                        for editor in this.editors_of(&path, cx) {
+                            editor.update(cx, |e, cx| e.check_disk(cx));
+                        }
+                    }
                 }
                 this.forget_gutter_marks(&path);
                 this.reload_diffs(&root, Some(&path), cx);
@@ -488,6 +507,34 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Editors open on `path`, under whatever spelling of it they were opened by.
+    fn editors_of(&self, path: &Path, cx: &App) -> Vec<Entity<EditorView>> {
+        self.items
+            .values()
+            .filter_map(|view| match view {
+                ItemView::Editor(e) if same_file(e.read(cx).path(), path) => Some(e.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Says so and returns true when `path` has unsaved edits, which a revert would lose and
+    /// the next save would undo.
+    fn refuse_unsaved_revert(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        let unsaved = self
+            .editors_of(path, cx)
+            .iter()
+            .any(|e| e.read(cx).is_dirty());
+        if unsaved {
+            self.transient_notice(
+                format!("{} has unsaved changes", file_label(path)),
+                "Save or revert them in the editor before reverting the session's edits.",
+                cx,
+            );
+        }
+        unsaved
     }
 
     fn open_session_menu(
@@ -1126,6 +1173,17 @@ mod tests {
             None,
             "a newline would run what follows"
         );
+    }
+
+    #[test]
+    fn an_editor_opened_through_a_link_is_the_file_a_session_reverts() {
+        let dir = temp("same");
+        std::fs::write(dir.join("a.go"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.join("a.go"), dir.join("link.go")).unwrap();
+        assert!(same_file(&dir.join("link.go"), &dir.join("a.go")));
+        assert!(same_file(&dir.join("gone.go"), &dir.join("gone.go")));
+        assert!(!same_file(&dir.join("a.go"), &dir.join("gone.go")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
