@@ -1,5 +1,6 @@
 mod blame;
 mod buffer;
+mod code_lens;
 mod completion;
 pub mod diff;
 mod diff_view;
@@ -36,6 +37,7 @@ pub use blame::{BlameCommit, GitGutterEvent, GutterBlame};
 pub use buffer::{
     Buffer, Cursor, Cursors, DiskState, Edit, Indent, LineEnding, SaveError, Selection,
 };
+pub use code_lens::Lens;
 pub use completion::{Completion, Resolved, ServerEdit};
 pub use diff_view::{DiffEvent, DiffView, HunkActions};
 pub use encoding::{Decoded, FileEncoding, decode as decode_text};

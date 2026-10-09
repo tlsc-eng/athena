@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use athena_editor::EditorView;
-use athena_lsp::{Client, CodeAction, FileChange, Position, Range, TextEdit};
+use athena_lsp::{Client, CodeAction, Command, FileChange, Position, Range, TextEdit};
 use athena_ui::MenuItem;
 use gpui::{Context, Entity, EntityId, Subscription, Task, WeakEntity, Window};
 
@@ -69,6 +69,18 @@ pub(super) fn merge_save_edits(imports: Vec<TextEdit>, format: Vec<TextEdit>) ->
 
 /// The edits a whole-file source action such as `source.organizeImports` (gopls) or
 /// `source.fixAll.eslint` makes to `doc`, empty when it has nothing to change.
+/// Runs a server command, such as a code action's or a code lens's; any edit it makes arrives
+/// as `workspace/applyEdit`.
+pub(super) async fn run_command(client: &Client, command: &Command) -> Result<(), String> {
+    client
+        .execute_command(command)
+        .await
+        .map(drop)
+        .inspect_err(|why| {
+            tracing::warn!("{} failed: {why}", command.command);
+        })
+}
+
 pub(super) async fn source_action_edits(client: &Client, doc: &Path, kind: &str) -> Vec<TextEdit> {
     let start = Position {
         line: 0,
@@ -332,9 +344,8 @@ impl Shell {
                 }
             }
             if let Some(command) = &action.command
-                && let Err(why) = client.execute_command(command).await
+                && let Err(why) = run_command(&client, command).await
             {
-                tracing::warn!("{} failed: {why}", command.command);
                 let _ = this.update(cx, |this, cx| this.lsp_failed(&action.title, why, cx));
             }
         })

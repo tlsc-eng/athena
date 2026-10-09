@@ -69,6 +69,15 @@ pub enum LspRequest {
     },
     /// The file's semantic tokens; answer with [`EditorView::show_semantic_tokens`].
     SemanticTokens { request: u64 },
+    /// The code lenses on zero-based lines `start_line..end_line`; answer with
+    /// [`EditorView::show_code_lenses`].
+    CodeLens {
+        request: u64,
+        start_line: u32,
+        end_line: u32,
+    },
+    /// Run lens `id` of the answer to code lens request `request`.
+    RunCodeLens { request: u64, id: usize },
 }
 
 /// A semantic token where a language server put it: zero-based line, UTF-16 start and length.

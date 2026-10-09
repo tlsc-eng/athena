@@ -364,6 +364,7 @@ impl Shell {
         let linked = e.linked_editing == Some(true);
         let minimap = e.minimap != Some(false);
         let semantic = e.semantic_highlighting != Some(false);
+        let lenses = e.code_lens != Some(false);
         let tidy = SaveSettings {
             trim_trailing_whitespace: e.trim_trailing_whitespace,
             insert_final_newline: e.insert_final_newline,
@@ -378,6 +379,7 @@ impl Shell {
             v.set_linked_editing(linked, cx);
             v.set_minimap(minimap, cx);
             v.set_semantic_highlighting(semantic, cx);
+            v.set_code_lens(lenses, cx);
             v.set_save_settings(tidy);
         });
     }

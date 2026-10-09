@@ -291,6 +291,15 @@ impl Client {
             .is_some_and(|v| v.as_bool().unwrap_or(v.is_object()))
     }
 
+    /// Whether the server runs `command` through `workspace/executeCommand`.
+    pub fn executes(&self, command: &str) -> bool {
+        self.capabilities
+            .get()
+            .and_then(|c| c.pointer("/executeCommandProvider/commands"))
+            .and_then(Value::as_array)
+            .is_some_and(|list| list.iter().any(|c| c.as_str() == Some(command)))
+    }
+
     fn notify(&self, method: &'static str, params: Value) {
         let _ = self.outgoing.try_send(Outgoing::Notify(method, params));
     }
@@ -1611,7 +1620,8 @@ mod tests {
     fn semantic_tokens_ask_for_a_delta_only_from_servers_that_offer_one() {
         let caps = json!({"semanticTokensProvider": {
             "legend": {"tokenTypes": ["function"], "tokenModifiers": ["readonly"]},
-            "full": {"delta": true}}, "codeLensProvider": {"resolveProvider": true}});
+            "full": {"delta": true}}, "codeLensProvider": {"resolveProvider": true},
+            "executeCommandProvider": {"commands": ["x.run"]}});
         let (client, seen) = scripted(caps, |method, params| match method {
             "textDocument/semanticTokens/full" => json!({"resultId": "1", "data": [0, 0, 4, 0, 0]}),
             "textDocument/semanticTokens/full/delta" => {
@@ -1649,6 +1659,7 @@ mod tests {
         let lenses = block_on(client.code_lens(doc)).unwrap();
         let lens = block_on(client.resolve_code_lens(&lenses[0])).unwrap();
         assert_eq!(lens.command.unwrap().title, "1 reference");
+        assert!(client.executes("x.run") && !client.executes("x.show"));
     }
 
     #[test]

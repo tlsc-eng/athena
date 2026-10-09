@@ -65,6 +65,8 @@ pub struct EditorSettings {
     /// VS Code's `editor.semanticHighlighting.enabled`: colour names as the language server
     /// classifies them.
     pub semantic_highlighting: Option<bool>,
+    /// VS Code's `editor.codeLens`: show the commands language servers offer with lines.
+    pub code_lens: Option<bool>,
 }
 
 /// Which code actions put a lightbulb beside the cursor's line; the rest wait for Cmd+.
@@ -101,6 +103,7 @@ impl EditorSettings {
             linked_editing: over.linked_editing.or(self.linked_editing),
             minimap: over.minimap.or(self.minimap),
             semantic_highlighting: over.semantic_highlighting.or(self.semantic_highlighting),
+            code_lens: over.code_lens.or(self.code_lens),
         }
     }
 
@@ -124,6 +127,7 @@ impl EditorSettings {
                 let flag = value.get("enabled").unwrap_or(value).as_bool();
                 self.minimap = Some(flag.ok_or("must be true or false")?);
             }
+            "code_lens" => self.code_lens = Some(flag()?),
             // VS Code's "configuredByTheme" is on: every Athena theme colours semantic tokens.
             "semantic_highlighting" => {
                 self.semantic_highlighting = Some(match value.as_str() {
@@ -182,6 +186,7 @@ fn editor_key(key: &str) -> &str {
         "wordWrap" => "word_wrap",
         "linkedEditing" => "linked_editing",
         "minimap.enabled" => "minimap",
+        "codeLens" => "code_lens",
         "semanticHighlighting" | "semanticHighlighting.enabled" => "semantic_highlighting",
         "lightbulb.enabled" => "lightbulb",
         "codeActionsOnSave" => "code_actions_on_save",
@@ -1746,6 +1751,26 @@ mod tests {
         assert_eq!(
             Settings::default().server_config("typescript-language-server"),
             Value::Null
+        );
+    }
+
+    #[test]
+    fn code_lens_reads_vs_codes_key_and_a_language_block_beats_it() {
+        let (s, problems) =
+            parse(r#"{"editor.codeLens": false, "[go]": {"editor.codeLens": true}}"#).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.editor.code_lens, Some(false));
+        assert_eq!(s.editor_for(Some(Lang::Go)).code_lens, Some(true));
+        assert_eq!(s.editor_for(Some(Lang::Rust)).code_lens, Some(false));
+        let vscode = parse_vscode(
+            r#"{"editor.codeLens": false, "typescript.referencesCodeLens.enabled": true}"#,
+            Path::new("/p"),
+        );
+        assert_eq!(vscode.editor.code_lens, Some(false));
+        assert_eq!(
+            vscode.lsp["typescript-language-server"]["typescript"]["referencesCodeLens"]["enabled"],
+            json!(true),
+            "typescript-language-server reads its lens settings from there"
         );
     }
 

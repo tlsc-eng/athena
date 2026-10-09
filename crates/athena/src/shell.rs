@@ -7,6 +7,7 @@ mod claude;
 mod claude_ide;
 mod claude_sessions;
 mod code_actions;
+mod codelens;
 mod conflicts;
 mod containers_view;
 mod dnd;

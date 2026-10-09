@@ -18,6 +18,7 @@
   //   "linked_editing": true,          // typing in a JSX tag name renames its closing tag
   //   "minimap": false,                // hides the file overview at the editor's right edge
   //   "semanticHighlighting.enabled": false, // colours from the language server, on by default
+  //   "codeLens": false,               // hides "run go generate", reference counts and the like
   //   "codeActionsOnSave": { "source.organizeImports": "explicit" } // ⌘S organizes imports
   // },
   // // Built in, as in VS Code: Markdown wraps and keeps trailing blanks, Go formats on save.
@@ -38,7 +39,8 @@
   //   // gopls runs with GOTOOLCHAIN=local unless its "env" names another toolchain.
   //   "gopls": { "hints": { "parameterNames": true }, "staticcheck": true, "env": { "GOTOOLCHAIN": "auto" } },
   //   "typescript-language-server": {
-  //     "preferences": { "includeInlayParameterNameHints": "all" }
+  //     "preferences": { "includeInlayParameterNameHints": "all" },
+  //     "typescript": { "referencesCodeLens": { "enabled": true } } // "N references" lenses
   //   }
   // },
 }

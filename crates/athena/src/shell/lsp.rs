@@ -107,6 +107,8 @@ pub(super) struct LspState {
     completions: HashMap<EntityId, (u64, Rc<Client>, Vec<CompletionItem>)>,
     /// Each document's semantic tokens as its server last sent them, which a delta builds on.
     semantic: HashMap<PathBuf, SemanticDoc>,
+    /// Each editor's last few code lens answers, newest last, by request, to run a clicked one.
+    pub(super) lenses: HashMap<EntityId, Vec<super::codelens::LensAnswer>>,
 }
 
 #[derive(Default)]
@@ -410,6 +412,7 @@ fn push_triggers(editor: &Entity<EditorView>, client: &Client, cx: &mut Context<
         // A file shown before its server was ready asks for its hints and tokens now.
         e.refresh_inlay_hints(cx);
         e.refresh_semantic_tokens(cx);
+        e.refresh_code_lens(cx);
     });
 }
 
@@ -897,7 +900,11 @@ impl Shell {
                     editor.update(cx, |e, cx| e.refresh_semantic_tokens(cx));
                 }
             }
-            Event::RefreshCodeLens => {}
+            Event::RefreshCodeLens => {
+                for editor in self.server_editors(&key, cx) {
+                    editor.update(cx, |e, cx| e.refresh_code_lens(cx));
+                }
+            }
             Event::Message { severity, text } => {
                 let title = key.1.label().to_string();
                 match severity {
@@ -1699,6 +1706,12 @@ impl Shell {
                 character,
             } => self.lsp_linked_editing(editor, request, position((line, character)), cx),
             LspRequest::SemanticTokens { request } => self.lsp_semantic_tokens(editor, request, cx),
+            LspRequest::CodeLens {
+                request,
+                start_line,
+                end_line,
+            } => self.lsp_code_lens(editor, request, start_line..end_line, cx),
+            LspRequest::RunCodeLens { request, id } => self.run_code_lens(editor, request, id, cx),
         }
     }
 
@@ -2059,6 +2072,33 @@ impl Shell {
         .into_any_element()
     }
 
+    /// Lists `found` in the References tab, or goes straight to it if it is the only one, as a
+    /// lens that carries its references asks.
+    pub(super) fn show_locations(&mut self, found: Vec<Location>, cx: &mut Context<Self>) {
+        if let [target] = found.as_slice() {
+            self.lsp.jump = Some((target.path.clone(), target.range.start));
+            cx.notify();
+            return;
+        }
+        let root = self.workspace.active_project().map(|p| p.root.clone());
+        cx.spawn(async move |this, cx| {
+            let list = cx
+                .background_executor()
+                .spawn(async move { with_snippets(found) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.lsp.references_asked += 1;
+                this.lsp.showing_calls = false;
+                this.lsp.reference_opened = None;
+                this.lsp.references_noun = "reference";
+                this.lsp.references_root = root;
+                this.lsp.references = References::Found(Rc::new(list));
+                this.show_drawer_tab(DrawerTab::References, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Says why a lookup went nowhere, so a click or key press is never silently ignored.
     pub(super) fn lsp_failed(&mut self, title: &str, body: String, cx: &mut Context<Self>) {
         self.transient_notice(title, body, cx);
@@ -2138,6 +2178,7 @@ impl Shell {
             })
             .collect();
         self.lsp.completions.retain(|id, _| open.contains(id));
+        self.lsp.lenses.retain(|id, _| open.contains(id));
         if !self.editors_showing(&doc, cx).is_empty() {
             return;
         }

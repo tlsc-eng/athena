@@ -487,6 +487,7 @@ pub struct EditorView {
     pub(crate) occurrences: crate::lsp_ui::Occurrences,
     pub(crate) inlays: crate::lsp_ui::Inlays,
     pub(crate) semantic: crate::lsp_ui::Semantic,
+    pub(crate) lenses: crate::code_lens::CodeLenses,
     /// The completed snippet whose stops Tab visits.
     pub(crate) snippet: Option<crate::snippet::Snippet>,
     /// The zero-based line showing the code action lightbulb.
@@ -594,6 +595,7 @@ impl EditorView {
             occurrences: Default::default(),
             inlays: Default::default(),
             semantic: Default::default(),
+            lenses: Default::default(),
             snippet: None,
             lightbulb: None,
             pending_top: None,
@@ -1722,6 +1724,7 @@ impl Render for EditorView {
         self.schedule_occurrences(focused, cx);
         self.schedule_inlays(cx);
         self.schedule_semantic(cx);
+        self.schedule_code_lens(cx);
         self.schedule_linked(focused, cx);
         let root = div()
             .id("editor")
@@ -1980,6 +1983,7 @@ impl Render for EditorView {
                     .map(|el| Self::on_line_actions(el, cx))
                     .child(EditorElement::new(cx.entity(), focused)),
             )
+            .children(self.render_code_lens(focused, cx))
             .children(self.render_line_jump(cx))
             .children(self.render_hover(cx))
             .children(self.render_blame_hover(cx))
