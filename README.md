@@ -7,6 +7,8 @@ editor with language-server support, a git diff viewer with hunk staging and a c
 browser preview, and read-only views of Playwright results and Docker containers. Claude Code
 sessions show their state on the tab, each file Claude edits can be reviewed as one diff against
 the version from before the session, and an MCP server lets Claude read the editor and terminals.
+Optionally Athena also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
+or reject, and the editor selection goes with each prompt.
 
 It is written in Rust on [GPUI](https://crates.io/crates/gpui) and runs only on Apple silicon.
 
@@ -104,6 +106,25 @@ its shells running.
 - Line operations: move lines up or down, copy them up or down, delete them, insert a line below
   (keys under [Keyboard shortcuts](#keyboard-shortcuts)); Insert line above is in the palette
   only.
+- Multiple cursors, with VS Code's keys: `cmd-d` selects the word at the caret, then adds its
+  next occurrence (whole word and case-sensitive when started from a bare caret), `cmd-k cmd-d`
+  skips to the next one instead, `cmd-shift-l` selects every occurrence, `cmd-alt-up` /
+  `cmd-alt-down` add a caret above or below, Alt+click adds or removes a caret and Shift+Alt+drag
+  selects a column. Escape goes back to one caret. Typing, deleting, pasting, line operations,
+  indenting, comments and completion happen at every caret as one undo step; a paste with as many
+  lines as there are carets puts one line at each. Copy and Cut take whole lines only when no caret
+  has a selection. Hover, signature help, rename, code actions and bracket matching follow the
+  primary caret. The same commands are in the **Selection** menu and, with an editor focused, the
+  command palette. In an editor `cmd-d` and `cmd-alt-up` / `cmd-alt-down` are these commands
+  rather than Split right and Focus pane up / down (terminals keep those).
+- Word wrap: `alt-z` (or View > Word Wrap) wraps the tab's long lines at the edge of the pane,
+  after a blank where there is one, with continuation rows indented like their line. Up and Down
+  move by screen row, Home and End stop at the row's edges first, and the line number is shown on
+  a line's first row only. Tabs that have not chosen follow **Toggle Word Wrap by Default** (File
+  menu or palette, off to begin with); Markdown files wrap unless their tab turns it off.
+- Sticky scroll: the header lines of the blocks around the top of the view (a function, an
+  `impl`, a class) stay pinned above the code, outermost first, at most five and never more than
+  a third of the view. Clicking one jumps to it.
 - Indentation guides, one per indent step (blank lines continue the block's guides; offside for
   Python and YAML), with the guide of the cursor's block drawn brighter. Spaces and tabs inside the
   selection are shown as dots and arrows.
@@ -111,8 +132,9 @@ its shells running.
   default 13 px; also in the View menu). The zoom is saved with the workspace. The rest of the
   interface keeps its size.
 - A status bar under the panes shows the project's branch (click: switch branch) and, for the
-  focused editor, `Ln N, Col M` with the selected character count (click: go to line), the
-  indentation (click: indent with 2, 4 or 8 spaces or tabs, or convert the file's indentation),
+  focused editor, `Ln N, Col M` with the selected character count, or "3 selections (15
+  characters selected)" with several carets (click: go to line), the indentation (click: indent
+  with 2, 4 or 8 spaces or tabs, or convert the file's indentation),
   `UTF-8`, `LF` or `CRLF`, the language (click: highlight as another language) and a dot for its
   language server (starting, running or failed; hover for the program).
 - Code folding by brackets, falling back to indentation: chevrons in the gutter on hover, fold
@@ -140,7 +162,7 @@ its shells running.
 - Go to file (fuzzy) and a command palette. A file opens in the editor pane used last, or in a
   new pane beside the focused one with Cmd+click in the tree or Cmd+Enter in Go to file.
 - Two tabs on the same file share one buffer: edits, undo and the unsaved marker are the file's;
-  each tab keeps its own cursor, scroll and folds.
+  each tab keeps its own cursors, scroll, folds and word wrap.
 - Auto save one second after you stop typing (palette: "Toggle auto save"), unsaved markers on
   tabs, tree rows and the window title, Save As, and a Reload / Overwrite bar when a file changes
   on disk while you have unsaved edits (unchanged files just reload). Project folders are
@@ -227,8 +249,8 @@ information rather than triggering the install dialog).
   optionally add the Playwright MCP server for Claude.
 - Containers: a read-only view of the local Docker engine (Docker Desktop or Rancher Desktop):
   list, stats and logs. Athena never starts, stops or removes containers.
-- Workspace layout, open projects and tabs are restored on launch, with each editor's cursor
-  where it was left.
+- Workspace layout, open projects and tabs are restored on launch, each editor with its cursor,
+  scroll position, folds and word wrap choice as they were left.
 - Open Recent (`ctrl-r` outside a terminal, or File > Open Recent) lists the last 20 project
   folders you closed.
 - Light and dark themes. By default Athena follows the macOS appearance and switches with it;
@@ -335,7 +357,10 @@ protocol is undocumented and may change between Claude Code releases. When it is
   projects and is removed when Athena quits or the setting is turned off.
 - New terminals get `CLAUDE_CODE_SSE_PORT`, so `claude` started in them connects by itself. In a
   session that was already running, type `/ide`. Athena listens on the same port after a restart
-  when it is free, so older terminals keep finding it.
+  when it is free, so older terminals keep finding it. A session daemon still running from
+  Athena 0.4 does not pass the port on, so its new terminals get it only once that daemon is
+  restarted: quit Athena, run `athena mux stop` (which hangs up its shells) and start Athena
+  again. Until then `/ide` connects too.
 - When Claude asks to edit a file, the proposed change opens as "main.rs (Claude's Proposal)":
   the file on disk against Claude's version. **Accept** (`cmd-enter`) lets Claude Code write it;
   **Reject** (`cmd-backspace`) or closing the tab declines it. You can still answer in the
@@ -382,12 +407,12 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-{` | Previous tab |
 | `cmd-}` | Next tab |
 | `cmd-1…9` | Select tab 1–9 |
-| `cmd-d` | Split right |
+| `cmd-d` | Split right (in an editor: add next occurrence) |
 | `cmd-shift-d` | Split down |
 | `cmd-alt-left` | Focus pane left |
 | `cmd-alt-right` | Focus pane right |
-| `cmd-alt-up` | Focus pane up |
-| `cmd-alt-down` | Focus pane down |
+| `cmd-alt-up` | Focus pane up (in an editor: add cursor above) |
+| `cmd-alt-down` | Focus pane down (in an editor: add cursor below) |
 | `cmd-shift-enter` | Zoom pane |
 | `cmd-b` | Toggle file tree |
 | `cmd-shift-s` | Save as |
@@ -412,13 +437,20 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-q` | Quit |
 
 Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
-commands without a key: Toggle auto save, Toggle format on save, Source control changes, Switch
-branch…, Reveal active file in tree, Open file to the side, Open Markdown preview, New browser
-preview and the Claude Code and Playwright commands. With an editor focused it also offers Go to
-line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has no key, since
-`cmd-shift-enter` is Zoom pane), Insert line below, Rename symbol, Quick fix, Go to
-implementations and Go to type definition. In Go to file, `@` lists the file's symbols, `#`
-searches workspace symbols and `>` lists commands.
+commands without a key: Toggle auto save, Toggle format on save, Toggle word wrap by default,
+Source control changes, Switch branch…, Reveal active file in tree, Open file to the side, Open
+Markdown preview, New browser preview, Clear recently opened, the three **Theme:** commands, Open
+keyboard shortcuts file and the Claude Code and Playwright commands. With an editor focused it
+also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
+no key, since `cmd-shift-enter` is Zoom pane), Insert line below, Rename symbol, Quick fix, Go to
+implementations, Go to type definition, the five multi-cursor commands and Toggle word wrap; with
+a terminal focused, Copy last command output and Scroll to previous / next command. In Go to
+file, `@` lists the file's symbols, `#` searches workspace symbols and `>` lists commands.
+
+The menu bar has Athena, File, Selection, View and Window menus. Selection holds Select All, the
+line copy and move commands and the multi-cursor commands. View includes Word Wrap and Theme, and
+File includes Open Recent, the settings toggles (auto save, format on save, word wrap by default,
+Claude Code integration) and Keyboard Shortcuts.
 
 On a Mac keyboard the `f`-keys need Fn unless "Use F1, F2, etc. keys as standard function keys" is
 on in System Settings. A system or app shortcut set on the same keys (`cmd-.` is a common one) can
@@ -451,7 +483,7 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `cmd-shift-up` / `cmd-shift-down` | Extend selection to document start / end |
 | `alt-backspace` | Delete word back |
 | `cmd-backspace` | Delete to line start |
-| `escape` | Close find, suggestions, hover or signature help / clear selection |
+| `escape` | Close find, suggestions, hover or signature help / back to one caret / clear selection |
 | `ctrl-g`, `cmd-l` | Go to line |
 | `ctrl-space` | Show completions |
 | `cmd-k cmd-i` | Show hover docs at the cursor |
@@ -470,6 +502,13 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `f2` | Rename symbol |
 | `cmd-.` | Quick fix |
 | `cmd-f12` | Go to implementations |
+| `cmd-d` | Select the word, then add its next occurrence |
+| `cmd-k cmd-d` | Skip to the next occurrence |
+| `cmd-shift-l` | Select all occurrences |
+| `cmd-alt-up` / `cmd-alt-down` | Add a caret above / below |
+| `alt`-click | Add or remove a caret |
+| `shift-alt`-drag | Column selection |
+| `alt-z` | Toggle word wrap for the tab |
 
 While the suggestion list is open, Up / Down move through it and Enter or Tab accepts. Clicking a
 chevron in the gutter folds or unfolds that block. In the find bar's replace field, `enter`
@@ -536,7 +575,8 @@ shape as VS Code's `keybindings.json`, and Athena applies it as soon as you save
   {"key": "cmd+shift+e", "command": "athena::RevealInTree"},
   // Only while an editor has focus.
   {"key": "f5", "command": "athena::ShowProblems", "when": "Editor"},
-  // A leading - removes a default binding (here cmd-d, Split right).
+  // A leading - removes one default binding (here cmd-d as Split right; the editor keeps
+  // cmd-d for Add next occurrence).
   {"key": "cmd-d", "command": "-athena::SplitRight"}
 ]
 ```
@@ -544,8 +584,9 @@ shape as VS Code's `keybindings.json`, and Athena applies it as soon as you save
 Command names are the action names in the source: `athena::…` (`crates/athena/src/actions.rs`),
 `editor::…`, `terminal::…` and so on. `when` takes the key contexts `Shell`, `Editor`,
 `Terminal`, `DiffView`, `ImageView`, `DocView` and `TextInput`, combined with `&&`, `||` and `!`.
-Your entries come after Athena's, so on the same key in the same context yours win. Comments and
-trailing commas are allowed. Entries Athena cannot use (an unknown command, a key it cannot
+Your entries come after Athena's, so on the same key in the same context yours win, and an entry
+without `when` takes its key in every context: Athena's bindings of that key, including the
+editor's and terminal's, no longer apply. Comments and trailing commas are allowed. Entries Athena cannot use (an unknown command, a key it cannot
 parse, a broken `when`) are listed in a toast and in `app.log`; the rest still apply.
 
 ## Command line
@@ -564,11 +605,10 @@ athena mcp-stdio              MCP server for Claude Code
 ## Files and logs
 
 Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
-editor cursors, recently closed folders, panel sizes, the text zoom, the theme (`System`, `Light`
-or `Dark`) and the `autosave_delay_ms`, `format_on_save` and `ide_integration` settings),
-`ide.env` (the Claude Code integration port that new terminals get), `keymap.json` (your
-shortcuts),
-`notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
+each editor tab's cursor, scroll line, folds and wrap choice, recently closed folders, panel
+sizes, the text zoom, the theme (`System`, `Light` or `Dark`) and the `autosave_delay_ms`,
+`format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
+integration port that new terminals get), `keymap.json` (your shortcuts), `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.
