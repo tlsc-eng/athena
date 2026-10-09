@@ -646,6 +646,23 @@ mod tests {
     }
 
     #[test]
+    fn the_template_parses_with_every_example_uncommented() {
+        let uncommented: String = TEMPLATE
+            .lines()
+            .map(|l| match l.trim_start().strip_prefix("// ") {
+                Some(rest) if l.starts_with("  ") => format!("  {rest}\n"),
+                _ => format!("{l}\n"),
+            })
+            .collect();
+        let (s, problems) = parse(&uncommented).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.editor.tab_size, Some(4));
+        assert_eq!(s.theme, Some(ThemeChoice::System));
+        assert!(s.lsp.contains_key("gopls"));
+        assert_eq!(parse(TEMPLATE).unwrap().0, Settings::default());
+    }
+
+    #[test]
     fn dotted_keys_are_updated_where_they_are() {
         let text = "{\"editor.format_on_save\": false}";
         assert_eq!(

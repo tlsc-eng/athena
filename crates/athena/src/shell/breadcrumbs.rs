@@ -122,7 +122,12 @@ impl Shell {
                                 .insert(task_doc, (version, Rc::new(list)));
                             cx.notify();
                         }
-                        Err(why) => tracing::debug!("breadcrumb symbols failed: {why}"),
+                        Err(why) => {
+                            tracing::debug!("breadcrumb symbols failed: {why}");
+                            // Asked again after the next edit, not on every frame.
+                            let none = Rc::new(Vec::new());
+                            this.breadcrumbs.symbols.insert(task_doc, (version, none));
+                        }
                     }
                 });
             });

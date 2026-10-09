@@ -20,8 +20,8 @@ pub(super) struct SettingsState {
     /// What workspace.json holds for the fields settings.json can set, so removing a key from
     /// settings.json brings back the choice made before.
     fallback: Preferences,
-    /// What the file had wrong when it was last read.
-    problems: Vec<String>,
+    /// What the file had wrong when it was read at launch; `Err` when none of it could be used.
+    problems: Result<Vec<String>, Vec<String>>,
     /// The theme or Claude Code integration changed while no window was at hand to apply it.
     unapplied: bool,
     toast: Option<u64>,
@@ -30,8 +30,10 @@ pub(super) struct SettingsState {
 impl SettingsState {
     /// Reads settings.json and lets it override `workspace`.
     pub(super) fn load(workspace: &mut Workspace) -> Self {
-        let (file, problems) =
-            settings::load().unwrap_or_else(|why| (Settings::default(), vec![why]));
+        let (file, problems) = match settings::load() {
+            Ok((file, problems)) => (file, Ok(problems)),
+            Err(why) => (Settings::default(), Err(vec![why])),
+        };
         let fallback = workspace.preferences();
         workspace.set_preferences(file.over(fallback));
         if let Some(size) = file.editor.font_size {
@@ -68,8 +70,8 @@ impl Shell {
         let watchers = settings::path()
             .map(|path| super::shortcuts::watch_keymap(path, changed))
             .unwrap_or_default();
-        let problems = std::mem::take(&mut self.settings.problems);
-        self.report_settings(Err(problems), cx);
+        let problems = std::mem::replace(&mut self.settings.problems, Ok(Vec::new()));
+        self.report_settings(problems, cx);
         cx.spawn_in(window, async move |this, cx| {
             let _watchers = watchers;
             while changes.recv().await.is_ok() {
