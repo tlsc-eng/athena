@@ -162,8 +162,8 @@ fn js_call(call: Node, src: &str) -> Option<(bool, String)> {
     let mut ac = args.walk();
     let first = args.named_children(&mut ac).next()?;
     let raw = text_of(first, src);
-    let title = match first.kind() {
-        "string" => raw.get(1..raw.len().checked_sub(1)?)?,
+    match first.kind() {
+        "string" => {}
         "template_string" => {
             let mut tc = first.walk();
             if first
@@ -172,11 +172,50 @@ fn js_call(call: Node, src: &str) -> Option<(bool, String)> {
             {
                 return None;
             }
-            raw.get(1..raw.len().checked_sub(1)?)?
         }
         _ => return None,
-    };
-    Some((group, title.to_string()))
+    }
+    // The runner matches `-t` against the title's value, so `'it\'s'` must become `it's`.
+    let title = js_unescape(raw.get(1..raw.len().checked_sub(1)?)?)?;
+    Some((group, title))
+}
+
+/// A JavaScript string literal's body as its value; `None` for a malformed escape.
+fn js_unescape(body: &str) -> Option<String> {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let hex = |chars: &mut std::iter::Peekable<std::str::Chars>, n: usize| {
+            let digits: String = chars.take(n).collect();
+            (digits.len() == n).then(|| u32::from_str_radix(&digits, 16).ok())?
+        };
+        match chars.next()? {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'b' => out.push('\u{8}'),
+            'f' => out.push('\u{c}'),
+            'v' => out.push('\u{b}'),
+            '0' if !chars.peek().is_some_and(char::is_ascii_digit) => out.push('\0'),
+            'x' => out.push(char::from_u32(hex(&mut chars, 2)?)?),
+            'u' if chars.peek() == Some(&'{') => {
+                chars.next();
+                let digits: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                out.push(char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?);
+            }
+            'u' => out.push(char::from_u32(hex(&mut chars, 4)?)?),
+            '\r' => {
+                chars.next_if_eq(&'\n');
+            }
+            '\n' | '\u{2028}' | '\u{2029}' => {}
+            other => out.push(other),
+        }
+    }
+    Some(out)
 }
 
 fn js_tests(node: Node, src: &str, stack: &mut Vec<String>, out: &mut Vec<TestSymbol>) {
@@ -313,6 +352,17 @@ mod tests {
         assert_eq!(found[5].line, 8);
         let tsx = find_tests(Lang::Tsx, Path::new("src/__tests__/App.tsx"), src);
         assert_eq!(tsx.len(), 6);
+    }
+
+    #[test]
+    fn javascript_titles_are_unescaped_to_the_runner_s_names() {
+        let src = "it('it\\'s', () => {});\n\
+                   it(\"tab\\there \\u00e9\\u{1F600} \\x41\", () => {});\n\
+                   it(`back\\`tick \\${x}`, () => {});\n";
+        let found = find_tests(Lang::JavaScript, Path::new("a.test.js"), src);
+        let titles: Vec<&str> = found.iter().map(|t| t.titles[0].as_str()).collect();
+        assert_eq!(titles, ["it's", "tab\there é\u{1F600} A", "back`tick ${x}"]);
+        assert_eq!(js_unescape("bad \\u12"), None);
     }
 
     #[test]
