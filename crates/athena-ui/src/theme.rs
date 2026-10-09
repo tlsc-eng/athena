@@ -38,6 +38,9 @@ pub const CODE_SIZE: f32 = 13.;
 /// Zoom steps, 1px each, keeping code between 6px and 40px.
 pub const CODE_ZOOM: RangeInclusive<i32> = -7..=27;
 
+/// Window zoom steps, 10% each, a range in which interface text still fits its rows.
+pub const UI_ZOOM: RangeInclusive<i32> = -3..=5;
+
 #[derive(Clone)]
 pub struct Typography {
     pub ui: SharedString,

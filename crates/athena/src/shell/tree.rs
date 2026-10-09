@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use super::Shell;
+use super::dnd::{TabGhost, TreeDrag};
 use super::item::ItemView;
 use super::panes::{DIVIDER_HIT, Drag, clamp_tree_width, resize_handle};
 
@@ -263,6 +264,7 @@ impl Shell {
             self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Center);
         }
         let edit_input = self.tree.editing.as_ref().map(|e| e.input.clone());
+        let drop_root = root.clone();
         let list = uniform_list(
             "file-tree",
             count,
@@ -305,6 +307,14 @@ impl Shell {
                         let selected = open.as_ref() == Some(&row.entry.path);
                         let unsaved = dirty.contains(&row.entry.path);
                         let git = this.git_status_for(&row.entry.path);
+                        let drop_dir = match is_dir {
+                            true => path.clone(),
+                            false => path.parent().unwrap_or(&root).to_path_buf(),
+                        };
+                        let drag = TreeDrag {
+                            path: path.clone(),
+                            label: row.entry.name.clone().into(),
+                        };
                         let marker = match (is_dir, row.expanded) {
                             (true, true) => "▾",
                             (true, false) => "▸",
@@ -349,6 +359,22 @@ impl Shell {
                                     }
                                 }),
                             )
+                            .on_drag(drag, |drag: &TreeDrag, _, _, cx| {
+                                let label = drag.label.clone();
+                                cx.new(|_| TabGhost { label })
+                            })
+                            .when(is_dir, |el| {
+                                let (dir, tint) = (path.clone(), t.color.surface_accent);
+                                el.drag_over::<TreeDrag>(move |s, drag, window, _| {
+                                    match drag.fits(&dir, window.modifiers().alt) {
+                                        true => s.bg(tint),
+                                        false => s,
+                                    }
+                                })
+                            })
+                            .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
+                                this.drop_tree_entry(drag, drop_dir.clone(), window, cx)
+                            }))
                             .on_click(cx.listener(
                                 move |this, event: &ClickEvent, window: &mut Window, cx| {
                                     if is_dir {
@@ -416,6 +442,9 @@ impl Shell {
                     .child("Files"),
             )
             .child(list)
+            .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
+                this.drop_tree_entry(drag, drop_root.clone(), window, cx)
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

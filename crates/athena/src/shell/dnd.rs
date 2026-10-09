@@ -1,9 +1,14 @@
+use std::path::{Path, PathBuf};
+
 use athena_ui::ActiveTheme;
 use athena_workspace::{ItemId, PaneId};
 use gpui::{
-    Bounds, Context, FontWeight, IntoElement, Pixels, Point, Render, SharedString, Window, div,
-    prelude::*, px,
+    Bounds, Context, FontWeight, IntoElement, Pixels, Point, PromptLevel, Render, SharedString,
+    Window, div, prelude::*, px,
 };
+
+use super::Shell;
+use super::fileops;
 
 /// Fraction of a pane's width or height, from each edge, that drops as a split.
 const EDGE_BAND: f32 = 0.25;
@@ -16,6 +21,25 @@ pub(super) struct TabDrag {
     pub label: SharedString,
     /// A terminal, which the bottom panel takes too.
     pub terminal: bool,
+}
+
+/// A file tree entry being dragged, to move it (or copy it, with ⌥) into a folder.
+#[derive(Clone, Debug)]
+pub(super) struct TreeDrag {
+    pub path: PathBuf,
+    pub label: SharedString,
+}
+
+impl TreeDrag {
+    /// Whether dropping on folder `dir` would do anything: not onto itself, inside itself, or
+    /// back into its own folder unless copying.
+    pub fn fits(&self, dir: &Path, copy: bool) -> bool {
+        match fileops::drop_destination(&self.path, dir) {
+            Ok(Some(_)) => true,
+            Ok(None) => copy,
+            Err(_) => false,
+        }
+    }
 }
 
 /// The caption that follows the cursor while a tab is dragged.
@@ -82,10 +106,134 @@ pub(super) fn strip_drop_index(here: Option<usize>, before: Option<usize>, len: 
     }
 }
 
+impl Shell {
+    /// A tree entry dropped on folder `dir`: moved after VS Code's confirmation, or copied with ⌥.
+    pub(super) fn drop_tree_entry(
+        &mut self,
+        drag: &TreeDrag,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let from = drag.path.clone();
+        let copy = window.modifiers().alt;
+        let dest = match fileops::drop_destination(&from, &dir) {
+            Ok(Some(dest)) if !copy || std::fs::symlink_metadata(&dest).is_err() => dest,
+            Ok(Some(_) | None) if copy => fileops::free_copy_name(&dir, &drag.label),
+            Ok(_) => return,
+            Err(err) => {
+                return self.transient_notice("Could not move that", format!("{err:#}"), cx);
+            }
+        };
+        if copy {
+            let copying = cx
+                .background_executor()
+                .spawn(async move { fileops::copy(&from, &dest).map(|()| dest) });
+            cx.spawn(async move |this, cx| {
+                let (result, dest) = match copying.await {
+                    Ok(dest) => (Ok(()), dest),
+                    Err(err) => (Err(err), PathBuf::new()),
+                };
+                let _ = this.update(cx, |this, cx| this.after_tree_drop(result, &dest, cx));
+            })
+            .detach();
+            return;
+        }
+        let name = drag.label.clone();
+        let into = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.display().to_string());
+        let confirm = self.settings.file.confirm_drag_and_drop().then(|| {
+            window.prompt(
+                PromptLevel::Info,
+                &format!("Are you sure you want to move “{name}” into “{into}”?"),
+                None,
+                &["Move", "Move and Don’t Ask Again", "Cancel"],
+                cx,
+            )
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(answer) = confirm {
+                match answer.await {
+                    Ok(0) => {}
+                    Ok(1) => {
+                        let stop = |this: &mut Shell, _: &mut Window, cx: &mut Context<Shell>| {
+                            this.write_setting(
+                                &["explorer", "confirmDragAndDrop"],
+                                false.into(),
+                                cx,
+                            )
+                        };
+                        let _ = this.update_in(cx, stop);
+                    }
+                    _ => return,
+                }
+            }
+            if std::fs::symlink_metadata(&dest).is_ok() {
+                let Ok(replace) = this.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &format!("“{name}” already exists in “{into}”. Replace it?"),
+                        Some("The one there goes to the Trash, where you can restore it."),
+                        &["Replace", "Cancel"],
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                if !matches!(replace.await, Ok(0)) {
+                    return;
+                }
+                if let Err(err) = fileops::trash(&dest) {
+                    let _ = this.update(cx, |this, cx| {
+                        this.transient_notice("Could not move that", format!("{err:#}"), cx)
+                    });
+                    return;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                let result = fileops::rename(&from, &dest);
+                if result.is_ok() {
+                    this.retarget_items(&from, &dest, cx);
+                    this.reload_changed_files(cx);
+                }
+                this.after_tree_drop(result, &dest, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn after_tree_drop(&mut self, result: anyhow::Result<()>, dest: &Path, cx: &mut Context<Self>) {
+        if let Err(err) = result {
+            return self.transient_notice("Could not move that", format!("{err:#}"), cx);
+        }
+        self.tree.invalidate();
+        if let Some(root) = self.active_root() {
+            self.tree.reveal(&root, dest);
+        }
+        self.git_kick(cx);
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{point, size};
+
+    #[test]
+    fn a_tree_entry_fits_any_folder_but_itself_inside_itself_or_its_own_unless_copied() {
+        let drag = TreeDrag {
+            path: PathBuf::from("/p/src"),
+            label: "src".into(),
+        };
+        assert!(drag.fits(Path::new("/p/docs"), false));
+        assert!(!drag.fits(Path::new("/p/src"), true));
+        assert!(!drag.fits(Path::new("/p/src/inner"), true));
+        assert!(!drag.fits(Path::new("/p"), false));
+        assert!(drag.fits(Path::new("/p"), true));
+    }
 
     #[test]
     fn a_dropped_tab_lands_just_before_the_tab_under_it() {

@@ -16,6 +16,8 @@
   // "theme": "system",                 // "system", "light" or "dark"
   // "ide_integration": false,          // Claude Code connects to Athena as its IDE
   // "git": { "autofetch": true },      // fetch the active project every three minutes
+  // "explorer": { "confirmDragAndDrop": false }, // move tree entries without asking
+  // "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   // "lsp": {
   //   // Sent to each server as it starts and whenever this file changes.
   //   "gopls": { "hints": { "parameterNames": true }, "staticcheck": true },

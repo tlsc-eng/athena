@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -33,6 +33,59 @@ pub(super) fn rename(from: &Path, to: &Path) -> Result<()> {
         }
     }
     fs::rename(from, to).with_context(|| describe("rename", from))
+}
+
+/// Where `from` lands when dropped on folder `dir`: `None` when it is already there, an error
+/// when `dir` is `from` itself or inside it.
+pub(super) fn drop_destination(from: &Path, dir: &Path) -> Result<Option<PathBuf>> {
+    if dir.starts_with(from) {
+        bail!("cannot move {} into itself", name(from));
+    }
+    if from.parent() == Some(dir) {
+        return Ok(None);
+    }
+    let Some(file_name) = from.file_name() else {
+        bail!("{} has no name to move", from.display());
+    };
+    Ok(Some(dir.join(file_name)))
+}
+
+/// A name in `dir` for a copy of `name` that nothing has yet: "a copy.txt", "a copy 2.txt", …
+pub(super) fn free_copy_name(dir: &Path, name: &str) -> PathBuf {
+    let (stem, ext) = match name.rfind('.').filter(|&i| i > 0) {
+        Some(i) => name.split_at(i),
+        None => (name, ""),
+    };
+    (1..)
+        .map(|n| match n {
+            1 => format!("{stem} copy{ext}"),
+            n => format!("{stem} copy {n}{ext}"),
+        })
+        .map(|candidate| dir.join(candidate))
+        .find(|path| fs::symlink_metadata(path).is_err())
+        .expect("some copy name is free")
+}
+
+/// Copies a file or a whole folder, never overwriting anything.
+pub(super) fn copy(from: &Path, to: &Path) -> Result<()> {
+    fn walk(from: &Path, to: &Path) -> io::Result<()> {
+        let meta = fs::symlink_metadata(from)?;
+        if meta.file_type().is_symlink() {
+            return std::os::unix::fs::symlink(fs::read_link(from)?, to);
+        }
+        if !meta.is_dir() {
+            OpenOptions::new().write(true).create_new(true).open(to)?;
+            fs::copy(from, to)?;
+            return Ok(());
+        }
+        fs::create_dir(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            walk(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    }
+    walk(from, to).with_context(|| describe("copy", from))
 }
 
 /// Moves `path` to the Trash so Finder's Put Back can restore it.
@@ -73,7 +126,6 @@ fn describe(verb: &str, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn scratch(test: &str) -> PathBuf {
         let dir =
@@ -132,6 +184,47 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["README.md"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_cannot_be_dropped_into_itself_or_its_own_subfolder() {
+        let src = Path::new("/p/src");
+        assert!(drop_destination(src, src).is_err());
+        let err = drop_destination(src, Path::new("/p/src/nested")).unwrap_err();
+        assert!(err.to_string().contains("into itself"), "{err}");
+        assert_eq!(drop_destination(src, Path::new("/p")).unwrap(), None);
+        assert_eq!(
+            drop_destination(src, Path::new("/p/srcs")).unwrap(),
+            Some(PathBuf::from("/p/srcs/src"))
+        );
+        assert_eq!(
+            drop_destination(Path::new("/p/src/a.rs"), Path::new("/p")).unwrap(),
+            Some(PathBuf::from("/p/a.rs"))
+        );
+    }
+
+    #[test]
+    fn a_copy_takes_the_first_free_copy_name() {
+        let dir = scratch("copy-name");
+        assert_eq!(free_copy_name(&dir, "a.rs"), dir.join("a copy.rs"));
+        fs::write(dir.join("a copy.rs"), "").unwrap();
+        assert_eq!(free_copy_name(&dir, "a.rs"), dir.join("a copy 2.rs"));
+        assert_eq!(free_copy_name(&dir, ".env"), dir.join(".env copy"));
+        assert_eq!(free_copy_name(&dir, "src"), dir.join("src copy"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn copy_takes_a_whole_folder_and_never_overwrites() {
+        let dir = scratch("copy");
+        fs::create_dir_all(dir.join("src/inner")).unwrap();
+        fs::write(dir.join("src/inner/a.rs"), "a").unwrap();
+        copy(&dir.join("src"), &dir.join("dst")).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("dst/inner/a.rs")).unwrap(), "a");
+        fs::write(dir.join("b.rs"), "new").unwrap();
+        assert!(copy(&dir.join("b.rs"), &dir.join("dst/inner/a.rs")).is_err());
+        assert_eq!(fs::read_to_string(dir.join("dst/inner/a.rs")).unwrap(), "a");
         fs::remove_dir_all(&dir).unwrap();
     }
 

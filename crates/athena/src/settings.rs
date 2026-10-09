@@ -32,6 +32,10 @@ pub struct Settings {
     pub autofetch: Option<bool>,
     /// Each language server's settings by program name, sent as it starts and when they change.
     pub lsp: HashMap<String, Value>,
+    /// VS Code's `explorer.confirmDragAndDrop`: ask before a file dragged in the tree moves.
+    pub confirm_drag_and_drop: Option<bool>,
+    /// `window.zoom_level`: interface text and spacing in 10% steps from the default.
+    pub zoom_level: Option<i32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -108,6 +112,10 @@ fn editor_key(key: &str) -> &str {
 impl Settings {
     pub fn git_autofetch(&self) -> bool {
         self.autofetch.unwrap_or(false)
+    }
+
+    pub fn confirm_drag_and_drop(&self) -> bool {
+        self.confirm_drag_and_drop.unwrap_or(true)
     }
 
     /// The word wrap set in `lang`'s own block, if any.
@@ -286,6 +294,21 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 }
                 _ => Err("must be {\"autofetch\": true or false}".into()),
             },
+            "explorer" => match value.get("confirmDragAndDrop").map(Value::as_bool) {
+                Some(Some(on)) => {
+                    settings.confirm_drag_and_drop = Some(on);
+                    Ok(())
+                }
+                _ => Err("must be {\"confirmDragAndDrop\": true or false}".into()),
+            },
+            "window" => match value.get("zoom_level").map(zoom_level) {
+                Some(Ok(level)) => {
+                    settings.zoom_level = Some(level);
+                    Ok(())
+                }
+                Some(Err(why)) => Err(format!("\"zoom_level\" {why}")),
+                None => Err("must be {\"zoom_level\": a whole number}".into()),
+            },
             "lsp" => match value.as_object() {
                 Some(servers) => {
                     for (name, config) in servers {
@@ -310,6 +333,13 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                     .as_bool()
                     .map(|on| settings.autofetch = Some(on))
                     .ok_or_else(|| "must be true or false".to_string()),
+                Some(("explorer", "confirmDragAndDrop")) => value
+                    .as_bool()
+                    .map(|on| settings.confirm_drag_and_drop = Some(on))
+                    .ok_or_else(|| "must be true or false".to_string()),
+                Some(("window", "zoom_level")) => {
+                    zoom_level(value).map(|level| settings.zoom_level = Some(level))
+                }
                 Some(("lsp", name)) => {
                     settings.lsp.insert(server_name(name).into(), value.clone());
                     Ok(())
@@ -322,6 +352,21 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
         }
     }
     Ok((settings, problems))
+}
+
+fn zoom_level(value: &Value) -> Result<i32, String> {
+    let range = athena_ui::UI_ZOOM;
+    value
+        .as_i64()
+        .and_then(|l| i32::try_from(l).ok())
+        .filter(|l| range.contains(l))
+        .ok_or_else(|| {
+            format!(
+                "must be a whole number from {} to {}",
+                range.start(),
+                range.end()
+            )
+        })
 }
 
 /// Reads an object of editor settings, spelled bare or `editor.`-prefixed.
@@ -759,6 +804,30 @@ mod tests {
         );
         let (dotted, _) = parse(r#"{"git.autofetch": true}"#).unwrap();
         assert!(dotted.git_autofetch());
+        assert!(!s.confirm_drag_and_drop() && s.zoom_level == Some(1));
+        assert!(
+            Settings::default().confirm_drag_and_drop(),
+            "on by default, as in VS Code"
+        );
+    }
+
+    #[test]
+    fn drag_confirmation_and_window_zoom_read_in_either_spelling_and_write_back() {
+        let (s, problems) =
+            parse(r#"{"explorer.confirmDragAndDrop": false, "window.zoom_level": -2}"#).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            (s.confirm_drag_and_drop, s.zoom_level),
+            (Some(false), Some(-2))
+        );
+        let out = set("{}", &["explorer", "confirmDragAndDrop"], json!(false));
+        assert!(!parse(&out).unwrap().0.confirm_drag_and_drop());
+        let out = set(&out, &["window", "zoom_level"], json!(3));
+        assert_eq!(parse(&out).unwrap().0.zoom_level, Some(3));
+        let (_, problems) = parse(r#"{"window": {"zoom_level": 99}}"#).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        let (_, problems) = parse(r#"{"window.zoom_level": 1.5}"#).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
     }
 
     #[test]

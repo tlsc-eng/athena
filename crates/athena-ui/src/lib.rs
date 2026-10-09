@@ -16,7 +16,7 @@ pub use logo::{Glyph, Lockup};
 pub use menu::{ContextMenu, MenuItem};
 pub use theme::{
     Appearance, CODE_SIZE, CODE_ZOOM, Colors, Motion, Shape, SyntaxColors, TerminalColors, Theme,
-    Typography,
+    Typography, UI_ZOOM,
 };
 
 use gpui::{App, WindowAppearance};
