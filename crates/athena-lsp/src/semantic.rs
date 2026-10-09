@@ -130,12 +130,13 @@ pub fn apply_semantic_edits(previous: &[u32], edits: &[SemanticEdit]) -> Option<
     let mut out = Vec::with_capacity(previous.len());
     let mut at = 0;
     for edit in sorted {
-        if edit.start < at || edit.start + edit.delete > previous.len() {
+        let end = edit.start.checked_add(edit.delete)?;
+        if edit.start < at || end > previous.len() {
             return None;
         }
         out.extend_from_slice(&previous[at..edit.start]);
         out.extend_from_slice(&edit.data);
-        at = edit.start + edit.delete;
+        at = end;
     }
     out.extend_from_slice(&previous[at..]);
     Some(out)
@@ -232,6 +233,23 @@ mod tests {
             data: vec![],
         }];
         assert_eq!(apply_semantic_edits(&previous, &past_end), None);
+    }
+
+    #[test]
+    fn edits_whose_end_overflows_are_refused_not_a_panic() {
+        let previous = [1, 2, 3];
+        for (start, delete) in [(5, usize::MAX), (usize::MAX, 1), (1, usize::MAX)] {
+            let edit = [SemanticEdit {
+                start,
+                delete,
+                data: vec![],
+            }];
+            assert_eq!(
+                apply_semantic_edits(&previous, &edit),
+                None,
+                "{start}+{delete}"
+            );
+        }
     }
 
     #[test]
