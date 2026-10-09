@@ -2189,16 +2189,23 @@ fn file_kind(path: PathBuf) -> ItemKind {
     }
 }
 
-/// Scroll and folds are not readable from outside the editor yet, so only the cursor is kept.
 fn view_state(editor: &EditorView) -> Option<ViewState> {
+    let state = editor.view_state()?;
     Some(ViewState {
-        cursor: editor.cursor_utf16()?,
-        ..ViewState::default()
+        cursor: state.cursor,
+        scroll_top: state.top_line.map(|l| l as u32),
+        folds: state.folds.iter().map(|&l| l as u32).collect(),
     })
 }
 
 fn restore_view_state(editor: &mut EditorView, state: &ViewState, cx: &mut Context<EditorView>) {
-    editor.go_to_position(state.cursor.0, state.cursor.1, cx);
+    let state = athena_editor::ViewState {
+        cursor: state.cursor,
+        top_line: state.scroll_top.map(|l| l as usize),
+        folds: state.folds.iter().map(|&l| l as usize).collect(),
+        wrap: None,
+    };
+    editor.restore_view_state(&state, cx);
 }
 
 #[cfg(test)]

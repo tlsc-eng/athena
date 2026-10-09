@@ -518,20 +518,21 @@ impl EditorView {
     /// The cursor, scroll position and folds, to hand back to [`Self::restore_view_state`].
     pub fn view_state(&self) -> Option<ViewState> {
         let b = self.buf()?;
+        // A tab never drawn has no scroll of its own yet.
         let top_line = match (self.pending_top, self.layout.as_ref()) {
-            (Some(line), _) => line,
+            (Some(line), _) => Some(line),
             (None, Some(layout)) => {
                 let row = (self.scroll.y / f32::from(layout.line_height))
                     .floor()
                     .max(0.) as usize;
                 let rows = self.display.row_count(b.len_lines());
-                self.display.line_of(row.min(rows.saturating_sub(1)))
+                Some(self.display.line_of(row.min(rows.saturating_sub(1))))
             }
-            (None, None) => 0,
+            (None, None) => None,
         };
         Some(ViewState {
             cursor: b.utf16_position(self.cursor.head()),
-            top_line: Some(top_line),
+            top_line,
             folds: self.display.folds().map(|f| f.header()).collect(),
             wrap: self.wrap,
         })
