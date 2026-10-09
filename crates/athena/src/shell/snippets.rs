@@ -253,17 +253,237 @@ fn read_until(chars: &[char], i: &mut usize, stop: char) -> Option<String> {
     None
 }
 
-/// `${NAME/regex/format/options}`: the value with `regex` replaced by `format` (`$1` names a
-/// group), every match with the `g` option.
+/// One piece of a transform's format string, as VS Code reads it.
+#[derive(Debug, PartialEq)]
+enum Format {
+    Text(String),
+    /// `$1`, `${1}`, `${1:/upcase}`, `${1:+if}`, `${1:-else}`, `${1:else}` or `${1:?if:else}`.
+    Group {
+        index: usize,
+        case: Option<String>,
+        set: Option<String>,
+        unset: Option<String>,
+    },
+}
+
+/// The text from `j` up to the unescaped `stop`, unescaping `\$`, `\}` and `\\`; another escape
+/// or an empty text fails, as in VS Code's parser. Returns the text and the index past `stop`.
+fn format_until(chars: &[char], mut j: usize, stop: char) -> Option<(String, usize)> {
+    let mut out = String::new();
+    loop {
+        match *chars.get(j)? {
+            '\\' => {
+                let next = *chars.get(j + 1)?;
+                if !matches!(next, '$' | '}' | '\\') {
+                    return None;
+                }
+                out.push(next);
+                j += 2;
+            }
+            c if c == stop => return (!out.is_empty()).then_some((out, j + 1)),
+            c => {
+                out.push(c);
+                j += 1;
+            }
+        }
+    }
+}
+
+/// The group reference starting with the `$` at `j`, and the index past it.
+fn format_group(chars: &[char], j: usize) -> Option<(Format, usize)> {
+    let braced = chars.get(j + 1) == Some(&'{');
+    let mut k = j + 1 + usize::from(braced);
+    let digits = chars[k.min(chars.len())..]
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
+    let index = chars[k..k + digits]
+        .iter()
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    k += digits;
+    let group = |case, set, unset| Format::Group {
+        index,
+        case,
+        set,
+        unset,
+    };
+    if !braced {
+        return Some((group(None, None, None), k));
+    }
+    match chars.get(k)? {
+        '}' => return Some((group(None, None, None), k + 1)),
+        ':' => k += 1,
+        _ => return None,
+    }
+    match chars.get(k)? {
+        '/' => {
+            let len = chars[k + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_alphanumeric() || **c == '_')
+                .count();
+            let name: String = chars[k + 1..k + 1 + len].iter().collect();
+            let valid = name.starts_with(|c: char| !c.is_ascii_digit());
+            (valid && chars.get(k + 1 + len) == Some(&'}'))
+                .then(|| (group(Some(name), None, None), k + len + 2))
+        }
+        '+' => {
+            format_until(chars, k + 1, '}').map(|(set, end)| (group(None, Some(set), None), end))
+        }
+        '-' => format_until(chars, k + 1, '}')
+            .map(|(unset, end)| (group(None, None, Some(unset)), end)),
+        '?' => {
+            let (set, k) = format_until(chars, k + 1, ':')?;
+            let (unset, end) = format_until(chars, k, '}')?;
+            Some((group(None, Some(set), Some(unset)), end))
+        }
+        _ => format_until(chars, k, '}').map(|(unset, end)| (group(None, None, Some(unset)), end)),
+    }
+}
+
+/// A transform's format string up to its closing `/`, from `i`; `i` ends past the `/`.
+fn parse_format(chars: &[char], i: &mut usize) -> Option<Vec<Format>> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    loop {
+        match *chars.get(*i)? {
+            '/' => {
+                *i += 1;
+                break;
+            }
+            '\\' if matches!(chars.get(*i + 1), Some('\\' | '/')) => {
+                text.push(chars[*i + 1]);
+                *i += 2;
+            }
+            '$' => match format_group(chars, *i) {
+                Some((group, next)) => {
+                    out.push(Format::Text(std::mem::take(&mut text)));
+                    out.push(group);
+                    *i = next;
+                }
+                None => {
+                    text.push('$');
+                    *i += 1;
+                }
+            },
+            c => {
+                text.push(c);
+                *i += 1;
+            }
+        }
+    }
+    out.push(Format::Text(text));
+    Some(out)
+}
+
+/// The words VS Code's pascalcase and camelcase join.
+fn case_words(value: &str) -> Vec<&str> {
+    value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// A group's text as `case` (`upcase`, `capitalize`, `pascalcase`...) shapes it.
+fn shaped(value: &str, case: &str) -> String {
+    let words = case_words(value);
+    match case {
+        "upcase" => value.to_uppercase(),
+        "downcase" => value.to_lowercase(),
+        "capitalize" => capitalized(value),
+        "pascalcase" | "camelcase" if words.is_empty() => value.to_string(),
+        "pascalcase" => words.into_iter().map(capitalized).collect(),
+        "camelcase" => words
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| match i {
+                0 => {
+                    let mut chars = w.chars();
+                    chars.next().map_or_else(String::new, |first| {
+                        first.to_lowercase().chain(chars).collect()
+                    })
+                }
+                _ => capitalized(w),
+            })
+            .collect(),
+        _ => value.to_string(),
+    }
+}
+
+/// The format with each group filled from `groups`, as VS Code's `Transform` does.
+fn formatted(format: &[Format], groups: Option<&regex::Captures>) -> String {
+    let mut out = String::new();
+    for part in format {
+        match part {
+            Format::Text(text) => out.push_str(text),
+            Format::Group {
+                index,
+                case,
+                set,
+                unset,
+            } => {
+                let value = groups
+                    .and_then(|g| g.get(*index))
+                    .map_or("", |m| m.as_str());
+                match (case, set, unset) {
+                    (Some(case), ..) => out.push_str(&shaped(value, case)),
+                    (_, Some(set), _) if !value.is_empty() => out.push_str(set),
+                    (_, _, Some(unset)) if value.is_empty() => out.push_str(unset),
+                    _ => out.push_str(value),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `${NAME/regex/format/options}`: the value with `regex` replaced by `format`, read as VS Code
+/// reads it (`$1`, `${1:/upcase}`, `${1:?if:else}`...), every match with the `g` option and
+/// `i`, `m` and `s` as in JavaScript.
 fn transform(value: &str, chars: &[char], i: &mut usize) -> Option<String> {
     let pattern = read_until(chars, i, '/')?;
-    let format = read_until(chars, i, '/')?;
+    let format = parse_format(chars, i)?;
     let options = read_until(chars, i, '}')?;
-    let re = regex::Regex::new(&pattern).ok()?;
-    Some(match options.contains('g') {
-        true => re.replace_all(value, format.as_str()).into_owned(),
-        false => re.replace(value, format.as_str()).into_owned(),
-    })
+    let mut re = regex::RegexBuilder::new(&pattern);
+    let mut every = false;
+    for option in options.chars() {
+        match option {
+            'g' => every = true,
+            'i' => {
+                re.case_insensitive(true);
+            }
+            'm' => {
+                re.multi_line(true);
+            }
+            's' => {
+                re.dot_matches_new_line(true);
+            }
+            'u' => {}
+            _ => return None,
+        }
+    }
+    let re = re.build().ok()?;
+    let has_else = format
+        .iter()
+        .any(|f| matches!(f, Format::Group { unset: Some(_), .. }));
+    if !re.is_match(value) && has_else {
+        return Some(formatted(&format, None));
+    }
+    let limit = if every { 0 } else { 1 };
+    Some(
+        re.replacen(value, limit, |caps: &regex::Captures| {
+            formatted(&format, Some(caps))
+        })
+        .into_owned(),
+    )
 }
 
 /// Where the `}` closing a `${NAME:default}` whose default starts at `j` is.
@@ -282,6 +502,30 @@ fn closing_brace(chars: &[char], mut j: usize) -> Option<usize> {
     None
 }
 
+/// Where the `${1|a,b|}` choice at `i` ends; its options are literal text, as in VS Code.
+fn choice_end(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'$') || chars.get(i + 1) != Some(&'{') {
+        return None;
+    }
+    let digits = chars[i + 2..]
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
+    let mut j = i + 2 + digits;
+    if digits == 0 || chars.get(j) != Some(&'|') {
+        return None;
+    }
+    j += 1;
+    while j < chars.len() {
+        match chars[j] {
+            '\\' => j += 2,
+            '|' if chars.get(j + 1) == Some(&'}') => return Some(j + 2),
+            _ => j += 1,
+        }
+    }
+    None
+}
+
 /// `body` with the variables `get` knows put in as literal text; tab stops, unknown variables
 /// and escapes are left for the snippet parser.
 fn resolve_variables(body: &str, get: impl Fn(&str) -> Option<String>) -> String {
@@ -294,6 +538,11 @@ fn resolve_variables(body: &str, get: impl Fn(&str) -> Option<String>) -> String
             out.push(c);
             out.push(chars[i + 1]);
             i += 2;
+            continue;
+        }
+        if let Some(end) = choice_end(&chars, i) {
+            out.extend(&chars[i..end]);
+            i = end;
             continue;
         }
         let braced = chars.get(i + 1) == Some(&'{');
@@ -572,6 +821,51 @@ mod tests {
         assert_eq!(r("${TM_FILENAME/[.]/_/g}"), "main_test_go");
         assert_eq!(r("$CURRENT_YEAR_SHORT $LINE_COMMENT"), "26 //");
         assert_eq!(r("cost: $"), "cost: $");
+    }
+
+    #[test]
+    fn transforms_read_vs_code_format_strings_and_regex_options() {
+        let v = vars();
+        let r = |body: &str| resolve_variables(body, |name| v.get(name));
+        assert_eq!(r("${TM_FILENAME_BASE/(.*)/$1_test/}"), "main_test");
+        assert_eq!(r("${TM_FILENAME_BASE/(.*)/${1}_test/}"), "main_test");
+        assert_eq!(r("${TM_FILENAME/(\\w+).*/${1:/upcase}/}"), "MAIN");
+        assert_eq!(r("${TM_FILENAME/(.*)/${1:/pascalcase}/}"), "MainTestGo");
+        assert_eq!(r("${TM_FILENAME/(.*)/${1:/camelcase}/}"), "mainTestGo");
+        assert_eq!(r("${TM_FILENAME/(m)/${1:/capitalize}/}"), "Main.test.go");
+        assert_eq!(r("${TM_FILENAME/MAIN/x/i}"), "x.test.go");
+        assert_eq!(r("${TM_FILENAME/[.](\\w)/_${1:/upcase}/g}"), "main_Test_Go");
+        assert_eq!(
+            r("${TM_FILENAME/(test)|(x)/${1:+T}${2:-none}/}"),
+            "main.Tnone.go"
+        );
+        assert_eq!(r("${TM_FILENAME/(go)$/${1:?yes:no}/}"), "main.test.yes");
+        assert_eq!(
+            r("${TM_FILENAME/^(zz)?$/${1:?yes:no}/}"),
+            "no",
+            "else on no match"
+        );
+        assert_eq!(
+            r("${TM_FILENAME/main/a\\/b\\\\c\\$/}"),
+            "a/b\\\\c\\\\\\$.test.go"
+        );
+        assert_eq!(r("${TM_FILENAME/main/$x/}"), "\\$x.test.go");
+        assert_eq!(r("${CLIPBOARD/^c/C/m}"), "Cost \\$5 {x\\}");
+        assert_eq!(
+            r("${TM_FILENAME/(/x/}"),
+            "${TM_FILENAME/(/x/}",
+            "a bad regex is left for the snippet parser"
+        );
+    }
+
+    #[test]
+    fn a_choice_keeps_its_options_as_written() {
+        let v = vars();
+        let r = |body: &str| resolve_variables(body, |name| v.get(name));
+        assert_eq!(
+            r("${1|$CLIPBOARD,b|} $CLIPBOARD"),
+            "${1|$CLIPBOARD,b|} cost \\$5 {x\\}"
+        );
     }
 
     #[test]
