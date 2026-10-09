@@ -97,9 +97,8 @@ fn line_styles(
 /// Lines above the view a bracket count starts from when no parse tree knows the nesting.
 const BRACKET_SCAN_LIMIT: usize = 5_000;
 
-/// Bracket pair colours for `lines` by nesting depth, keyed by char offset, as VS Code colours
-/// them: the tree gives the brackets open above each run of lines, and brackets inside strings
-/// and comments (by `tokens`) are skipped. A closer matching no opener keeps its own colour.
+/// Bracket pair colours for `lines` by nesting depth, keyed by char offset, skipping brackets in
+/// `tokens`' strings and comments. A closer that matches no opener keeps its own colour.
 fn bracket_colors(
     buffer: &Buffer,
     lines: &[usize],

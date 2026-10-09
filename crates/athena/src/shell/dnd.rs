@@ -115,6 +115,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Letting go of a folder over its own row is an aborted drag, not a mistake to report.
+        if dir == drag.path {
+            return;
+        }
         let from = drag.path.clone();
         let copy = window.modifiers().alt;
         let dest = match fileops::drop_destination(&from, &dir) {

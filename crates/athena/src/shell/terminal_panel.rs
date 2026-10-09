@@ -161,6 +161,9 @@ impl Shell {
         let root = self.active_root()?;
         let i = self.workspace.active?;
         let project = &mut self.workspace.projects[i];
+        if let (Some(layout), Some(pane)) = (&project.layout, pane) {
+            layout.pane(pane)?;
+        }
         let item = project.panel.take(id)?;
         let emptied = project.panel.is_empty();
         let new_id = match project.layout.as_mut() {
