@@ -414,6 +414,18 @@ information rather than triggering the install dialog).
 - With the project's hooks enabled, each file Claude edits posts a toast ("Claude edited main.go")
   whose **Review diff** opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
+- The **Claude** drawer tab (palette: **Claude: Show sessions**) lists the project's recent
+  sessions from `~/.claude` and every `~/.claude-*` profile: title, todo progress, messages,
+  tokens and an estimated cost. A session expands to its todo list and plan and to each file it
+  changed with +/− line counts; open a file's diff, step through them all with **Review All**
+  (palette: **Claude: Review next/previous changed file**), or **Revert** one file to before the
+  session (a copy of the current file is kept in `discarded/` for 30 days). **Resume** opens a
+  terminal running `claude --resume <id>` with that profile's `CLAUDE_CONFIG_DIR`.
+- Costs are estimates from built-in list prices, not a bill; models without a price show
+  "cost n/a". Set your own in settings.json, in USD per million tokens:
+  `"claude": { "prices": { "claude-sonnet-5": { "input": 3, "output": 15 } } }` (cache prices
+  default to 1.25×, 2× and 0.1× the input price; `cache_write`, `cache_write_1h` and `cache_read`
+  override them).
 - Optional title-bar indicator for Claude plan usage (5-hour and weekly windows).
 
 **Also**
@@ -507,6 +519,12 @@ process tree which pane the calling Claude session runs in.
 | `list_project_files` | A project's files, honouring `.gitignore`; secrets such as `.env` and keys are left out. |
 | `get_diagnostics` | Errors and warnings from the language servers. |
 | `open_diff` | Shows the user a file's uncommitted changes in the diff viewer (unstaged by default, `staged` for the index). |
+| `lsp_definition`, `lsp_references` | Definition or references of the symbol at a 1-based line plus the symbol's text (or a UTF-16 column), from the language server that has the file open, unsaved edits included. Up to 200 locations. |
+| `document_symbols` | Functions, types and other symbols of an open file with the lines they span. |
+| `get_open_editors` | Every editor tab: path, project, unsaved changes, focused. |
+| `read_buffer` | An open file's text including unsaved changes (at most 512 KiB). |
+| `run_tests`, `get_test_results` | Start go test or Vitest/Jest in the Tests panel (all, a package or file, or one test by name), then read counts and failures. |
+| `git_status` | Branch, ahead/behind and changed files of a project; ignored files left out. |
 
 ### Hooks
 
@@ -516,7 +534,9 @@ any of your own on the same events:
 
 - `UserPromptSubmit`, `Stop`, and `Notification` for permission and idle prompts, which make the
   tab state exact;
-- `PreToolUse` and `PostToolUse` on `Edit|MultiEdit|Write`, for reviewing Claude's edits (below).
+- `PreToolUse` and `PostToolUse` on `Edit|MultiEdit|Write`, for reviewing Claude's edits (below);
+- `PostToolUse` on `TodoWrite|ExitPlanMode`, which shows the session's todo progress ("3/7") on
+  its terminal tab and its todos and plan in the Claude tab.
 
 Each calls `athena notify --event …`. **Disable Claude Code hooks for this project** removes only
 Athena's commands, keeping your own even when they share an entry with ours. A settings file whose
@@ -525,7 +545,7 @@ symlinked settings file stays a symlink and keeps its permissions.
 
 Projects whose hooks were enabled by Athena 0.3 or earlier have only the first three. The palette
 offers **Enable Claude Code hooks for this project** again for them; run it once to add the edit
-hooks.
+hooks. The same goes for the todo and plan hook added in 0.8.
 
 ### Reviewing Claude's edits
 
@@ -886,7 +906,7 @@ athena [<folder>]             open a folder in the running window, or start Athe
 athena --version
 athena mux status             list the daemon's sessions
 athena mux stop               stop the daemon; its shells are hung up
-athena notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited>
+athena notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited|claude-plan>
 athena notify --edited <file> [--session <id>]
 athena notify --title <t> [--body <b>]
 athena mcp-stdio              MCP server for Claude Code
