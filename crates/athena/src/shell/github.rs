@@ -102,7 +102,11 @@ impl Shell {
                     (Gh::Ready(program), Some(then)) => then(this, program, window, cx),
                     (gh, Some(_)) => {
                         let why = gh.explain().unwrap_or_default();
-                        this.transient_notice("GitHub CLI unavailable", why, cx);
+                        this.transient_notice(
+                            "GitHub CLI unavailable",
+                            format!("{why}, then try again."),
+                            cx,
+                        );
                     }
                     (Gh::Ready(_), None) if first => {
                         if let Some(root) = this.active_root() {
@@ -180,19 +184,17 @@ impl Shell {
             None => {
                 return self.transient_notice(
                     "Publish the branch first",
-                    "A pull request is made from a branch on GitHub; use Publish Branch in the \
-                     status bar.",
+                    "Publish it from the status bar, then try again.",
                     cx,
                 );
             }
             Some(t) if t.ahead > 0 => {
+                let commits = if t.ahead == 1 { "commit" } else { "commits" };
                 return self.transient_notice(
                     "Push your commits first",
                     format!(
-                        "{} commit{} not on {} yet would be left out of the pull request.",
-                        t.ahead,
-                        if t.ahead == 1 { " is" } else { "s are" },
-                        t.upstream
+                        "{} {commits} not on {} would be left out.",
+                        t.ahead, t.upstream
                     ),
                     cx,
                 );

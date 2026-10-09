@@ -28,8 +28,8 @@ impl Gh {
     /// One line saying what is missing, for a palette entry or notice; `None` when ready.
     pub fn explain(&self) -> Option<&'static str> {
         match self {
-            Self::Missing => Some("Needs the GitHub CLI: brew install gh"),
-            Self::SignedOut => Some("Needs a GitHub sign-in: run gh auth login in a terminal"),
+            Self::Missing => Some("Needs gh: brew install gh"),
+            Self::SignedOut => Some("Needs gh auth login"),
             Self::Ready(_) => None,
         }
     }

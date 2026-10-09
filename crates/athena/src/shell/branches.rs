@@ -58,6 +58,10 @@ pub(super) fn entries(
         .filter(|b| !b.remote)
         .map(|b| b.name.as_str())
         .collect();
+    let current = branches
+        .iter()
+        .find(|b| b.current && !b.remote)
+        .map(|b| b.name.as_str());
     let elsewhere = |name: &str| {
         worktrees
             .iter()
@@ -76,7 +80,7 @@ pub(super) fn entries(
         };
         let mut detail = vec![b.when.clone(), b.subject.clone()];
         let pick = match &pick {
-            BranchPick::Switch(name) if !b.current => match elsewhere(name) {
+            BranchPick::Switch(name) if Some(name.as_str()) != current => match elsewhere(name) {
                 Some(path) => {
                     detail.insert(
                         0,
@@ -320,6 +324,7 @@ mod tests {
             branch("main", false, true),
             branch("feat", false, false),
             branch("origin/feat", true, false),
+            branch("origin/main", true, false),
         ];
         let worktrees = [
             Worktree {
@@ -347,5 +352,7 @@ mod tests {
             Some("in worktree /r-feat · 2 days ago · Work")
         );
         assert_eq!(rows[2].pick, BranchPick::OpenWorktree("/r-feat".into()));
+        assert_eq!(rows[3].pick, BranchPick::Switch("main".into()));
+        assert_eq!(rows[3].detail.as_deref(), Some("2 days ago · Work"));
     }
 }

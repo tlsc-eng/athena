@@ -241,6 +241,7 @@ impl Shell {
         self.git.commit_input = Some(input);
         self.set_autofetch(self.settings.file.git_autofetch(), window, cx);
         self.start_github(window, cx);
+        self.group_worktrees();
         // The window is not active yet while it is being built, so the first run is kicked.
         self.git_kick(cx);
         self.git.poll = Some(cx.spawn_in(window, async move |this, cx| {
