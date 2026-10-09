@@ -1,4 +1,4 @@
-# Roadmap report: v0.2.0 to v0.6.0
+# Roadmap report: v0.2.0 to v0.7.0
 
 What happened while you were away, for the roadmap in `piped-orbiting-stearns.md` (Phases A–E).
 
@@ -9,11 +9,223 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
 - Release: v0.4.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.4.0 (tap `7aa6afb`, installed here)
 - Release: v0.5.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.5.0 (tap `b75ca95`, installed here)
 - Release: v0.6.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.6.0 (tap `f79bd1b`, installed here)
+- Release: v0.7.0 — <link added at release>
 
 The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
 v0.5. For v0.6 the lanes ran GUI QA with synthetic keys only, while you were idle, so anything
-that needs a mouse click is unverified. Everything below marked **unverified on screen** is
+that needs a mouse click is unverified. v0.7 was the same, except that the git and code lanes and
+the fix sweep could take screenshots with the screen unlocked; the workbench lane ran locked
+until its last two captures. Everything below marked **unverified on screen** is
 covered by unit tests, logs or synthetic-key runs, but nobody has looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+
+## v0.7.0
+
+Plan: [plans/v0.7.md](plans/v0.7.md), three file-disjoint lanes (workbench, git review, code
+understanding), `v0.6.0..main`, then a review pass, a fix sweep and a paint performance
+follow-up. The v0.6.0 section follows this one.
+
+### What shipped
+
+**Workbench** (`c59c9fe`, `0811914`, `9d0e6ec`, `9aa0d2c`, `a2df79a`, `20b7748`, `bcb59d9`,
+`08ccd4d`, `6e38a6b`)
+- A terminal panel in the drawer, as in VS Code: ``Ctrl+` `` shows, focuses or hides it,
+  ``Ctrl+Shift+` `` opens another, several panel terminals are listed as sub-tabs on the right, and a
+  terminal moves between the panel and the editor area keeping its shell (View menu, palette,
+  right-click menus, or dragging a sub-tab onto a pane and a terminal tab onto the panel). Panel
+  terminals are stored in the project's new `panel` in `workspace.json` and reattach like tabs.
+  MCP's `list_terminals`, `run_in_terminal` and the Cmd+Alt+K at-mention see them (`2be737b`).
+- Dragging tree rows moves entries into folders, Option copies ("name copy.ext" on a clash, in
+  the background). A move asks first as VS Code does, with "Move and Don't Ask Again" writing
+  `"explorer": {"confirmDragAndDrop": false}`; a name clash asks to replace and the replaced
+  entry goes to the Trash. Open tabs follow the move and git status refreshes.
+- Bracket pair colours by depth (three colours per theme, 4.5:1 contrast), driven by the parse
+  tree so a view mid-file needs no scan from the top; `editor.bracketPairColorization.enabled`
+  (or `bracket_pair_colorization`, also per language) turns them off.
+- Interface zoom on Cmd+Option+= / - / 0, in 10% steps from -3 to +5, scaling the chrome (tabs,
+  rows, bars, menus, buttons, toasts) and not the code; kept in `workspace.json` and in
+  `"window": {"zoom_level": …}` once settings.json has it.
+- Toasts no longer sit under web previews: a preview whose pane a toast overlaps hides until the
+  last toast fades.
+
+**Git review** (`cabc7c9`, `cf40362`, `23cdd7b`, `b802e47`, `8aabe35`, `906af9b`, `bfb7627`,
+`f3ee854`, `93acef4`)
+- Quick diff peek: clicking a gutter change bar, or Alt+F3 / Shift+Alt+F3, opens the index's
+  lines for that change under it with Stage, Revert, Previous, Next and Close.
+- Timeline drawer tab (**Git: Open timeline**): the active file's commits through renames; a
+  click opens what the commit did to the file, Compare with Current diffs it with the working tree.
+- Whole-file blame gutter (**Git: Toggle file blame**): an age bar per line, author and age per
+  stretch, a hover card, and a click that opens the commit's diff.
+- Diff views: drag to select on either side, Cmd+C / Cmd+A, Hide Unchanged (three lines of
+  context, on by default over 500 rows) and a right-click menu with Copy, Select All, the
+  change's Stage / Unstage / Revert and Open File.
+- A multi-line commit box (Enter breaks the line, Cmd+Enter commits, grows to six rows), and
+  Select for Compare / Compare with Selected in the tree.
+- New diff bases (a commit against its parent, a revision against the working tree, two files)
+  that restore across launches.
+
+**Code understanding** (`948cf9b`, `46e0509`, `43f1622`, `8ab13bb`, `1769f13`, `b94d491`)
+- Outline view behind an Explorer / Outline switch at the top of the tree area: the active
+  editor's symbols, following the cursor, with a filter.
+- Call hierarchy on Shift+Alt+H in the References tab: incoming calls by default, Outgoing in
+  the header, a chevron or double click loading the next level.
+- ESLint (`vscode-eslint-language-server`) and Biome (`biome lsp-proxy`) started only from the
+  project's own `node_modules/.bin`, with diagnostics per server labelled `eslint(no-var)` in
+  Problems, their fixes in Cmd+., and `eslint.fixOnSave` (off by default). After the review they
+  run only once the project is allowed (see Decisions).
+- Built-in language defaults (Markdown wraps and keeps trailing whitespace, Go formats on save)
+  now sit between the global `"editor"` block and the user's `"[lang]"` block, as in VS Code.
+  This closes the v0.6 known gap about global trimming hitting Markdown.
+- Markdown inline highlighting (emphasis, strong, code spans, links) through tree-sitter-md's
+  inline grammar, a Mermaid line highlighter for `.mmd` / `.mermaid`, and Rust ALL_CAPS
+  constants coloured again (the upstream query's predicate had a stray quote).
+
+Screenshots from the QA builds: [a panel terminal in the drawer's Terminal tab](screenshots/v0.7/01-panel.png),
+[file blame, the Timeline tab and a commit's diff, with a two-file compare tab](screenshots/v0.7/02-git.png),
+and [the Explorer / Outline switch, bracket pair colours and the call hierarchy](screenshots/v0.7/03-code.png).
+
+### Decisions made without you
+
+- **Project linters ask first.** The lane shipped ESLint and Biome starting on their own once
+  found in the project; the review called that running a repository's code unprompted (H3). Now
+  the first file that would start one asks once per project root, "Run ESLint and Biome from
+  proj?" (naming only the linters it installs) with Allow / Don't Allow (Escape is Don't
+  Allow), and nothing starts until allowed. The answer lives on the project in `workspace.json`
+  (`"linters": "allowed" | "denied"`, absent meaning not asked), since it belongs to one folder
+  rather than to every project the way settings.json does; the palette's Allow / Disallow project linters change it. When two saved roots turn out to be one
+  folder, the strictest answer wins: denied over allowed over not asked (`b62e3fa`, `588a8e7`).
+- Project linters run without `SSH_AUTH_SOCK`, `NODE_OPTIONS` and `NODE_PATH`, ESLint's
+  `nodePath` is pinned to the project's own `node_modules`, and every language server gets its
+  own process group so the reaper kills Biome's native child too. `biome stop` is not run, since it would stop a daemon
+  another editor shares; the daemon is started with `--stop-on-disconnect` instead (`da7c0cb`).
+- **Git reads never run filter drivers or textconv.** The review suggested
+  `--attr-source=<empty tree>`; a scratch repository with the attribute in `.git/info/attributes`
+  still ran all three drivers that way, and it would drop `eol=crlf` conversion. Instead every
+  reading git gets each configured driver's commands emptied (and `required=false`) through
+  `GIT_CONFIG_KEY_n`, with names from `git config --list -z`, plus `--no-textconv` and
+  `log.showSignature=false`. Commands that write (stage a whole file, discard, switch, stash,
+  pull, commit) still run the filters, since skipping them would store or check out the wrong
+  bytes for git-crypt or LFS; one-hunk stage, unstage and revert, and the peek, are refused for a
+  file behind a filter (`5c16bb2`, `e5a2ff3`).
+- The gutter now compares the saved file with the index rather than `HEAD`, as VS Code's quick
+  diff does, so staging a change clears its bar and the peek always shows what a bar stands for.
+- The peek is an overlay anchored under the change, not a view zone that pushes lines down; that
+  would need row changes in the display map. It covers the lines below it (see Known gaps).
+- Interface zoom took Cmd+Option+= / - / 0 because none of them was bound and Cmd+= stays the
+  code font zoom (`editor.font_size`). With macOS Accessibility Zoom's shortcuts on, the system
+  takes them first.
+- Bracket pair colours are on by default, as in VS Code; highlighters without a tree count from
+  the top of the file, up to 5000 lines.
+- A tree drag that would replace a file with unsaved changes is refused with a notice rather than
+  discarding them; the replaced entry's tabs close as the move lands. Option-copy runs in the
+  background; a move runs on the UI thread.
+- Hide Unchanged starts on for diffs over 500 rows; Amend now fills in the whole last message.
+- ``Ctrl+Shift+` `` is also bound as Ctrl+~, which is what macOS reports for it.
+- Notifications remember the daemon session rather than the tab id, since a terminal's id changes
+  when it moves between the panel and the editor area (`9e4c536`).
+- A blamed commit's diff compares against blame's own `previous` commit, and timeline log records
+  are split on NUL only, so a subject holding `\x1e` cannot fake a row (`5c16bb2`).
+
+### Review fixes
+
+A review of `v0.6.0..a12ca42` found 16 issues (3 high, 9 medium, 4 low; one low was part of a
+high). All are fixed on main:
+- Dragging `/p/pkg/pkg` onto `/p` made `/p/pkg`, the dragged folder's own parent, the
+  destination, and Replace sent it to the Trash with the dragged folder inside (high). Such a
+  destination is refused, checked by device and inode before anything is trashed (`933cfc2`).
+- A slow call hierarchy answer for an earlier Shift+Alt+H indexed into the new, smaller tree and
+  panicked (high); clicks on rows drawn before the tree changed did the same (`5c651ee`).
+- Project ESLint and Biome ran with no trust prompt (high) (`b62e3fa`, `588a8e7`).
+- A replacing drag left the replaced file's tabs open on the moved file, where a dirty "keep
+  mine" wrote the old edits over it; a move across volumes failed with EXDEV after the replaced
+  entry was already in the Trash (`9503880`).
+- Cmd+W with focus in a panel terminal closed the editor area's active tab, possibly a Claude
+  Code terminal, and Move Terminal into Panel pulled the wrong terminal down (`fdd025c`).
+- Killing a panel terminal, tab or project whose terminal had never been shown left its shell
+  running in the daemon with nothing to reach it (`7724a21`).
+- Git reads ran the repository's filter drivers and textconv (`5c16bb2`, `e5a2ff3`).
+- Project linters inherited `SSH_AUTH_SOCK`, `NODE_OPTIONS` and `NODE_PATH`; Biome's native child
+  outlived its wrapper; ESLint could resolve its library above the project (`da7c0cb`).
+- Markdown inline highlighting re-parsed a whole paragraph per paint, and bracket colouring walked
+  every sibling before the view per frame (`1cae47a`, numbers below).
+- Whole-file blame re-ran after each typing pause with dropped runs left going, a timeout read as
+  "no committed lines", and the timeline showed the previous file's commits while loading and
+  kept unneeded logs running; runs can now be cancelled and kill git (`5c16bb2`).
+- Lows: a notification lost its terminal once the terminal moved (`9e4c536`); a crashed ESLint's
+  late pull answer overwrote its restarted instance's (`c902a66`); merging duplicate project roots
+  dropped the active copy's panel terminals (`4892bb5`); a blamed commit diffed against `rev^`
+  rather than blame's `previous`, and a subject with `\x1e` forged timeline rows (`5c16bb2`);
+  zoom steps could overflow from a hand-edited level, and a doc comment had drifted (`0d6168f`).
+
+Before the review, within the lanes: an aborted tree drag over its own row and a panel terminal
+dropped on a pane that had gone now do nothing (`5873086`); MCP and the at-mention did not see
+panel terminals (`2be737b`); the drawer's tab row pushed the Terminal tab's Kill button off the
+edge at +2 zoom (`c96b183`); the commit box sat 4 px taller than the branch pill and diff toolbar
+labels cut off mid-word (`f3ee854`); the Outline and call hierarchy rows ignored interface zoom
+(`a12ca42`).
+
+### Performance
+
+From [perf/2026-10-v0.7-paint.md](perf/2026-10-v0.7-paint.md) (release build, Apple M5, an
+ignored `paint_cost` test kept in the tree):
+
+| Case | before | after |
+|---|---|---|
+| Markdown, 60 lines of a 20 k-line paragraph, per paint | 318 ms | 2.1 ms |
+| JSON 300 k array, open brackets, each frame while scrolling | 13.5 ms | 0.002 ms |
+| JSON 300 k array, open brackets, first frame after a parse | 13.5 ms | 13.4–16.5 ms |
+
+The inline grammar now parses only the painted lines and 20 either side, and nodes with 64 or
+more children keep the bracket tokens read so far until the tree changes.
+
+### Verification
+
+- Unit tests throughout, plus a gopls integration test for call hierarchy, a fixture-gated
+  integration test against eslint 9.39 with vscode-langservers-extracted 4.10 and biome 1.9.4,
+  real-repository tests for history, blame and the diff bases, a scratch repository whose
+  clean / smudge / process / textconv drivers touch marker files (none ran through any read;
+  `git add` still ran clean), a cancel test killing a 30 s git within 2 s, temp-dir tests with a
+  recording Trash for the drag fixes, and a regression test that panicked before the call
+  hierarchy fix. Most fix commits report the full gate passing.
+- GUI QA in isolated `HOME`s with synthetic keys only, while you were idle. The screen was locked
+  for most of the workbench lane: ``Ctrl+` `` and ``Ctrl+Shift+` `` made two panel terminals whose sessions
+  survived a quit and relaunch, keymap-bound moves took one panel → pane → panel with its session
+  kept, and Cmd+Option+- / = / 0 moved the saved level; only the two captures at the end (the
+  panel above, and +2 zoom showing the Kill button pushed off, before `c96b183`) were seen.
+- The git lane's QA app was captured on screen: the peek with its Stage / Revert row, the blame
+  gutter, the Timeline tab, Hide Unchanged, Select All in a diff, and the Changes tab before and
+  after the commit box alignment fix.
+- The code lane's QA app: palette Focus outline, typing "sto" and Enter moved the cursor to
+  `Server.Stop`; the call hierarchy screenshot above; MCP `get_diagnostics` listed ESLint and
+  Biome problems for a JS file (before the trust prompt existed).
+- After the fixes: Cmd+W in a focused panel terminal removed the panel terminal from
+  `workspace.json` and left the editor area's tabs alone; with biome 2.5.15 in a project,
+  "denied" started nothing, "allowed" started `lsp-proxy`, and no answer showed the sheet with no
+  biome process running before it was answered.
+- **Unverified (they need a mouse)**: dragging tree rows (move, Option-copy, the confirmation,
+  Replace and the Trash, a drag to another volume), dragging terminals between the panel and
+  panes, the right-click menus (terminal tab, panel row, tree compare items, diff, Timeline row),
+  clicking a gutter change bar, hovering and clicking the blame gutter, selecting in a diff by
+  drag, opening a Hide Unchanged fold, the Explorer / Outline switch by click, call hierarchy
+  chevrons, the "Move and Don't Ask Again" button, and the zoomed drawer after `c96b183`. Bracket
+  colours were seen only in the screenshots.
+
+### Known gaps
+
+- Filter drivers configured inside a submodule are not switched off: git status looks into
+  submodules, where the parent's overrides do not reach.
+- A tree move across volumes copies on the UI thread, so a large folder blocks the window until
+  it is done (Option-copy runs in the background).
+- When two saved roots merge, the panel terminals of the copy that loses stay running in the
+  daemon with no tab. `athena mux status` shows them; the only way to end them today is
+  `athena mux stop`, which hangs up every shell, not just these.
+- The quick diff peek covers the lines below the change instead of pushing them down.
+- The Timeline lists at most the last 500 commits of a file.
+- ESLint was never run in the app after the trust prompt landed (the QA project had Biome only);
+  it is covered by the integration test and the lane's earlier MCP check.
+- The first frame after each tree change deep in a huge array still reads every element above
+  the view once (about 13 ms at the middle of 300 k elements), twice per keystroke. Emphasis or a
+  code span that opens more than 20 lines above the view paints as plain text.
+- Interface zoom keys are taken by macOS when Accessibility Zoom's keyboard shortcuts are on.
 
 ## v0.6.0
 
@@ -772,3 +984,35 @@ For v0.6.0:
     should ask first); Stash, then pick the stash from Pop Stash…. Click LF and convert to CRLF.
 30. Click each breadcrumb (a folder, the file, a symbol). Run Run task… with a Makefile target.
 31. Turn on `"git": {"autofetch": true}` and leave the window in front for three minutes.
+
+For v0.7.0:
+
+32. ``Ctrl+` `` in a project: the Terminal tab opens on a shell; ``Ctrl+Shift+` `` adds a second and the
+    sub-tab list appears. Drag a sub-tab onto a pane, then use the terminal tab's right-click Move
+    Terminal into Panel. With the panel focused press Cmd+W: only the panel terminal closes.
+    Quit and relaunch: the panel terminals come back with their scrollback. Run `list_terminals`
+    from Claude Code and check the panel terminal is listed.
+33. Drag a file onto a folder in the tree: the "Are you sure" question, then Move. Option-drag a
+    file into its own folder: "name copy.ext". Drag onto a folder holding the same name and
+    Replace: the old one is in the Trash and its tab closed. Try "Move and Don't Ask Again" and
+    look at settings.json. If you have an external disk, drag a project file onto it in a second
+    project.
+34. Open a nested JSON or Rust file: brackets in three colours by depth, none inside strings.
+    Set `"editor.bracketPairColorization.enabled": false`: they go back to plain.
+35. Cmd+Option+= twice, look over the tree, drawer (the Terminal tab's Kill button), menus and
+    palette, then Cmd+Option+0.
+36. Edit a tracked file: click its gutter bar for the peek, Stage one change, Revert another,
+    step with Alt+F3. In a git-lfs or git-crypt repository, the peek and one-hunk Stage are
+    refused with the whole-file message, while staging the whole file works.
+37. Git: Toggle file blame: hover a stretch, click it for the commit's diff. Git: Open timeline:
+    click a commit, then Compare with Current; switch tabs and watch the list follow.
+38. In a diff: drag-select and Cmd+C, toggle Hide Unchanged and click a fold bar, right-click a
+    change. Select for Compare on one file and Compare with Selected on another. Type a commit
+    message of three lines with Enter and commit with Cmd+Enter; turn Amend on.
+39. Click Outline at the top of the tree, filter, and click a symbol. Shift+Alt+H on a Go
+    function, flip to Outgoing and expand a row.
+40. In a project with `eslint` and `vscode-langservers-extracted` in `node_modules`, open a JS
+    file: the Allow / Don't Allow sheet. Allow, then check Problems shows `eslint(…)` rows and
+    Cmd+. offers its fixes; run Disallow project linters and watch them go.
+41. Open a Markdown file with emphasis, code spans and links, and a `.mmd` file: both
+    highlighted. A global `"word_wrap": false` still leaves Markdown wrapped.
