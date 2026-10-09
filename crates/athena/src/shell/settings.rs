@@ -197,7 +197,13 @@ impl Shell {
         let lang = editor.read(cx).lang();
         let e = self.settings.file.editor_for(lang);
         let format = e.format_on_save.or(self.workspace.format_on_save);
-        let wrap = e.word_wrap.unwrap_or(self.workspace.word_wrap);
+        let wrap = self
+            .settings
+            .file
+            .editor
+            .word_wrap
+            .unwrap_or(self.workspace.word_wrap);
+        let wrap_language = self.settings.file.language_word_wrap(lang);
         let ms = e
             .autosave_delay_ms
             .unwrap_or(self.workspace.autosave_delay_ms);
@@ -210,6 +216,7 @@ impl Shell {
         editor.update(cx, |v, cx| {
             v.set_format_on_save(format);
             v.set_word_wrap_default(wrap, cx);
+            v.set_word_wrap_language(wrap_language, cx);
             v.set_autosave(autosave, cx);
             v.set_inlay_hints(inlays, cx);
             v.set_save_settings(tidy);

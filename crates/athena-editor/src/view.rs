@@ -493,6 +493,7 @@ pub struct EditorView {
     /// This tab's word wrap choice; `None` follows `wrap_default`.
     pub(crate) wrap: Option<bool>,
     pub(crate) wrap_default: bool,
+    pub(crate) wrap_language: Option<bool>,
     pub(crate) merge: crate::merge_conflicts::MergeCache,
     pub(crate) run_marks: Vec<crate::run_marks::RunMark>,
 }
@@ -583,6 +584,7 @@ impl EditorView {
             occurrence: None,
             wrap: None,
             wrap_default: false,
+            wrap_language: None,
             merge: Default::default(),
             run_marks: Vec::new(),
         }

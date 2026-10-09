@@ -16,10 +16,11 @@ fn segments(text: &str, cols: usize) -> Vec<(usize, usize)> {
 }
 
 impl EditorView {
-    /// Whether long lines wrap: this tab's choice, else the workspace's, with Markdown wrapping
-    /// by default as in VS Code.
+    /// Whether long lines wrap: this tab's choice, else its language's setting, else the
+    /// workspace's, with Markdown wrapping by default as in VS Code.
     pub fn word_wrap(&self) -> bool {
         self.wrap
+            .or(self.wrap_language)
             .unwrap_or_else(|| self.wrap_default || self.lang() == Some(Lang::Markdown))
     }
 
@@ -32,6 +33,12 @@ impl EditorView {
     /// Whether tabs that have not chosen wrap long lines.
     pub fn set_word_wrap_default(&mut self, wrap: bool, cx: &mut Context<Self>) {
         self.wrap_default = wrap;
+        self.wrap_changed(cx);
+    }
+
+    /// The word wrap a `"[lang]"` settings block chooses, which beats the built-in Markdown default.
+    pub fn set_word_wrap_language(&mut self, wrap: Option<bool>, cx: &mut Context<Self>) {
+        self.wrap_language = wrap;
         self.wrap_changed(cx);
     }
 

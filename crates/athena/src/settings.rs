@@ -110,6 +110,12 @@ impl Settings {
         self.autofetch.unwrap_or(false)
     }
 
+    /// The word wrap set in `lang`'s own block, if any.
+    pub fn language_word_wrap(&self, lang: Option<Lang>) -> Option<bool> {
+        lang.and_then(|l| self.languages.get(language_id(l)))
+            .and_then(|over| over.word_wrap)
+    }
+
     /// The editor settings for files of `lang`, its language block applied.
     pub fn editor_for(&self, lang: Option<Lang>) -> EditorSettings {
         match lang.and_then(|l| self.languages.get(language_id(l))) {
