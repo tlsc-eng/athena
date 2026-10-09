@@ -143,8 +143,9 @@ fn line_blocks(
         token_at[a..b].fill(Some(*token));
     }
     let mut col = 0usize;
+    let mut next_break = breaks.iter().peekable();
     for (i, (byte, c)) in text.char_indices().enumerate() {
-        if breaks.contains(&i) {
+        if next_break.next_if_eq(&&i).is_some() {
             out.row_starts.push(col.min(u16::MAX as usize) as u16);
         }
         let width = if c == '\t' {
@@ -457,6 +458,19 @@ mod tests {
         b.set_lang(Some(Lang::Rust));
         let blocks = m.blocks(&b, 0..1, None);
         assert!(blocks[0].blocks.iter().any(|b| b.token.is_some()));
+    }
+
+    #[test]
+    fn a_1_mb_wrapped_line_lays_out_in_linear_time() {
+        let line = "word ".repeat(200_000);
+        let t = Instant::now();
+        let lb = line_blocks(&line, &[], 0, Some(80));
+        let took = t.elapsed();
+        assert_eq!(lb.row_starts.len(), 1_000_000 / 80);
+        assert_eq!(lb.row_starts[1], 80);
+        // Checking every break for every char took 57 s here in a debug build.
+        let budget = if cfg!(debug_assertions) { 1000. } else { 50. };
+        assert!(took.as_secs_f64() * 1e3 < budget, "took {took:?}");
     }
 
     /// 10k lines of Rust: a frame from the cache, and one after an edit that misses it.
