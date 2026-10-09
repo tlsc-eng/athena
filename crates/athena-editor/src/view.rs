@@ -267,6 +267,8 @@ pub enum EditorEvent {
         start_line: u32,
         end_line: u32,
     },
+    /// A request for the language server's newer features.
+    Lsp(crate::lsp_ui::LspRequest),
 }
 
 /// A change bar in the gutter, in zero-based lines of the saved file.

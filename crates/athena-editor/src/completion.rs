@@ -10,6 +10,8 @@ use gpui::{
 };
 
 use crate::buffer::{Buffer, Cursors, is_word};
+use crate::hover::HoverBlock;
+use crate::lsp_ui::LspRequest;
 use crate::view::{EditorEvent, EditorView};
 
 /// Typing pauses this long before suggestions are asked for.
@@ -17,6 +19,7 @@ const TYPING_DELAY: Duration = Duration::from_millis(100);
 const MAX_ROWS: usize = 10;
 const ROW_HEIGHT: f32 = 22.;
 const WIDTH: f32 = 420.;
+const DOCS_WIDTH: f32 = 340.;
 
 /// A change a language server asks for, in its zero-based lines and UTF-16 columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,9 +47,22 @@ pub struct Completion {
     pub stops: Vec<(u32, Range<usize>)>,
     pub additional_edits: Vec<ServerEdit>,
     pub preselect: bool,
+    pub documentation: Vec<HoverBlock>,
+    /// The server fills in more (documentation, an import to add) once asked to resolve it.
+    pub resolve: bool,
+}
+
+/// What `completionItem/resolve` added to a suggestion.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Resolved {
+    pub detail: Option<String>,
+    pub documentation: Vec<HoverBlock>,
+    pub additional_edits: Vec<ServerEdit>,
 }
 
 struct Menu {
+    /// The request that brought these items, which resolving them refers to.
+    request: u64,
     /// Where the word being completed starts, in chars.
     start: usize,
     items: Vec<Completion>,
@@ -56,6 +72,8 @@ struct Menu {
     first_row: usize,
     incomplete: bool,
     opened: Opening,
+    /// Items asked to resolve, whose answers are on their way.
+    asked: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -67,6 +85,9 @@ pub(crate) struct Completing {
     timer: Option<Task<()>>,
     /// Characters that ask for suggestions at once; `None` while no language server has the file.
     triggers: Option<Vec<String>>,
+    /// An item accepted before it resolved: its request and index, the buffer version its
+    /// insertion left, and the line it was inserted on; resolved edits above it still apply.
+    late: Option<(u64, usize, u64, u32)>,
 }
 
 /// How well `query` matches `candidate` as a case-insensitive subsequence whose first char starts a
@@ -117,7 +138,23 @@ fn align(query: &[char], cand: &[char], prefer_words: bool) -> Option<(i32, Vec<
     Some((score, matched))
 }
 
+/// The resolved edits elsewhere that still fit once an item was inserted on `line`: those
+/// above it, which the insertion did not move.
+fn edits_above(edits: Vec<ServerEdit>, line: u32) -> Vec<ServerEdit> {
+    edits.into_iter().filter(|e| e.end.0 < line).collect()
+}
+
 impl Menu {
+    /// The selected item, if it still needs resolving and has not been asked about; noted as asked.
+    fn take_unresolved(&mut self) -> Option<usize> {
+        let &(index, _) = self.matches.get(self.selected)?;
+        if !self.items[index].resolve || self.asked.contains(&index) {
+            return None;
+        }
+        self.asked.push(index);
+        Some(index)
+    }
+
     fn refilter(&mut self, query: &str) {
         let mut scored: Vec<(i32, usize)> = self
             .items
@@ -321,6 +358,7 @@ impl EditorView {
             .as_ref()
             .map_or_else(Opening::now, |m| m.opened);
         let mut menu = Menu {
+            request,
             start,
             items,
             matches: Vec::new(),
@@ -328,6 +366,7 @@ impl EditorView {
             first_row: 0,
             incomplete,
             opened,
+            asked: Vec::new(),
         };
         menu.refilter(&query);
         if menu.matches.is_empty() {
@@ -335,13 +374,73 @@ impl EditorView {
             return;
         }
         self.completing.menu = Some(menu);
+        self.resolve_selected(cx);
         cx.notify();
     }
 
     pub(crate) fn step_completion(&mut self, by: isize, cx: &mut Context<Self>) {
         if let Some(menu) = self.completing.menu.as_mut() {
             menu.step(by);
+            self.resolve_selected(cx);
             cx.notify();
+        }
+    }
+
+    /// Asks the server to fill in the selected suggestion, for its documentation beside the list.
+    fn resolve_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.completing.menu.as_mut() else {
+            return;
+        };
+        let Some(index) = menu.take_unresolved() else {
+            return;
+        };
+        let request = menu.request;
+        cx.emit(EditorEvent::Lsp(LspRequest::ResolveCompletion {
+            request,
+            index,
+        }));
+    }
+
+    /// The answer to [`LspRequest::ResolveCompletion`]: the open list shows it, and an item
+    /// accepted meanwhile gets its edits elsewhere (an auto-import) if nothing was typed since.
+    pub fn resolved_completion(
+        &mut self,
+        request: u64,
+        index: usize,
+        resolved: Resolved,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(menu) = self
+            .completing
+            .menu
+            .as_mut()
+            .filter(|m| m.request == request)
+            && let Some(item) = menu.items.get_mut(index)
+        {
+            if resolved.detail.is_some() {
+                item.detail = resolved.detail;
+            }
+            if !resolved.documentation.is_empty() {
+                item.documentation = resolved.documentation;
+            }
+            item.additional_edits = resolved.additional_edits;
+            item.resolve = false;
+            cx.notify();
+            return;
+        }
+        let Some((asked, at, version, line)) = self.completing.late else {
+            return;
+        };
+        if (asked, at) != (request, index) {
+            return;
+        }
+        self.completing.late = None;
+        if self.version() != Some(version) {
+            return;
+        }
+        let above = edits_above(resolved.additional_edits, line);
+        if !above.is_empty() {
+            self.apply_server_edits(&above, cx);
         }
     }
 
@@ -355,8 +454,10 @@ impl EditorView {
         let Some((item, _)) = menu.matches.get(index.unwrap_or(menu.selected)) else {
             return;
         };
-        let item = menu.items[*item].clone();
+        let index = *item;
+        let item = menu.items[index].clone();
         let start = menu.start;
+        let line = self.buf().map(|b| b.utf16_position(start).0);
         let single = !self.cursor.is_multi();
         let mut snippet = None;
         self.with_buffer(cx, |b, c| {
@@ -385,6 +486,18 @@ impl EditorView {
             }
         });
         self.snippet = snippet;
+        self.completing.late = match (item.resolve, self.version(), line) {
+            (true, Some(version), Some(line)) => {
+                if !menu.asked.contains(&index) {
+                    cx.emit(EditorEvent::Lsp(LspRequest::ResolveCompletion {
+                        request: menu.request,
+                        index,
+                    }));
+                }
+                Some((menu.request, index, version, line))
+            }
+            _ => None,
+        };
         // A function just completed into its parentheses shows its parameters, as in VS Code.
         let head = self.cursor.head();
         if self
@@ -502,14 +615,49 @@ impl EditorView {
                 this.scroll_completion(event, cx);
             }))
             .children(rows);
-        let panel = motion::animate_enter(
-            t.motion.reduced,
-            menu.opened.running(t.motion.fast),
-            panel,
-            "completion-open",
-            Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
-            |el, d| el.opacity(d),
-        );
+        let docs = menu
+            .matches
+            .get(menu.selected)
+            .map(|(i, _)| &menu.items[*i])
+            .filter(|item| !item.documentation.is_empty())
+            .map(|item| {
+                let blocks = item.documentation.iter().map(|block| match block {
+                    HoverBlock::Text(text) => div()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .text_color(t.color.content_secondary)
+                        .child(text.clone())
+                        .into_any_element(),
+                    HoverBlock::Code(code) => div()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .bg(t.color.surface_sunken)
+                        .font_family(t.typography.mono.clone())
+                        .text_color(t.color.content)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(code.clone())
+                        .into_any_element(),
+                });
+                div()
+                    .id("completion-docs")
+                    .occlude()
+                    .w(px(DOCS_WIDTH))
+                    .max_h(height)
+                    .overflow_y_scroll()
+                    .py(px(4.))
+                    .flex()
+                    .flex_col()
+                    .bg(t.color.surface)
+                    .border_1()
+                    .border_color(t.color.border)
+                    .rounded(t.shape.radius_panel)
+                    .shadow(vec![t.popover_shadow()])
+                    .font_family(t.typography.ui.clone())
+                    .text_size(t.typography.caption)
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .children(blocks)
+            });
         // Below the line, or above it when the list would run off the bottom of the editor.
         let below = point(origin.x - px(6.), origin.y + line_height + px(2.));
         let bottom = self.layout.as_ref()?.origin.y + self.viewport.height;
@@ -518,13 +666,28 @@ impl EditorView {
         } else {
             (below, Corner::TopLeft)
         };
+        // Documentation sits beside the list, as VS Code shows the selected item's details.
+        let row = div()
+            .flex()
+            .gap(px(4.))
+            .when(corner == Corner::BottomLeft, |el| el.items_end())
+            .child(panel)
+            .children(docs);
+        let row = motion::animate_enter(
+            t.motion.reduced,
+            menu.opened.running(t.motion.fast),
+            row,
+            "completion-open",
+            Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
+            |el, d| el.opacity(d),
+        );
         Some(
             deferred(
                 anchored()
                     .position(position)
                     .anchor(corner)
                     .snap_to_window_with_margin(px(8.))
-                    .child(panel),
+                    .child(row),
             )
             .with_priority(1)
             .into_any_element(),
@@ -631,6 +794,8 @@ mod tests {
             stops: Vec::new(),
             additional_edits: Vec::new(),
             preselect: false,
+            documentation: Vec::new(),
+            resolve: false,
         }
     }
 
@@ -669,6 +834,8 @@ mod tests {
             first_row: 0,
             incomplete: false,
             opened: Opening::now(),
+            asked: Vec::new(),
+            request: 0,
         };
         let labels = |m: &Menu| -> Vec<String> {
             m.matches
@@ -692,6 +859,48 @@ mod tests {
     }
 
     #[test]
+    fn the_selected_item_is_resolved_once_and_only_if_it_needs_it() {
+        let mut needs = item("useState", "0");
+        needs.resolve = true;
+        let mut menu = Menu {
+            start: 0,
+            items: vec![
+                needs.clone(),
+                item("useEffect", "1"),
+                Completion {
+                    sort_text: "2".into(),
+                    ..needs
+                },
+            ],
+            matches: Vec::new(),
+            selected: 0,
+            first_row: 0,
+            incomplete: false,
+            opened: Opening::now(),
+            asked: Vec::new(),
+            request: 3,
+        };
+        menu.refilter("");
+        assert_eq!(menu.take_unresolved(), Some(0));
+        assert_eq!(menu.take_unresolved(), None, "already asked");
+        menu.step(1);
+        assert_eq!(menu.take_unresolved(), None, "complete as listed");
+        menu.step(1);
+        assert_eq!(menu.take_unresolved(), Some(2));
+    }
+
+    #[test]
+    fn an_auto_import_resolved_after_accepting_applies_only_above_the_completion() {
+        let edit = |line: u32| ServerEdit {
+            start: (line, 0),
+            end: (line, 0),
+            text: "import x\n".into(),
+        };
+        let kept = edits_above(vec![edit(0), edit(5), edit(9)], 5);
+        assert_eq!(kept, vec![edit(0)]);
+    }
+
+    #[test]
     fn stepping_wraps_and_scrolls_the_window_of_rows() {
         let mut menu = Menu {
             start: 0,
@@ -701,6 +910,8 @@ mod tests {
             first_row: 0,
             incomplete: false,
             opened: Opening::now(),
+            asked: Vec::new(),
+            request: 0,
         };
         menu.refilter("a");
         menu.step(-1);

@@ -5,8 +5,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use athena_editor::{
-    Completion, EditorView, HoverBlock, Inlay, Lang, Marker, MarkerSeverity, Occurrence,
-    ServerEdit, Signature,
+    Completion, EditorView, HoverBlock, Inlay, Lang, LspRequest, Marker, MarkerSeverity,
+    Occurrence, Resolved, ServerEdit, Signature,
 };
 use athena_lsp::{
     Client, CompletionItem, Config, Diagnostic, Event, Location, MarkupBlock, Position, Range,
@@ -16,8 +16,8 @@ use athena_proto::{DiagnosticInfo, NoticeKind};
 use athena_ui::ActiveTheme;
 use athena_workspace::LinterTrust;
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, PromptButton, PromptLevel, Task, WeakEntity, Window,
-    actions, div, prelude::*, px, uniform_list,
+    AnyElement, Context, Entity, EntityId, FontWeight, PromptButton, PromptLevel, Task, WeakEntity,
+    Window, actions, div, prelude::*, px, uniform_list,
 };
 
 use super::Shell;
@@ -91,6 +91,8 @@ pub(super) struct LspState {
     asking_trust: HashSet<PathBuf>,
     /// Projects whose own TypeScript waits for trust with no global one to run meanwhile.
     held_back: HashSet<PathBuf>,
+    /// Each editor's last suggestions as the server sent them, to resolve one on request.
+    completions: HashMap<EntityId, (u64, Rc<Client>, Vec<CompletionItem>)>,
 }
 
 impl LspState {
@@ -243,19 +245,31 @@ pub(super) fn document_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn completion(item: CompletionItem) -> Completion {
+fn server_edit(e: athena_lsp::TextEdit) -> ServerEdit {
+    ServerEdit {
+        start: (e.range.start.line, e.range.start.character),
+        end: (e.range.end.line, e.range.end.character),
+        text: e.text,
+    }
+}
+
+fn hover_blocks(blocks: Vec<MarkupBlock>) -> Vec<HoverBlock> {
+    blocks
+        .into_iter()
+        .map(|b| match b {
+            MarkupBlock::Text(t) => HoverBlock::Text(t),
+            MarkupBlock::Code(c) => HoverBlock::Code(c),
+        })
+        .collect()
+}
+
+fn completion(item: CompletionItem, resolve: bool) -> Completion {
     let pos = |p: Position| (p.line, p.character);
     Completion {
         range: item.range.map(|r| (pos(r.start), pos(r.end))),
-        additional_edits: item
-            .additional_edits
-            .into_iter()
-            .map(|e| ServerEdit {
-                start: pos(e.range.start),
-                end: pos(e.range.end),
-                text: e.text,
-            })
-            .collect(),
+        additional_edits: item.additional_edits.into_iter().map(server_edit).collect(),
+        documentation: hover_blocks(item.documentation),
+        resolve,
         label: item.label,
         kind: item.kind,
         detail: item.detail,
@@ -1185,14 +1199,7 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let found = client.hover(&doc, at).await;
             let blocks = match found {
-                Ok(Some(hover)) => hover
-                    .blocks
-                    .into_iter()
-                    .map(|b| match b {
-                        MarkupBlock::Text(t) => HoverBlock::Text(t),
-                        MarkupBlock::Code(c) => HoverBlock::Code(c),
-                    })
-                    .collect(),
+                Ok(Some(hover)) => hover_blocks(hover.blocks),
                 Ok(None) => Vec::new(),
                 Err(why) => {
                     tracing::debug!("hover failed: {why}");
@@ -1413,23 +1420,74 @@ impl Shell {
         };
         tracing::debug!(path = %doc.display(), line = at.line, character = at.character, ?trigger, "completion");
         let weak = editor.downgrade();
-        cx.spawn(async move |_, cx| {
-            let (items, incomplete) = match client.completion(&doc, at, trigger.as_deref()).await {
-                Ok(list) => (
-                    list.items.into_iter().map(completion).collect(),
-                    list.incomplete,
-                ),
+        let id = editor.entity_id();
+        let resolves = client.supports("/completionProvider/resolveProvider");
+        cx.spawn(async move |this, cx| {
+            let (list, incomplete) = match client.completion(&doc, at, trigger.as_deref()).await {
+                Ok(list) => (list.items, list.incomplete),
                 Err(why) => {
                     tracing::debug!("completion failed: {why}");
                     (Vec::new(), false)
                 }
             };
-            tracing::debug!(
-                "completion → {} items, incomplete {incomplete}",
-                items.len()
-            );
+            tracing::debug!("completion → {} items, incomplete {incomplete}", list.len());
+            let items = list
+                .iter()
+                .map(|item| completion(item.clone(), resolves))
+                .collect();
+            if resolves {
+                let _ = this.update(cx, |this, _| {
+                    this.lsp.completions.insert(id, (request, client, list));
+                });
+            }
             let _ = weak.update(cx, |e, cx| {
                 e.show_completions(request, items, incomplete, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Answers the editor's requests for the newer language features.
+    pub(super) fn lsp_editor_request(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: LspRequest,
+        cx: &mut Context<Self>,
+    ) {
+        match request {
+            LspRequest::ResolveCompletion { request, index } => {
+                self.lsp_resolve_completion(editor, request, index, cx)
+            }
+        }
+    }
+
+    fn lsp_resolve_completion(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((asked, client, items)) = self.lsp.completions.get(&editor.entity_id()) else {
+            return;
+        };
+        let Some(item) = items.get(index).filter(|_| *asked == request).cloned() else {
+            return;
+        };
+        let client = client.clone();
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let item = match client.resolve_completion(&item).await {
+                Ok(item) => item,
+                Err(why) => return tracing::debug!("completion resolve failed: {why}"),
+            };
+            let resolved = Resolved {
+                detail: item.detail,
+                documentation: hover_blocks(item.documentation),
+                additional_edits: item.additional_edits.into_iter().map(server_edit).collect(),
+            };
+            let _ = weak.update(cx, |e, cx| {
+                e.resolved_completion(request, index, resolved, cx)
             });
         })
         .detach();
@@ -1701,6 +1759,15 @@ impl Shell {
     /// Tells the server a file is closed once no tab shows it.
     pub(super) fn lsp_closed(&mut self, path: &Path, cx: &Context<Self>) {
         let doc = document_key(path);
+        let open: HashSet<EntityId> = self
+            .items
+            .values()
+            .filter_map(|view| match view {
+                ItemView::Editor(e) => Some(e.entity_id()),
+                _ => None,
+            })
+            .collect();
+        self.lsp.completions.retain(|id, _| open.contains(id));
         if !self.editors_showing(&doc, cx).is_empty() {
             return;
         }

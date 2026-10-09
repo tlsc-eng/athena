@@ -176,6 +176,10 @@ its shells running.
   tab; clicking a row opens the file at that line), hover docs (rest the pointer on a word for
   half a second), completion as you type (Up/Down to move, Enter or Tab to accept, Escape to
   close; accepting can also add an import) and signature help while typing call arguments.
+  The selected suggestion's documentation shows beside the list; servers that send it only on
+  request (typescript-language-server) are asked as an item is selected, and an import such an
+  item adds (TypeScript's auto-imports) is applied on accept, or as soon as it arrives if
+  nothing was typed in between.
 - Completion snippets keep their tab stops: Tab moves to the next placeholder and Shift+Tab to
   the previous one, a placeholder used in several places gets a caret in each so they are typed
   together, and `$0` (or the snippet's end), Escape or Tab once the caret has left the snippet

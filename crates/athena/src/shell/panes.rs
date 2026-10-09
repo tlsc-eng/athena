@@ -313,6 +313,9 @@ impl Shell {
                             let lines = *start_line..*end_line;
                             return this.lsp_inlay_hints(&view, *request, lines, cx);
                         }
+                        EditorEvent::Lsp(request) => {
+                            return this.lsp_editor_request(&view, request.clone(), cx);
+                        }
                     }
                     cx.notify();
                 })

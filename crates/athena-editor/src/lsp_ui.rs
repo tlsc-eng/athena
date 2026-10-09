@@ -31,6 +31,14 @@ actions!(
     ]
 );
 
+/// A question for the language server that the shell answers through the method each names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LspRequest {
+    /// Fill in a suggestion of the list `request` brought; answer with
+    /// [`EditorView::resolved_completion`].
+    ResolveCompletion { request: u64, index: usize },
+}
+
 /// The name typed into the rename field, sent up to the shell to rename with.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = editor, no_json)]
