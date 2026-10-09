@@ -887,19 +887,21 @@ mod tests {
              (sleep 0.3; printf 'Content-Length: %s\\r\\n\\r\\n%s' \"${#body}\" \"$body\") | \
              nc -U \"$1\" > '{dir}/heard'\n",
         );
-        let adapter = Adapter {
-            program,
-            args: vec!["{socket}".into()],
-            cwd: dir.clone(),
-            login_shell: false,
-            transport: Transport::DialIn,
-        };
-        let (client, _events) = Client::start(adapter).unwrap();
-        let capabilities = block_on(client.initialize("go")).unwrap();
-        assert_eq!(capabilities["supportsConfigurationDoneRequest"], true);
-        assert!(client.supports("supportsConfigurationDoneRequest"));
-        assert!(!client.supports("supportsRestartRequest"));
-        drop(client);
+        // Delve starts through the login shell, so both ways of starting must reach it.
+        for login_shell in [false, true] {
+            let adapter = Adapter {
+                program: program.clone(),
+                args: vec!["{socket}".into()],
+                cwd: dir.clone(),
+                login_shell,
+                transport: Transport::DialIn,
+            };
+            let (client, _events) = Client::start(adapter).unwrap();
+            let capabilities = block_on(client.initialize("go")).unwrap();
+            assert_eq!(capabilities["supportsConfigurationDoneRequest"], true);
+            assert!(client.supports("supportsConfigurationDoneRequest"));
+            assert!(!client.supports("supportsRestartRequest"));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
