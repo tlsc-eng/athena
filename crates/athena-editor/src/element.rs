@@ -12,7 +12,7 @@ use gpui::{
 
 use crate::Lang;
 use crate::buffer::Buffer;
-use crate::display::{DisplayLine, Guides, wrap_breaks, wrap_indent};
+use crate::display::{DisplayLine, Guides, column_width, wrap_breaks, wrap_indent};
 use crate::syntax::Token;
 use crate::view::{EditorLayout, EditorView, LayoutRow};
 
@@ -42,7 +42,12 @@ impl TokenStyle {
 /// `line` as drawn with inlay hints `(column, text, is_type)` inside it, and the bytes each hint
 /// takes. The caret at a hint's column is drawn after it, except before a type, which belongs
 /// to the name before it; at the line's start and end the caret stays outside every hint.
-fn inlaid(line: &str, hints: &[(usize, String, bool)]) -> (DisplayLine, Vec<Range<usize>>) {
+/// Where a wrapped line `breaks`, a type ends the row above and a parameter name starts the next.
+fn inlaid(
+    line: &str,
+    hints: &[(usize, String, bool)],
+    breaks: &[usize],
+) -> (DisplayLine, Vec<Range<usize>>) {
     let plain = DisplayLine::new(line);
     let n = plain.char_to_byte.len() - 1;
     let mut text = String::with_capacity(plain.text.len());
@@ -50,6 +55,21 @@ fn inlaid(line: &str, hints: &[(usize, String, bool)]) -> (DisplayLine, Vec<Rang
     let mut spans = Vec::new();
     for i in 0..=n {
         let start = text.len();
+        if breaks.binary_search(&i).is_ok() {
+            for is_type in [true, false] {
+                if !is_type {
+                    char_to_byte.push(text.len());
+                }
+                for (_, hint, _) in hints.iter().filter(|h| h.0 == i && h.2 == is_type) {
+                    spans.push(text.len()..text.len() + hint.len());
+                    text.push_str(hint);
+                }
+            }
+            if i < n {
+                text.push_str(&plain.text[plain.char_to_byte[i]..plain.char_to_byte[i + 1]]);
+            }
+            continue;
+        }
         let hugs = |is_type: bool| i == 0 || (is_type && i < n);
         let mut after = false;
         for hugging in [true, false] {
@@ -65,6 +85,50 @@ fn inlaid(line: &str, hints: &[(usize, String, bool)]) -> (DisplayLine, Vec<Rang
         }
     }
     (DisplayLine { text, char_to_byte }, spans)
+}
+
+/// The hints of a wrapped line that leave each row within `cols` columns, earlier ones first.
+/// Rows break by the buffer's text, as the display map counts them, so a hint that would push
+/// its row's text past the edge is left out rather than hiding code.
+fn fitting_hints(
+    line: &str,
+    hints: &[(usize, String, bool)],
+    breaks: &[usize],
+    cols: usize,
+) -> Vec<(usize, String, bool)> {
+    let chars: Vec<char> = line.chars().collect();
+    let starts: Vec<usize> = std::iter::once(0).chain(breaks.iter().copied()).collect();
+    let indent = wrap_indent(line, cols);
+    let mut room: Vec<usize> = starts
+        .iter()
+        .enumerate()
+        .map(|(row, &a)| {
+            let b = starts.get(row + 1).copied().unwrap_or(chars.len());
+            let text: String = chars[a..b].iter().collect();
+            let used = column_width(text.trim_end()) + if row > 0 { indent } else { 0 };
+            cols.saturating_sub(used)
+        })
+        .collect();
+    let mut sorted: Vec<&(usize, String, bool)> = hints.iter().collect();
+    sorted.sort_by_key(|h| h.0);
+    sorted
+        .into_iter()
+        .filter(|(col, hint, is_type)| {
+            // A type at a break belongs to the row it ends; anything else to the row it starts.
+            let row = match *is_type {
+                true => starts.partition_point(|&s| s < *col),
+                false => starts.partition_point(|&s| s <= *col),
+            }
+            .saturating_sub(1);
+            let width = column_width(hint);
+            let fits = room[row] >= width;
+            if fits {
+                room[row] -= width;
+            }
+            fits
+        })
+        .cloned()
+        .collect()
 }
 
 /// The style of each char of `line`, `n` chars long, from highlights covering it.
@@ -535,9 +599,12 @@ impl Element for EditorElement {
                 ),
                 None => (Vec::new(), px(0.)),
             };
-            // Wrapped lines break by the buffer's columns, which hint text would throw off.
-            let (display, inlay_spans) = match inlays.get(&line) {
-                Some(hints) if breaks.is_empty() && n > 0 => inlaid(&raw, hints),
+            let (display, inlay_spans) = match (inlays.get(&line), wrap) {
+                (Some(hints), Some(cols)) if n > 0 && !breaks.is_empty() => {
+                    let fitting = fitting_hints(&raw, hints, &breaks, cols);
+                    inlaid(&raw, &fitting, &breaks)
+                }
+                (Some(hints), _) if n > 0 => inlaid(&raw, hints, &[]),
                 _ => (DisplayLine::new(&raw), Vec::new()),
             };
             let display = Rc::new(display);
@@ -1360,7 +1427,7 @@ mod tests {
             (2, ": int".to_string(), true),
             (8, "n: ".to_string(), false),
         ];
-        let (d, spans) = inlaid("x😀 := f(1)", &hints);
+        let (d, spans) = inlaid("x😀 := f(1)", &hints, &[]);
         assert_eq!(d.text, "x😀: int := f(n: 1)");
         assert_eq!(spans.len(), 2);
         assert_eq!(&d.text[spans[0].clone()], ": int");
@@ -1379,9 +1446,64 @@ mod tests {
         assert_eq!(d.char_to_byte[10], d.text.len());
         assert_eq!(d.char_for_byte(spans[1].start + 1), 7);
 
-        let (d, _) = inlaid("\tf(1)", &[(0, "x".into(), false), (5, ": y".into(), true)]);
+        let (d, _) = inlaid(
+            "\tf(1)",
+            &[(0, "x".into(), false), (5, ": y".into(), true)],
+            &[],
+        );
         assert_eq!(d.text, "x    f(1): y");
         assert_eq!((d.char_to_byte[0], d.char_to_byte[5]), (0, d.text.len()));
+    }
+
+    #[test]
+    fn hints_on_a_wrapped_line_land_on_the_row_they_belong_to() {
+        // Rows `total := ` and `scale(1, 2)`: a type ends the first, a parameter starts the next.
+        let line = "total := scale(1, 2)";
+        let breaks = [9];
+        let hints = vec![
+            (5, ": int".to_string(), true),
+            (9, "x: ".to_string(), false),
+            (9, " ok".to_string(), true),
+            (15, "value: ".to_string(), false),
+        ];
+        let (d, spans) = inlaid(line, &hints, &breaks);
+        assert_eq!(d.text, "total: int :=  okx: scale(value: 1, 2)");
+        assert_eq!(spans.len(), 4);
+        let row = |a: usize, b: usize| &d.text[d.char_to_byte[a]..d.char_to_byte[b]];
+        assert_eq!(
+            row(0, 9),
+            "total: int :=  ok",
+            "the type at the break ends the row"
+        );
+        assert_eq!(
+            row(9, 20),
+            "x: scale(value: 1, 2)",
+            "the parameter name at the break starts the next"
+        );
+    }
+
+    #[test]
+    fn hints_that_would_push_a_wrapped_row_past_the_edge_are_left_out() {
+        let line = "first(alpha) second(beta) third(gamma)";
+        let cols = 16;
+        let breaks = crate::display::wrap_breaks(line, cols);
+        assert_eq!(breaks, [13, 26]);
+        let hints = vec![
+            (6, "a:".to_string(), false),
+            (20, "bb: ".to_string(), false),
+            (32, "very long name: ".to_string(), false),
+            (13, ":T".to_string(), true),
+            (1, "x".to_string(), false),
+        ];
+        let kept: Vec<usize> = fitting_hints(line, &hints, &breaks, cols)
+            .iter()
+            .map(|h| h.0)
+            .collect();
+        assert_eq!(
+            kept,
+            [1, 6, 20],
+            "earlier hints take a row's room first, and the long name fits no row"
+        );
     }
 
     #[test]
