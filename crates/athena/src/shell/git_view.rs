@@ -191,7 +191,7 @@ pub(super) fn status_badge(
 }
 
 /// Hunks for a UTF-16 file, which git diffs as binary, from its index and worktree texts;
-/// `None` for any other file, which git diffs line by line as it is.
+/// `None` for any other file, or one git re-encodes, which git diffs line by line as it is.
 fn utf16_hunks(root: &Path, path: &Path) -> Option<Vec<Hunk>> {
     let disk = std::fs::read(path).ok()?;
     if disk.len() > super::review::MAX_DIFF_BYTES {
@@ -199,6 +199,9 @@ fn utf16_hunks(root: &Path, path: &Path) -> Option<Vec<Hunk>> {
     }
     let now = athena_editor::decode_text(&disk, None).filter(|d| d.encoding.is_utf16())?;
     let rel = path.strip_prefix(root).ok()?;
+    if git::worktree_encoding(root, rel).ok()?.is_some() {
+        return None;
+    }
     let index = git::show(root, git::Rev::Index, rel).ok()??;
     let before = athena_editor::decode_text(&index, Some(now.encoding))?;
     Some(line_hunks(&before.text, &now.text))
@@ -1739,6 +1742,24 @@ mod tests {
             utf16_hunks(&dir, &dir.join("plain.txt")),
             None,
             "git diffs it"
+        );
+        // Git writes this one out big-endian, so its copy and the disk's differ in byte order.
+        let attributed = dir.join("a.u16");
+        std::fs::write(
+            dir.join(".gitattributes"),
+            "*.u16 working-tree-encoding=UTF-16\n",
+        )
+        .unwrap();
+        std::fs::write(&attributed, utf16("one\ntwo\nthree\n")).unwrap();
+        git(&["add", "."]);
+        std::fs::write(&attributed, utf16("one\nTWO\nthree\nfour\n")).unwrap();
+        assert_eq!(utf16_hunks(&dir, &attributed), None, "git diffs it as text");
+        assert_eq!(
+            git::diff_hunks(&dir, &attributed).unwrap(),
+            [
+                Hunk::Modified { start: 1, len: 1 },
+                Hunk::Added { start: 3, len: 1 }
+            ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

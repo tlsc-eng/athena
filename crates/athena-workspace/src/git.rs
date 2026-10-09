@@ -1002,22 +1002,48 @@ pub fn show(root: &Path, rev: Rev, rel: &Path) -> Result<Option<Vec<u8>>> {
     run(cmd, None).map(Some)
 }
 
-/// Refuses a file that goes through a filter driver: its hunks were read without the driver, so
-/// only git itself, staging or restoring the whole file, can store or write it correctly.
-pub fn refuse_filtered(root: &Path, rel: &Path) -> Result<()> {
+/// The attributes in `names` that `rel` gives a value, as (name, value) pairs.
+fn valued_attrs(root: &Path, rel: &Path, names: &[&str]) -> Result<Vec<(String, String)>> {
     let mut cmd = git(root);
-    cmd.args(["check-attr", "-z", "filter", "--"]).arg(rel);
+    cmd.args(["check-attr", "-z"])
+        .args(names)
+        .arg("--")
+        .arg(rel);
     let out = run(cmd, None)?;
-    let driver = out.split(|&b| b == 0).nth(2).unwrap_or_default();
-    match driver {
-        b"" | b"unspecified" | b"unset" | b"set" => Ok(()),
-        name => bail!(
-            "{} goes through the \"{}\" filter, so Athena stages and reverts it only as a whole \
-             file.",
-            rel.display(),
-            String::from_utf8_lossy(name)
-        ),
-    }
+    let fields: Vec<&[u8]> = out.split(|&b| b == 0).collect();
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    Ok(fields
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|[_, name, value]| (text(name), text(value)))
+        .filter(|(_, value)| !matches!(value.as_str(), "unspecified" | "unset" | "set" | ""))
+        .collect())
+}
+
+/// The encoding git writes `rel` out in when its `working-tree-encoding` attribute names one;
+/// git keeps such a file as UTF-8 and diffs it as text.
+pub fn worktree_encoding(root: &Path, rel: &Path) -> Result<Option<String>> {
+    let attrs = valued_attrs(root, rel, &["working-tree-encoding"])?;
+    Ok(attrs.into_iter().next().map(|(_, value)| value))
+}
+
+/// Refuses a file that goes through a filter driver or that git re-encodes for the worktree: its
+/// hunks were read without the driver or in Athena's guess at the encoding, so only git itself,
+/// staging or restoring the whole file, can store or write it correctly.
+pub fn refuse_filtered(root: &Path, rel: &Path) -> Result<()> {
+    let attrs = valued_attrs(root, rel, &["filter", "working-tree-encoding"])?;
+    let Some((name, value)) = attrs.into_iter().next() else {
+        return Ok(());
+    };
+    let why = match name.as_str() {
+        "filter" => format!("goes through the \"{value}\" filter"),
+        _ => format!("is kept in git as UTF-8 and written out as {value}"),
+    };
+    bail!(
+        "{} {why}, so Athena stages and reverts it only as a whole file.",
+        rel.display()
+    )
 }
 
 /// Puts `contents` in the index as `rel`, or takes `rel` out of it for `None`, leaving the
@@ -2168,6 +2194,41 @@ mod tests {
             write_index(&dir, Path::new("g.dat"), "one\ntwo\n", Some("one\nthree\n")).unwrap_err();
         assert!(err.to_string().contains("\"caps\" filter"), "{err:#}");
         assert_eq!(git_out(&dir, &["cat-file", "blob", ":g.dat"]), "one\ntwo\n");
+        refuse_filtered(&dir, Path::new("f.txt")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hunks_refuse_files_git_reencodes_for_the_worktree() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("stage-encoding", "seed\n");
+        std::fs::write(
+            dir.join(".git/info/attributes"),
+            "*.u16 working-tree-encoding=UTF-16LE-BOM\n",
+        )
+        .unwrap();
+        let utf16 = |text: &str| -> Vec<u8> {
+            let mut out = vec![0xFF, 0xFE];
+            out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+            out
+        };
+        std::fs::write(dir.join("w.u16"), utf16("a\nb\n")).unwrap();
+        stage(&dir, &[PathBuf::from("w.u16")]).unwrap();
+        commit(&dir, "Add UTF-16", false).unwrap();
+        assert_eq!(git_out(&dir, &["cat-file", "blob", ":w.u16"]), "a\nb\n");
+        let err = refuse_filtered(&dir, Path::new("w.u16")).unwrap_err();
+        assert!(err.to_string().contains("UTF-16LE-BOM"), "{err:#}");
+        std::fs::write(dir.join("w.u16"), utf16("A\nB\n")).unwrap();
+        let staged = write_index_bytes(
+            &dir,
+            Path::new("w.u16"),
+            &utf16("a\nb\n"),
+            Some(&utf16("A\nb\n")),
+        );
+        assert!(staged.is_err(), "the hunk is refused");
+        assert_eq!(git_out(&dir, &["cat-file", "blob", ":w.u16"]), "a\nb\n");
         refuse_filtered(&dir, Path::new("f.txt")).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
