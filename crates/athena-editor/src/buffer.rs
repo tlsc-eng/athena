@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::ops::Range;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use ropey::Rope;
 use tree_sitter::{InputEdit, Point};
 
 use crate::display::{Fold, TAB_WIDTH, indent_fold_at};
+use crate::encoding::{self, Decoded, FileEncoding};
 use crate::pairs::{self, AutoClosed};
 use crate::save::Tidy;
 use crate::syntax::{Lang, ParseJob, Parsed, Syntax, Token, bracket_pair};
@@ -452,6 +453,11 @@ pub struct Buffer {
     parse_owed: bool,
     /// Edits only move the tree; whoever owns the buffer runs [`Self::start_parse`] elsewhere.
     background_parse: bool,
+    encoding: FileEncoding,
+    /// Whether the file's bytes decoded without loss, so a save rewrites only what was edited.
+    round_trips: bool,
+    /// Set when the user picked the encoding, so reloads keep it instead of detecting again.
+    encoding_pinned: bool,
 }
 
 /// What a file looked like on disk; tools that keep the modification time still change its size.
@@ -514,13 +520,18 @@ impl Buffer {
             defer_parse: false,
             parse_owed: false,
             background_parse: false,
+            encoding: FileEncoding::utf8(),
+            round_trips: true,
+            encoding_pinned: false,
         }
     }
 
-    /// Opens a UTF-8 text file; binary and very large files are refused.
+    /// Opens a text file in the encoding it looks like; binary and very large files are refused.
     pub fn open(path: &Path) -> Result<Self> {
-        let (text, stamp) = read_text(path)?;
-        let mut buffer = Self::new(&text, Some(path.to_path_buf()));
+        let (decoded, stamp) = read_text(path, None)?;
+        let mut buffer = Self::new(&decoded.text, Some(path.to_path_buf()));
+        buffer.encoding = decoded.encoding;
+        buffer.round_trips = decoded.round_trips;
         buffer.disk = Some(stamp);
         buffer.indent = crate::editorconfig::resolve(path).indent(buffer.indent);
         Ok(buffer)
@@ -530,6 +541,8 @@ impl Buffer {
     /// link and its target gets the text, and a hard-linked file is rewritten in place.
     pub fn save(&mut self) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
+        // Encoded before the file is touched, so text that can't be written leaves it as it was.
+        let bytes = self.encoded(&path)?;
         let target = link_target(&path);
         let meta = fs::metadata(&target).ok();
         if meta.as_ref().is_some_and(|m| m.is_file() && m.nlink() > 1) {
@@ -539,10 +552,10 @@ impl Buffer {
                 .truncate(true)
                 .open(&target)
                 .with_context(|| format!("write {}", target.display()))?;
-            self.rope.write_to(&mut out)?;
+            out.write_all(&bytes)?;
             out.sync_all()?;
         } else {
-            self.replace_file(&target, meta.as_ref())?;
+            replace_file(&target, &bytes, meta.as_ref())?;
         }
         self.disk = stamp(&path);
         self.saved_at = Some(self.undo.len());
@@ -551,29 +564,52 @@ impl Buffer {
         Ok(())
     }
 
-    /// Swaps `target` for a fully written temp file, so a failed save never leaves it half written.
-    fn replace_file(&self, target: &Path, meta: Option<&fs::Metadata>) -> Result<()> {
-        let tmp = target.with_file_name(format!(
-            ".{}.athena-tmp",
-            target
-                .file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default()
-        ));
-        let written = (|| {
-            let mut out =
-                fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
-            self.rope.write_to(&mut out)?;
-            out.sync_all()?;
-            if let Some(meta) = meta {
-                fs::set_permissions(&tmp, meta.permissions())?;
-            }
-            fs::rename(&tmp, target).with_context(|| format!("replace {}", target.display()))
-        })();
-        if written.is_err() {
-            let _ = fs::remove_file(&tmp);
+    /// The text as the file's bytes, refused when writing it would change bytes nobody edited.
+    fn encoded(&self, path: &Path) -> Result<Vec<u8>> {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let encoding = self.encoding.name();
+        if !self.round_trips {
+            bail!(
+                "{name} has bytes that aren't valid {encoding}, and saving would change them; \
+                 Reopen with Encoding to read it as the encoding it was written in"
+            );
         }
-        written
+        encoding::encode(&self.rope, self.encoding).map_err(|c| {
+            anyhow::anyhow!(
+                "{encoding} has no \"{c}\" (U+{:04X}), so {name} can't be saved in it; \
+                 Save with Encoding to pick one that has, such as UTF-8",
+                c as u32
+            )
+        })
+    }
+
+    pub fn encoding(&self) -> FileEncoding {
+        self.encoding
+    }
+
+    /// Writes as `encoding` from now on, `pinned` if the user picked it, and returns the encoding
+    /// and pin it replaces so a failed save can put them back.
+    pub(crate) fn swap_encoding(
+        &mut self,
+        encoding: FileEncoding,
+        pinned: bool,
+    ) -> (FileEncoding, bool) {
+        let before = (self.encoding, self.encoding_pinned);
+        self.encoding = encoding;
+        self.encoding_pinned = pinned;
+        before
+    }
+
+    /// Writes in `other`'s encoding, as a copy saved elsewhere should.
+    pub(crate) fn copy_encoding(&mut self, other: &Buffer) {
+        self.encoding = other.encoding;
+        self.round_trips = other.round_trips;
+        self.encoding_pinned = other.encoding_pinned;
+    }
+
+    /// The encoding a reload should read the file in: the user's pick, else whatever it looks like.
+    pub(crate) fn pinned_encoding(&self) -> Option<FileEncoding> {
+        self.encoding_pinned.then_some(self.encoding)
     }
 
     /// Whether another program wrote or removed the file since this buffer read or saved it.
@@ -630,7 +666,7 @@ impl Buffer {
     /// Takes the file's current text as an undoable edit and marks it saved.
     pub fn reload_from_disk(&mut self, c: &mut Cursor) -> Result<()> {
         let path = self.path.clone().context("buffer has no file")?;
-        let disk = read_disk_text(&path, &self.rope)?;
+        let disk = read_disk_text(&path, &self.rope, self.pinned_encoding())?;
         let mut cs = Cursors::new(*c);
         self.take_disk_text(&mut cs, disk);
         *c = *cs.primary();
@@ -641,6 +677,11 @@ impl Buffer {
     /// saved; reloads with no edit between them undo as one step.
     pub(crate) fn take_disk_text(&mut self, cs: &mut Cursors, disk: DiskText) {
         self.disk = Some(disk.stamp);
+        // Undo past a recode would restore text decoded the old way, then save it the new way.
+        let recoded = disk.encoding != self.encoding;
+        self.encoding = disk.encoding;
+        self.round_trips = disk.round_trips;
+        self.encoding_pinned |= disk.pinned;
         if let Some((range, inserted)) = disk.change {
             let (prefix, old_end) = (range.start, range.end);
             let new_end = prefix + inserted.chars().count();
@@ -661,6 +702,11 @@ impl Buffer {
             cs.set(all.collect(), cs.primary_index());
         } else if self.last_edit.is_some_and(|(k, _)| k != EditKind::Reload) {
             // The next keystroke must start a new undo step, or it would fold into the saved one.
+            self.last_edit = None;
+        }
+        if recoded {
+            self.undo.clear();
+            self.redo.clear();
             self.last_edit = None;
         }
         self.saved_at = Some(self.undo.len());
@@ -2273,8 +2319,9 @@ fn stamp(path: &Path) -> Option<Stamp> {
     fs::metadata(path).ok().map(|m| Stamp::of(&m))
 }
 
-/// A UTF-8 text file's contents and modification time; binary and very large files are refused.
-fn read_text(path: &Path) -> Result<(String, Stamp)> {
+/// A text file's contents, read as `forced` or as the encoding they look like, and its
+/// modification time; binary and very large files are refused.
+fn read_text(path: &Path, forced: Option<FileEncoding>) -> Result<(Decoded, Stamp)> {
     // Non-blocking, so a FIFO without a writer fails the checks below instead of hanging here.
     let file = fs::OpenOptions::new()
         .read(true)
@@ -2294,27 +2341,60 @@ fn read_text(path: &Path) -> Result<(String, Stamp)> {
     if bytes.len() as u64 > MAX_FILE {
         return Err(too_large());
     }
-    if bytes.iter().take(8192).any(|b| *b == 0) {
+    let Some(decoded) = encoding::decode(&bytes, forced) else {
         bail!("{} looks like a binary file", path.display());
+    };
+    Ok((decoded, Stamp::of(&meta)))
+}
+
+/// Swaps `target` for a fully written temp file, so a failed save never leaves it half written.
+fn replace_file(target: &Path, bytes: &[u8], meta: Option<&fs::Metadata>) -> Result<()> {
+    let tmp = target.with_file_name(format!(
+        ".{}.athena-tmp",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+    ));
+    let written = (|| {
+        let mut out = fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+        out.write_all(bytes)?;
+        out.sync_all()?;
+        if let Some(meta) = meta {
+            fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        fs::rename(&tmp, target).with_context(|| format!("replace {}", target.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    let text =
-        String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))?;
-    Ok((text, Stamp::of(&meta)))
+    written
 }
 
 /// A file's text as read from disk, as the one edit that turns a buffer's text into it.
 pub(crate) struct DiskText {
     stamp: Stamp,
+    encoding: FileEncoding,
+    round_trips: bool,
+    pinned: bool,
     /// The chars replaced and their replacement; `None` when the text is the same.
     change: Option<(Range<usize>, String)>,
 }
 
-/// Reads `path` and compares it with `rope`; it leaves the buffer alone, so it can run off the UI thread.
-pub(crate) fn read_disk_text(path: &Path, rope: &Rope) -> Result<DiskText> {
-    let (text, stamp) = read_text(path)?;
+/// Reads `path` (as `forced`, else as detected) and compares it with `rope`; it leaves the buffer
+/// alone, so it can run off the UI thread.
+pub(crate) fn read_disk_text(
+    path: &Path,
+    rope: &Rope,
+    forced: Option<FileEncoding>,
+) -> Result<DiskText> {
+    let (decoded, stamp) = read_text(path, forced)?;
     Ok(DiskText {
         stamp,
-        change: differing_span(rope, &text),
+        encoding: decoded.encoding,
+        round_trips: decoded.round_trips,
+        pinned: forced.is_some(),
+        change: differing_span(rope, &decoded.text),
     })
 }
 
@@ -3827,5 +3907,160 @@ mod tests {
             10_000,
             "the far caret followed every edit"
         );
+    }
+
+    fn encoding_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("athena-enc-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Opens `bytes`, types "X" after `anchor`, saves, and expects only that edit in the bytes.
+    fn edit_and_save(bytes: &[u8], anchor: &str, name: &str, edited: &[u8]) {
+        let dir = encoding_dir(name.split(' ').next().unwrap());
+        let path = dir.join("f.txt");
+        fs::write(&path, bytes).unwrap();
+        let mut b = Buffer::open(&path).unwrap();
+        assert_eq!(b.encoding().name(), name);
+        let unchanged = b.full_text();
+        b.save().unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "a save with no edit writes the same bytes"
+        );
+        let at = unchanged.find(anchor).unwrap() + anchor.len();
+        let at = unchanged[..at].chars().count();
+        b.insert(&mut Cursor::at(at), "X");
+        b.save().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), edited);
+        assert_eq!(b.line_ending(), LineEnding::CrLf, "line breaks kept");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn utf16_files_save_back_in_utf16_with_their_bom() {
+        let utf16 = |text: &str, le: bool| -> Vec<u8> {
+            let mut out = if le {
+                vec![0xFF, 0xFE]
+            } else {
+                vec![0xFE, 0xFF]
+            };
+            for u in text.encode_utf16() {
+                out.extend(if le { u.to_le_bytes() } else { u.to_be_bytes() });
+            }
+            out
+        };
+        for le in [true, false] {
+            let name = if le { "UTF-16 LE" } else { "UTF-16 BE" };
+            edit_and_save(
+                &utf16("héllo\r\nwörld 𝄞\r\n", le),
+                "wör",
+                name,
+                &utf16("héllo\r\nwörXld 𝄞\r\n", le),
+            );
+        }
+    }
+
+    #[test]
+    fn shift_jis_files_save_back_in_shift_jis() {
+        let sjis = |t: &str| encoding_rs::SHIFT_JIS.encode(t).0.into_owned();
+        edit_and_save(
+            &sjis("こんにちは、世界\r\nテスト\r\n"),
+            "テ",
+            "Shift JIS",
+            &sjis("こんにちは、世界\r\nテXスト\r\n"),
+        );
+    }
+
+    #[test]
+    fn latin1_files_save_back_byte_for_byte() {
+        edit_and_save(
+            b"caf\xE9\r\nna\xEFve \x81\x8D\r\n",
+            "caf",
+            "Windows 1252",
+            b"cafX\xE9\r\nna\xEFve \x81\x8D\r\n",
+        );
+    }
+
+    #[test]
+    fn a_utf8_bom_stays_out_of_the_text_and_on_disk() {
+        edit_and_save(
+            b"\xEF\xBB\xBFkey = 1\r\n",
+            "key",
+            "UTF-8 with BOM",
+            b"\xEF\xBB\xBFkeyX = 1\r\n",
+        );
+        let b = Buffer::new("x", None);
+        assert_eq!(b.encoding(), FileEncoding::utf8());
+    }
+
+    #[test]
+    fn a_file_that_does_not_round_trip_refuses_to_save_and_is_left_alone() {
+        let dir = encoding_dir("lossy");
+        let path = dir.join("odd.txt");
+        // A trailing half code unit: decoding replaces it, so writing back would drop a byte.
+        let bytes = b"\xFF\xFEa\0b\0c".to_vec();
+        fs::write(&path, &bytes).unwrap();
+        let mut b = Buffer::open(&path).unwrap();
+        b.insert(&mut Cursor::at(0), "z");
+        let err = format!("{:#}", b.save().unwrap_err());
+        assert!(err.contains("Reopen with Encoding"), "{err}");
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_character_the_encoding_lacks_refuses_the_save_even_through_a_hard_link() {
+        let dir = encoding_dir("unmappable");
+        let path = dir.join("latin.txt");
+        fs::write(&path, b"caf\xE9\n").unwrap();
+        fs::hard_link(&path, dir.join("other")).unwrap();
+        let mut b = Buffer::open(&path).unwrap();
+        b.insert(&mut Cursor::at(0), "✓");
+        let err = format!("{:#}", b.save().unwrap_err());
+        assert!(
+            err.contains("U+2713") && err.contains("Save with Encoding"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"caf\xE9\n", "not truncated");
+        assert!(b.is_dirty());
+        let utf8 = FileEncoding::all()[0];
+        b.swap_encoding(utf8, true);
+        b.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "✓café\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picked_encoding_survives_a_reload() {
+        let dir = encoding_dir("pinned");
+        let path = dir.join("ru.txt");
+        let cp1251 = encoding_rs::WINDOWS_1251;
+        fs::write(&path, cp1251.encode("привет\n").0).unwrap();
+        let mut b = Buffer::open(&path).unwrap();
+        assert_eq!(
+            b.encoding().name(),
+            "Windows 1252",
+            "Cyrillic isn't guessed"
+        );
+        let pick = FileEncoding::all()
+            .into_iter()
+            .find(|e| e.name() == "Windows 1251")
+            .unwrap();
+        let mut c = Cursor::default();
+        b.insert(&mut c, "x");
+        b.save().unwrap();
+        let disk = read_disk_text(&path, b.rope(), Some(pick)).unwrap();
+        b.take_disk_text(&mut Cursors::new(c), disk);
+        assert_eq!(b.full_text(), "xпривет\n");
+        assert!(!b.is_dirty());
+        assert!(!b.undo(&mut c), "no undo back into the old decoding");
+        fs::write(&path, cp1251.encode("мир\n").0).unwrap();
+        b.reload_from_disk(&mut c).unwrap();
+        assert_eq!(b.full_text(), "мир\n");
+        assert_eq!(b.encoding(), pick);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

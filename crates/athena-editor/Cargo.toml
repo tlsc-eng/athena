@@ -35,3 +35,4 @@ imagesize.workspace = true
 libc.workspace = true
 regex.workspace = true
 globset.workspace = true
+encoding_rs.workspace = true

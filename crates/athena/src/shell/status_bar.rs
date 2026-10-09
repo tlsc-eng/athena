@@ -1,10 +1,10 @@
-use athena_editor::{EditorView, Indent, Lang, LineEnding};
+use athena_editor::{EditorView, FileEncoding, Indent, Lang, LineEnding};
 use athena_ui::{ActiveTheme, MenuItem, Tooltip};
 use athena_workspace::gh::CiState;
 use athena_workspace::git;
 use gpui::{
-    ClickEvent, Context, Entity, Focusable, IntoElement, SharedString, WeakEntity, Window, div,
-    prelude::*, px,
+    ClickEvent, Context, Entity, Focusable, IntoElement, Pixels, Point, SharedString, WeakEntity,
+    Window, div, prelude::*, px,
 };
 
 use super::Shell;
@@ -204,7 +204,22 @@ impl Shell {
                         })
                     }),
                 )
-                .child(item("status-encoding", "UTF-8".into()))
+                .child(
+                    button(
+                        "status-encoding",
+                        status.encoding.name().into(),
+                        "Select Encoding",
+                    )
+                    .on_click({
+                        let editor = editor.clone();
+                        let current = status.encoding;
+                        cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            let shell = cx.entity().downgrade();
+                            let items = encoding_menu(&editor, current, event.position(), shell);
+                            this.open_context_menu(event.position(), items, window, cx);
+                        })
+                    }),
+                )
                 .child(
                     button(
                         "status-eol",
@@ -345,6 +360,56 @@ fn eol_menu(editor: &Entity<EditorView>, current: LineEnding) -> Vec<MenuItem> {
                     .ok();
             })
             .disabled(eol == current)
+        })
+        .collect()
+}
+
+/// VS Code's encoding picker: whether to reopen or save, then a second menu of encodings.
+fn encoding_menu(
+    editor: &Entity<EditorView>,
+    current: FileEncoding,
+    at: Point<Pixels>,
+    shell: WeakEntity<Shell>,
+) -> Vec<MenuItem> {
+    let step = |label: &'static str, save: bool| {
+        let (editor, shell) = (editor.downgrade(), shell.clone());
+        MenuItem::new(label, move |window, cx| {
+            let items = encoding_choices(&editor, current, save);
+            shell
+                .update(cx, |this, cx| this.open_context_menu(at, items, window, cx))
+                .ok();
+        })
+    };
+    vec![
+        step("Reopen with Encoding", false),
+        step("Save with Encoding", true),
+    ]
+}
+
+fn encoding_choices(
+    editor: &WeakEntity<EditorView>,
+    current: FileEncoding,
+    save: bool,
+) -> Vec<MenuItem> {
+    FileEncoding::all()
+        .into_iter()
+        .map(|encoding| {
+            let editor = editor.clone();
+            let item = MenuItem::new(encoding.description(), move |_, cx| {
+                editor
+                    .update(cx, |e, cx| {
+                        if save {
+                            e.save_with_encoding(encoding, cx);
+                        } else {
+                            e.reopen_with_encoding(encoding, cx);
+                        }
+                    })
+                    .ok();
+            });
+            match encoding == current {
+                true => item.hint("current"),
+                false => item,
+            }
         })
         .collect()
 }

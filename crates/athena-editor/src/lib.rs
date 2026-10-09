@@ -6,6 +6,7 @@ mod diff_view;
 mod display;
 pub mod editorconfig;
 mod element;
+mod encoding;
 pub mod find;
 mod format;
 mod hover;
@@ -35,6 +36,7 @@ pub use buffer::{
 };
 pub use completion::{Completion, Resolved, ServerEdit};
 pub use diff_view::{DiffEvent, DiffView, HunkActions};
+pub use encoding::FileEncoding;
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
 pub use lsp_ui::{

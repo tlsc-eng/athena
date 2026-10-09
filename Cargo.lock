@@ -498,6 +498,7 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "athena-ui",
+ "encoding_rs",
  "globset",
  "gpui",
  "imagesize",

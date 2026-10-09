@@ -66,6 +66,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = "8"
 url = "2.5"
 percent-encoding = "2.3"
+encoding_rs = "0.8.42"
 
 athena-proto = { path = "crates/athena-proto" }
 athena-term = { path = "crates/athena-term" }

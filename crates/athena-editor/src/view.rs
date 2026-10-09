@@ -2237,21 +2237,21 @@ impl EditorView {
     /// Replaces the buffer with the file on disk, as a step that undo can take back; a large file
     /// is read and compared off the UI thread.
     fn reload(&mut self, cx: &mut Context<Self>) {
-        let Some((path, rope, version)) = self
-            .buf()
-            .and_then(|b| Some((b.path.clone()?, b.rope().clone(), b.version())))
-        else {
+        let Some((path, rope, version, pinned)) = self.buf().and_then(|b| {
+            let pinned = b.pinned_encoding();
+            Some((b.path.clone()?, b.rope().clone(), b.version(), pinned))
+        }) else {
             return;
         };
         if std::fs::metadata(&path).is_ok_and(|m| m.len() <= BACKGROUND_RELOAD) {
-            let disk = read_disk_text(&path, &rope);
+            let disk = read_disk_text(&path, &rope, pinned);
             self.finish_reload(version, disk, cx);
             return;
         }
         self.reloading = Some(cx.spawn(async move |this, cx| {
             let disk = cx
                 .background_executor()
-                .spawn(async move { read_disk_text(&path, &rope) })
+                .spawn(async move { read_disk_text(&path, &rope, pinned) })
                 .await;
             this.update(cx, |this, cx| this.finish_reload(version, disk, cx))
                 .ok();
@@ -2314,6 +2314,7 @@ impl EditorView {
                 let b = shared.buffer.borrow();
                 let mut fork = Buffer::new(&b.full_text(), Some(path.clone()));
                 fork.indent = b.indent;
+                fork.copy_encoding(&b);
                 fork
             };
             fork.save()?;
@@ -2599,6 +2600,7 @@ pub struct EditorStatus {
     pub lang: Option<crate::Lang>,
     pub indent: crate::Indent,
     pub line_ending: crate::LineEnding,
+    pub encoding: crate::FileEncoding,
 }
 
 impl EditorView {
@@ -2624,6 +2626,7 @@ impl EditorView {
             lang: b.lang(),
             indent: b.indent,
             line_ending: b.line_ending(),
+            encoding: b.encoding(),
         })
     }
 
@@ -2637,6 +2640,56 @@ impl EditorView {
         *self.fold_cache.borrow_mut() = Default::default();
         shared.changed(cx);
         self.changed(cx);
+    }
+
+    /// Reads the file again as `encoding`, in every tab showing it; refused over unsaved edits,
+    /// which were typed as the old encoding's text.
+    pub fn reopen_with_encoding(&mut self, encoding: crate::FileEncoding, cx: &mut Context<Self>) {
+        let Some(shared) = self.buffer.clone() else {
+            return;
+        };
+        let (path, rope, dirty) = {
+            let b = shared.buffer.borrow();
+            (b.path.clone(), b.rope().clone(), b.is_dirty())
+        };
+        let Some(path) = path else {
+            return;
+        };
+        if dirty {
+            self.save_error = Some(format!(
+                "{} has unsaved edits; save them before reopening it as {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                encoding.name()
+            ));
+            return self.changed(cx);
+        }
+        match read_disk_text(&path, &rope, Some(encoding)) {
+            Ok(disk) => {
+                self.with_buffer(cx, |b, c| b.take_disk_text(c, disk));
+                self.save_error = None;
+                shared.changed(cx);
+            }
+            Err(e) => self.save_error = Some(format!("{e:#}")),
+        }
+        self.changed(cx);
+    }
+
+    /// Saves in `encoding` and keeps using it; a save that fails keeps the old one.
+    pub fn save_with_encoding(
+        &mut self,
+        encoding: crate::FileEncoding,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(shared) = self.buffer.clone() else {
+            return false;
+        };
+        let before = shared.buffer.borrow_mut().swap_encoding(encoding, true);
+        let saved = self.save(cx);
+        if !saved {
+            shared.buffer.borrow_mut().swap_encoding(before.0, before.1);
+            self.changed(cx);
+        }
+        saved
     }
 
     /// Indents with `indent` from now on, leaving existing lines as they are.
