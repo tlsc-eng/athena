@@ -637,11 +637,14 @@ impl Shell {
         project.linters = trust;
         self.schedule_save(cx);
         self.lsp.held_back.remove(root);
-        self.project_settings_changed(root, cx);
+        // Started again even when its settings match: without a global TypeScript the pinned
+        // and the trusted configuration are the same, yet only a trusted project may keep its own.
         let typescript = (root.to_path_buf(), ServerKind::TypeScript);
-        if !self.lsp.servers.contains_key(&typescript) {
-            self.restart_lsp(&typescript, cx);
+        match self.lsp.servers.contains_key(&typescript) {
+            true => self.replace_server(&typescript, cx),
+            false => self.restart_lsp(&typescript, cx),
         }
+        self.project_settings_changed(root, cx);
         if trust != LinterTrust::Allowed {
             return self.stop_project_linters(root, cx);
         }
