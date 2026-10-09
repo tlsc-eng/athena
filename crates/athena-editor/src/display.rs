@@ -170,6 +170,8 @@ struct Wrap {
     cols: usize,
     /// Rows per buffer line; 0 marks a line whose rows must be counted again.
     rows: Vec<usize>,
+    /// Columns per buffer line, `usize::MAX` until measured, so a resize skips lines that fit.
+    widths: Vec<usize>,
     /// Rows before each line, one entry past the last line.
     before: Vec<usize>,
     stale: bool,
@@ -248,6 +250,7 @@ impl DisplayMap {
     pub fn reset_wrap(&mut self) {
         if let Some(w) = self.wrap.as_mut() {
             w.rows.clear();
+            w.widths.clear();
             w.stale = true;
         }
     }
@@ -262,10 +265,18 @@ impl DisplayMap {
         match (cols, &mut self.wrap) {
             (None, _) => self.wrap = None,
             (Some(cols), Some(w)) if w.cols == cols => {}
-            (Some(cols), _) => {
+            (Some(cols), Some(w)) => {
+                w.cols = cols;
+                for (rows, &width) in w.rows.iter_mut().zip(&w.widths) {
+                    *rows = if width <= cols { 1 } else { 0 };
+                }
+                w.stale = true;
+            }
+            (Some(cols), None) => {
                 self.wrap = Some(Wrap {
                     cols,
                     rows: Vec::new(),
+                    widths: Vec::new(),
                     before: Vec::new(),
                     stale: true,
                 })
@@ -282,9 +293,16 @@ impl DisplayMap {
             return;
         }
         w.rows.resize(lines, 0);
-        for (line, rows) in w.rows.iter_mut().enumerate() {
+        w.widths.resize(lines, usize::MAX);
+        for (line, (rows, width)) in w.rows.iter_mut().zip(&mut w.widths).enumerate() {
             if *rows == 0 {
-                *rows = wrap_breaks(&text(line), w.cols).len() + 1;
+                let text = text(line);
+                *width = column_width(&text);
+                *rows = if *width <= w.cols {
+                    1
+                } else {
+                    wrap_breaks(&text, w.cols).len() + 1
+                };
             }
         }
         w.before.clear();
@@ -346,6 +364,8 @@ impl DisplayMap {
             if first < end {
                 w.rows
                     .splice(first..end, std::iter::repeat_n(0, new_lines + 1));
+                w.widths
+                    .splice(first..end, std::iter::repeat_n(usize::MAX, new_lines + 1));
             }
             w.stale = true;
         }
@@ -661,6 +681,31 @@ mod tests {
         });
         assert_eq!(map.row_of(5), 1);
         assert_eq!(map.row_count(10), 6);
+    }
+
+    #[test]
+    fn resizing_rewraps_only_the_lines_too_wide_for_either_width() {
+        let lines = ["short", "a much longer line of words", "tiny"];
+        let read = std::cell::RefCell::new(Vec::new());
+        let text = |l: usize| {
+            read.borrow_mut().push(l);
+            lines[l].to_string()
+        };
+        let mut map = DisplayMap::default();
+        map.set_wrap(Some(12));
+        map.sync_wrap(3, text);
+        assert_eq!(map.row_count(3), 5);
+        read.borrow_mut().clear();
+        map.set_wrap(Some(14));
+        map.sync_wrap(3, text);
+        assert_eq!(*read.borrow(), [1], "short lines fit both widths");
+        assert_eq!(map.row_count(3), 4);
+        map.apply_edit(0, 0, 0);
+        read.borrow_mut().clear();
+        map.set_wrap(Some(30));
+        map.sync_wrap(3, text);
+        assert_eq!(*read.borrow(), [0], "an edited line is measured again");
+        assert_eq!(map.row_count(3), 3);
     }
 
     #[test]
