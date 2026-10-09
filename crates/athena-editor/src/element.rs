@@ -600,7 +600,7 @@ impl Element for EditorElement {
                 None => (Vec::new(), px(0.)),
             };
             let (display, inlay_spans) = match (inlays.get(&line), wrap) {
-                (Some(hints), Some(cols)) if n > 0 && !breaks.is_empty() => {
+                (Some(hints), Some(cols)) if n > 0 => {
                     let fitting = fitting_hints(&raw, hints, &breaks, cols);
                     inlaid(&raw, &fitting, &breaks)
                 }
@@ -1499,6 +1499,11 @@ mod tests {
             .iter()
             .map(|h| h.0)
             .collect();
+        let one_row = fitting_hints("f(alpha)", &[(2, "name: ".into(), false)], &[], 10);
+        assert!(
+            one_row.is_empty(),
+            "a line that only fits unwrapped loses the hint"
+        );
         assert_eq!(
             kept,
             [1, 6, 20],
