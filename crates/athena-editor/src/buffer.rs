@@ -2118,6 +2118,12 @@ impl Buffer {
         self.scan_bracket(at).map(|partner| (at, partner))
     }
 
+    /// The open brackets enclosing char `at`, outermost first, when a parse tree knows them.
+    pub fn tree_open_brackets(&self, at: usize) -> Option<Vec<char>> {
+        let byte = self.rope.char_to_byte(at.min(self.len_chars()));
+        self.syntax.as_ref()?.open_brackets_at(byte)
+    }
+
     /// The tree's partner for the bracket at `byte`, if the text still holds both brackets there;
     /// a tree waiting for a background parse can point at text that has moved.
     fn bracket_partner(&self, byte: usize) -> Option<usize> {

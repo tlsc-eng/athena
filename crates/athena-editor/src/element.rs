@@ -94,6 +94,125 @@ fn line_styles(
     styles
 }
 
+/// Lines above the view a bracket count starts from when no parse tree knows the nesting.
+const BRACKET_SCAN_LIMIT: usize = 5_000;
+
+/// Bracket pair colours for `lines` by nesting depth, keyed by char offset, as VS Code colours
+/// them: the tree gives the brackets open above each run of lines, and brackets inside strings
+/// and comments (by `tokens`) are skipped. A closer matching no opener keeps its own colour.
+fn bracket_colors(
+    buffer: &Buffer,
+    lines: &[usize],
+    tokens: &[(Range<usize>, Token)],
+    palette: &[Hsla; 3],
+) -> HashMap<usize, Hsla> {
+    let mut out = HashMap::new();
+    if buffer.lang().is_none() {
+        return out;
+    }
+    let quoted = Quoted::new(tokens);
+    for run in lines.chunk_by(|a, b| a + 1 == *b) {
+        let mut open = buffer
+            .tree_open_brackets(buffer.line_start(run[0]))
+            .unwrap_or_else(|| scanned_open_brackets(buffer, run[0]));
+        for &line in run {
+            walk_brackets(buffer, line, &quoted, &mut open, |at, depth| {
+                out.insert(at, palette[depth % palette.len()]);
+            });
+        }
+    }
+    out
+}
+
+fn paint_brackets(styles: &mut [TokenStyle], line_start: usize, colors: &HashMap<usize, Hsla>) {
+    if colors.is_empty() {
+        return;
+    }
+    for (i, style) in styles.iter_mut().enumerate() {
+        if let Some(&color) = colors.get(&(line_start + i)) {
+            style.color = color;
+        }
+    }
+}
+
+/// The brackets open at the start of `line`, counted from the top, for highlighters without a
+/// tree; none when that is too far up to count every frame.
+fn scanned_open_brackets(buffer: &Buffer, line: usize) -> Vec<char> {
+    let mut open = Vec::new();
+    if line <= BRACKET_SCAN_LIMIT {
+        let quoted = Quoted::new(&buffer.highlights(0..line));
+        for l in 0..line {
+            walk_brackets(buffer, l, &quoted, &mut open, |_, _| {});
+        }
+    }
+    open
+}
+
+/// Steps `open` over `line`'s brackets outside strings and comments, calling `found` with the
+/// char offset and depth of each opener and of each closer that matches the innermost opener.
+fn walk_brackets(
+    buffer: &Buffer,
+    line: usize,
+    quoted: &Quoted,
+    open: &mut Vec<char>,
+    mut found: impl FnMut(usize, usize),
+) {
+    let start = buffer.line_start(line);
+    let mut byte = buffer.char_to_byte(start);
+    for (i, ch) in buffer.line(line).chars().enumerate() {
+        let at = byte;
+        byte += ch.len_utf8();
+        let pair = match ch {
+            '(' | ')' => ('(', ')'),
+            '[' | ']' => ('[', ']'),
+            '{' | '}' => ('{', '}'),
+            _ => continue,
+        };
+        if quoted.contains(at) {
+            continue;
+        }
+        if ch == pair.0 {
+            found(start + i, open.len());
+            open.push(ch);
+        } else if open.last() == Some(&pair.0) {
+            open.pop();
+            found(start + i, open.len());
+        }
+    }
+}
+
+/// The byte ranges of string and comment tokens, merged and sorted for lookup.
+struct Quoted(Vec<Range<usize>>);
+
+impl Quoted {
+    fn new(tokens: &[(Range<usize>, Token)]) -> Self {
+        let mut ranges: Vec<Range<usize>> = tokens
+            .iter()
+            .filter(|(_, t)| {
+                matches!(
+                    t,
+                    Token::String | Token::StringSpecial | Token::Escape | Token::Comment
+                )
+            })
+            .map(|(r, _)| r.clone())
+            .collect();
+        ranges.sort_by_key(|r| r.start);
+        let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+        for r in ranges {
+            match merged.last_mut() {
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        Self(merged)
+    }
+
+    fn contains(&self, byte: usize) -> bool {
+        let i = self.0.partition_point(|r| r.start <= byte);
+        i > 0 && self.0[i - 1].end > byte
+    }
+}
+
 fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
     let color = match token {
         Token::Keyword => syntax.keyword,
@@ -352,6 +471,7 @@ impl Element for EditorElement {
         for run in shown.chunk_by(|a, b| a + 1 == *b) {
             tokens.extend(buffer.highlights(run[0]..run[run.len() - 1] + 1));
         }
+        let brackets = bracket_colors(&buffer, &shown, &tokens, &syntax.bracket_pairs);
         let mut inlays: HashMap<usize, Vec<(usize, String, bool)>> = HashMap::new();
         for (at, (text, is_type)) in view.inlays.shown.now(&buffer) {
             let line = buffer.line_of(at.start);
@@ -376,7 +496,8 @@ impl Element for EditorElement {
             let raw = buffer.line(line);
             let start_char = buffer.line_start(line);
             let n = raw.chars().count();
-            let styles = line_styles(rope, &tokens, line, n, &syntax);
+            let mut styles = line_styles(rope, &tokens, line, n, &syntax);
+            paint_brackets(&mut styles, start_char, &brackets);
             let (breaks, indent) = match wrap {
                 Some(cols) => (
                     wrap_breaks(&raw, cols),
@@ -772,7 +893,10 @@ impl Element for EditorElement {
             let raw = buffer.line(line);
             let display = DisplayLine::new(&raw);
             let n = raw.chars().count();
-            let styles = line_styles(rope, &buffer.highlights(line..line + 1), line, n, &syntax);
+            let tokens = buffer.highlights(line..line + 1);
+            let mut styles = line_styles(rope, &tokens, line, n, &syntax);
+            let brackets = bracket_colors(&buffer, &[line], &tokens, &syntax.bracket_pairs);
+            paint_brackets(&mut styles, buffer.line_start(line), &brackets);
             let mut runs: Vec<(TextRun, TokenStyle)> = Vec::new();
             for (i, style) in styles.iter().enumerate() {
                 let len = display.char_to_byte[i + 1] - display.char_to_byte[i];
@@ -957,6 +1081,91 @@ fn reveal(scroll: f32, line: f32, lh: f32, height: f32, inset: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PALETTE: [Hsla; 3] = [
+        Hsla {
+            h: 0.1,
+            s: 1.,
+            l: 0.5,
+            a: 1.,
+        },
+        Hsla {
+            h: 0.5,
+            s: 1.,
+            l: 0.5,
+            a: 1.,
+        },
+        Hsla {
+            h: 0.8,
+            s: 1.,
+            l: 0.5,
+            a: 1.,
+        },
+    ];
+
+    /// Each bracket of `lines` as `(char, depth)`, or `(char, None)` when left uncoloured.
+    fn depths(buffer: &Buffer, lines: &[usize]) -> Vec<(char, Option<usize>)> {
+        let tokens: Vec<_> = lines
+            .chunk_by(|a, b| a + 1 == *b)
+            .flat_map(|run| buffer.highlights(run[0]..run[run.len() - 1] + 1))
+            .collect();
+        let colors = bracket_colors(buffer, lines, &tokens, &PALETTE);
+        lines
+            .iter()
+            .flat_map(|&line| {
+                let start = buffer.line_start(line);
+                buffer
+                    .line(line)
+                    .chars()
+                    .enumerate()
+                    .filter(|(_, c)| "()[]{}".contains(*c))
+                    .map(|(i, c)| {
+                        let depth = colors
+                            .get(&(start + i))
+                            .and_then(|color| PALETTE.iter().position(|p| p == color));
+                        (c, depth)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    const NESTED: &str = "fn main() {\n    let v = [(1, 2)];\n    // ( [ {\n    let s = \"( [\";\n    if v.len() > 0 { f(((v[0]))); }\n}\n";
+
+    #[test]
+    fn brackets_cycle_three_colours_by_depth_skipping_strings_and_comments() {
+        let b = Buffer::new(NESTED, Some("main.rs".into()));
+        let all: Vec<usize> = (0..b.len_lines()).collect();
+        let colored = |s: &str, d: &[usize]| -> Vec<(char, Option<usize>)> {
+            s.chars().zip(d).map(|(c, &d)| (c, Some(d))).collect()
+        };
+        let mut expect = colored("(){[()]", &[0, 0, 0, 1, 2, 2, 1]);
+        expect.extend("([{([".chars().map(|c| (c, None)));
+        expect.extend(colored(
+            "(){((([])))}}",
+            &[1, 1, 1, 2, 0, 1, 2, 2, 1, 0, 2, 1, 0],
+        ));
+        assert_eq!(depths(&b, &all), expect);
+    }
+
+    #[test]
+    fn a_view_starting_mid_file_takes_its_depth_from_the_tree() {
+        let b = Buffer::new(NESTED, Some("main.rs".into()));
+        let whole: Vec<usize> = (0..b.len_lines()).collect();
+        let from_top = depths(&b, &whole);
+        let tail = depths(&b, &[4, 5]);
+        assert_eq!(&from_top[from_top.len() - tail.len()..], &tail[..]);
+        assert_eq!(tail.first(), Some(&('(', Some(1))));
+    }
+
+    #[test]
+    fn a_closer_without_its_opener_and_text_without_a_language_stay_uncoloured() {
+        let b = Buffer::new("fn f() { ] }\n", Some("x.rs".into()));
+        let got = depths(&b, &[0]);
+        assert!(got.contains(&(']', None)), "{got:?}");
+        let plain = Buffer::new("(a [b])\n", None);
+        assert!(depths(&plain, &[0]).iter().all(|(_, d)| d.is_none()));
+    }
 
     #[test]
     fn inlay_hints_sit_inside_the_text_without_moving_its_chars() {

@@ -772,6 +772,43 @@ impl Syntax {
     }
 }
 
+impl Syntax {
+    /// The open brackets enclosing `byte`, outermost first, as the parse tree pairs them; `None`
+    /// without a tree. Brackets inside strings and comments are never tokens, so never counted.
+    pub fn open_brackets_at(&self, byte: usize) -> Option<Vec<char>> {
+        let Backend::Tree {
+            tree: Some(tree), ..
+        } = &self.backend
+        else {
+            return None;
+        };
+        let mut node = Some(tree.root_node().descendant_for_byte_range(byte, byte)?);
+        let mut levels: Vec<Vec<char>> = Vec::new();
+        while let Some(n) = node {
+            let mut open = Vec::new();
+            let mut cursor = n.walk();
+            for child in n.children(&mut cursor) {
+                if child.start_byte() >= byte {
+                    break;
+                }
+                if child.is_named() {
+                    continue;
+                }
+                match (bracket_pair(child.kind()), child.kind().chars().next()) {
+                    (Some((o, _)), Some(c)) if o.starts_with(c) => open.push(c),
+                    (Some((o, _)), Some(_)) if open.last().is_some_and(|&l| o.starts_with(l)) => {
+                        open.pop();
+                    }
+                    _ => {}
+                }
+            }
+            levels.push(open);
+            node = n.parent();
+        }
+        Some(levels.into_iter().rev().flatten().collect())
+    }
+}
+
 /// The open and close strings of the bracket pair `kind` belongs to.
 pub fn bracket_pair(kind: &str) -> Option<(&'static str, &'static str)> {
     match kind {

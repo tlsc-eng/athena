@@ -103,6 +103,8 @@ pub struct SyntaxColors {
     pub heading: Hsla,
     pub error: Hsla,
     pub bracket_match: Hsla,
+    /// Bracket pair colours by nesting depth, cycling, as VS Code's bracket pair colorization.
+    pub bracket_pairs: [Hsla; 3],
     pub line_number: Hsla,
     pub line_number_active: Hsla,
     pub current_line: Hsla,
@@ -216,6 +218,7 @@ fn dark_scheme() -> (Colors, TerminalColors, SyntaxColors) {
             heading: c(0x6f9ee6),
             error: c(0xe9566a),
             bracket_match: ca(0x5f5a5599),
+            bracket_pairs: [c(0xe3bd5e), c(0xd68ad0), c(0x5eaee6)],
             line_number: c(0x5f5a55),
             line_number_active: c(0xa8a49e),
             current_line: c(0x1a1614),
@@ -304,6 +307,7 @@ fn light_scheme() -> (Colors, TerminalColors, SyntaxColors) {
             heading: c(0x3a55c8),
             error: c(0xab2b3f),
             bracket_match: ca(0xc9c6bf99),
+            bracket_pairs: [c(0x3449c9), c(0x2c7536), c(0x8a4a1c)],
             line_number: c(0x9a958f),
             line_number_active: c(0x312d2a),
             current_line: c(0xf1eee8),
@@ -502,6 +506,7 @@ mod tests {
             heading,
             error,
             bracket_match: _,
+            bracket_pairs: [pair_1, pair_2, pair_3],
             line_number: _,
             line_number_active,
             current_line: _,
@@ -527,6 +532,9 @@ mod tests {
             ("heading", heading),
             ("error", error),
             ("line_number_active", line_number_active),
+            ("bracket_pairs[0]", pair_1),
+            ("bracket_pairs[1]", pair_2),
+            ("bracket_pairs[2]", pair_3),
         ]
     }
 
@@ -595,6 +603,14 @@ mod tests {
                     assert_reads(name, fg, bg, 4.5, &t);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn bracket_pair_colours_are_three_different_colours_in_each_theme() {
+        for t in both() {
+            let [a, b, c] = t.syntax.bracket_pairs;
+            assert!(a != b && b != c && a != c, "{:?}", t.appearance);
         }
     }
 
