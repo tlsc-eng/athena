@@ -35,6 +35,8 @@ pub enum Event {
     Stopped(String),
     /// Inlay hints shown so far are out of date, as after its settings changed.
     RefreshInlayHints,
+    /// Diagnostics pulled so far are out of date; ask for them again.
+    RefreshDiagnostics,
     /// The server asks for an edit, usually while running a command; answer through `reply`.
     ApplyEdit {
         label: Option<String>,
@@ -137,6 +139,25 @@ impl Client {
         root: PathBuf,
         config: Config,
     ) -> (Self, async_channel::Receiver<Event>) {
+        Self::spawn(kind, None, root, config)
+    }
+
+    /// Starts the server at `program`, a path [`crate::project_server`] vetted, not one on PATH.
+    pub fn start_local(
+        kind: ServerKind,
+        program: PathBuf,
+        root: PathBuf,
+        config: Config,
+    ) -> (Self, async_channel::Receiver<Event>) {
+        Self::spawn(kind, Some(program), root, config)
+    }
+
+    fn spawn(
+        kind: ServerKind,
+        program: Option<PathBuf>,
+        root: PathBuf,
+        config: Config,
+    ) -> (Self, async_channel::Receiver<Event>) {
         let (out_tx, out_rx) = async_channel::unbounded();
         let (events_tx, events_rx) = async_channel::unbounded();
         let pending: Pending = Arc::default();
@@ -149,6 +170,7 @@ impl Client {
             signature_triggers: signature_triggers.clone(),
             capabilities: capabilities.clone(),
             kind,
+            program,
             root,
             config,
             outgoing: out_rx.clone(),
@@ -477,6 +499,23 @@ impl Client {
         Ok(parse_calls(&answer(reply).await?, "to"))
     }
 
+    /// The diagnostics a pull-model server, such as vscode-eslint-language-server 3, finds in
+    /// the file; it publishes none by itself.
+    pub async fn pull_diagnostics(&self, path: &Path) -> Result<Vec<Diagnostic>, String> {
+        let uri = protocol::uri_from_path(path);
+        let reply = self.request(
+            "textDocument/diagnostic",
+            json!({"textDocument": {"uri": uri}}),
+        );
+        let result = answer(reply).await?;
+        let items = result.get("items").cloned().unwrap_or_else(|| json!([]));
+        Ok(
+            protocol::parse_diagnostics(&json!({"uri": uri, "diagnostics": items}))
+                .map(|(_, list)| list)
+                .unwrap_or_default(),
+        )
+    }
+
     /// Symbols anywhere in the workspace whose names match `query`, as the server matches.
     pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<Symbol>, String> {
         let reply = self.request("workspace/symbol", json!({"query": query}));
@@ -542,6 +581,7 @@ impl Drop for Client {
 
 struct Session {
     kind: ServerKind,
+    program: Option<PathBuf>,
     root: PathBuf,
     config: Config,
     outgoing: async_channel::Receiver<Outgoing>,
@@ -555,13 +595,17 @@ struct Session {
 
 impl Session {
     fn run(self) -> Result<()> {
-        let program = env::find_program(self.kind.program()).with_context(|| {
-            format!(
-                "{} is not installed. Install it with: {}",
-                self.kind.program(),
-                self.kind.install_hint()
-            )
-        })?;
+        let program = self
+            .program
+            .clone()
+            .or_else(|| env::find_program(self.kind.program()))
+            .with_context(|| {
+                format!(
+                    "{} is not installed. Install it with: {}",
+                    self.kind.program(),
+                    self.kind.install_hint()
+                )
+            })?;
         let mut child = Command::new(&program)
             .args(self.kind.args())
             .env_clear()
@@ -723,6 +767,11 @@ impl Session {
         if !options.is_null() {
             params["initializationOptions"] = options;
         }
+        // Only ESLint is asked to be pulled from; gopls and others keep publishing.
+        if self.kind == ServerKind::Eslint {
+            params["capabilities"]["textDocument"]["diagnostic"] = json!({});
+            params["capabilities"]["workspace"]["diagnostics"] = json!({"refreshSupport": true});
+        }
         params
     }
 }
@@ -800,6 +849,9 @@ impl Reader {
                 if method == "workspace/inlayHint/refresh" {
                     let _ = self.events.send_blocking(Event::RefreshInlayHints);
                 }
+                if method == "workspace/diagnostic/refresh" {
+                    let _ = self.events.send_blocking(Event::RefreshDiagnostics);
+                }
                 let result = match method {
                     "workspace/configuration" => {
                         let config = self.config.read().map_or(Value::Null, |c| c.clone());
@@ -818,6 +870,8 @@ impl Reader {
                         )
                     }
                     "workspace/workspaceFolders" => Value::Array(Vec::new()),
+                    // Older ESLint servers ask before running the project's ESLint; 4 approves.
+                    "eslint/confirmESLintExecution" => Value::from(4),
                     _ => Value::Null,
                 };
                 let _ = send(
@@ -937,6 +991,7 @@ mod tests {
         let (events_tx, events) = async_channel::unbounded();
         let session = Session {
             kind: ServerKind::Go,
+            program: None,
             root: PathBuf::from("/tmp"),
             config: Arc::new(RwLock::new(json!({"hints": {"parameterNames": true}}))),
             outgoing: out_rx,

@@ -196,7 +196,12 @@ impl Shell {
     ) {
         let lang = editor.read(cx).lang();
         let e = self.settings.file.editor_for(lang);
-        let format = e.format_on_save.or(self.workspace.format_on_save);
+        let eslint_fixes = self.settings.file.eslint_fix_on_save()
+            && matches!(lang, Some(Lang::TypeScript | Lang::Tsx | Lang::JavaScript));
+        let format = match eslint_fixes {
+            true => Some(true),
+            false => e.format_on_save.or(self.workspace.format_on_save),
+        };
         let wrap = self
             .settings
             .file

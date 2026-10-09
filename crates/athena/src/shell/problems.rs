@@ -41,8 +41,21 @@ pub(super) struct ProblemsState {
     opened: Option<(PathBuf, Position)>,
 }
 
+/// `eslint(no-unused-vars)`: who reported a problem and its rule, as VS Code labels it.
+fn source_label(d: &Diagnostic) -> Option<String> {
+    let code = match d.raw.get("code") {
+        Some(serde_json::Value::String(code)) => Some(code.clone()),
+        Some(serde_json::Value::Number(code)) => Some(code.to_string()),
+        _ => None,
+    };
+    match (&d.source, code) {
+        (Some(source), Some(code)) => Some(format!("{source}({code})")),
+        (source, code) => source.clone().or(code),
+    }
+}
+
 /// Errors, then warnings, then information, each in file order, as VS Code lists them.
-fn problems(list: &[Diagnostic]) -> Vec<Problem> {
+fn problems(list: &[&Diagnostic]) -> Vec<Problem> {
     let mut out: Vec<Problem> = list
         .iter()
         .filter(|d| d.severity != Severity::Hint)
@@ -50,7 +63,7 @@ fn problems(list: &[Diagnostic]) -> Vec<Problem> {
             severity: d.severity,
             at: d.range.start,
             message: d.message.lines().next().unwrap_or_default().to_string(),
-            source: d.source.clone(),
+            source: source_label(d),
         })
         .collect();
     out.sort_by_key(|p| (p.severity, p.at));
@@ -119,7 +132,7 @@ impl Shell {
                     Ok(rest) => root.join(rest),
                     Err(_) => doc.to_path_buf(),
                 };
-                (path, problems(list))
+                (path, problems(&list))
             })
             .filter(|(_, list)| !list.is_empty())
             .collect();
@@ -492,12 +505,13 @@ mod tests {
             source: None,
             raw: serde_json::Value::Null,
         };
-        let list = problems(&[
+        let all = [
             d(Severity::Warning, 1),
             d(Severity::Hint, 2),
             d(Severity::Error, 7),
             d(Severity::Error, 3),
-        ]);
+        ];
+        let list = problems(&all.iter().collect::<Vec<_>>());
         let order: Vec<(Severity, u32)> = list.iter().map(|p| (p.severity, p.at.line)).collect();
         assert_eq!(
             order,
@@ -508,5 +522,33 @@ mod tests {
             ]
         );
         assert_eq!(list[0].message, "line 3", "only the first line is listed");
+    }
+
+    #[test]
+    fn problems_are_labelled_with_their_source_and_rule() {
+        let d = |source: Option<&str>, raw| Diagnostic {
+            range: athena_lsp::Range {
+                start: at(0, 0),
+                end: at(0, 1),
+            },
+            severity: Severity::Warning,
+            message: "x".into(),
+            source: source.map(str::to_string),
+            raw,
+        };
+        let code = serde_json::json!({"code": "no-unused-vars"});
+        assert_eq!(
+            source_label(&d(Some("eslint"), code.clone())).as_deref(),
+            Some("eslint(no-unused-vars)")
+        );
+        assert_eq!(
+            source_label(&d(Some("compiler"), serde_json::json!({"code": 2304}))).as_deref(),
+            Some("compiler(2304)")
+        );
+        assert_eq!(
+            source_label(&d(Some("biome"), serde_json::Value::Null)).as_deref(),
+            Some("biome")
+        );
+        assert_eq!(source_label(&d(None, serde_json::Value::Null)), None);
     }
 }

@@ -21,6 +21,7 @@
   // "git": { "autofetch": true },      // fetch the active project every three minutes
   // "explorer": { "confirmDragAndDrop": false }, // move tree entries without asking
   // "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
+  // "eslint": { "fixOnSave": true },   // ⌘S applies ESLint's fixes; needs the project's server
   // "lsp": {
   //   // Sent to each server as it starts and whenever this file changes.
   //   "gopls": { "hints": { "parameterNames": true }, "staticcheck": true },

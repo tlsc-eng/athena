@@ -21,14 +21,16 @@ pub(super) struct CodeActionState {
     /// One subscription per editor, for the cursor moves that move the lightbulb.
     watched: HashMap<EntityId, (WeakEntity<EditorView>, Subscription)>,
     lightbulb_task: Option<Task<()>>,
-    /// The actions the open Cmd+. menu offers, with the server and file they came from and the
-    /// file versions they were asked for at.
-    menu: Option<(Rc<Client>, PathBuf, Vec<CodeAction>, AskedAt)>,
+    menu: Option<Menu>,
 }
 
+/// The actions the open Cmd+. menu offers, each with the index of the server it came from, the
+/// file they are for, and the file versions they were asked for at.
+type Menu = (Vec<Rc<Client>>, PathBuf, Vec<(usize, CodeAction)>, AskedAt);
+
 /// Quick fixes first (preferred ones leading), then refactorings, then source actions, as
-/// VS Code orders its menu; each group keeps the server's order.
-fn menu_order(actions: &mut [CodeAction]) {
+/// VS Code orders its menu; each group keeps the servers' order.
+fn menu_order<T>(actions: &mut [(T, CodeAction)]) {
     let rank = |a: &CodeAction| {
         let kind = a.kind.as_deref().unwrap_or_default();
         match () {
@@ -39,7 +41,7 @@ fn menu_order(actions: &mut [CodeAction]) {
             _ => 4,
         }
     };
-    actions.sort_by_key(rank);
+    actions.sort_by_key(|(_, a)| rank(a));
 }
 
 fn group(a: &CodeAction) -> u8 {
@@ -64,20 +66,21 @@ pub(super) fn merge_save_edits(imports: Vec<TextEdit>, format: Vec<TextEdit>) ->
     imports.into_iter().chain(kept).collect()
 }
 
-/// The edits gopls's organize imports makes to `doc`, empty when imports are already in order.
-pub(super) async fn organize_imports(client: &Client, doc: &Path) -> Vec<TextEdit> {
+/// The edits a whole-file source action such as `source.organizeImports` (gopls) or
+/// `source.fixAll.eslint` makes to `doc`, empty when it has nothing to change.
+pub(super) async fn source_action_edits(client: &Client, doc: &Path, kind: &str) -> Vec<TextEdit> {
     let start = Position {
         line: 0,
         character: 0,
     };
     let range = Range { start, end: start };
     let found = client
-        .code_actions(doc, range, Vec::new(), Some(&["source.organizeImports"]))
+        .code_actions(doc, range, Vec::new(), Some(&[kind]))
         .await;
     let action = match found {
         Ok(actions) => actions.into_iter().next(),
         Err(why) => {
-            tracing::debug!("organize imports failed: {why}");
+            tracing::debug!("{kind} failed: {why}");
             None
         }
     };
@@ -130,23 +133,24 @@ impl Shell {
     ) {
         let doc = document_key(editor.read(cx).path());
         let line = editor.read(cx).cursor_line() as u32;
-        let diagnostics: Vec<serde_json::Value> = self
-            .lsp
-            .diagnostics
-            .get(&doc)
-            .map(|(_, list)| {
-                list.iter()
+        let servers: Vec<(Rc<Client>, Vec<serde_json::Value>)> = self
+            .document_servers(&doc)
+            .into_iter()
+            .map(|(client, list)| {
+                let on_line = list
+                    .into_iter()
                     .filter(|d| d.range.start.line <= line && line <= d.range.end.line)
                     .map(|d| d.raw.clone())
-                    .collect()
+                    .collect::<Vec<_>>();
+                (client, on_line)
             })
-            .unwrap_or_default();
-        let client = self.document_client(&doc);
-        let (Some(client), false) = (client, diagnostics.is_empty()) else {
+            .filter(|(_, on_line)| !on_line.is_empty())
+            .collect();
+        if servers.is_empty() {
             self.code_actions.lightbulb_task = None;
             editor.update(cx, |e, cx| e.set_lightbulb(None, cx));
             return;
-        };
+        }
         let weak = editor.downgrade();
         self.code_actions.lightbulb_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(LIGHTBULB_DELAY).await;
@@ -164,11 +168,21 @@ impl Shell {
                 character: at.1,
             };
             let range = Range { start: at, end: at };
-            let fixes = client
-                .code_actions(&doc, range, diagnostics, Some(&["quickfix"]))
-                .await
-                .unwrap_or_default();
-            let shown = fixes.iter().any(|a| a.disabled.is_none()).then_some(line);
+            let asked = servers.into_iter().map(|(client, diagnostics)| {
+                let doc = doc.clone();
+                async move {
+                    client
+                        .code_actions(&doc, range, diagnostics, Some(&["quickfix"]))
+                        .await
+                        .unwrap_or_default()
+                }
+            });
+            let fixes = futures::future::join_all(asked).await;
+            let shown = fixes
+                .iter()
+                .flatten()
+                .any(|a| a.disabled.is_none())
+                .then_some(line);
             let _ = weak.update(cx, |e, cx| {
                 if e.cursor_line() as u32 == line {
                     e.set_lightbulb(shown, cx);
@@ -194,36 +208,48 @@ impl Shell {
         };
         let doc = document_key(editor.read(cx).path());
         let asked = self.versions_for_request(cx);
-        let Some(client) = self.document_client(&doc) else {
+        let servers = self.document_servers(&doc);
+        if servers.is_empty() {
             return self.lsp_failed("No code actions", NO_SERVER.into(), cx);
-        };
+        }
         let Some((line, character)) = editor.read(cx).cursor_utf16() else {
             return;
         };
         let at = Position { line, character };
-        let diagnostics: Vec<serde_json::Value> = self
-            .lsp
-            .diagnostics
-            .get(&doc)
-            .map(|(_, list)| {
-                list.iter()
+        let (clients, diagnostics): (Vec<Rc<Client>>, Vec<Vec<serde_json::Value>>) = servers
+            .into_iter()
+            .map(|(client, list)| {
+                let here = list
+                    .into_iter()
                     .filter(|d| {
                         d.range.start <= at && at <= d.range.end || d.range.start.line == line
                     })
                     .map(|d| d.raw.clone())
-                    .collect()
+                    .collect();
+                (client, here)
             })
-            .unwrap_or_default();
+            .unzip();
         let weak = editor.downgrade();
-        tracing::debug!(path = %doc.display(), line, "code actions");
+        tracing::debug!(path = %doc.display(), line, servers = clients.len(), "code actions");
         cx.spawn_in(window, async move |this, cx| {
             let range = Range { start: at, end: at };
-            let found = client.code_actions(&doc, range, diagnostics, None).await;
+            let asked_each = clients
+                .iter()
+                .zip(diagnostics)
+                .map(|(client, diagnostics)| client.code_actions(&doc, range, diagnostics, None));
+            let found = futures::future::join_all(asked_each).await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let mut actions = match found {
-                    Ok(actions) => actions,
-                    Err(why) => return this.lsp_failed("No code actions", why, cx),
-                };
+                let mut actions = Vec::new();
+                let mut failure = None;
+                for (i, result) in found.into_iter().enumerate() {
+                    match result {
+                        Ok(list) => actions.extend(list.into_iter().map(|a| (i, a))),
+                        Err(why) => failure = failure.or(Some(why)),
+                    }
+                }
+                if let (true, Some(why)) = (actions.is_empty(), failure) {
+                    return this.lsp_failed("No code actions", why, cx);
+                }
                 if actions.is_empty() {
                     return this.lsp_failed(
                         "No code actions",
@@ -236,8 +262,8 @@ impl Shell {
                 };
                 menu_order(&mut actions);
                 let mut items = Vec::new();
-                for (i, action) in actions.iter().enumerate() {
-                    if i > 0 && group(&actions[i - 1]) != group(action) {
+                for (i, (_, action)) in actions.iter().enumerate() {
+                    if i > 0 && group(&actions[i - 1].1) != group(action) {
                         items.push(MenuItem::separator());
                     }
                     items.push(
@@ -247,7 +273,7 @@ impl Shell {
                         .disabled(action.disabled.is_some()),
                     );
                 }
-                this.code_actions.menu = Some((client, doc, actions, asked));
+                this.code_actions.menu = Some((clients, doc, actions, asked));
                 this.open_context_menu(position, items, window, cx);
             });
         })
@@ -256,13 +282,14 @@ impl Shell {
 
     /// Runs the action picked from the Cmd+. menu: its edit, then its command.
     pub(super) fn apply_code_action(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some((client, doc, mut actions, asked)) = self.code_actions.menu.take() else {
+        let Some((clients, doc, mut actions, asked)) = self.code_actions.menu.take() else {
             return;
         };
         if index >= actions.len() {
             return;
         }
-        let action = actions.swap_remove(index);
+        let (server, action) = actions.swap_remove(index);
+        let client = clients[server].clone();
         tracing::debug!(title = %action.title, "code action");
         if let Some(editor) = self.editor_for_doc(&doc, cx) {
             self.flush_change(&doc, &editor, cx);
@@ -359,17 +386,25 @@ mod tests {
             raw: serde_json::Value::Null,
         };
         let mut list = vec![
-            action("Organize imports", "source.organizeImports", false),
-            action("Extract function", "refactor.extract", false),
-            action("Add import", "quickfix", false),
-            action("Fix typo", "quickfix", true),
+            (
+                0,
+                action("Organize imports", "source.organizeImports", false),
+            ),
+            (0, action("Extract function", "refactor.extract", false)),
+            (
+                1,
+                action("Disable no-console for this line", "quickfix", false),
+            ),
+            (0, action("Add import", "quickfix", false)),
+            (1, action("Fix typo", "quickfix", true)),
         ];
         menu_order(&mut list);
-        let titles: Vec<&str> = list.iter().map(|a| a.title.as_str()).collect();
+        let titles: Vec<&str> = list.iter().map(|(_, a)| a.title.as_str()).collect();
         assert_eq!(
             titles,
             [
                 "Fix typo",
+                "Disable no-console for this line",
                 "Add import",
                 "Extract function",
                 "Organize imports"

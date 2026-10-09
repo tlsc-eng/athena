@@ -501,9 +501,13 @@ impl Shell {
                 Some((asked, real)) => *file == asked || real.as_ref() == Some(*file),
                 None => true,
             })
-            .map(|(file, (_, list))| ide::FileDiagnostics {
+            .map(|(file, published)| ide::FileDiagnostics {
                 path: file.clone(),
-                diagnostics: list.iter().map(diagnostic).collect(),
+                diagnostics: published
+                    .iter()
+                    .flat_map(|(_, list)| list)
+                    .map(diagnostic)
+                    .collect(),
             })
             .collect()
     }

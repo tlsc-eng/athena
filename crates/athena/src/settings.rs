@@ -36,6 +36,8 @@ pub struct Settings {
     pub confirm_drag_and_drop: Option<bool>,
     /// `window.zoom_level`: interface text and spacing in 10% steps from the default.
     pub zoom_level: Option<i32>,
+    /// VS Code ESLint's `eslint.fixOnSave`-style switch: Cmd+S applies ESLint's fixes first.
+    pub eslint_fix_on_save: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -124,6 +126,11 @@ impl Settings {
 
     pub fn confirm_drag_and_drop(&self) -> bool {
         self.confirm_drag_and_drop.unwrap_or(true)
+    }
+
+    /// Off unless chosen, as fixes that rewrite code on save should be.
+    pub fn eslint_fix_on_save(&self) -> bool {
+        self.eslint_fix_on_save.unwrap_or(false)
     }
 
     /// The word wrap `lang` chooses: its own block's, else its built-in default.
@@ -321,6 +328,13 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 .map(|on| settings.ide_integration = Some(on))
                 .ok_or_else(|| "must be true or false".to_string()),
             "editor" => editor_block(&mut settings.editor, value, key, &mut problems),
+            "eslint" => match value.get("fixOnSave").map(Value::as_bool) {
+                Some(Some(on)) => {
+                    settings.eslint_fix_on_save = Some(on);
+                    Ok(())
+                }
+                _ => Err("must be {\"fixOnSave\": true or false}".into()),
+            },
             "git" => match value.get("autofetch").map(Value::as_bool) {
                 Some(Some(on)) => {
                     settings.autofetch = Some(on);
@@ -374,6 +388,10 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 Some(("window", "zoom_level")) => {
                     zoom_level(value).map(|level| settings.zoom_level = Some(level))
                 }
+                Some(("eslint", "fixOnSave")) => value
+                    .as_bool()
+                    .map(|on| settings.eslint_fix_on_save = Some(on))
+                    .ok_or_else(|| "must be true or false".to_string()),
                 Some(("lsp", name)) => {
                     settings.lsp.insert(server_name(name).into(), value.clone());
                     Ok(())
@@ -843,6 +861,10 @@ mod tests {
             Settings::default().confirm_drag_and_drop(),
             "on by default, as in VS Code"
         );
+        assert!(s.eslint_fix_on_save());
+        assert!(!Settings::default().eslint_fix_on_save(), "off by default");
+        let (dotted, _) = parse(r#"{"eslint.fixOnSave": true}"#).unwrap();
+        assert!(dotted.eslint_fix_on_save());
     }
 
     #[test]

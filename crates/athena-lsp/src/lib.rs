@@ -1,4 +1,5 @@
-//! A small Language Server Protocol client on plain threads, for gopls and typescript-language-server.
+//! A small Language Server Protocol client on plain threads, for gopls, typescript-language-server
+//! and the ESLint and Biome servers a project installs.
 
 mod call;
 mod client;
@@ -6,6 +7,7 @@ mod code_action;
 mod completion;
 mod edit;
 mod env;
+mod local;
 mod markup;
 mod protocol;
 mod signature;
@@ -17,6 +19,7 @@ pub use code_action::{CodeAction, Command};
 pub use completion::{CompletionItem, CompletionList, TextEdit};
 pub use edit::{EditError, FileChange, WorkspaceEdit, apply_text_edits};
 pub use env::{find_program, server_env};
+pub use local::{eslint_settings, project_server};
 pub use markup::{Hover, MarkupBlock, expand_snippet, markdown_blocks, snippet_stops};
 pub use protocol::{
     Diagnostic, Highlight, InlayHint, Location, Position, Range, Severity, path_from_uri,
@@ -30,6 +33,9 @@ pub use symbol::{Symbol, symbol_kind_label};
 pub enum ServerKind {
     Go,
     TypeScript,
+    /// Started only from the project's own node_modules; see [`project_server`].
+    Eslint,
+    Biome,
 }
 
 impl ServerKind {
@@ -37,13 +43,16 @@ impl ServerKind {
         match self {
             Self::Go => "gopls",
             Self::TypeScript => "typescript-language-server",
+            Self::Eslint => "vscode-eslint-language-server",
+            Self::Biome => "biome",
         }
     }
 
     pub fn args(self) -> &'static [&'static str] {
         match self {
             Self::Go => &[],
-            Self::TypeScript => &["--stdio"],
+            Self::TypeScript | Self::Eslint => &["--stdio"],
+            Self::Biome => &["lsp-proxy"],
         }
     }
 
@@ -52,6 +61,21 @@ impl ServerKind {
         match self {
             Self::Go => "go install golang.org/x/tools/gopls@latest",
             Self::TypeScript => "npm install -g typescript-language-server typescript",
+            Self::Eslint => "npm install -D vscode-langservers-extracted",
+            Self::Biome => "npm install -D @biomejs/biome",
+        }
+    }
+
+    /// A linter that runs beside a file's main server and is found in the project, never on PATH.
+    pub fn is_project_local(self) -> bool {
+        matches!(self, Self::Eslint | Self::Biome)
+    }
+
+    /// The name its diagnostics are labelled with when they carry none.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Eslint => "eslint",
+            other => other.program(),
         }
     }
 }

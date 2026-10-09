@@ -55,10 +55,12 @@ pub(super) struct LspState {
     servers: HashMap<ServerKey, Server>,
     /// Servers that failed to start, not retried until Athena restarts.
     failed: HashMap<ServerKey, String>,
-    /// Each file's diagnostics and the server that published them.
-    pub(super) diagnostics: HashMap<PathBuf, (ServerKey, Vec<Diagnostic>)>,
+    /// Each file's diagnostics, by the server that published them.
+    pub(super) diagnostics: HashMap<PathBuf, Vec<(ServerKey, Vec<Diagnostic>)>>,
     /// Documents the servers have open, and which server has each.
     documents: HashMap<PathBuf, ServerKey>,
+    /// Documents the project's linters (ESLint, Biome) have open beside their main server.
+    linters: HashMap<PathBuf, Vec<ServerKey>>,
     changes: HashMap<PathBuf, Task<()>>,
     /// When each server last stopped unexpectedly, within `CRASH_WINDOW`.
     crashes: HashMap<ServerKey, Vec<Instant>>,
@@ -139,6 +141,31 @@ fn files_ending_with(root: &Path, tail: &Path) -> Vec<PathBuf> {
 /// How long to wait before restarting a server that has stopped `crashes` times in the window.
 fn restart_delay(crashes: usize) -> Option<Duration> {
     (crashes < MAX_CRASHES).then(|| Duration::from_millis(500) * (1 << crashes.saturating_sub(1)))
+}
+
+/// The linters that run beside a file's main server when the project installs them.
+fn linters_for(lang: Lang) -> &'static [ServerKind] {
+    match lang {
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => &[ServerKind::Eslint, ServerKind::Biome],
+        Lang::Json | Lang::Css => &[ServerKind::Biome],
+        _ => &[],
+    }
+}
+
+/// `over` laid onto `base`, objects merged key by key.
+fn merge_settings(base: &mut serde_json::Value, over: &serde_json::Value) {
+    match (base.as_object_mut(), over.as_object()) {
+        (Some(base), Some(over)) => {
+            for (key, value) in over {
+                merge_settings(
+                    base.entry(key.clone()).or_insert(serde_json::Value::Null),
+                    value,
+                );
+            }
+        }
+        _ if !over.is_null() => *base = over.clone(),
+        _ => {}
+    }
 }
 
 fn server_for(lang: Lang) -> Option<(ServerKind, &'static str)> {
@@ -227,21 +254,82 @@ impl Shell {
         let (Some(lang), Some(version), Some(text)) = (lang, version, text) else {
             return;
         };
-        if let Some(client) = self.document_client(&doc) {
-            // Another tab already opened this file in its server.
-            push_triggers(editor, &client, cx);
-            return;
+        // Another tab may have opened this file in its servers already.
+        if let Some((kind, language_id)) = server_for(lang)
+            && !self.lsp.documents.contains_key(&doc)
+        {
+            let key = (root.to_path_buf(), kind);
+            if let Some(client) = self.lsp_client(&key, cx) {
+                client.did_open(&doc, language_id, version as i64, text.clone());
+                self.lsp.documents.insert(doc.clone(), key);
+            }
         }
-        let Some((kind, language_id)) = server_for(lang) else {
-            return;
+        for &kind in linters_for(lang) {
+            let key = (root.to_path_buf(), kind);
+            if self.lsp.linters.get(&doc).is_some_and(|k| k.contains(&key)) {
+                continue;
+            }
+            let Some(client) = self.lsp_client(&key, cx) else {
+                continue;
+            };
+            let language_id = crate::settings::language_id(lang);
+            client.did_open(&doc, language_id, version as i64, text.clone());
+            self.pull_diagnostics(&key, &doc, cx);
+            self.lsp.linters.entry(doc.clone()).or_default().push(key);
+        }
+        if let Some(client) = self.document_client(&doc) {
+            push_triggers(editor, &client, cx);
+        }
+    }
+
+    /// Every server with `doc` open, its main one first, and what each published for it.
+    pub(super) fn document_servers(&self, doc: &Path) -> Vec<(Rc<Client>, Vec<&Diagnostic>)> {
+        let published = |key: &ServerKey| -> Vec<&Diagnostic> {
+            self.lsp
+                .diagnostics
+                .get(doc)
+                .into_iter()
+                .flatten()
+                .filter(|(k, _)| k == key)
+                .flat_map(|(_, list)| list)
+                .collect()
         };
-        let key = (root.to_path_buf(), kind);
-        let Some(client) = self.lsp_client(&key, cx) else {
-            return;
-        };
-        client.did_open(&doc, language_id, version as i64, text);
-        push_triggers(editor, &client, cx);
-        self.lsp.documents.insert(doc, key);
+        self.document_keys(doc)
+            .filter_map(|key| Some((self.lsp.servers.get(key)?.client.clone(), published(key))))
+            .collect()
+    }
+
+    fn document_keys<'a>(&'a self, doc: &Path) -> impl Iterator<Item = &'a ServerKey> {
+        self.lsp
+            .documents
+            .get(doc)
+            .into_iter()
+            .chain(self.lsp.linters.get(doc).into_iter().flatten())
+    }
+
+    /// Every diagnostic published for `doc`, whichever server sent it.
+    pub(super) fn file_diagnostics(&self, doc: &Path) -> Vec<&Diagnostic> {
+        self.lsp
+            .diagnostics
+            .get(doc)
+            .into_iter()
+            .flatten()
+            .flat_map(|(_, list)| list)
+            .collect()
+    }
+
+    /// The settings a server starts with and is sent again when settings.json changes: the
+    /// user's `lsp.<program>` section, laid over what ESLint needs to run at all.
+    fn server_settings(&self, key: &ServerKey) -> serde_json::Value {
+        let user = self.settings.file.server_config(key.1.program());
+        match key.1 {
+            ServerKind::Eslint => {
+                let mut settings = athena_lsp::eslint_settings(&document_key(&key.0));
+                merge_settings(&mut settings, &user);
+                settings
+            }
+            _ => user,
+        }
     }
 
     pub(super) fn document_client(&self, doc: &Path) -> Option<Rc<Client>> {
@@ -275,12 +363,12 @@ impl Shell {
         path.to_path_buf()
     }
 
-    /// The running servers of the project at `root`.
+    /// The running main servers of the project at `root`, linters left out.
     pub(super) fn project_clients(&self, root: &Path) -> Vec<Rc<Client>> {
         self.lsp
             .servers
             .iter()
-            .filter(|((r, _), s)| r == root && s.ready)
+            .filter(|((r, kind), s)| r == root && s.ready && !kind.is_project_local())
             .map(|(_, s)| s.client.clone())
             .collect()
     }
@@ -292,11 +380,18 @@ impl Shell {
         if let Some(server) = self.lsp.servers.get(key) {
             return Some(server.client.clone());
         }
-        tracing::info!(root = %key.0.display(), "starting {}", key.1.program());
-        let config: Config = Arc::new(RwLock::new(
-            self.settings.file.server_config(key.1.program()),
-        ));
-        let (client, events) = Client::start_with(key.1, document_key(&key.0), config.clone());
+        // A linter the project does not install is simply not run, and never reported.
+        let local = match key.1.is_project_local() {
+            true => Some(athena_lsp::project_server(&key.0, key.1)?),
+            false => None,
+        };
+        tracing::info!(root = %key.0.display(), ?local, "starting {}", key.1.program());
+        let config: Config = Arc::new(RwLock::new(self.server_settings(key)));
+        let root = document_key(&key.0);
+        let (client, events) = match local {
+            Some(program) => Client::start_local(key.1, program, root, config.clone()),
+            None => Client::start_with(key.1, root, config.clone()),
+        };
         let client = Rc::new(client);
         let event_key = key.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -343,10 +438,19 @@ impl Shell {
                         push_triggers(&editor, &client, cx);
                     }
                 }
+                self.pull_all_diagnostics(&key, cx);
             }
-            Event::Diagnostics { path, list } => {
+            Event::RefreshDiagnostics => self.pull_all_diagnostics(&key, cx),
+            Event::Diagnostics { path, mut list } => {
+                if key.1.is_project_local() {
+                    for d in &mut list {
+                        d.source.get_or_insert_with(|| key.1.label().into());
+                    }
+                }
                 let doc = document_key(&path);
-                self.lsp.diagnostics.insert(doc.clone(), (key, list));
+                let published = self.lsp.diagnostics.entry(doc.clone()).or_default();
+                published.retain(|(k, _)| *k != key);
+                published.push((key, list));
                 for editor in self.editors_showing(&doc, cx) {
                     self.push_markers(&editor, &doc, cx);
                 }
@@ -364,6 +468,10 @@ impl Shell {
                         self.lsp.changes.remove(doc);
                     }
                     keep
+                });
+                self.lsp.linters.retain(|_, keys| {
+                    keys.retain(|k| *k != key);
+                    !keys.is_empty()
                 });
                 self.clear_diagnostics(&key, cx);
                 let program = key.1.program();
@@ -412,7 +520,7 @@ impl Shell {
     pub(super) fn lsp_settings_changed(&mut self, cx: &mut Context<Self>) {
         let mut changed = Vec::new();
         for (key, server) in &self.lsp.servers {
-            let config = self.settings.file.server_config(key.1.program());
+            let config = self.server_settings(key);
             let Ok(mut current) = server.config.write() else {
                 continue;
             };
@@ -511,11 +619,13 @@ impl Shell {
             .lsp
             .diagnostics
             .iter()
-            .filter(|(_, (k, _))| k == key)
+            .filter(|(_, published)| published.iter().any(|(k, _)| k == key))
             .map(|(file, _)| file.clone())
             .collect();
         for file in files {
-            self.lsp.diagnostics.remove(&file);
+            if let Some(published) = self.lsp.diagnostics.get_mut(&file) {
+                published.retain(|(k, _)| k != key);
+            }
             for editor in self.editors_showing(&file, cx) {
                 self.push_markers(&editor, &file, cx);
             }
@@ -543,10 +653,10 @@ impl Shell {
                 _ => None,
             })
             .filter(|e| {
-                e.read(cx)
-                    .lang()
-                    .and_then(server_for)
-                    .is_some_and(|(kind, _)| kind == key.1)
+                e.read(cx).lang().is_some_and(|lang| {
+                    server_for(lang).is_some_and(|(kind, _)| kind == key.1)
+                        || linters_for(lang).contains(&key.1)
+                })
             })
             .collect();
         tracing::info!(root = %key.0.display(), files = editors.len(), "restarting {}", key.1.program());
@@ -570,18 +680,13 @@ impl Shell {
     }
 
     fn push_markers(&self, editor: &Entity<EditorView>, doc: &Path, cx: &mut Context<Self>) {
-        let markers = self
-            .lsp
-            .diagnostics
-            .get(doc)
-            .map(|(_, list)| list.iter().map(marker).collect())
-            .unwrap_or_default();
+        let markers = self.file_diagnostics(doc).into_iter().map(marker).collect();
         editor.update(cx, |e, cx| e.set_markers(markers, cx));
     }
 
     pub(super) fn lsp_edited(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
         let doc = document_key(editor.read(cx).path());
-        if !self.lsp.documents.contains_key(&doc) {
+        if self.document_keys(&doc).next().is_none() {
             return;
         }
         let weak = editor.downgrade();
@@ -600,13 +705,51 @@ impl Shell {
 
     fn send_change(&self, doc: &Path, editor: &Entity<EditorView>, cx: &Context<Self>) {
         let e = editor.read(cx);
-        let server = self
+        let (Some(text), Some(version)) = (e.text(), e.version()) else {
+            return;
+        };
+        for key in self.document_keys(doc) {
+            if let Some(server) = self.lsp.servers.get(key) {
+                server.client.did_change(doc, version as i64, text.clone());
+                self.pull_diagnostics(key, doc, cx);
+            }
+        }
+    }
+
+    /// Asks a pull-model server (ESLint) for `doc`'s diagnostics, delivered as if published.
+    fn pull_diagnostics(&self, key: &ServerKey, doc: &Path, cx: &Context<Self>) {
+        let Some(server) = self.lsp.servers.get(key) else {
+            return;
+        };
+        if key.1 != ServerKind::Eslint || !server.client.supports("/diagnosticProvider") {
+            return;
+        }
+        let (client, key, path) = (server.client.clone(), key.clone(), doc.to_path_buf());
+        cx.spawn(async move |this, cx| {
+            let list = match client.pull_diagnostics(&path).await {
+                Ok(list) => list,
+                Err(why) => return tracing::debug!("{} diagnostics failed: {why}", key.1.label()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                // Only for servers and files still open, so a late answer cannot revive one.
+                if this.document_keys(&path).any(|k| *k == key) {
+                    this.lsp_event(key, Event::Diagnostics { path, list }, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn pull_all_diagnostics(&self, key: &ServerKey, cx: &Context<Self>) {
+        let docs: Vec<&PathBuf> = self
             .lsp
-            .documents
-            .get(doc)
-            .and_then(|k| self.lsp.servers.get(k));
-        if let (Some(server), Some(text), Some(version)) = (server, e.text(), e.version()) {
-            server.client.did_change(doc, version as i64, text);
+            .linters
+            .iter()
+            .filter(|(_, keys)| keys.contains(key))
+            .map(|(doc, _)| doc)
+            .collect();
+        for doc in docs {
+            self.pull_diagnostics(key, doc, cx);
         }
     }
 
@@ -625,13 +768,10 @@ impl Shell {
     pub(super) fn lsp_saved(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
         let doc = document_key(editor.read(cx).path());
         self.flush_change(&doc, editor, cx);
-        if let Some(server) = self
-            .lsp
-            .documents
-            .get(&doc)
-            .and_then(|k| self.lsp.servers.get(k))
-        {
-            server.client.did_save(&doc);
+        for key in self.document_keys(&doc) {
+            if let Some(server) = self.lsp.servers.get(key) {
+                server.client.did_save(&doc);
+            }
         }
     }
 
@@ -865,8 +1005,9 @@ impl Shell {
         .detach();
     }
 
-    /// Asks the server to format the file before Cmd+S saves it; the editor always gets an
-    /// answer, empty when the server is missing, fails or is too slow.
+    /// Asks the server to format the file before Cmd+S saves it, and ESLint to fix it when
+    /// `eslint.fixOnSave` is on; the editor always gets an answer, empty when the servers are
+    /// missing, fail or are too slow.
     pub(super) fn lsp_format(
         &mut self,
         editor: &Entity<EditorView>,
@@ -876,10 +1017,34 @@ impl Shell {
     ) {
         let doc = document_key(editor.read(cx).path());
         self.flush_change(&doc, editor, cx);
-        let Some(client) = self.document_client(&doc) else {
+        let lang = editor.read(cx).lang();
+        // Fix on save routes every save here, so formatting still follows its own setting.
+        let wants_format = self
+            .settings
+            .file
+            .editor_for(lang)
+            .format_on_save
+            .or(self.workspace.format_on_save)
+            .unwrap_or(lang == Some(Lang::Go));
+        let eslint = self
+            .settings
+            .file
+            .eslint_fix_on_save()
+            .then(|| {
+                let key = self
+                    .lsp
+                    .linters
+                    .get(&doc)?
+                    .iter()
+                    .find(|(_, k)| *k == ServerKind::Eslint)?;
+                Some(self.lsp.servers.get(key)?.client.clone())
+            })
+            .flatten();
+        let client = self.document_client(&doc).filter(|_| wants_format);
+        if client.is_none() && eslint.is_none() {
             editor.update(cx, |e, cx| e.format_and_save(request, Vec::new(), cx));
             return;
-        };
+        }
         // Go files have their imports organized as they are formatted, as VS Code's Go setup does.
         let organize = self
             .lsp
@@ -894,14 +1059,29 @@ impl Shell {
         })
         .detach();
         cx.spawn(async move |_, cx| {
-            let imports = async {
-                match organize {
-                    true => super::code_actions::organize_imports(&client, &doc).await,
-                    false => Vec::new(),
+            let source = |client: Option<Rc<Client>>, kind: &'static str| {
+                let doc = doc.clone();
+                async move {
+                    match client {
+                        Some(client) => {
+                            super::code_actions::source_action_edits(&client, &doc, kind).await
+                        }
+                        None => Vec::new(),
+                    }
                 }
             };
-            let (imports, formatted) =
-                futures::join!(imports, client.formatting(&doc, tab_size, insert_spaces));
+            let imports = source(
+                client.clone().filter(|_| organize),
+                "source.organizeImports",
+            );
+            let fixes = source(eslint, "source.fixAll.eslint");
+            let formatting = async {
+                match &client {
+                    Some(client) => client.formatting(&doc, tab_size, insert_spaces).await,
+                    None => Ok(Vec::new()),
+                }
+            };
+            let (imports, fixes, formatted) = futures::join!(imports, fixes, formatting);
             let edits = match formatted {
                 Ok(edits) => edits,
                 Err(why) => {
@@ -910,11 +1090,14 @@ impl Shell {
                 }
             };
             tracing::debug!(
-                "formatting → {} edits, organize imports → {}",
+                "formatting → {} edits, organize imports → {}, eslint fixes → {}",
                 edits.len(),
-                imports.len()
+                imports.len(),
+                fixes.len()
             );
-            let edits = super::code_actions::merge_save_edits(imports, edits)
+            // ESLint's fixes win where they overlap, as VS Code applies them before formatting.
+            let edits = super::code_actions::merge_save_edits(imports, edits);
+            let edits = super::code_actions::merge_save_edits(fixes, edits)
                 .into_iter()
                 .map(|e| ServerEdit {
                     start: (e.range.start.line, e.range.start.character),
@@ -1243,10 +1426,11 @@ impl Shell {
         }
         self.lsp.changes.remove(&doc);
         self.breadcrumbs_closed(&doc);
-        if let Some(key) = self.lsp.documents.remove(&doc)
-            && let Some(server) = self.lsp.servers.get(&key)
-        {
-            server.client.did_close(&doc);
+        let keys = self.lsp.documents.remove(&doc).into_iter();
+        for key in keys.chain(self.lsp.linters.remove(&doc).into_iter().flatten()) {
+            if let Some(server) = self.lsp.servers.get(&key) {
+                server.client.did_close(&doc);
+            }
         }
     }
 
@@ -1258,20 +1442,34 @@ impl Shell {
         self.lsp.servers.retain(|(r, _), _| r != root);
         self.lsp.failed.retain(|(r, _), _| r != root);
         self.lsp.documents.retain(|_, (r, _)| r != root);
+        self.lsp.linters.retain(|_, keys| {
+            keys.retain(|(r, _)| r != root);
+            !keys.is_empty()
+        });
         self.lsp.crashes.retain(|(r, _), _| r != root);
         self.lsp.restarts.retain(|(r, _), _| r != root);
-        self.lsp.diagnostics.retain(|_, ((r, _), _)| r != root);
+        self.lsp.diagnostics.retain(|_, published| {
+            published.retain(|((r, _), _)| r != root);
+            !published.is_empty()
+        });
         let under = document_key(root);
         self.lsp.changes.retain(|doc, _| !doc.starts_with(&under));
     }
 
     /// Each file's diagnostics from the servers of the project at `root`, by canonical path.
-    pub(super) fn lsp_diagnostics_of(&self, root: &Path) -> Vec<(&Path, &[Diagnostic])> {
+    pub(super) fn lsp_diagnostics_of(&self, root: &Path) -> Vec<(&Path, Vec<&Diagnostic>)> {
         self.lsp
             .diagnostics
             .iter()
-            .filter(|(_, ((r, _), _))| r == root)
-            .map(|(doc, (_, list))| (doc.as_path(), list.as_slice()))
+            .map(|(doc, published)| {
+                let list = published
+                    .iter()
+                    .filter(|((r, _), _)| r == root)
+                    .flat_map(|(_, list)| list)
+                    .collect::<Vec<_>>();
+                (doc.as_path(), list)
+            })
+            .filter(|(_, list)| !list.is_empty())
             .collect()
     }
 
@@ -1298,15 +1496,18 @@ impl Shell {
                 Some(p) => file.as_path() == p,
                 None => roots.iter().any(|r| file.starts_with(r)),
             })
-            .flat_map(|(file, (_, list))| {
-                list.iter().map(move |d| DiagnosticInfo {
-                    path: file.clone(),
-                    line: d.range.start.line + 1,
-                    column: d.range.start.character + 1,
-                    severity: format!("{:?}", d.severity).to_lowercase(),
-                    message: d.message.clone(),
-                    source: d.source.clone(),
-                })
+            .flat_map(|(file, published)| {
+                published
+                    .iter()
+                    .flat_map(|(_, list)| list)
+                    .map(move |d| DiagnosticInfo {
+                        path: file.clone(),
+                        line: d.range.start.line + 1,
+                        column: d.range.start.character + 1,
+                        severity: format!("{:?}", d.severity).to_lowercase(),
+                        message: d.message.clone(),
+                        source: d.source.clone(),
+                    })
             })
             .collect();
         out.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
