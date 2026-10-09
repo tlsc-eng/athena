@@ -113,7 +113,6 @@ fn duration(ms: u64) -> String {
     }
 }
 
-/// Title and body for a notice, as shown in toasts, the drawer and macOS banners.
 /// Whether toasts drawn over `toasts` would land on a pane at `pane`, a web preview's or not.
 pub(super) fn covers(toasts: Bounds<Pixels>, pane: Rect) -> bool {
     let (left, top) = (f32::from(toasts.left()), f32::from(toasts.top()));
@@ -121,6 +120,7 @@ pub(super) fn covers(toasts: Bounds<Pixels>, pane: Rect) -> bool {
     left < pane.x + pane.w && pane.x < right && top < pane.y + pane.h && pane.y < bottom
 }
 
+/// Title and body for a notice, as shown in toasts, the drawer and macOS banners.
 pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, String) {
     let place = project.unwrap_or("Athena");
     match kind {
