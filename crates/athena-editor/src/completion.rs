@@ -144,6 +144,18 @@ fn edits_above(edits: Vec<ServerEdit>, line: u32) -> Vec<ServerEdit> {
     edits.into_iter().filter(|e| e.end.0 < line).collect()
 }
 
+/// Whether `b` changed only at or below `line` since `version`, so edits above it still fit.
+fn untouched_above(b: &Buffer, version: u64, line: u32) -> bool {
+    b.edits_since(version)
+        .is_some_and(|mut edits| edits.all(|e| e.line >= line as usize))
+}
+
+/// Whether an accepted item may still get edits elsewhere from resolving; one that brought some
+/// in the list already applied them, and a resolve would repeat them.
+fn awaits_late_edits(item: &Completion) -> bool {
+    item.resolve && item.additional_edits.is_empty()
+}
+
 impl Menu {
     /// The selected item, if it still needs resolving and has not been asked about; noted as asked.
     fn take_unresolved(&mut self) -> Option<usize> {
@@ -401,8 +413,8 @@ impl EditorView {
         }));
     }
 
-    /// The answer to [`LspRequest::ResolveCompletion`]: the open list shows it, and an item
-    /// accepted meanwhile gets its edits elsewhere (an auto-import) if nothing was typed since.
+    /// The answer to [`LspRequest::ResolveCompletion`]: the open list shows it, and an item accepted
+    /// meanwhile gets its edits elsewhere (an auto-import) if nothing above it changed since.
     pub fn resolved_completion(
         &mut self,
         request: u64,
@@ -435,7 +447,10 @@ impl EditorView {
             return;
         }
         self.completing.late = None;
-        if self.version() != Some(version) {
+        if !self
+            .buf()
+            .is_some_and(|b| untouched_above(&b, version, line))
+        {
             return;
         }
         let above = edits_above(resolved.additional_edits, line);
@@ -486,7 +501,7 @@ impl EditorView {
             }
         });
         self.snippet = snippet;
-        self.completing.late = match (item.resolve, self.version(), line) {
+        self.completing.late = match (awaits_late_edits(&item), self.version(), line) {
             (true, Some(version), Some(line)) => {
                 if !menu.asked.contains(&index) {
                     cx.emit(EditorEvent::Lsp(LspRequest::ResolveCompletion {
@@ -899,6 +914,29 @@ mod tests {
         };
         let kept = edits_above(vec![edit(0), edit(5), edit(9)], 5);
         assert_eq!(kept, vec![edit(0)]);
+    }
+
+    #[test]
+    fn a_late_auto_import_survives_typing_below_it_but_never_repeats_listed_edits() {
+        let mut b = Buffer::new("import a\n\nuseS\n", None);
+        let mut cs = Cursors::new(Cursor::at(14));
+        let version = b.version();
+        b.edit_each(&mut cs, |b, c| b.insert(c, "tate("));
+        assert!(untouched_above(&b, version, 2), "typed into the completion");
+        let mut top = Cursors::new(Cursor::at(0));
+        b.edit_each(&mut top, |b, c| b.insert(c, "// x\n"));
+        assert!(!untouched_above(&b, version, 2), "a line above moved");
+        assert!(!untouched_above(&b, b.version() + 1, 0));
+
+        let mut item = item("useState", "0");
+        item.resolve = true;
+        assert!(awaits_late_edits(&item));
+        item.additional_edits.push(ServerEdit {
+            start: (0, 0),
+            end: (0, 0),
+            text: "import { useState } from \"react\";\n".into(),
+        });
+        assert!(!awaits_late_edits(&item), "already applied on accept");
     }
 
     #[test]
