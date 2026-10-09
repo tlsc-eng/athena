@@ -22,6 +22,10 @@
   // "explorer": { "confirmDragAndDrop": false }, // move tree entries without asking
   // "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   // "eslint": { "fixOnSave": true },   // ⌘S applies ESLint's fixes; needs the project's server
+  // // The Claude tab estimates each session's cost from built-in list prices; these replace
+  // // them by model id, in USD per million tokens. Cache prices default to 1.25×, 2× and 0.1×
+  // // the input price. It is an estimate, not a bill.
+  // "claude": { "prices": { "claude-sonnet-5": { "input": 3, "output": 15, "cache_read": 0.3 } } },
   // "lsp": {
   //   // Sent to each server as it starts and whenever this file changes.
   //   "gopls": { "hints": { "parameterNames": true }, "staticcheck": true },

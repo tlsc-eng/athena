@@ -3,10 +3,11 @@
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use sha2::{Digest, Sha256};
 
 /// Sessions untouched for this long are deleted.
@@ -99,6 +100,94 @@ pub fn read(store: &Path, session: &str, path: &Path) -> Before {
         Ok(text) => Before::Text(text),
         Err(_) => Before::Unknown,
     }
+}
+
+/// A session in the store and the files it kept a copy of before their first edit.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Stored {
+    pub session: String,
+    pub modified: SystemTime,
+    pub files: Vec<PathBuf>,
+}
+
+/// The files `session` snapshotted, by path.
+pub fn files(store: &Path, session: &str) -> Vec<PathBuf> {
+    if !valid_session(session) {
+        return Vec::new();
+    }
+    let mut files: Vec<PathBuf> = fs::read_dir(store.join(session))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "path"))
+        .filter_map(|e| fs::read(e.path()).ok())
+        .map(|bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Sessions that snapshotted a file under `root`, newest first, each with only those files.
+pub fn sessions_under(store: &Path, root: &Path) -> Vec<Stored> {
+    let mut out: Vec<Stored> = fs::read_dir(store)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let session = e.file_name().to_str()?.to_string();
+            let modified = e.metadata().and_then(|m| m.modified()).ok()?;
+            let files: Vec<PathBuf> = files(store, &session)
+                .into_iter()
+                .filter(|f| f.starts_with(root))
+                .collect();
+            (!files.is_empty()).then_some(Stored {
+                session,
+                modified,
+                files,
+            })
+        })
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    out
+}
+
+/// Puts `path` back as it was before `session` first edited it, deleting it if the session
+/// created it; the current file is first copied into `backup` under its path below `root`.
+pub fn revert(store: &Path, session: &str, root: &Path, path: &Path, backup: &Path) -> Result<()> {
+    let before = read(store, session, path);
+    if matches!(before, Before::Unknown | Before::Skipped) {
+        bail!(
+            "no copy of {} from before the session was kept",
+            path.display()
+        );
+    }
+    let rel = path
+        .strip_prefix(root)
+        .ok()
+        .or_else(|| path.file_name().map(Path::new))
+        .context("the file has no name")?;
+    if path.is_file() {
+        let to = backup.join(rel);
+        fs::create_dir_all(to.parent().unwrap_or(backup))?;
+        fs::copy(path, &to).with_context(|| format!("keep a copy of {}", rel.display()))?;
+    }
+    match before {
+        Before::Text(bytes) => {
+            let mut name = path.file_name().context("the file has no name")?.to_owned();
+            name.push(".athena-revert");
+            let tmp = path.with_file_name(name);
+            fs::write(&tmp, bytes)?;
+            if let Ok(meta) = fs::metadata(path) {
+                fs::set_permissions(&tmp, meta.permissions())?;
+            }
+            fs::rename(&tmp, path)?;
+        }
+        _ => match fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        },
+    }
+    Ok(())
 }
 
 /// Deletes sessions older than `max_age`, then the oldest others until the store is under
@@ -222,6 +311,49 @@ mod tests {
         fs::write(&file, "edited by Claude\n").unwrap();
         take(&store, "s-1", &file).unwrap();
         assert_eq!(read(&store, "s-1", &file), Before::Skipped);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_lists_the_files_it_touched_under_a_root_and_reverts_them() {
+        let dir = temp("list");
+        let (store, root) = (dir.join("store"), dir.join("app"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        let (edited, created, outside) = (
+            root.join("src/a.go"),
+            root.join("new.go"),
+            dir.join("elsewhere.txt"),
+        );
+        fs::write(&edited, "before\n").unwrap();
+        fs::write(&outside, "x").unwrap();
+        for f in [&edited, &created, &outside] {
+            take(&store, "s-1", f).unwrap();
+        }
+        take(&store, "s-2", &outside).unwrap();
+        fs::write(&edited, "after\n").unwrap();
+        fs::write(&created, "made by Claude\n").unwrap();
+
+        let listed = sessions_under(&store, &root);
+        assert_eq!(listed.len(), 1, "s-2 touched nothing under the root");
+        assert_eq!(listed[0].session, "s-1");
+        assert_eq!(listed[0].files, [created.clone(), edited.clone()]);
+        assert_eq!(files(&store, "s-1").len(), 3);
+        assert!(files(&store, "../x").is_empty());
+
+        let backup = dir.join("backup");
+        revert(&store, "s-1", &root, &edited, &backup).unwrap();
+        assert_eq!(fs::read_to_string(&edited).unwrap(), "before\n");
+        assert_eq!(
+            fs::read_to_string(backup.join("src/a.go")).unwrap(),
+            "after\n"
+        );
+        revert(&store, "s-1", &root, &created, &backup).unwrap();
+        assert!(!created.exists(), "a file the session created is removed");
+        assert_eq!(
+            fs::read_to_string(backup.join("new.go")).unwrap(),
+            "made by Claude\n"
+        );
+        assert!(revert(&store, "s-9", &root, &edited, &backup).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 

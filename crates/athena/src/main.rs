@@ -10,6 +10,7 @@ mod settings;
 mod shell;
 mod snapshots;
 mod system_notify;
+mod transcripts;
 mod usage;
 
 use std::path::PathBuf;

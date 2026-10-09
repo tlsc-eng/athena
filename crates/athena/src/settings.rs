@@ -38,6 +38,8 @@ pub struct Settings {
     pub zoom_level: Option<i32>,
     /// VS Code ESLint's `eslint.fixOnSave`-style switch: Cmd+S applies ESLint's fixes first.
     pub eslint_fix_on_save: Option<bool>,
+    /// `claude.prices`: USD per million tokens by model id, over the built-in estimates.
+    pub claude_prices: HashMap<String, crate::transcripts::Price>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -368,6 +370,10 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 }
                 None => Err("must be an object of language server settings".into()),
             },
+            "claude" => match value.get("prices") {
+                Some(prices) => claude_prices(&mut settings, prices),
+                None => Err("must be {\"prices\": {model id: prices}}".into()),
+            },
             k if k.len() > 2 && k.starts_with('[') && k.ends_with(']') => {
                 let lang = settings
                     .languages
@@ -396,6 +402,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                     settings.lsp.insert(server_name(name).into(), value.clone());
                     Ok(())
                 }
+                Some(("claude", "prices")) => claude_prices(&mut settings, value),
                 _ => Err("is not a setting".into()),
             },
         };
@@ -404,6 +411,31 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
         }
     }
     Ok((settings, problems))
+}
+
+/// Reads `{"claude-opus-5": {"input": 5, "output": 25}}`; cache prices default to the usual
+/// multiples of the input price.
+fn claude_prices(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    let models = value
+        .as_object()
+        .ok_or("must be an object of prices by model id")?;
+    for (model, price) in models {
+        let field = |name: &str| match price.get(name) {
+            None => Ok(None),
+            Some(v) => v.as_f64().filter(|n| *n >= 0.).map(Some).ok_or(format!(
+                "\"{model}\".\"{name}\" must be a number of USD per million tokens"
+            )),
+        };
+        let (Some(input), Some(output)) = (field("input")?, field("output")?) else {
+            return Err(format!("\"{model}\" needs \"input\" and \"output\" prices"));
+        };
+        let mut p = crate::transcripts::Price::of(input, output);
+        p.cache_write_5m = field("cache_write")?.unwrap_or(p.cache_write_5m);
+        p.cache_write_1h = field("cache_write_1h")?.unwrap_or(p.cache_write_1h);
+        p.cache_read = field("cache_read")?.unwrap_or(p.cache_read);
+        settings.claude_prices.insert(model.clone(), p);
+    }
+    Ok(())
 }
 
 fn zoom_level(value: &Value) -> Result<i32, String> {
@@ -865,6 +897,36 @@ mod tests {
         assert!(!Settings::default().eslint_fix_on_save(), "off by default");
         let (dotted, _) = parse(r#"{"eslint.fixOnSave": true}"#).unwrap();
         assert!(dotted.eslint_fix_on_save());
+        assert_eq!(s.claude_prices["claude-sonnet-5"].cache_read, 0.3);
+    }
+
+    #[test]
+    fn claude_prices_fill_cache_prices_from_the_input_price_and_reject_bad_ones() {
+        let (s, problems) =
+            parse(r#"{"claude.prices": {"m-1": {"input": 2, "output": 10, "cache_write_1h": 3}}}"#)
+                .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let p = s.claude_prices["m-1"];
+        assert_eq!(
+            (
+                p.input,
+                p.output,
+                p.cache_write_5m,
+                p.cache_write_1h,
+                p.cache_read
+            ),
+            (2., 10., 2.5, 3., 0.2)
+        );
+        for bad in [
+            r#"{"claude": {"prices": {"m": {"input": 1}}}}"#,
+            r#"{"claude": {"prices": {"m": {"input": -1, "output": 1}}}}"#,
+            r#"{"claude": {"prices": {"m": {"input": 1, "output": "x"}}}}"#,
+            r#"{"claude": {"prices": []}}"#,
+            r#"{"claude": {"price": {}}}"#,
+        ] {
+            let (_, problems) = parse(bad).unwrap();
+            assert_eq!(problems.len(), 1, "{bad}");
+        }
     }
 
     #[test]
