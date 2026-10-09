@@ -1115,6 +1115,11 @@ mod tests {
             format!("CLAUDE_CONFIG_DIR='/x/it'\\''s' claude --resume {id}")
         );
         assert_eq!(resume_command("x; rm -rf ~", None), None);
+        assert_eq!(
+            resume_command("--dangerously-skip-permissions", None),
+            None,
+            "a transcript named like a flag"
+        );
     }
 
     #[test]

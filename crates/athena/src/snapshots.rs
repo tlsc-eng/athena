@@ -33,9 +33,10 @@ pub fn store() -> Result<PathBuf> {
     Ok(athena_proto::data_dir()?.join("snapshots"))
 }
 
-/// Claude Code session ids are UUIDs; anything else must not become a directory name.
+/// Claude Code session ids are UUIDs; anything else must not become a directory name, nor a
+/// word on a command line that reads as a flag.
 pub fn valid_session(session: &str) -> bool {
-    !session.is_empty()
+    session.starts_with(|c: char| c.is_ascii_alphanumeric())
         && session.len() <= 128
         && session
             .bytes()
@@ -273,6 +274,8 @@ mod tests {
         }
         assert!(take(&dir.join("store"), "ok", Path::new("relative")).is_err());
         assert!(valid_session("0b6c1e3a-1f2d-4c1b-9d55-1f0d2c3b4a5e"));
+        assert!(!valid_session("--dangerously-skip-permissions"));
+        assert!(!valid_session("_x"));
         fs::remove_dir_all(dir).unwrap();
     }
 
