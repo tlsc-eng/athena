@@ -115,6 +115,21 @@ pub type FileCoverage = BTreeMap<usize, bool>;
 
 /// Reads a `-coverprofile` file into per-file line coverage; files outside `module` are dropped.
 pub fn parse_coverprofile(text: &str, module: &GoModule) -> HashMap<PathBuf, FileCoverage> {
+    let line_count = |path: &Path| {
+        let bytes = std::fs::read(path).ok()?;
+        Some(bytes.split(|&b| b == b'\n').count())
+    };
+    coverage_within(text, module, line_count)
+}
+
+/// `parse_coverprofile` with each file's length from `line_count`; a block reaching past the
+/// end is cut there, so a bogus profile cannot expand into billions of lines.
+fn coverage_within(
+    text: &str,
+    module: &GoModule,
+    line_count: impl Fn(&Path) -> Option<usize>,
+) -> HashMap<PathBuf, FileCoverage> {
+    let mut lengths: HashMap<PathBuf, Option<usize>> = HashMap::new();
     let mut out: HashMap<PathBuf, FileCoverage> = HashMap::new();
     for line in text.lines().filter(|l| !l.starts_with("mode:")) {
         let Some((file, lines, covered)) = cover_block(line) else {
@@ -131,8 +146,17 @@ pub fn parse_coverprofile(text: &str, module: &GoModule) -> HashMap<PathBuf, Fil
             };
             dir.join(name)
         };
+        let length = *lengths
+            .entry(path.clone())
+            .or_insert_with_key(|p| line_count(p));
+        let Some(last) = length.and_then(|n| n.checked_sub(1)) else {
+            continue;
+        };
+        if *lines.start() > last {
+            continue;
+        }
         let file = out.entry(path).or_default();
-        for line in lines {
+        for line in *lines.start()..=(*lines.end()).min(last) {
             *file.entry(line).or_default() |= covered;
         }
     }
@@ -432,8 +456,21 @@ mod tests {
                        example.com/mx/c.go:1.1,2.1 1 1\n\
                        golang.org/x/y/d.go:1.1,2.1 1 1\n\
                        /abs/e.go:2.1,2.5 1 3\n\
+                       /abs/huge.go:2.1,4000000000.1 1 1\n\
+                       /abs/huge.go:9.1,9.5 1 1\n\
+                       /abs/gone.go:1.1,1.5 1 1\n\
                        garbage line\n";
-        let cov = parse_coverprofile(profile, &module());
+        let line_count = |p: &Path| match p.to_str()? {
+            "/abs/huge.go" => Some(5),
+            "/abs/gone.go" => None,
+            _ => Some(100),
+        };
+        let cov = coverage_within(profile, &module(), line_count);
+        let huge: Vec<usize> = cov[&PathBuf::from("/abs/huge.go")]
+            .keys()
+            .copied()
+            .collect();
+        assert_eq!(huge, [1, 2, 3, 4]);
         let a = &cov[&PathBuf::from("/work/m/sub/a.go")];
         let lines: Vec<(usize, bool)> = a.iter().map(|(l, c)| (*l, *c)).collect();
         // Line 4 holds the end of a block that ran, so it counts as run.
@@ -443,7 +480,7 @@ mod tests {
         );
         assert!(!cov[&PathBuf::from("/work/m/b.go")][&0]);
         assert!(cov[&PathBuf::from("/abs/e.go")][&1]);
-        assert_eq!(cov.len(), 3);
+        assert_eq!(cov.len(), 4);
         let job = with_coverage(
             go_job(&module(), &["./...".into()], None),
             Path::new("/t/c.out"),
