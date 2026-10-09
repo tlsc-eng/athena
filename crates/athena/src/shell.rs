@@ -207,7 +207,8 @@ impl Shell {
                 async {}
             }),
         ];
-        let debug = debug::DebugState::load(&windows::workspace_path(cx));
+        let roots: Vec<PathBuf> = workspace.projects.iter().map(|p| p.root.clone()).collect();
+        let debug = debug::DebugState::load(&windows::workspace_path(cx), &roots);
         let mut shell = Self {
             rail_from: workspace.active.unwrap_or(0),
             workspace,
