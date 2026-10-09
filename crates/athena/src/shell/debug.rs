@@ -1028,7 +1028,7 @@ impl Shell {
                         this.debug.console_line(
                             LineKind::Info,
                             "macOS asks for an administrator password before Delve may control \
-                             a program; `DevToolsSecurity -enable` stops it asking."
+                             a program; `sudo DevToolsSecurity -enable` stops it asking."
                                 .into(),
                         );
                     }
