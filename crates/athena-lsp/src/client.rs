@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -107,6 +107,8 @@ type Reply = Result<Value, String>;
 type Pending = Arc<Mutex<HashMap<i64, async_channel::Sender<Reply>>>>;
 /// Frames for the one thread that writes to the server, so no writer waits on another.
 type Frames = mpsc::Sender<Value>;
+/// A server's settings, which the user may change while it runs.
+pub type Config = Arc<RwLock<Value>>;
 
 /// One running language server. Calls never block: messages queue until `initialize` has finished.
 pub struct Client {
@@ -122,6 +124,16 @@ pub struct Client {
 
 impl Client {
     pub fn start(kind: ServerKind, root: PathBuf) -> (Self, async_channel::Receiver<Event>) {
+        Self::start_with(kind, root, Config::default())
+    }
+
+    /// Starts a server configured with `config`: its `initializationOptions`, and the answer to
+    /// its `workspace/configuration` requests.
+    pub fn start_with(
+        kind: ServerKind,
+        root: PathBuf,
+        config: Config,
+    ) -> (Self, async_channel::Receiver<Event>) {
         let (out_tx, out_rx) = async_channel::unbounded();
         let (events_tx, events_rx) = async_channel::unbounded();
         let pending: Pending = Arc::default();
@@ -135,6 +147,7 @@ impl Client {
             capabilities: capabilities.clone(),
             kind,
             root,
+            config,
             outgoing: out_rx.clone(),
             events: events_tx.clone(),
             pending: pending.clone(),
@@ -420,6 +433,14 @@ impl Client {
         Ok(parse_symbols(&answer(reply).await?, None))
     }
 
+    /// Tells the server its settings changed; servers such as gopls then ask for them again.
+    pub fn did_change_configuration(&self, settings: Value) {
+        self.notify(
+            "workspace/didChangeConfiguration",
+            json!({"settings": settings}),
+        );
+    }
+
     /// Tells the server files changed on disk outside the documents it has open.
     pub fn did_change_watched_files(&self, changes: &[(PathBuf, FileEvent)]) {
         let changes: Vec<Value> = changes
@@ -472,6 +493,7 @@ impl Drop for Client {
 struct Session {
     kind: ServerKind,
     root: PathBuf,
+    config: Config,
     outgoing: async_channel::Receiver<Outgoing>,
     events: async_channel::Sender<Event>,
     pending: Pending,
@@ -516,6 +538,8 @@ impl Session {
             .name("lsp-writer".into())
             .spawn(move || write_frames(BufWriter::new(stdin), frames))?;
         let reader = Reader {
+            program: self.kind.program(),
+            config: self.config.clone(),
             writer: writer.clone(),
             outgoing: self.outgoing.clone(),
             pending: self.pending.clone(),
@@ -583,7 +607,8 @@ impl Session {
             .root
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        json!({
+        let options = self.config.read().map_or(Value::Null, |c| c.clone());
+        let mut params = json!({
             "processId": std::process::id(),
             "clientInfo": {"name": "athena", "version": env!("CARGO_PKG_VERSION")},
             "rootUri": uri,
@@ -640,11 +665,17 @@ impl Session {
                     }
                 }
             }
-        })
+        });
+        if !options.is_null() {
+            params["initializationOptions"] = options;
+        }
+        params
     }
 }
 
 struct Reader {
+    program: &'static str,
+    config: Config,
     writer: Frames,
     outgoing: async_channel::Receiver<Outgoing>,
     pending: Pending,
@@ -714,11 +745,20 @@ impl Reader {
             (Some(method), Some(id)) => {
                 let result = match method {
                     "workspace/configuration" => {
+                        let config = self.config.read().map_or(Value::Null, |c| c.clone());
                         let items = message
                             .pointer("/params/items")
                             .and_then(Value::as_array)
-                            .map_or(0, Vec::len);
-                        Value::Array(vec![Value::Null; items])
+                            .map_or(&[][..], Vec::as_slice);
+                        Value::Array(
+                            items
+                                .iter()
+                                .map(|item| {
+                                    let section = item.get("section").and_then(Value::as_str);
+                                    configuration_section(&config, self.program, section)
+                                })
+                                .collect(),
+                        )
                     }
                     "workspace/workspaceFolders" => Value::Array(Vec::new()),
                     _ => Value::Null,
@@ -737,6 +777,19 @@ impl Reader {
             }
             _ => {}
         }
+    }
+}
+
+/// The part of a server's settings a `workspace/configuration` item asks for: all of them for
+/// no section or the server's own name (gopls asks for "gopls"), else the dotted path in them.
+fn configuration_section(config: &Value, program: &str, section: Option<&str>) -> Value {
+    match section {
+        None | Some("") => config.clone(),
+        Some(s) if s == program => config.clone(),
+        Some(s) => config
+            .pointer(&format!("/{}", s.replace('.', "/")))
+            .cloned()
+            .unwrap_or(Value::Null),
     }
 }
 
@@ -828,6 +881,7 @@ mod tests {
         let session = Session {
             kind: ServerKind::Go,
             root: PathBuf::from("/tmp"),
+            config: Arc::new(RwLock::new(json!({"hints": {"parameterNames": true}}))),
             outgoing: out_rx,
             events: events_tx,
             pending: Arc::default(),
@@ -844,6 +898,8 @@ mod tests {
             let mut input = BufReader::new(server_end.try_clone().unwrap());
             let mut output = server_end;
             let init = read_message(&mut input).unwrap().unwrap();
+            let settings = json!({"hints": {"parameterNames": true}});
+            assert_eq!(init["params"]["initializationOptions"], settings);
             write_message(
                 &mut output,
                 &json!({"jsonrpc": "2.0", "id": init["id"], "result": {"capabilities": {}}}),
@@ -863,7 +919,10 @@ mod tests {
                 match message["method"].as_str() {
                     Some("textDocument/didChange") => changed = true,
                     Some(_) => {}
-                    None => replies += 1,
+                    None => {
+                        assert_eq!(message["result"], json!([settings]));
+                        replies += 1;
+                    }
                 }
             }
             let _ = done_tx.send(());
@@ -884,6 +943,28 @@ mod tests {
         assert!(
             done.recv_timeout(Duration::from_secs(20)).is_ok(),
             "client and server deadlocked"
+        );
+    }
+
+    #[test]
+    fn configuration_requests_are_answered_from_the_settings_per_section() {
+        let config = json!({"hints": {"parameterNames": true}, "typescript": {"format": {"semicolons": "remove"}}});
+        assert_eq!(
+            configuration_section(&config, "gopls", Some("gopls")),
+            config
+        );
+        assert_eq!(configuration_section(&config, "gopls", None), config);
+        assert_eq!(
+            configuration_section(&config, "x", Some("typescript.format")),
+            json!({"semicolons": "remove"})
+        );
+        assert_eq!(
+            configuration_section(&config, "gopls", Some("nope")),
+            Value::Null
+        );
+        assert_eq!(
+            configuration_section(&Value::Null, "gopls", Some("gopls")),
+            Value::Null
         );
     }
 

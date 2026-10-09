@@ -10,7 +10,7 @@ mod protocol;
 mod signature;
 mod symbol;
 
-pub use client::{Client, EditReply, Event, FileEvent, RenameTarget};
+pub use client::{Client, Config, EditReply, Event, FileEvent, RenameTarget};
 pub use code_action::{CodeAction, Command};
 pub use completion::{CompletionItem, CompletionList, TextEdit};
 pub use edit::{EditError, FileChange, WorkspaceEdit, apply_text_edits};
