@@ -465,6 +465,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_symbol_kind_has_a_glyph_rather_than_a_bare_letter() {
+        let theme = athena_ui::Theme::dark(false);
+        for kind in 1..=26 {
+            let (glyph, _) = symbol_badge(kind, &theme);
+            assert!(
+                !(glyph.len() == 1 && glyph.chars().all(|c| c.is_ascii_lowercase())),
+                "kind {kind} shows {glyph:?}"
+            );
+        }
+        assert_eq!(symbol_badge(13, &theme).0, "𝑥");
+        assert_eq!(symbol_badge(14, &theme).0, "≡");
+    }
+
     fn list() -> Vec<Symbol> {
         vec![
             symbol("Server", 1, None),

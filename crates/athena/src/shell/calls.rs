@@ -465,9 +465,9 @@ pub(super) fn symbol_badge(kind: u32, t: &Theme) -> (&'static str, Hsla) {
         7 | 8 | 20 => ("◆", s.property),
         5 | 10 | 11 | 23 | 26 => ("T", s.type_),
         2..=4 => ("{}", s.type_),
-        13 => ("x", s.text),
-        14 | 22 => ("c", s.constant),
-        15..=18 => ("c", s.string_special),
+        13 => ("𝑥", s.variable_builtin),
+        14 | 22 => ("≡", s.constant),
+        15..=18 => ("≡", s.string_special),
         _ => ("·", t.color.content_muted),
     }
 }

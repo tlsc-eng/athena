@@ -717,11 +717,11 @@ fn kind_badge(kind: Option<u32>, t: &athena_ui::Theme) -> (&'static str, Hsla) {
     match kind {
         Some(2..=4) => ("ƒ", s.function),
         Some(5 | 10) => ("◆", s.property),
-        Some(6) => ("x", s.text),
+        Some(6) => ("𝑥", s.variable_builtin),
         Some(7 | 8 | 13 | 22 | 25) => ("T", s.type_),
         Some(9) => ("{}", s.type_),
         Some(14) => ("k", s.keyword),
-        Some(12 | 20 | 21) => ("c", s.constant),
+        Some(12 | 20 | 21) => ("≡", s.constant),
         Some(15) => ("⧉", s.string),
         _ => ("·", t.color.content_muted),
     }
