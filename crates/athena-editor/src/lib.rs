@@ -4,6 +4,7 @@ pub mod diff;
 mod diff_view;
 mod display;
 mod element;
+pub mod find;
 mod format;
 mod hover;
 mod image;

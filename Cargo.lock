@@ -499,6 +499,7 @@ dependencies = [
  "gpui",
  "imagesize",
  "libc",
+ "regex",
  "ropey",
  "streaming-iterator",
  "tree-sitter",

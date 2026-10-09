@@ -54,7 +54,8 @@ impl EditorView {
                 .occurrence
                 .as_ref()
                 .is_some_and(|(q, word)| *q == query && *word);
-            let matches = b.find(&query, !self.find_open(), word);
+            let (case, word) = self.occurrence_options(word);
+            let matches = b.find(&query, case, word);
             let from = self.cursor.selection().range().end;
             let taken =
                 |r: &Range<usize>| self.cursor.all().iter().any(|c| c.selection.range() == *r);
@@ -97,7 +98,8 @@ impl EditorView {
         } else {
             (b.selected_text(self.cursor.primary()), false)
         };
-        let matches = b.find(&query, !self.find_open(), word);
+        let (case, word) = self.occurrence_options(word);
+        let matches = b.find(&query, case, word);
         let at = primary.range().start;
         let Some(main) = matches
             .iter()
@@ -111,6 +113,15 @@ impl EditorView {
         self.occurrence = Some((query, word));
         drop(b);
         self.carets_changed(cx);
+    }
+
+    /// Case and whole-word matching for Cmd+D: the find bar's toggles while it is open.
+    fn occurrence_options(&self, word: bool) -> (bool, bool) {
+        if self.find_open() {
+            (self.find_options.case, word || self.find_options.word)
+        } else {
+            (true, word)
+        }
     }
 
     /// Cmd+Alt+Up/Down: a caret on the row above or below each caret, in the column it aims for.

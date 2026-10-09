@@ -23,6 +23,7 @@ use crate::buffer::{
 use crate::completion::Completing;
 use crate::display::{DisplayLine, DisplayMap, Fold};
 use crate::element::EditorElement;
+use crate::find::{self, FindOptions};
 use crate::hover::Hovering;
 use crate::line_jump::LineJump;
 use crate::shared::{self, SharedBuffer};
@@ -96,6 +97,9 @@ actions!(
         AddCursorAbove,
         AddCursorBelow,
         ToggleWordWrap,
+        ToggleMatchCase,
+        ToggleWholeWord,
+        ToggleRegex,
     ]
 );
 
@@ -176,6 +180,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-k cmd-d", SkipOccurrence, ctx),
         KeyBinding::new("cmd-shift-l", SelectAllOccurrences, ctx),
         KeyBinding::new("alt-z", ToggleWordWrap, ctx),
+    ]);
+    let bar = Some("FindBar");
+    cx.bind_keys([
+        KeyBinding::new("alt-c", ToggleMatchCase, bar),
+        KeyBinding::new("alt-w", ToggleWholeWord, bar),
+        KeyBinding::new("alt-r", ToggleRegex, bar),
+        KeyBinding::new("cmd-alt-c", ToggleMatchCase, bar),
+        KeyBinding::new("cmd-alt-w", ToggleWholeWord, bar),
+        KeyBinding::new("cmd-alt-r", ToggleRegex, bar),
     ]);
 }
 
@@ -362,7 +375,30 @@ struct FindBar {
     replacing: bool,
     matches: Vec<Range<usize>>,
     current: usize,
+    /// The regex last compiled, kept while the query and toggles stay the same.
+    compiled: Option<(String, FindOptions, Result<regex::Regex, String>)>,
     _subscriptions: [Subscription; 2],
+}
+
+impl FindBar {
+    fn regex(&mut self, query: &str, opts: FindOptions) -> &Result<regex::Regex, String> {
+        if self
+            .compiled
+            .as_ref()
+            .is_none_or(|(q, o, _)| q != query || *o != opts)
+        {
+            self.compiled = Some((query.to_string(), opts, find::compile(query, opts)));
+        }
+        &self.compiled.as_ref().expect("just compiled").2
+    }
+
+    /// Why the query matches nothing because it is not a valid regex.
+    fn error(&self, opts: FindOptions) -> Option<&str> {
+        match &self.compiled {
+            Some((_, o, Err(e))) if opts.regex && *o == opts => Some(e),
+            _ => None,
+        }
+    }
 }
 
 /// Files larger than this are reloaded from disk off the UI thread.
@@ -401,6 +437,8 @@ pub struct EditorView {
     /// A dismissed find bar, still drawn while it fades out.
     find_closing: Option<(FindBar, Closing)>,
     find_generation: u64,
+    /// The find bar's toggles, kept while it is closed as VS Code keeps them.
+    pub(crate) find_options: FindOptions,
     save_error: Option<String>,
     selecting: bool,
     was_dirty: bool,
@@ -493,6 +531,7 @@ impl EditorView {
             find_opening: None,
             find_closing: None,
             find_generation: 0,
+            find_options: FindOptions::default(),
             save_error: None,
             selecting: false,
             was_dirty: false,
@@ -1036,6 +1075,7 @@ impl EditorView {
                 replacing: false,
                 matches: Vec::new(),
                 current: 0,
+                compiled: None,
                 _subscriptions: [find_events, replace_events],
             });
             self.find_closing = None;
@@ -1099,7 +1139,19 @@ impl EditorView {
         let (Some(find), Some(buffer)) = (self.find.as_mut(), self.buffer.as_ref()) else {
             return;
         };
-        find.matches = buffer.buffer.borrow().find_all(&query);
+        let opts = self.find_options;
+        let b = buffer.buffer.borrow();
+        find.matches = if !opts.regex {
+            b.find(&query, opts.case, opts.word)
+        } else if query.is_empty() {
+            Vec::new()
+        } else {
+            match find.regex(&query, opts) {
+                Ok(re) => b.find_regex(re, opts.word),
+                Err(_) => Vec::new(),
+            }
+        };
+        drop(b);
         let head = self.cursor.selection().range().start;
         find.current = find
             .matches
@@ -1155,28 +1207,87 @@ impl EditorView {
             (None, None) => return None,
         };
         let t = cx.theme().clone();
+        let opts = self.find_options;
+        let error = find.error(opts);
         let count = match find.matches.len() {
+            _ if error.is_some() => "Invalid regular expression".to_string(),
             0 => "No results".to_string(),
             n => format!("{} of {n}", find.current + 1),
         };
-        let field = |input: &Entity<TextInput>| {
+        let field = |input: &Entity<TextInput>, invalid: bool| {
             let focused = input.focus_handle(cx).is_focused(window);
             div()
                 .w(px(280.))
                 .h(px(24.))
-                .px(px(8.))
+                .pl(px(8.))
+                .pr(px(2.))
                 .flex()
                 .items_center()
+                .gap(px(2.))
                 .bg(t.color.surface_sunken)
                 .border_1()
-                .border_color(if focused {
+                .border_color(if invalid {
+                    t.color.danger
+                } else if focused {
                     t.color.accent
                 } else {
                     t.color.border_strong
                 })
                 .rounded(t.shape.radius_control)
-                .child(input.clone())
+                .child(div().flex_1().min_w_0().child(input.clone()))
         };
+        let toggle = |id: &'static str,
+                      label: &'static str,
+                      tip: &'static str,
+                      on: bool,
+                      flip: fn(&mut FindOptions)| {
+            div()
+                .id(id)
+                .flex_none()
+                .h(px(18.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .rounded(t.shape.radius_control)
+                .cursor_pointer()
+                .text_color(if on {
+                    t.color.content
+                } else {
+                    t.color.content_muted
+                })
+                .when(on, |el| {
+                    el.bg(t.color.surface_accent)
+                        .border_1()
+                        .border_color(t.color.accent)
+                })
+                .when(!on, |el| el.hover(|s| s.bg(t.color.surface_hover)))
+                .tooltip(move |_, cx| athena_ui::Tooltip::view(tip, cx))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_find_option(flip, cx)))
+                .child(label)
+        };
+        let toggles = [
+            toggle(
+                "find-match-case",
+                "Aa",
+                "Match Case  ⌥⌘C",
+                opts.case,
+                |o| o.case = !o.case,
+            ),
+            toggle(
+                "find-whole-word",
+                "ab",
+                "Match Whole Word  ⌥⌘W",
+                opts.word,
+                |o| o.word = !o.word,
+            ),
+            toggle(
+                "find-regex",
+                ".*",
+                "Use Regular Expression  ⌥⌘R",
+                opts.regex,
+                |o| o.regex = !o.regex,
+            ),
+        ];
         let chevron = div()
             .id("find-toggle-replace")
             .w(px(16.))
@@ -1197,8 +1308,23 @@ impl EditorView {
             .items_center()
             .gap(px(8.))
             .child(chevron)
-            .child(field(&find.input))
-            .child(div().text_color(t.color.content_muted).child(count));
+            .child(field(&find.input, error.is_some()).children(toggles))
+            .child(
+                div()
+                    .id("find-count")
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(if error.is_some() {
+                        t.color.danger
+                    } else {
+                        t.color.content_muted
+                    })
+                    .when_some(error.map(str::to_string), |el, error| {
+                        el.tooltip(move |_, cx| athena_ui::Tooltip::view(error.clone(), cx))
+                    })
+                    .child(count),
+            );
         let replace_row = find.replacing.then(|| {
             div()
                 .h(px(24.))
@@ -1206,7 +1332,7 @@ impl EditorView {
                 .items_center()
                 .gap(px(8.))
                 .pl(px(24.))
-                .child(field(&find.replace))
+                .child(field(&find.replace, false))
                 .child(
                     Button::new("find-replace-one", "Replace", ButtonKind::Ghost)
                         .on_click(cx.listener(|this, _, _, cx| this.replace_one(cx))),
@@ -1244,6 +1370,16 @@ impl EditorView {
         };
         Some(
             div()
+                .key_context("FindBar")
+                .on_action(cx.listener(|this, _: &ToggleMatchCase, _, cx| {
+                    this.toggle_find_option(|o| o.case = !o.case, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| {
+                    this.toggle_find_option(|o| o.word = !o.word, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
+                    this.toggle_find_option(|o| o.regex = !o.regex, cx)
+                }))
                 .flex_none()
                 .h(px(if find.replacing { 64. } else { 36. }))
                 .px(px(12.))
@@ -1267,6 +1403,43 @@ impl EditorView {
         self.step_find(0);
     }
 
+    fn toggle_find_option(&mut self, flip: fn(&mut FindOptions), cx: &mut Context<Self>) {
+        flip(&mut self.find_options);
+        self.refresh_find(true, cx);
+        cx.notify();
+    }
+
+    /// The text each of `matches` becomes, with regex groups filled in when that toggle is on.
+    fn replacements(
+        &mut self,
+        matches: &[Range<usize>],
+        cx: &App,
+    ) -> Option<Vec<(Range<usize>, String)>> {
+        let opts = self.find_options;
+        let find = self.find.as_mut()?;
+        let with = find.replace.read(cx).text().to_string();
+        if !opts.regex {
+            return Some(matches.iter().map(|m| (m.clone(), with.clone())).collect());
+        }
+        let query = find.input.read(cx).text().to_string();
+        let re = find.regex(&query, opts).as_ref().ok()?.clone();
+        let b = self.buffer.as_ref()?.buffer.borrow();
+        let text = b.rope().to_string();
+        let byte = |at: usize| b.rope().char_to_byte(at);
+        Some(
+            matches
+                .iter()
+                .map(|m| {
+                    let range = byte(m.start)..byte(m.end);
+                    (
+                        m.clone(),
+                        find::replacement(&re, &text, &range, &with, opts),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     /// Replaces the selected match and selects the next one; a selection off the matches first
     /// moves to the current match, as VS Code's Replace does.
     fn replace_one(&mut self, cx: &mut Context<Self>) {
@@ -1281,7 +1454,12 @@ impl EditorView {
             cx.notify();
             return;
         }
-        let with = find.replace.read(cx).text().to_string();
+        let Some((_, with)) = self
+            .replacements(std::slice::from_ref(&current), cx)
+            .and_then(|mut r| r.pop())
+        else {
+            return;
+        };
         self.with_buffer(cx, |b, c| {
             b.edit_primary(c, |b, c| b.replace_range(c, current, &with))
         });
@@ -1290,15 +1468,12 @@ impl EditorView {
 
     /// Replaces every match as one undo step.
     fn replace_all(&mut self, cx: &mut Context<Self>) {
-        let Some(find) = self.find.as_ref() else {
+        let Some(matches) = self.find.as_ref().map(|f| f.matches.clone()) else {
             return;
         };
-        let with = find.replace.read(cx).text().to_string();
-        let edits: Vec<(Range<usize>, String)> = find
-            .matches
-            .iter()
-            .map(|m| (m.clone(), with.clone()))
-            .collect();
+        let Some(edits) = self.replacements(&matches, cx) else {
+            return;
+        };
         if !edits.is_empty() {
             self.with_buffer(cx, |b, c| {
                 b.edit_primary(c, |b, c| b.apply_edits(c, &edits, None))

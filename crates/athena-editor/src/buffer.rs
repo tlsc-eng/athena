@@ -2154,9 +2154,14 @@ impl Buffer {
                 && (k == 0 || from(k - 1) != from(k))
                 && from(end) != from(end - 1);
             let range = from(k)..from(end - 1) + 1;
+            // As in VS Code, an edge of the match that is not a word char needs no boundary.
             let whole = !word
-                || ((range.start == 0 || !is_word(self.rope.char(range.start - 1)))
-                    && (range.end == self.len_chars() || !is_word(self.rope.char(range.end))));
+                || ((range.start == 0
+                    || !is_word(self.rope.char(range.start - 1))
+                    || !is_word(self.rope.char(range.start)))
+                    && (range.end == self.len_chars()
+                        || !is_word(self.rope.char(range.end))
+                        || !is_word(self.rope.char(range.end - 1))));
             if found && whole {
                 out.push(range);
                 k = end;
@@ -2165,6 +2170,15 @@ impl Buffer {
             }
         }
         out
+    }
+
+    /// Char ranges of the non-empty matches of `re`, only whole words with `word`.
+    pub fn find_regex(&self, re: &regex::Regex, word: bool) -> Vec<Range<usize>> {
+        let text = self.rope.to_string();
+        crate::find::find_matches(re, &text, word)
+            .into_iter()
+            .map(|r| self.rope.byte_to_char(r.start)..self.rope.byte_to_char(r.end))
+            .collect()
     }
 
     /// The identifier at `at` or ending there, as a cursor touching a word picks it.
@@ -3703,6 +3717,26 @@ mod tests {
             "a caret just after a word picks it"
         );
         assert_eq!(b.word_around(20), Some(20..23));
+    }
+
+    #[test]
+    fn regex_occurrences_are_char_ranges_past_multibyte_text() {
+        use crate::find::{FindOptions, compile};
+        let b = buf("été (x1) é_x2 x3\r\nx4", "/x/a.txt");
+        let opts = FindOptions {
+            case: true,
+            word: true,
+            regex: true,
+        };
+        let re = compile(r"x\d", opts).unwrap();
+        assert_eq!(b.find_regex(&re, true), [5..7, 14..16, 18..20]);
+        assert_eq!(b.find_regex(&re, false).len(), 4);
+        assert_eq!(
+            b.find("(x1", true, true),
+            vec![4..7],
+            "a bracket edge needs no boundary"
+        );
+        assert!(b.find("(x", true, true).is_empty());
     }
 
     #[test]
