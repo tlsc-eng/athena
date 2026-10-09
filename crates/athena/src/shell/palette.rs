@@ -67,6 +67,10 @@ pub(super) enum Mode {
     Stashes,
     /// package.json scripts and Makefile targets.
     Tasks,
+    Worktrees,
+    /// Branches a new worktree can check out.
+    NewWorktree,
+    RemoveWorktree,
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -85,6 +89,8 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Symbols | Mode::WorkspaceSymbols => "No matching symbols",
         Mode::Recent => "No recently opened folders",
         Mode::Tasks => "No matching tasks",
+        Mode::Worktrees | Mode::RemoveWorktree => "No matching worktrees",
+        Mode::NewWorktree => "Type a name for a new branch",
         _ => "No matching commands",
     }
 }
@@ -228,6 +234,18 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::GitStashIncludeUntracked),
         ),
         ("Git: Pop stash…", Box::new(actions::GitPopStash)),
+        (
+            "Git: Open worktree…",
+            Box::new(super::worktrees::GitOpenWorktree),
+        ),
+        (
+            "Git: Create worktree…",
+            Box::new(super::worktrees::GitCreateWorktree),
+        ),
+        (
+            "Git: Delete worktree…",
+            Box::new(super::worktrees::GitDeleteWorktree),
+        ),
         ("Open file to the side", Box::new(actions::QuickOpenBeside)),
         ("New Claude session", Box::new(actions::NewClaudeSession)),
         (
@@ -365,6 +383,9 @@ impl Shell {
             Mode::Recent => "Open a recent folder…",
             Mode::Stashes => "Pop a stash…",
             Mode::Tasks => "Select the task to run…",
+            Mode::Worktrees => "Open a worktree…",
+            Mode::NewWorktree => "Pick a branch for the new worktree, or type a new branch name…",
+            Mode::RemoveWorktree => "Delete a worktree…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -384,6 +405,9 @@ impl Shell {
             | Mode::FilesBeside
             | Mode::Branches
             | Mode::Stashes
+            | Mode::Worktrees
+            | Mode::NewWorktree
+            | Mode::RemoveWorktree
             | Mode::Symbols
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
@@ -755,9 +779,17 @@ impl Shell {
             Mode::Branches => Some(super::branches::entries(
                 &self.git.branches,
                 &self.git.stashes,
+                &self.git.worktrees,
                 &query,
             )),
             Mode::Stashes => Some(super::branches::stash_entries(&self.git.stashes)),
+            Mode::Worktrees => Some(super::worktrees::open_entries(&self.git.worktrees)),
+            Mode::NewWorktree => Some(super::worktrees::new_entries(
+                &self.git.branches,
+                &self.git.worktrees,
+                &query,
+            )),
+            Mode::RemoveWorktree => Some(super::worktrees::remove_entries(&self.git.worktrees)),
             _ => None,
         };
         if let Some(rows) = branch_rows {
@@ -870,7 +902,7 @@ impl Shell {
             Some(Target::File(path)) => self.open_file(path, window, cx),
             Some(Target::Command(action)) => window.dispatch_action(action, cx),
             Some(Target::Claude(command)) => self.start_claude_with(command, window, cx),
-            Some(Target::Branch(pick)) => self.run_branch(pick, cx),
+            Some(Target::Branch(pick)) => self.run_branch(pick, window, cx),
             Some(Target::Symbol(path, at)) => self.lsp.jump = Some((path, at)),
             Some(Target::Folder(root)) => self.open_folder(root, cx),
             Some(Target::Task(command)) => self.run_task(command, window, cx),

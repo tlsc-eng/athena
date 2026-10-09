@@ -73,6 +73,10 @@ pub(super) struct GitState {
     pub(super) branches: Vec<git::Branch>,
     /// Stashes for the branch picker, newest first.
     pub(super) stashes: Vec<git::Stash>,
+    /// The active repository's worktrees for the pickers, the main one first.
+    pub(super) worktrees: Vec<git::Worktree>,
+    /// Each open project's main worktree when it is a linked worktree.
+    pub(super) worktree_mains: HashMap<PathBuf, Option<PathBuf>>,
     /// The fetch, pull, push or stash under way, as the status bar words it.
     pub(super) remote_busy: Option<&'static str>,
     autofetch: Option<Task<()>>,
@@ -257,6 +261,7 @@ impl Shell {
         if let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) {
             self.git_repo(&root);
         }
+        self.note_worktree_mains();
         self.git.kick = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(KICK_DELAY).await;
             let _ = this.update(cx, |this, cx| this.refresh_git(cx));
@@ -266,6 +271,7 @@ impl Shell {
     /// Forgets a closed project's git state and gutter marks.
     pub(super) fn git_project_closed(&mut self, root: &Path) {
         self.git.repos.remove(root);
+        self.git.worktree_mains.remove(root);
         self.git.marks.retain(|path, _| !path.starts_with(root));
     }
 
@@ -1522,6 +1528,21 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
         |this, _: &crate::actions::GitStashIncludeUntracked, _, cx| this.git_stash(true, cx),
     ))
     .on_action(cx.listener(|this, _: &GitPopStash, w, cx| this.open_stashes(w, cx)))
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitOpenWorktree, w, cx| {
+            this.open_worktrees(super::palette::Mode::Worktrees, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitCreateWorktree, w, cx| {
+            this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitDeleteWorktree, w, cx| {
+            this.open_worktrees(super::palette::Mode::RemoveWorktree, w, cx)
+        }),
+    )
     .on_action(
         cx.listener(|this, _: &crate::actions::GitOpenTimeline, _, cx| this.open_timeline(cx)),
     )

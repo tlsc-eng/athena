@@ -41,6 +41,7 @@ mod timeline;
 mod tree;
 mod usage_view;
 mod watch;
+mod worktrees;
 mod zoom;
 
 use std::cell::RefCell;
@@ -385,8 +386,12 @@ impl Shell {
     pub fn open_folder(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let previous = self.workspace.active;
         let index = self.workspace.add_project(root);
+        let root = self.workspace.projects[index].root.clone();
         self.workspace.active = previous;
-        self.switch_to(index, cx);
+        self.group_worktrees();
+        if let Some(index) = self.workspace.projects.iter().position(|p| p.root == root) {
+            self.switch_to(index, cx);
+        }
     }
 
     /// Files and folders dropped from Finder: folders open as projects, files as tabs.
@@ -548,7 +553,17 @@ impl Shell {
             .enumerate()
             .map(|(i, (project, monogram))| {
                 let selected = Some(i) == active;
-                let root = project.root.display().to_string();
+                let main = self
+                    .worktree_main(&project.root)
+                    .filter(|m| self.workspace.projects.iter().any(|p| p.root == *m));
+                let root = match &main {
+                    Some(main) => format!(
+                        "{} — worktree of {}",
+                        project.root.display(),
+                        main.display()
+                    ),
+                    None => project.root.display().to_string(),
+                };
                 div()
                     .id(("rail-item", i))
                     .size(t.ui(RAIL_ITEM))
@@ -571,6 +586,16 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_to(i, cx)))
                     .relative()
                     .child(monogram)
+                    .children(main.map(|_| {
+                        // Joins a worktree to the repository above it, as one group.
+                        div()
+                            .absolute()
+                            .top(-t.ui(RAIL_GAP))
+                            .left(t.ui(RAIL_ITEM / 2.) - px(0.5))
+                            .w(px(1.))
+                            .h(t.ui(RAIL_GAP))
+                            .bg(t.color.border_strong)
+                    }))
                     .children(self.project_claude_state(&project.root, cx).map(|state| {
                         let color = match state {
                             ClaudeState::Waiting => t.color.warning,

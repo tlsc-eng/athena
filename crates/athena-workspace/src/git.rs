@@ -1296,6 +1296,157 @@ pub fn stash_pop(root: &Path, commit: &str) -> Result<()> {
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
+/// One `git worktree list` entry; the main worktree comes first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// The checked-out branch; `None` when HEAD is detached or the repository is bare.
+    pub branch: Option<String>,
+    pub head: String,
+    pub bare: bool,
+    pub locked: bool,
+    /// Its folder is gone, so `git worktree prune` would forget it.
+    pub prunable: bool,
+}
+
+/// Parses `worktree list --porcelain -z`: NUL-ended attributes, an empty one ending each record.
+pub fn parse_worktrees(out: &[u8]) -> Vec<Worktree> {
+    let text = String::from_utf8_lossy(out);
+    let mut list: Vec<Worktree> = Vec::new();
+    let mut open = false;
+    for field in text.split('\0') {
+        if field.is_empty() {
+            open = false;
+            continue;
+        }
+        let (key, value) = field.split_once(' ').unwrap_or((field, ""));
+        if key == "worktree" {
+            list.push(Worktree {
+                path: PathBuf::from(value),
+                branch: None,
+                head: String::new(),
+                bare: false,
+                locked: false,
+                prunable: false,
+            });
+            open = true;
+            continue;
+        }
+        let Some(w) = list.last_mut().filter(|_| open) else {
+            continue;
+        };
+        match key {
+            "HEAD" => w.head = value.to_string(),
+            "branch" => {
+                w.branch = Some(
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value)
+                        .to_string(),
+                )
+            }
+            "bare" => w.bare = true,
+            "locked" => w.locked = true,
+            "prunable" => w.prunable = true,
+            _ => {}
+        }
+    }
+    list
+}
+
+pub fn worktrees(root: &Path) -> Result<Vec<Worktree>> {
+    let mut cmd = git(root);
+    cmd.args(["worktree", "list", "--porcelain", "-z"]);
+    Ok(parse_worktrees(&run(cmd, None)?))
+}
+
+/// The branch a new worktree checks out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NewWorktree {
+    /// A local branch no other worktree has checked out.
+    Existing(String),
+    /// A remote branch (`origin/x`), checked out as a new local branch tracking it.
+    Track(String),
+    /// A new branch made at HEAD.
+    Create(String),
+}
+
+/// `git worktree add` at `path`, which must not exist yet.
+pub fn add_worktree(root: &Path, path: &Path, how: &NewWorktree) -> Result<()> {
+    let mut cmd = filtering_git(root);
+    cmd.args(["worktree", "add"]);
+    match how {
+        NewWorktree::Existing(branch) => {
+            refuse_dash(branch)?;
+            cmd.arg("--").arg(path).arg(branch);
+        }
+        NewWorktree::Track(remote) => {
+            refuse_dash(remote)?;
+            let (_, local) = remote
+                .split_once('/')
+                .context("a remote branch is named remote/branch")?;
+            cmd.args(["--track", "-b", local, "--"])
+                .arg(path)
+                .arg(remote);
+        }
+        NewWorktree::Create(branch) => {
+            refuse_dash(branch)?;
+            cmd.args(["-b", branch, "--"]).arg(path);
+        }
+    }
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+fn refuse_dash(name: &str) -> Result<()> {
+    if name.starts_with('-') {
+        bail!("a branch name cannot start with a dash");
+    }
+    Ok(())
+}
+
+/// Error from removing a worktree with uncommitted or untracked changes without `force`.
+#[derive(Debug)]
+pub struct Dirty;
+
+impl std::fmt::Display for Dirty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the worktree has uncommitted changes")
+    }
+}
+
+impl std::error::Error for Dirty {}
+
+/// `git worktree remove`; without `force` a worktree with changes is refused with [`Dirty`].
+/// The branch it had checked out stays.
+pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
+    if !force {
+        let mut status = git(path);
+        status.args(["status", "--porcelain", "--untracked-files=normal"]);
+        if !run(status, None)?.trim_ascii().is_empty() {
+            return Err(Dirty.into());
+        }
+    }
+    let mut cmd = filtering_git(root);
+    cmd.args(["worktree", "remove"]);
+    if force {
+        cmd.arg("--force");
+    }
+    cmd.arg("--").arg(path);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// The main worktree of the linked worktree at `root`, read from its `.git` file without git.
+pub fn main_worktree(root: &Path) -> Option<PathBuf> {
+    let pointer = std::fs::read_to_string(root.join(".git")).ok()?;
+    let git_dir = root.join(pointer.strip_prefix("gitdir:")?.trim());
+    let common = std::fs::read_to_string(git_dir.join("commondir")).ok()?;
+    let common = git_dir.join(common.trim()).canonicalize().ok()?;
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    common.parent().map(Path::to_path_buf)
+}
+
 /// Per-file statuses plus every folder's most severe one, for colouring a file tree.
 #[derive(Clone, Debug, Default)]
 pub struct Decorations {
@@ -2220,6 +2371,95 @@ mod tests {
         for dir in [a, bare] {
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn worktree_records_parse() {
+        let out = nul(&[
+            "worktree /r/main",
+            "HEAD 1111",
+            "branch refs/heads/main",
+            "",
+            "worktree /r/feat x",
+            "HEAD 2222",
+            "branch refs/heads/feat/x",
+            "locked reason here",
+            "",
+            "worktree /r/gone",
+            "HEAD 3333",
+            "detached",
+            "prunable gitdir file points to non-existent location",
+            "",
+        ]);
+        let list = parse_worktrees(&out);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].path, PathBuf::from("/r/main"));
+        assert_eq!(list[0].branch.as_deref(), Some("main"));
+        assert_eq!(list[1].path, PathBuf::from("/r/feat x"));
+        assert_eq!(list[1].branch.as_deref(), Some("feat/x"));
+        assert!(list[1].locked && !list[1].prunable);
+        assert_eq!((list[2].branch.as_deref(), list[2].prunable), (None, true));
+        assert_eq!(list[2].head, "3333");
+    }
+
+    #[test]
+    fn worktrees_are_added_listed_found_and_removed_only_when_clean() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("worktree", "a\n");
+        repo_git(&dir, &["branch", "old"]);
+        let new = dir.with_extension("new");
+        let old = dir.with_extension("old");
+        let _ = std::fs::remove_dir_all(&new);
+        let _ = std::fs::remove_dir_all(&old);
+        add_worktree(&dir, &new, &NewWorktree::Create("feat".into())).unwrap();
+        add_worktree(&dir, &old, &NewWorktree::Existing("old".into())).unwrap();
+        let err = add_worktree(
+            &dir,
+            &dir.with_extension("x"),
+            &NewWorktree::Existing("old".into()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("old"), "{err:#}");
+        assert!(add_worktree(&dir, &new, &NewWorktree::Create("-f".into())).is_err());
+
+        let list = worktrees(&dir).unwrap();
+        let found: Vec<(PathBuf, Option<&str>)> = list
+            .iter()
+            .map(|w| (w.path.canonicalize().unwrap(), w.branch.as_deref()))
+            .collect();
+        let new = new.canonicalize().unwrap();
+        assert_eq!(
+            found,
+            [
+                (dir.clone(), Some("main")),
+                (new.clone(), Some("feat")),
+                (old.canonicalize().unwrap(), Some("old")),
+            ]
+        );
+        assert_eq!(main_worktree(&new), Some(dir.clone()));
+        assert_eq!(main_worktree(&dir), None);
+        assert_eq!(current_branch(&new).unwrap().as_deref(), Some("feat"));
+
+        std::fs::write(new.join("f.txt"), "changed\n").unwrap();
+        let err = remove_worktree(&dir, &new, false).unwrap_err();
+        assert!(err.is::<Dirty>(), "{err:#}");
+        assert!(new.join("f.txt").exists());
+        std::fs::write(old.join("untracked.txt"), "x").unwrap();
+        assert!(
+            remove_worktree(&dir, &old, false)
+                .unwrap_err()
+                .is::<Dirty>()
+        );
+        std::fs::remove_file(old.join("untracked.txt")).unwrap();
+        remove_worktree(&dir, &old, false).unwrap();
+        assert!(!old.exists());
+        remove_worktree(&dir, &new, true).unwrap();
+        assert!(!new.exists());
+        assert_eq!(worktrees(&dir).unwrap().len(), 1);
+        assert!(branches(&dir).unwrap().iter().any(|b| b.name == "feat"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

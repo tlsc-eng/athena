@@ -1,4 +1,6 @@
-use athena_workspace::git::{self, Branch, Stash, Switch};
+use std::path::PathBuf;
+
+use athena_workspace::git::{self, Branch, NewWorktree, Stash, Switch, Worktree};
 use gpui::{Context, Window};
 
 use super::Shell;
@@ -16,6 +18,12 @@ pub(super) enum BranchPick {
     },
     /// The stash's commit, as its index shifts when another is pushed.
     PopStash(String),
+    /// A branch checked out in another worktree is opened there, as git cannot switch to it.
+    OpenWorktree(PathBuf),
+    /// Lists the branches a new worktree can check out.
+    PickWorktreeBranch,
+    AddWorktree(NewWorktree),
+    RemoveWorktree(PathBuf),
 }
 
 /// One picker row: label, detail, the text the query is matched against, and what it does.
@@ -27,8 +35,13 @@ pub(super) struct BranchEntry {
 }
 
 /// The picker's rows for `query`, VS Code's order: create from the query, local, then remote;
-/// stashing and the stashes to pop come last.
-pub(super) fn entries(branches: &[Branch], stashes: &[Stash], query: &str) -> Vec<BranchEntry> {
+/// creating a worktree, stashing and the stashes to pop come last.
+pub(super) fn entries(
+    branches: &[Branch],
+    stashes: &[Stash],
+    worktrees: &[Worktree],
+    query: &str,
+) -> Vec<BranchEntry> {
     let typed = query.trim();
     let mut out = Vec::new();
     if !typed.is_empty() && !branches.iter().any(|b| b.name == typed) {
@@ -45,6 +58,12 @@ pub(super) fn entries(branches: &[Branch], stashes: &[Stash], query: &str) -> Ve
         .filter(|b| !b.remote)
         .map(|b| b.name.as_str())
         .collect();
+    let elsewhere = |name: &str| {
+        worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some(name))
+            .map(|w| w.path.clone())
+    };
     let (mine, remote): (Vec<&Branch>, Vec<&Branch>) = branches.iter().partition(|b| !b.remote);
     for b in mine.into_iter().chain(remote) {
         let pick = if !b.remote {
@@ -56,6 +75,19 @@ pub(super) fn entries(branches: &[Branch], stashes: &[Stash], query: &str) -> Ve
             }
         };
         let mut detail = vec![b.when.clone(), b.subject.clone()];
+        let pick = match &pick {
+            BranchPick::Switch(name) if !b.current => match elsewhere(name) {
+                Some(path) => {
+                    detail.insert(
+                        0,
+                        format!("in worktree {}", crate::actions::display_path(&path)),
+                    );
+                    BranchPick::OpenWorktree(path)
+                }
+                None => pick,
+            },
+            _ => pick,
+        };
         if b.current {
             detail.insert(0, "current".into());
         }
@@ -67,6 +99,12 @@ pub(super) fn entries(branches: &[Branch], stashes: &[Stash], query: &str) -> Ve
             pick,
         });
     }
+    out.push(BranchEntry {
+        label: "Create worktree…".into(),
+        detail: None,
+        key: "Create worktree…".into(),
+        pick: BranchPick::PickWorktreeBranch,
+    });
     for (label, untracked) in [
         ("Stash changes", false),
         ("Stash changes (include untracked)", true),
@@ -110,12 +148,16 @@ impl Shell {
         cx.spawn_in(window, async move |this, cx| {
             let listed = cx
                 .background_executor()
-                .spawn(async move { anyhow::Ok((git::branches(&root)?, git::stashes(&root)?)) })
+                .spawn(async move {
+                    let worktrees = git::worktrees(&root).unwrap_or_default();
+                    anyhow::Ok((git::branches(&root)?, git::stashes(&root)?, worktrees))
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match listed {
-                Ok((branches, stashes)) => {
+                Ok((branches, stashes, worktrees)) => {
                     this.git.branches = branches;
                     this.git.stashes = stashes;
+                    this.git.worktrees = worktrees;
                     this.open_palette(Mode::Branches, window, cx);
                 }
                 Err(err) => {
@@ -153,7 +195,12 @@ impl Shell {
         .detach();
     }
 
-    pub(super) fn run_branch(&mut self, pick: BranchPick, cx: &mut Context<Self>) {
+    pub(super) fn run_branch(
+        &mut self,
+        pick: BranchPick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.active_root() else {
             return;
         };
@@ -163,6 +210,14 @@ impl Shell {
             BranchPick::Create(name) => (name, Switch::Create),
             BranchPick::Stash { untracked } => return self.git_stash(untracked, cx),
             BranchPick::PopStash(commit) => return self.git_stash_pop(commit, cx),
+            BranchPick::OpenWorktree(path) => return self.open_worktree(path, cx),
+            BranchPick::PickWorktreeBranch => {
+                return self.open_worktrees(Mode::NewWorktree, window, cx);
+            }
+            BranchPick::AddWorktree(how) => return self.add_worktree(how, cx),
+            BranchPick::RemoveWorktree(path) => {
+                return self.remove_worktree(path, false, window, cx);
+            }
         };
         cx.spawn(async move |this, cx| {
             let task_name = name.clone();
@@ -206,7 +261,7 @@ mod tests {
             branch("main", false, true),
             branch("origin/dev", true, false),
         ];
-        let rows = entries(&list, &[], "feat/x");
+        let rows = entries(&list, &[], &[], "feat/x");
         assert_eq!(rows[0].pick, BranchPick::Create("feat/x".into()));
         assert_eq!(rows[1].pick, BranchPick::Switch("main".into()));
         assert_eq!(
@@ -215,7 +270,7 @@ mod tests {
         );
         assert_eq!(rows[2].pick, BranchPick::Track("origin/dev".into()));
         assert!(
-            entries(&list, &[], "main")
+            entries(&list, &[], &[], "main")
                 .iter()
                 .all(|e| !matches!(e.pick, BranchPick::Create(_)))
         );
@@ -227,7 +282,7 @@ mod tests {
             branch("dev", false, false),
             branch("origin/dev", true, false),
         ];
-        let rows = entries(&list, &[], "");
+        let rows = entries(&list, &[], &[], "");
         assert_eq!(rows[1].pick, BranchPick::Switch("dev".into()));
     }
 
@@ -242,6 +297,7 @@ mod tests {
         let rows = entries(
             &[branch("main", false, true)],
             std::slice::from_ref(&stash),
+            &[],
             "",
         );
         let picks: Vec<&BranchPick> = rows.iter().map(|r| &r.pick).collect();
@@ -249,11 +305,47 @@ mod tests {
             picks,
             [
                 &BranchPick::Switch("main".into()),
+                &BranchPick::PickWorktreeBranch,
                 &BranchPick::Stash { untracked: false },
                 &BranchPick::Stash { untracked: true },
                 &BranchPick::PopStash("c0ffee".into()),
             ]
         );
-        assert_eq!(rows[3].label, "Pop stash@{0}: On main: wip");
+        assert_eq!(rows[4].label, "Pop stash@{0}: On main: wip");
+    }
+
+    #[test]
+    fn a_branch_checked_out_in_another_worktree_opens_that_worktree() {
+        let list = [
+            branch("main", false, true),
+            branch("feat", false, false),
+            branch("origin/feat", true, false),
+        ];
+        let worktrees = [
+            Worktree {
+                path: "/r".into(),
+                branch: Some("main".into()),
+                head: String::new(),
+                bare: false,
+                locked: false,
+                prunable: false,
+            },
+            Worktree {
+                path: "/r-feat".into(),
+                branch: Some("feat".into()),
+                head: String::new(),
+                bare: false,
+                locked: false,
+                prunable: false,
+            },
+        ];
+        let rows = entries(&list, &[], &worktrees, "");
+        assert_eq!(rows[0].pick, BranchPick::Switch("main".into()));
+        assert_eq!(rows[1].pick, BranchPick::OpenWorktree("/r-feat".into()));
+        assert_eq!(
+            rows[1].detail.as_deref(),
+            Some("in worktree /r-feat · 2 days ago · Work")
+        );
+        assert_eq!(rows[2].pick, BranchPick::OpenWorktree("/r-feat".into()));
     }
 }
