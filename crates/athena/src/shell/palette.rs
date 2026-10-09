@@ -32,6 +32,8 @@ pub(super) enum Target {
     Symbol(PathBuf, Position),
     /// A recently closed project folder.
     Folder(PathBuf),
+    /// A shell command Run Task starts in a new terminal.
+    Task(String),
 }
 
 impl Clone for Target {
@@ -43,6 +45,7 @@ impl Clone for Target {
             Self::Branch(pick) => Self::Branch(pick.clone()),
             Self::Symbol(path, at) => Self::Symbol(path.clone(), *at),
             Self::Folder(path) => Self::Folder(path.clone()),
+            Self::Task(command) => Self::Task(command.clone()),
         }
     }
 }
@@ -62,6 +65,8 @@ pub(super) enum Mode {
     /// Recently closed project folders.
     Recent,
     Stashes,
+    /// package.json scripts and Makefile targets.
+    Tasks,
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -79,6 +84,7 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Files | Mode::FilesBeside => "No matching files",
         Mode::Symbols | Mode::WorkspaceSymbols => "No matching symbols",
         Mode::Recent => "No recently opened folders",
+        Mode::Tasks => "No matching tasks",
         _ => "No matching commands",
     }
 }
@@ -180,6 +186,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::RevealInTree),
         ),
         ("Find in project", Box::new(actions::FindInProject)),
+        ("Run task…", Box::new(actions::RunTask)),
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),
         ("Switch branch…", Box::new(actions::SwitchBranch)),
@@ -285,6 +292,7 @@ impl Shell {
             Mode::WorkspaceSymbols => "Go to symbol in workspace…",
             Mode::Recent => "Open a recent folder…",
             Mode::Stashes => "Pop a stash…",
+            Mode::Tasks => "Select the task to run…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -309,6 +317,7 @@ impl Shell {
             Mode::Claude => claude_entries(""),
             Mode::Commands => self.command_entries(window, cx),
             Mode::Recent => self.recent_entries(),
+            Mode::Tasks => self.task_entries(),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
@@ -396,6 +405,22 @@ impl Shell {
             .and_then(|p| p.active_item());
         item.and_then(|item| self.items.get(&(project.root.clone(), item.id)))
             .is_some_and(|view| matches!(view, super::item::ItemView::Terminal(_)))
+    }
+
+    fn task_entries(&self) -> Vec<Entry> {
+        let Some(root) = self.active_root() else {
+            return Vec::new();
+        };
+        super::tasks::discover(&root)
+            .into_iter()
+            .map(|task| Entry {
+                key: task.label.clone(),
+                label: task.label,
+                detail: Some(task.detail),
+                kind: None,
+                target: Target::Task(task.command),
+            })
+            .collect()
     }
 
     /// Closed project folders that still exist, newest first.
@@ -776,6 +801,7 @@ impl Shell {
             Some(Target::Branch(pick)) => self.run_branch(pick, cx),
             Some(Target::Symbol(path, at)) => self.lsp.jump = Some((path, at)),
             Some(Target::Folder(root)) => self.open_folder(root, cx),
+            Some(Target::Task(command)) => self.run_task(command, window, cx),
             None => {}
         }
         cx.notify();

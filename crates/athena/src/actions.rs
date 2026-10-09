@@ -83,6 +83,7 @@ actions!(
         GitStash,
         GitStashIncludeUntracked,
         GitPopStash,
+        RunTask,
     ]
 );
 

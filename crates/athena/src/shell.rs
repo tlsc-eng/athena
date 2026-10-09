@@ -26,6 +26,7 @@ mod review;
 mod search;
 mod shortcuts;
 mod status_bar;
+mod tasks;
 mod tree;
 mod usage_view;
 mod watch;
@@ -708,7 +709,7 @@ impl Render for Shell {
             |el, d| el.opacity(d).top(px(4. * (1. - d))),
         );
 
-        let root = git_view::bind_git_actions(div(), cx);
+        let root = tasks::bind_run_actions(git_view::bind_git_actions(div(), cx), cx);
         root.track_focus(&self.focus)
             .key_context("Shell")
             .on_action(cx.listener(Self::add_project))
