@@ -9,7 +9,7 @@ use gpui::{
     ScrollWheelEvent, StyledText, Task, anchored, deferred, div, point, prelude::*, px,
 };
 
-use crate::buffer::is_word;
+use crate::buffer::{Buffer, Cursors, is_word};
 use crate::view::{EditorEvent, EditorView};
 
 /// Typing pauses this long before suggestions are asked for.
@@ -367,18 +367,7 @@ impl EditorView {
                 let from = b.char_at_utf16(e.start.0, e.start.1);
                 (from..b.char_at_utf16(e.end.0, e.end.1), e.text.clone())
             }));
-            let primary = c.primary_index();
-            b.edit_carets(c, false, |b, c, i| {
-                if i == primary {
-                    b.apply_edits(c, &edits, item.select.clone());
-                } else if c.selection.is_empty() {
-                    let at = c.head();
-                    let from = at - typed.min(b.column_of(at));
-                    b.replace_range(c, from..at, &item.text);
-                } else {
-                    b.insert(c, &item.text);
-                }
-            });
+            complete_carets(b, c, &edits, typed, item.select.clone());
         });
         // A function just completed into its parentheses shows its parameters, as in VS Code.
         let head = self.cursor.head();
@@ -543,9 +532,58 @@ fn kind_badge(kind: Option<u32>, t: &athena_ui::Theme) -> (&'static str, Hsla) {
     }
 }
 
+/// Applies a completion at every caret: the primary takes `edits` (its own first, in offsets of
+/// the text before any caret changed) and the others replace the `typed` chars before them.
+fn complete_carets(
+    b: &mut Buffer,
+    cs: &mut Cursors,
+    edits: &[(Range<usize>, String)],
+    typed: usize,
+    select: Option<Range<usize>>,
+) {
+    let Some((_, text)) = edits.first() else {
+        return;
+    };
+    let primary = cs.primary_index();
+    b.edit_carets(cs, false, |b, c, i| {
+        if i == primary {
+            // Carets later in the text completed first, moving any edit past them.
+            let edits: Vec<_> = edits
+                .iter()
+                .map(|(r, t)| (b.since_batch(r.clone()), t.clone()))
+                .collect();
+            b.apply_edits(c, &edits, select.clone());
+        } else if c.selection.is_empty() {
+            let at = c.head();
+            let from = at - typed.min(b.column_of(at));
+            b.replace_range(c, from..at, text);
+        } else {
+            b.insert(c, text);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::Cursor;
+
+    #[test]
+    fn a_completion_edit_past_later_carets_lands_where_the_server_meant() {
+        let mut b = Buffer::new("pr\npr\n// end\n", None);
+        let mut cs = Cursors::new(Cursor::at(5));
+        cs.add(Cursor::at(2));
+        assert_eq!(cs.primary_index(), 0);
+        let end = b.len_chars();
+        let edits = vec![
+            (0..2, "print".to_string()),
+            (end..end, "use x\n".to_string()),
+        ];
+        complete_carets(&mut b, &mut cs, &edits, 2, None);
+        assert_eq!(b.full_text(), "print\nprint\n// end\nuse x\n");
+        assert!(b.undo_all(&mut cs));
+        assert_eq!(b.full_text(), "pr\npr\n// end\n", "one undo step");
+    }
 
     fn item(label: &str, sort: &str) -> Completion {
         Completion {

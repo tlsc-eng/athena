@@ -19,6 +19,9 @@ pub(crate) const UNDO_GROUP: Duration = Duration::from_millis(500);
 const MAX_FILE: u64 = 50 * 1024 * 1024;
 /// Changes kept for views that have not caught up; one further behind starts over.
 const EDIT_LOG: usize = 4096;
+/// Carets a view keeps at most, so one edit at each (two, for surrounding a selection) still fits
+/// the edit log other views follow.
+pub const MAX_CARETS: usize = EDIT_LOG / 2;
 
 /// A selection in char offsets; `head` is where the cursor is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -167,8 +170,11 @@ impl Cursors {
         *self = Self::new(primary);
     }
 
-    /// Adds a caret, which becomes the primary, merging any it overlaps.
+    /// Adds a caret, which becomes the primary, merging any it overlaps; none past [`MAX_CARETS`].
     pub fn add(&mut self, c: Cursor) {
+        if self.all.len() >= MAX_CARETS {
+            return;
+        }
         self.all.push(c);
         self.primary = self.all.len() - 1;
         self.normalize();
@@ -203,11 +209,12 @@ impl Cursors {
         }
     }
 
-    /// Replaces every caret, `primary` indexing into `all`.
-    pub fn set(&mut self, all: Vec<Cursor>, primary: usize) {
+    /// Replaces every caret, `primary` indexing into `all`; those past [`MAX_CARETS`] are dropped.
+    pub fn set(&mut self, mut all: Vec<Cursor>, primary: usize) {
         if all.is_empty() {
             return;
         }
+        all.truncate(MAX_CARETS);
         self.primary = primary.min(all.len() - 1);
         self.all = all;
         self.normalize();
@@ -1607,6 +1614,13 @@ impl Buffer {
                 op(b, c);
             }
         });
+    }
+
+    /// Where `range`, in the text as it was when the open batch began, lies now.
+    pub(crate) fn since_batch(&self, range: Range<usize>) -> Range<usize> {
+        let edits = self.batch.as_ref().map_or(&[][..], |batch| &batch.edits);
+        let map = |at| edits.iter().fold(at, |at, e| e.map(at));
+        map(range.start)..map(range.end)
     }
 
     /// Runs `op` at each caret (or the primary alone), handing it the caret's index; see
@@ -3486,6 +3500,25 @@ mod tests {
         );
         cs.collapse();
         assert_eq!(spots(&cs), [(3, 2)]);
+    }
+
+    #[test]
+    fn carets_stop_at_the_cap_and_a_batch_at_every_one_stays_followable() {
+        let text = "ab\n".repeat(MAX_CARETS + 10);
+        let mut b = buf(&text, "/x/a.txt");
+        let spots: Vec<_> = (0..MAX_CARETS + 10).map(|l| (l * 3, l * 3 + 2)).collect();
+        let mut cs = carets(&spots);
+        assert_eq!(cs.len(), MAX_CARETS);
+        cs.add(Cursor::at(b.len_chars()));
+        assert_eq!(cs.len(), MAX_CARETS, "no caret past the cap");
+        let version = b.version();
+        b.edit_each(&mut cs, |b, c| b.type_char(c, '('));
+        let edits = b.edits_since(version).map(Iterator::count);
+        assert_eq!(
+            edits,
+            Some(2 * MAX_CARETS),
+            "surrounding makes two edits a caret"
+        );
     }
 
     #[test]
