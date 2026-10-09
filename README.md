@@ -159,6 +159,10 @@ its shells running.
 - Format on save: `cmd-s` asks the language server to format the file first, by default in Go
   files only; for Go it also organizes imports. "Toggle format on save" (palette, File menu) turns
   it on or off for every language with a server. Auto save does not format.
+- Trim trailing whitespace and insert a final newline on save: off by default, as in VS Code, and
+  turned on in settings.json or `.editorconfig`. Trimming leaves blanks inside multi-line strings
+  (raw strings, template literals, docstrings, YAML block scalars), and an auto save leaves them
+  on any line where a tab of that file has a caret.
 - Go to file (fuzzy) and a command palette. A file opens in the editor pane used last, or in a
   new pane beside the focused one with Cmd+click in the tree or Cmd+Enter in Go to file.
 - Two tabs on the same file share one buffer: edits, undo and the unsaved marker are the file's;
@@ -624,7 +628,8 @@ as soon as you save:
 
 `"editor.word_wrap": true` works too, as do VS Code's spellings (`"files.trimTrailingWhitespace"`,
 `"editor.formatOnSave"`, `"editor.tabSize"` and so on), so its settings can be pasted in. Trimming
-and the final newline override each language's defaults, and an `.editorconfig` overrides both. The palette and File menu toggles (auto save, format on
+trailing whitespace and inserting a final newline are off by default, as in VS Code; these settings
+or an `.editorconfig` (which wins) turn them on. The palette and File menu toggles (auto save, format on
 save, word wrap, theme, Claude Code integration) write their key into this file, changing only
 that key's value or adding it at the end of its object, so comments and layout stay. A key left
 out falls back to the choice `workspace.json` already held, so nothing set before settings.json

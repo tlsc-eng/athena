@@ -1456,13 +1456,12 @@ impl Buffer {
     }
 
     /// Trims trailing blanks, converts line breaks and adds a final one as `tidy` asks, as one
-    /// undo step; with `keep_caret_lines` the lines holding a caret keep their blanks.
-    pub fn tidy(&mut self, cs: &mut Cursors, tidy: Tidy, keep_caret_lines: bool) {
+    /// undo step; `keep_lines` and lines whose break is inside a string literal keep their blanks.
+    pub fn tidy(&mut self, cs: &mut Cursors, tidy: Tidy, keep_lines: &[usize]) {
         let eol = tidy.end_of_line.map(LineEnding::as_str);
-        let caret_lines: Vec<usize> = match keep_caret_lines {
-            true => cs.all().iter().map(|c| self.line_of(c.head())).collect(),
-            false => Vec::new(),
-        };
+        if tidy.trim_trailing_whitespace {
+            self.settle_parse();
+        }
         let mut changes = Vec::new();
         for i in 0..self.len_lines() {
             let start = self.line_start(i);
@@ -1472,12 +1471,16 @@ impl Buffer {
             while body > 0 && matches!(line.char(body - 1), '\n' | '\r') {
                 body -= 1;
             }
-            if tidy.trim_trailing_whitespace && !caret_lines.contains(&i) {
+            if tidy.trim_trailing_whitespace && !keep_lines.contains(&i) {
                 let mut end = body;
                 while end > 0 && matches!(line.char(end - 1), ' ' | '\t') {
                     end -= 1;
                 }
-                if end < body {
+                let in_string = || {
+                    let byte = self.rope.char_to_byte(start + body);
+                    self.syntax.as_ref().is_some_and(|s| s.in_string(byte))
+                };
+                if end < body && !(body < len && in_string()) {
                     changes.push((start + end..start + body, String::new()));
                 }
             }

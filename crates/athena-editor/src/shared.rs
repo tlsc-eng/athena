@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 
 use anyhow::Result;
-use gpui::{App, AppContext, Entity, Global};
+use gpui::{App, AppContext, Entity, Global, WeakEntity};
 
 use crate::buffer::Buffer;
 use crate::recovery;
+use crate::view::EditorView;
 
 /// One file's text, held by every editor tab showing that file.
 pub(crate) struct SharedBuffer {
@@ -16,6 +17,8 @@ pub(crate) struct SharedBuffer {
     pub signal: Entity<Signal>,
     /// Notified when a background parse lands, so views redraw with its highlights.
     pub parsed: Entity<Signal>,
+    /// The views that have shown this buffer, for an auto save to keep blanks on all their carets.
+    pub views: RefCell<Vec<WeakEntity<EditorView>>>,
     recovery_id: u64,
 }
 
@@ -28,6 +31,7 @@ impl SharedBuffer {
             buffer: RefCell::new(buffer),
             signal: cx.new(|_| Signal),
             parsed: cx.new(|_| Signal),
+            views: RefCell::default(),
             recovery_id: recovery::next_id(),
         })
     }

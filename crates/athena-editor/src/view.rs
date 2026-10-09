@@ -427,7 +427,7 @@ pub struct EditorView {
     pub(crate) buffer: Option<Rc<SharedBuffer>>,
     pub(crate) cursor: Cursors,
     /// The buffer version this view's cursor and folds have followed up to.
-    seen: u64,
+    pub(crate) seen: u64,
     _buffer_watch: Vec<Subscription>,
     error: Option<String>,
     path: PathBuf,
@@ -640,6 +640,10 @@ impl EditorView {
     }
 
     fn watch(shared: &SharedBuffer, cx: &mut Context<Self>) -> Vec<Subscription> {
+        let mut views = shared.views.borrow_mut();
+        views.retain(|v| v.upgrade().is_some());
+        views.push(cx.weak_entity());
+        drop(views);
         vec![
             cx.observe(&shared.signal, |this, _, cx| this.buffer_changed(cx)),
             cx.observe(&shared.parsed, |this, _, cx| {

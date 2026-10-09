@@ -747,6 +747,31 @@ impl Syntax {
     }
 }
 
+impl Syntax {
+    /// Whether the line break at `byte` is inside a string literal, where trailing blanks are
+    /// text: raw strings, template literals, docstrings, heredocs, YAML block scalars.
+    pub fn in_string(&self, byte: usize) -> bool {
+        let Backend::Tree {
+            tree: Some(tree), ..
+        } = &self.backend
+        else {
+            return false;
+        };
+        let mut node = tree.root_node().descendant_for_byte_range(byte, byte + 1);
+        while let Some(n) = node {
+            let kind = n.kind();
+            if ["string", "heredoc", "block_scalar", "quote_scalar"]
+                .iter()
+                .any(|k| kind.contains(k))
+            {
+                return true;
+            }
+            node = n.parent();
+        }
+        false
+    }
+}
+
 /// The open and close strings of the bracket pair `kind` belongs to.
 pub fn bracket_pair(kind: &str) -> Option<(&'static str, &'static str)> {
     match kind {
