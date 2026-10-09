@@ -609,8 +609,8 @@ impl EditorView {
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .flex()
-                            .justify_end()
+                            .text_right()
+                            .text_ellipsis()
                             .text_color(t.color.content_muted)
                             .children(item.detail.clone()),
                     )
