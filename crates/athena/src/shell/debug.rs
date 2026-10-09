@@ -174,62 +174,89 @@ pub(super) struct DebugState {
     _inputs: Vec<Subscription>,
 }
 
+/// The saved breakpoints; an unparsable file is set aside, as saving over it would lose them all.
+fn read_saved(path: &Path) -> Saved {
+    match std::fs::read(path).map(|b| serde_json::from_slice(&b)) {
+        Ok(Ok(saved)) => saved,
+        Ok(Err(e)) => {
+            match athena_workspace::set_aside(path) {
+                Ok(aside) => tracing::warn!("{e}: kept breakpoints in {}", aside.display()),
+                Err(err) => tracing::warn!("{e}; could not keep it aside: {err:#}"),
+            }
+            Saved::default()
+        }
+        Err(_) => Saved::default(),
+    }
+}
+
 impl DebugState {
     /// Loads the breakpoints and watch expressions kept beside `workspace` (workspace.json).
     pub(super) fn load(workspace: &Path) -> Self {
         let path = workspace.with_file_name("breakpoints.json");
-        let saved: Saved = match std::fs::read(&path).map(|b| serde_json::from_slice(&b)) {
-            Ok(Ok(saved)) => saved,
-            Ok(Err(e)) => {
-                // Kept aside, as the next save would otherwise overwrite every breakpoint in it.
-                match athena_workspace::set_aside(&path) {
-                    Ok(aside) => tracing::warn!("{e}: kept breakpoints in {}", aside.display()),
-                    Err(err) => tracing::warn!("{e}; could not keep it aside: {err:#}"),
-                }
-                Saved::default()
-            }
-            Err(_) => Saved::default(),
-        };
+        let saved = read_saved(&path);
         let mut state = Self {
             saved_path: Some(path),
             ..Self::default()
         };
         for (root, project) in saved.projects {
-            for b in project.breakpoints {
-                let path = match b.path.is_absolute() {
-                    true => b.path.clone(),
-                    false => root.join(&b.path),
-                };
-                state
-                    .breakpoints
-                    .entry(document_key(&path))
-                    .or_default()
-                    .push(Breakpoint {
-                        condition: b.condition,
-                        hit_condition: b.hit_condition,
-                        log_message: b.log_message,
-                        enabled: b.enabled,
-                        ..Breakpoint::at(b.line.saturating_sub(1))
-                    });
-            }
-            if !project.watch.is_empty() {
-                state.watch.insert(root, project.watch);
-            }
+            state.take_in(root, project);
         }
         state
     }
 
+    fn take_in(&mut self, root: PathBuf, project: SavedProject) {
+        for b in project.breakpoints {
+            let path = match b.path.is_absolute() {
+                true => b.path.clone(),
+                false => root.join(&b.path),
+            };
+            self.breakpoints
+                .entry(document_key(&path))
+                .or_default()
+                .push(Breakpoint {
+                    condition: b.condition,
+                    hit_condition: b.hit_condition,
+                    log_message: b.log_message,
+                    enabled: b.enabled,
+                    ..Breakpoint::at(b.line.saturating_sub(1))
+                });
+        }
+        if !project.watch.is_empty() {
+            self.watch.insert(root, project.watch);
+        }
+    }
+
+    /// Reads `root`'s breakpoints again, as another window may have changed them since launch.
+    pub(super) fn reload_project(&mut self, root: &Path) {
+        let Some(path) = &self.saved_path else {
+            return;
+        };
+        let mut saved = read_saved(path);
+        let key = document_key(root);
+        self.breakpoints.retain(|file, _| !file.starts_with(&key));
+        self.watch.remove(root);
+        if let Some(project) = saved.projects.remove(root) {
+            self.take_in(root.to_path_buf(), project);
+        }
+    }
+
+    /// Writes this window's projects' breakpoints, keeping the other windows' entries in the file.
     fn save(&self, roots: &[PathBuf]) {
         let Some(path) = &self.saved_path else {
             return;
         };
-        let mut saved = Saved::default();
+        let mut saved = read_saved(path);
+        let outside = PathBuf::from("/");
+        saved
+            .projects
+            .retain(|root, _| !roots.contains(root) && *root != outside);
+        let others: Vec<PathBuf> = saved.projects.keys().map(|r| document_key(r)).collect();
         for (file, list) in &self.breakpoints {
-            let root = roots
-                .iter()
-                .find(|r| file.starts_with(document_key(r)))
-                .cloned()
-                .unwrap_or_else(|| PathBuf::from("/"));
+            let root = match roots.iter().find(|r| file.starts_with(document_key(r))) {
+                Some(root) => root.clone(),
+                None if others.iter().any(|o| file.starts_with(o)) => continue,
+                None => outside.clone(),
+            };
             let rel = file
                 .strip_prefix(document_key(&root))
                 .map(Path::to_path_buf)
@@ -247,7 +274,9 @@ impl DebugState {
                 }));
         }
         for (root, watch) in &self.watch {
-            saved.projects.entry(root.clone()).or_default().watch = watch.clone();
+            if roots.contains(root) || !saved.projects.contains_key(root) {
+                saved.projects.entry(root.clone()).or_default().watch = watch.clone();
+            }
         }
         let tmp = path.with_extension("json.tmp");
         let written = serde_json::to_vec_pretty(&saved)
@@ -1751,6 +1780,40 @@ mod tests {
         let loaded = DebugState::load(&dir.join("workspace.json"));
         assert_eq!(loaded.breakpoints.get(&file), state.breakpoints.get(&file));
         assert_eq!(loaded.watch.get(&root), Some(&vec!["p.X".to_string()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_windows_saving_breakpoints_keep_each_others_projects() {
+        let dir = std::env::temp_dir().join(format!("athena-debug-windows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        let (a, b) = (document_key(&dir.join("a")), document_key(&dir.join("b")));
+        let workspace = dir.join("workspace.json");
+        let mut first = DebugState::load(&workspace);
+        let mut second = DebugState::load(&workspace);
+        first
+            .breakpoints
+            .insert(a.join("a.go"), vec![Breakpoint::at(1)]);
+        first.save(std::slice::from_ref(&a));
+        second
+            .breakpoints
+            .insert(b.join("b.go"), vec![Breakpoint::at(2)]);
+        second.watch.insert(b.clone(), vec!["x".into()]);
+        second.save(std::slice::from_ref(&b));
+        first
+            .breakpoints
+            .insert(a.join("a.go"), vec![Breakpoint::at(3)]);
+        first.save(std::slice::from_ref(&a));
+
+        let both = DebugState::load(&workspace);
+        assert_eq!(both.breakpoints[&a.join("a.go")][0].line, 3);
+        assert_eq!(both.breakpoints[&b.join("b.go")][0].line, 2);
+        assert_eq!(both.watch.get(&b), Some(&vec!["x".to_string()]));
+
+        first.reload_project(&b);
+        assert_eq!(first.breakpoints[&b.join("b.go")][0].line, 2, "b moved in");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
