@@ -532,12 +532,16 @@ pub static SETTINGS: &[Setting] = &[
 ];
 
 /// The setting `keys` name, whichever spelling they use.
-#[cfg(test)]
 pub fn find(keys: &[&str]) -> Option<&'static Setting> {
     let name = super::setting_name(None, &keys.join("."));
     SETTINGS
         .iter()
         .find(|s| super::setting_name(None, &s.id()) == name)
+}
+
+/// Whether a project's `.athena/settings.json` may set `keys`: a known setting, not app-wide.
+pub fn project_may_set(keys: &[&str]) -> bool {
+    find(keys).is_some_and(|s| !s.user_only)
 }
 
 /// The JSON Schema of settings.json, generated from [`SETTINGS`] for a JSON language server.
@@ -721,7 +725,13 @@ mod tests {
         for s in SETTINGS {
             let (_, problems) = parse_project(&with(s, &example(s))).unwrap();
             assert_eq!(problems.len(), usize::from(s.user_only), "{}", s.id());
+            assert_eq!(project_may_set(s.keys), !s.user_only, "{}", s.id());
         }
+        assert!(
+            !project_may_set(&["editor", "fontSize"]),
+            "in VS Code's spelling"
+        );
+        assert!(!project_may_set(&["nope"]));
     }
 
     /// What Athena does with `s`, through the same fallbacks the shell applies.

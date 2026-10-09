@@ -506,6 +506,14 @@ impl Shell {
         value: Option<&Value>,
         cx: &mut Context<Self>,
     ) {
+        if value.is_some() && !settings::schema::project_may_set(keys) {
+            let why = format!(
+                "\"{}\" is not a project setting; set it in settings.json",
+                keys.join(".")
+            );
+            self.transient_notice(".athena/settings.json was not updated", why, cx);
+            return;
+        }
         let written = settings::ensure_project_file(root).and_then(|path| {
             match value {
                 Some(value) => settings::write_at(&path, keys, value),
