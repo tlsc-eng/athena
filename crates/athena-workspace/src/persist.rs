@@ -99,6 +99,7 @@ mod tests {
             drawer_height: 180.,
             tree_visible: false,
             font_zoom: -2,
+            zoom_level: 3,
         };
         save(&path, &w).unwrap();
         assert_eq!(load(&path).unwrap(), w);

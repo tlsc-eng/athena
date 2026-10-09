@@ -697,6 +697,7 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_window_zoom(cx);
         self.sync_previews(cx);
         self.sync_watchers();
         if self.lsp.jump.is_some() {
@@ -874,6 +875,21 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &FontZoomIn, _, cx| this.zoom_font(Some(1), cx)))
             .on_action(cx.listener(|this, _: &FontZoomOut, _, cx| this.zoom_font(Some(-1), cx)))
             .on_action(cx.listener(|this, _: &FontZoomReset, _, cx| this.zoom_font(None, cx)))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::WindowZoomIn, _, cx| {
+                    this.zoom_window(Some(1), cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::WindowZoomOut, _, cx| {
+                    this.zoom_window(Some(-1), cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::WindowZoomReset, _, cx| {
+                    this.zoom_window(None, cx)
+                }),
+            )
             .on_action(
                 cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
             )

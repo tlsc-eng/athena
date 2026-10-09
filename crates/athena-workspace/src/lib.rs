@@ -83,6 +83,8 @@ pub struct UiState {
     pub tree_visible: bool,
     /// Editor and terminal font size, in 1px steps from the default.
     pub font_zoom: i32,
+    /// Interface size, in 10% steps from the default.
+    pub zoom_level: i32,
 }
 
 impl Default for UiState {
@@ -92,6 +94,7 @@ impl Default for UiState {
             drawer_height: 240.,
             tree_visible: true,
             font_zoom: 0,
+            zoom_level: 0,
         }
     }
 }

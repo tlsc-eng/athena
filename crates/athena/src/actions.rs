@@ -77,6 +77,9 @@ actions!(
         NewPanelTerminal,
         MoveTerminalToPanel,
         MoveTerminalToEditor,
+        WindowZoomIn,
+        WindowZoomOut,
+        WindowZoomReset,
     ]
 );
 
@@ -167,6 +170,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-+", FontZoomIn, None),
         KeyBinding::new("cmd--", FontZoomOut, None),
         KeyBinding::new("cmd-0", FontZoomReset, None),
+        KeyBinding::new("cmd-alt-=", WindowZoomIn, None),
+        KeyBinding::new("cmd-alt-+", WindowZoomIn, None),
+        KeyBinding::new("cmd-alt--", WindowZoomOut, None),
+        KeyBinding::new("cmd-alt-0", WindowZoomReset, None),
         KeyBinding::new("cmd-shift-m", ShowProblems, None),
         KeyBinding::new("cmd-shift-o", GoToSymbol, None),
         // VS Code's ⌘T opens a terminal here, so workspace symbols take ⌘⌥O.
@@ -324,6 +331,9 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Zoom In", FontZoomIn),
                 MenuItem::action("Zoom Out", FontZoomOut),
                 MenuItem::action("Reset Zoom", FontZoomReset),
+                MenuItem::action("Zoom Interface In", WindowZoomIn),
+                MenuItem::action("Zoom Interface Out", WindowZoomOut),
+                MenuItem::action("Reset Interface Zoom", WindowZoomReset),
                 MenuItem::submenu(Menu {
                     name: "Theme".into(),
                     items: vec![
@@ -466,5 +476,20 @@ mod tests {
             assert!(k.modifiers.platform, "{source}");
             assert_eq!(k.key, key, "{source}");
         }
+    }
+
+    #[test]
+    fn window_zoom_keystrokes_parse_and_leave_font_zoom_its_keys() {
+        for (source, key) in [
+            ("cmd-alt-=", "="),
+            ("cmd-alt-+", "+"),
+            ("cmd-alt--", "-"),
+            ("cmd-alt-0", "0"),
+        ] {
+            let k = Keystroke::parse(source).unwrap();
+            assert!(k.modifiers.platform && k.modifiers.alt, "{source}");
+            assert_eq!(k.key, key, "{source}");
+        }
+        assert!(!Keystroke::parse("cmd-=").unwrap().modifiers.alt);
     }
 }

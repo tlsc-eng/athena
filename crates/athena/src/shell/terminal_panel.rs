@@ -327,7 +327,7 @@ impl Shell {
                 .collect();
             div()
                 .id("panel-terminal-list")
-                .w(px(LIST_WIDTH))
+                .w(t.ui(LIST_WIDTH))
                 .flex_none()
                 .h_full()
                 .overflow_y_scroll()
@@ -375,7 +375,7 @@ impl Shell {
         div()
             .id(("panel-row", id.0))
             .group(close_group.clone())
-            .h(px(24.))
+            .h(t.ui(24.))
             .mx(px(4.))
             .pl(px(8.))
             .pr(px(4.))

@@ -265,6 +265,7 @@ impl Shell {
         }
         let edit_input = self.tree.editing.as_ref().map(|e| e.input.clone());
         let drop_root = root.clone();
+        let row_height = t.ui(ROW_HEIGHT);
         let list = uniform_list(
             "file-tree",
             count,
@@ -281,7 +282,7 @@ impl Shell {
                             return div()
                                 .id("tree-edit-row")
                                 .w_full()
-                                .h(px(ROW_HEIGHT))
+                                .h(row_height)
                                 .pl(px(12. + INDENT * row.depth as f32))
                                 .pr(px(8.))
                                 .flex()
@@ -325,7 +326,7 @@ impl Shell {
                                 row.entry.path.to_string_lossy().into_owned().into(),
                             ))
                             .w_full()
-                            .h(px(ROW_HEIGHT))
+                            .h(row_height)
                             .pl(px(12. + INDENT * row.depth as f32))
                             .pr(px(8.))
                             .flex()

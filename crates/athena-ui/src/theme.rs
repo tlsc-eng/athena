@@ -41,6 +41,11 @@ pub const CODE_ZOOM: RangeInclusive<i32> = -7..=27;
 /// Window zoom steps, 10% each, a range in which interface text still fits its rows.
 pub const UI_ZOOM: RangeInclusive<i32> = -3..=5;
 
+const CAPTION: f32 = 12.;
+const BODY: f32 = 14.;
+const HEADING: f32 = 18.;
+const DISPLAY: f32 = 24.;
+
 #[derive(Clone)]
 pub struct Typography {
     pub ui: SharedString,
@@ -125,6 +130,8 @@ pub enum Appearance {
 #[derive(Clone)]
 pub struct Theme {
     pub appearance: Appearance,
+    /// Window zoom: interface text and the chrome sized with [`Theme::ui`] scale by this.
+    pub ui_scale: f32,
     pub color: Colors,
     pub terminal: TerminalColors,
     pub syntax: SyntaxColors,
@@ -338,16 +345,17 @@ impl Theme {
         let (color, terminal, syntax) = scheme(appearance);
         Self {
             appearance,
+            ui_scale: 1.,
             color,
             terminal,
             syntax,
             typography: Typography {
                 ui: "Geist".into(),
                 mono: "Geist Mono".into(),
-                caption: px(12.),
-                body: px(14.),
-                heading: px(18.),
-                display: px(24.),
+                caption: px(CAPTION),
+                body: px(BODY),
+                heading: px(HEADING),
+                display: px(DISPLAY),
                 code: px(CODE_SIZE),
             },
             shape: Shape {
@@ -381,6 +389,27 @@ impl Theme {
     pub fn set_code_zoom(&mut self, zoom: i32) {
         let zoom = zoom.clamp(*CODE_ZOOM.start(), *CODE_ZOOM.end());
         self.typography.code = px(CODE_SIZE + zoom as f32);
+    }
+
+    /// Scales interface text `zoom` steps of 10% from the default, clamped to [`UI_ZOOM`]; code
+    /// text keeps its own zoom.
+    pub fn set_ui_zoom(&mut self, zoom: i32) {
+        let zoom = zoom.clamp(*UI_ZOOM.start(), *UI_ZOOM.end());
+        self.ui_scale = 1. + zoom as f32 / 10.;
+        let t = &mut self.typography;
+        t.caption = px(CAPTION * self.ui_scale);
+        t.body = px(BODY * self.ui_scale);
+        t.heading = px(HEADING * self.ui_scale);
+        t.display = px(DISPLAY * self.ui_scale);
+    }
+
+    pub fn ui_zoom(&self) -> i32 {
+        ((self.ui_scale - 1.) * 10.).round() as i32
+    }
+
+    /// A chrome measure in default-zoom pixels, at the current window zoom.
+    pub fn ui(&self, size: f32) -> Pixels {
+        px(size * self.ui_scale)
     }
 
     pub fn popover_shadow(&self) -> BoxShadow {
@@ -644,6 +673,27 @@ mod tests {
         assert_eq!(theme.typography.code, px(16.));
         assert!(theme.motion.reduced);
         assert_eq!(theme.color.surface, Theme::light(false).color.surface);
+    }
+
+    #[test]
+    fn window_zoom_scales_interface_text_and_chrome_but_not_code() {
+        let mut theme = Theme::dark(false);
+        theme.set_code_zoom(2);
+        theme.set_ui_zoom(2);
+        assert_eq!(theme.ui_zoom(), 2);
+        assert_eq!(theme.typography.body, px(BODY * 1.2));
+        assert_eq!(theme.typography.caption, px(CAPTION * 1.2));
+        assert_eq!(theme.ui(24.), px(24. * 1.2));
+        assert_eq!(theme.typography.code, px(15.));
+        theme.set_appearance(Appearance::Light);
+        assert_eq!(theme.ui_zoom(), 2, "kept across appearance changes");
+        theme.set_ui_zoom(-100);
+        assert_eq!(theme.ui_zoom(), *UI_ZOOM.start());
+        theme.set_ui_zoom(100);
+        assert_eq!(theme.ui_zoom(), *UI_ZOOM.end());
+        theme.set_ui_zoom(0);
+        assert_eq!(theme.typography.heading, px(HEADING));
+        assert_eq!(theme.ui(32.), px(32.));
     }
 
     #[test]

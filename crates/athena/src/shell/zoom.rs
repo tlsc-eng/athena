@@ -1,4 +1,4 @@
-use athena_ui::{CODE_ZOOM, Theme};
+use athena_ui::{ActiveTheme, CODE_ZOOM, Theme, UI_ZOOM};
 use gpui::Context;
 
 use super::Shell;
@@ -17,5 +17,37 @@ impl Shell {
         self.schedule_save(cx);
         self.font_zoom_changed(zoom, cx);
         cx.notify();
+    }
+
+    /// Steps the whole interface one size up or down, or back to the default with `None`;
+    /// written to settings.json only when the user keeps `window.zoom_level` there.
+    pub(super) fn zoom_window(&mut self, step: Option<i32>, cx: &mut Context<Self>) {
+        let zoom = step.map_or(0, |step| {
+            (self.workspace.ui.zoom_level + step).clamp(*UI_ZOOM.start(), *UI_ZOOM.end())
+        });
+        if zoom == self.workspace.ui.zoom_level {
+            return;
+        }
+        self.workspace.ui.zoom_level = zoom;
+        self.schedule_save(cx);
+        if self.settings.file.zoom_level.is_some() {
+            self.write_setting(&["window", "zoom_level"], zoom.into(), cx);
+        }
+        self.sync_window_zoom(cx);
+        cx.notify();
+    }
+
+    /// Puts settings.json's `window.zoom_level`, else the last zoom chosen, in force.
+    pub(super) fn sync_window_zoom(&mut self, cx: &mut Context<Self>) {
+        if let Some(level) = self.settings.file.zoom_level
+            && level != self.workspace.ui.zoom_level
+        {
+            self.workspace.ui.zoom_level = level;
+            self.schedule_save(cx);
+        }
+        if cx.theme().ui_zoom() != self.workspace.ui.zoom_level {
+            cx.global_mut::<Theme>()
+                .set_ui_zoom(self.workspace.ui.zoom_level);
+        }
     }
 }

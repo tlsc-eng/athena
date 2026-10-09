@@ -1611,7 +1611,7 @@ impl Shell {
                 ))
         };
         let strip = div()
-            .h(px(TAB_STRIP_HEIGHT))
+            .h(t.ui(TAB_STRIP_HEIGHT))
             .flex_none()
             .relative()
             .bg(t.color.surface)

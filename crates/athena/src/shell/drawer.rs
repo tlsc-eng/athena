@@ -218,7 +218,7 @@ impl Shell {
             })
             .child(
                 div()
-                    .h(px(32.))
+                    .h(t.ui(32.))
                     .flex_none()
                     .pr(px(8.))
                     .flex()
