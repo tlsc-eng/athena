@@ -100,6 +100,7 @@ impl Shell {
 
         let tracking = root.as_deref().and_then(|r| self.cached_tracking(r));
         let busy = self.git.remote_busy;
+        let checked = root.as_deref().is_some_and(|r| self.git_checked(r));
         let left = branch.map(|branch| {
             let sync = sync_label(tracking.as_ref(), busy);
             div()
@@ -110,15 +111,17 @@ impl Shell {
                         cx.listener(|this, _, window, cx| this.open_branches(window, cx)),
                     ),
                 )
-                .child(
-                    button("status-sync", sync.into(), "Pull, push, fetch or stash").on_click(
-                        cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            let shell = cx.entity().downgrade();
-                            let items = sync_menu(tracking.is_some(), shell);
-                            this.open_context_menu(event.position(), items, window, cx);
-                        }),
-                    ),
-                )
+                .when(checked, |el| {
+                    el.child(
+                        button("status-sync", sync.into(), "Pull, push, fetch or stash").on_click(
+                            cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                let shell = cx.entity().downgrade();
+                                let items = sync_menu(tracking.is_some(), shell);
+                                this.open_context_menu(event.position(), items, window, cx);
+                            }),
+                        ),
+                    )
+                })
         });
         let right = status.zip(editor).map(|(status, editor)| {
             let position =

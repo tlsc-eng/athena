@@ -7,8 +7,7 @@ use std::rc::Rc;
 
 use athena_ui::{ActiveTheme, Theme};
 use gpui::{
-    Action, AnyElement, Context, Hsla, MouseButton, Window, anchored, deferred, div, point,
-    prelude::*, px,
+    Action, AnyElement, Context, Hsla, MouseButton, Window, anchored, div, point, prelude::*, px,
 };
 use ropey::Rope;
 
@@ -342,14 +341,17 @@ impl EditorView {
                         },
                     )),
                 );
-            out.push(
-                deferred(
+            // Drawn in tree order, under the palette and menus, and cut off at the editor's edge.
+            let x = origin.x + layout.cell * 3.;
+            let room = layout.origin.x + self.viewport.width - x;
+            if room > px(0.) {
+                out.push(
                     anchored()
-                        .position(point(origin.x + layout.cell * 3., origin.y))
-                        .child(row),
-                )
-                .into_any_element(),
-            );
+                        .position(point(x, origin.y))
+                        .child(row.max_w(room).overflow_hidden())
+                        .into_any_element(),
+                );
+            }
         }
         out
     }

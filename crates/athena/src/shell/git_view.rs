@@ -252,6 +252,14 @@ impl Shell {
         self.git.repos.get(root)?.branch.clone()
     }
 
+    /// Whether a status run has found the project in a repository.
+    pub(super) fn git_checked(&self, root: &Path) -> bool {
+        self.git
+            .repos
+            .get(root)
+            .is_some_and(|r| r.checked && r.prefix.is_some())
+    }
+
     /// The branch's upstream and ahead/behind counts, from the last status run.
     pub(super) fn cached_tracking(&self, root: &Path) -> Option<git::Tracking> {
         self.git.repos.get(root)?.tracking.clone()
