@@ -52,6 +52,8 @@ pub(crate) fn init(cx: &mut App) {
 pub(crate) struct Anchored<T> {
     version: u64,
     items: Vec<(Range<usize>, T)>,
+    /// Text typed at a range's edges joins it, as it does a snippet's placeholder.
+    grow: bool,
 }
 
 impl<T> Default for Anchored<T> {
@@ -59,15 +61,24 @@ impl<T> Default for Anchored<T> {
         Self {
             version: 0,
             items: Vec::new(),
+            grow: false,
         }
     }
 }
 
 impl<T: Clone> Anchored<T> {
-    fn new(b: &Buffer, items: Vec<(Range<usize>, T)>) -> Self {
+    pub(crate) fn new(b: &Buffer, items: Vec<(Range<usize>, T)>) -> Self {
         Self {
             version: b.version(),
             items,
+            grow: false,
+        }
+    }
+
+    pub(crate) fn growing(b: &Buffer, items: Vec<(Range<usize>, T)>) -> Self {
+        Self {
+            grow: true,
+            ..Self::new(b, items)
         }
     }
 
@@ -77,13 +88,17 @@ impl<T: Clone> Anchored<T> {
             return Vec::new();
         };
         let edits: Vec<_> = edits.collect();
-        // Text typed at either edge of a range stays outside it.
         let follow = |r: Range<usize>, e: &&crate::buffer::Edit| {
-            let start = match e.removed == 0 && r.start == e.at {
+            let typed_at = |at: usize| e.removed == 0 && at == e.at;
+            let start = match !self.grow && typed_at(r.start) {
                 true => r.start + e.inserted,
                 false => e.map(r.start),
             };
-            start..e.map(r.end).max(start)
+            let end = match self.grow && typed_at(r.end) {
+                true => r.end + e.inserted,
+                false => e.map(r.end),
+            };
+            start..end.max(start)
         };
         self.items
             .iter()

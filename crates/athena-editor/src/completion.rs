@@ -40,6 +40,8 @@ pub struct Completion {
     pub range: Option<((u32, u32), (u32, u32))>,
     /// The part of `text` to select once inserted, in chars.
     pub select: Option<Range<usize>>,
+    /// A snippet's tab stops: each one's number and range in chars of `text`, `$0` numbered 0.
+    pub stops: Vec<(u32, Range<usize>)>,
     pub additional_edits: Vec<ServerEdit>,
     pub preselect: bool,
 }
@@ -355,6 +357,8 @@ impl EditorView {
         };
         let item = menu.items[*item].clone();
         let start = menu.start;
+        let single = !self.cursor.is_multi();
+        let mut snippet = None;
         self.with_buffer(cx, |b, c| {
             let head = c.head();
             // The server's range was for the word when it was asked; it now ends at the cursor.
@@ -373,7 +377,14 @@ impl EditorView {
                 (from..b.char_at_utf16(e.end.0, e.end.1), e.text.clone())
             }));
             complete_carets(b, c, &edits, typed, item.select.clone());
+            // The first stop is selected, so the snippet starts that far before the selection.
+            if let (true, Some(select)) = (single, &item.select) {
+                let base = c.selection().range().start.saturating_sub(select.start);
+                let len = item.text.chars().count();
+                snippet = crate::snippet::Snippet::new(b, base, len, &item.stops);
+            }
         });
+        self.snippet = snippet;
         // A function just completed into its parentheses shows its parameters, as in VS Code.
         let head = self.cursor.head();
         if self
@@ -590,6 +601,23 @@ mod tests {
         assert_eq!(b.full_text(), "pr\npr\n// end\n", "one undo step");
     }
 
+    #[test]
+    fn a_snippet_completed_below_an_added_import_finds_its_stops() {
+        let mut b = Buffer::new("package main\n\nfunc main() { fmt.Pr }\n", None);
+        let mut cs = Cursors::new(Cursor::at(34));
+        let text = "Println(a)".to_string();
+        let edits = vec![
+            (32..34, text.clone()),
+            (14..14, "import \"fmt\"\n\n".to_string()),
+        ];
+        complete_carets(&mut b, &mut cs, &edits, 2, Some(8..9));
+        let base = cs.selection().range().start - 8;
+        assert_eq!(b.text(base..base + text.len()), text);
+        assert_eq!(b.line(4), "func main() { fmt.Println(a) }");
+        let snippet = crate::snippet::Snippet::new(&b, base, text.len(), &[(1, 8..9)]);
+        assert!(snippet.is_some());
+    }
+
     fn item(label: &str, sort: &str) -> Completion {
         Completion {
             label: label.into(),
@@ -600,6 +628,7 @@ mod tests {
             text: label.into(),
             range: None,
             select: None,
+            stops: Vec::new(),
             additional_edits: Vec::new(),
             preselect: false,
         }

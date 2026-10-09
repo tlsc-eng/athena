@@ -172,6 +172,7 @@ fn completion(item: CompletionItem) -> Completion {
         sort_text: item.sort_text,
         text: item.text,
         select: item.select,
+        stops: item.stops,
         preselect: item.preselect,
     }
 }

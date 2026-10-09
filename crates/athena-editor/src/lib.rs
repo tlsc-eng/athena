@@ -20,6 +20,7 @@ mod run_marks;
 mod save;
 mod shared;
 mod signature;
+mod snippet;
 mod sticky;
 mod syntax;
 mod view;

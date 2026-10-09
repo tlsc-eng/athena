@@ -162,6 +162,24 @@ fn inline(text: &str) -> String {
 /// A snippet as plain text, with the range to select afterwards: the first tab stop's placeholder,
 /// else `$0`, in chars of the returned text. `None` leaves the cursor after the text.
 pub fn expand_snippet(snippet: &str) -> (String, Option<Range<usize>>) {
+    let (text, stops) = snippet_stops(snippet);
+    let first = first_stop(&stops);
+    (text, first)
+}
+
+/// Where the cursor goes first: the lowest numbered stop, else `$0`.
+pub(crate) fn first_stop(stops: &[(u32, Range<usize>)]) -> Option<Range<usize>> {
+    stops
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .min_by_key(|(n, _)| *n)
+        .or_else(|| stops.iter().find(|(n, _)| *n == 0))
+        .map(|(_, r)| r.clone())
+}
+
+/// A snippet as plain text, with each tab stop's number and range in chars of that text; a
+/// number used more than once mirrors one placeholder.
+pub fn snippet_stops(snippet: &str) -> (String, Vec<(u32, Range<usize>)>) {
     let chars: Vec<char> = snippet.chars().collect();
     let expand = |placeholders: &HashMap<u32, Vec<char>>| {
         let mut snippet = Snippet {
@@ -182,12 +200,7 @@ pub fn expand_snippet(snippet: &str) -> (String, Option<Range<usize>>) {
         .map(|(n, r)| (*n, first_out[r.clone()].to_vec()))
         .collect();
     let (out, stops) = expand(&placeholders);
-    let first = stops
-        .iter()
-        .filter(|(n, _)| *n > 0)
-        .min_by_key(|(n, _)| *n)
-        .or_else(|| stops.iter().find(|(n, _)| *n == 0));
-    (out.into_iter().collect(), first.map(|(_, r)| r.clone()))
+    (out.into_iter().collect(), stops)
 }
 
 struct Snippet<'a> {
@@ -333,6 +346,17 @@ mod tests {
         assert_eq!(
             expand_snippet("f(${1:g(${2:x})})"),
             ("f(g(x))".into(), Some(2..6))
+        );
+    }
+
+    #[test]
+    fn every_stop_and_its_mirrors_are_kept() {
+        let (text, mut stops) = snippet_stops("for ${2:i} := ${1:0}; $2 < n; $2++ {\n\t$0\n}");
+        stops.sort_by_key(|(n, r)| (*n, r.start));
+        assert_eq!(text, "for i := 0; i < n; i++ {\n\t\n}");
+        assert_eq!(
+            stops,
+            vec![(0, 26..26), (1, 9..10), (2, 4..5), (2, 12..13), (2, 19..20)]
         );
     }
 

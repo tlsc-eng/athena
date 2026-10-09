@@ -15,7 +15,7 @@ pub use code_action::{CodeAction, Command};
 pub use completion::{CompletionItem, CompletionList, TextEdit};
 pub use edit::{EditError, FileChange, WorkspaceEdit, apply_text_edits};
 pub use env::{find_program, server_env};
-pub use markup::{Hover, MarkupBlock, expand_snippet, markdown_blocks};
+pub use markup::{Hover, MarkupBlock, expand_snippet, markdown_blocks, snippet_stops};
 pub use protocol::{
     Diagnostic, Highlight, InlayHint, Location, Position, Range, Severity, path_from_uri,
     uri_from_path,

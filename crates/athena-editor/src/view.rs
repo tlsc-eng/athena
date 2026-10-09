@@ -478,6 +478,8 @@ pub struct EditorView {
     pub(crate) rename: Option<crate::lsp_ui::RenameBox>,
     pub(crate) occurrences: crate::lsp_ui::Occurrences,
     pub(crate) inlays: crate::lsp_ui::Inlays,
+    /// The completed snippet whose stops Tab visits.
+    pub(crate) snippet: Option<crate::snippet::Snippet>,
     /// The zero-based line showing the code action lightbulb.
     pub(crate) lightbulb: Option<usize>,
     /// A restored first line to scroll to once the line height is known.
@@ -572,6 +574,7 @@ impl EditorView {
             rename: None,
             occurrences: Default::default(),
             inlays: Default::default(),
+            snippet: None,
             lightbulb: None,
             pending_top: None,
             column_select: None,
@@ -1523,7 +1526,9 @@ impl EditorView {
             this.with_buffer(cx, |b, c| b.indent_lines_all(c, false))
         }))
         .on_action(cx.listener(|this, _: &OutdentLines, _, cx| {
-            this.with_buffer(cx, |b, c| b.indent_lines_all(c, true))
+            if !this.step_snippet(-1, cx) {
+                this.with_buffer(cx, |b, c| b.indent_lines_all(c, true))
+            }
         }))
         .on_action(cx.listener(|this, _: &MoveLinesUp, _, cx| {
             this.with_buffer(cx, |b, c| b.move_lines_all(c, false))
@@ -1818,6 +1823,9 @@ impl Render for EditorView {
                         if this.completion_open() {
                             return this.accept_completion(None, cx);
                         }
+                        if this.step_snippet(1, cx) {
+                            return;
+                        }
                         this.with_buffer(cx, |b, c| b.tab_all(c))
                     }))
                     .on_action(
@@ -1867,6 +1875,7 @@ impl Render for EditorView {
                         if this.dismiss_completion(cx)
                             || this.hide_signature(cx)
                             || this.hide_hover(cx)
+                            || this.leave_snippet()
                         {
                             return;
                         }

@@ -2,7 +2,7 @@ use std::ops::Range as Span;
 
 use serde_json::Value;
 
-use crate::markup::expand_snippet;
+use crate::markup::{first_stop, snippet_stops};
 use crate::protocol::Range;
 
 /// Text to put in place of a range of the document.
@@ -26,6 +26,8 @@ pub struct CompletionItem {
     pub range: Option<Range>,
     /// The part of `text` to select once inserted, in chars; `None` puts the cursor after it.
     pub select: Option<Span<usize>>,
+    /// A snippet's tab stops: each one's number and range in chars of `text`, `$0` numbered 0.
+    pub stops: Vec<(u32, Span<usize>)>,
     /// Edits elsewhere in the file, such as an import gopls adds.
     pub additional_edits: Vec<TextEdit>,
     pub preselect: bool,
@@ -87,11 +89,12 @@ fn parse_item(item: &Value) -> Option<CompletionItem> {
         .or_else(|| str_of("insertText"))
         .unwrap_or_else(|| label.clone());
     let snippet = item.get("insertTextFormat").and_then(Value::as_u64) == Some(2);
-    let (text, select) = if snippet {
-        expand_snippet(&raw)
+    let (text, stops) = if snippet {
+        snippet_stops(&raw)
     } else {
-        (raw, None)
+        (raw, Vec::new())
     };
+    let select = first_stop(&stops);
     let detail = str_of("detail").filter(|d| !d.is_empty()).or_else(|| {
         item.pointer("/labelDetails/description")
             .and_then(Value::as_str)
@@ -110,6 +113,7 @@ fn parse_item(item: &Value) -> Option<CompletionItem> {
         text,
         range,
         select,
+        stops,
         additional_edits,
         preselect: item
             .get("preselect")
