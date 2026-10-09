@@ -3,7 +3,69 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ItemKind, Layout};
+use crate::{Item, ItemId, ItemKind, Layout};
+
+/// The first id of a panel terminal, far above any layout's, so the two never share a key.
+pub const PANEL_IDS: u64 = 1 << 32;
+
+/// The bottom panel's terminals, shown there as sub-tabs like VS Code's panel terminals.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct Panel {
+    pub terminals: Vec<Item>,
+    pub active: usize,
+}
+
+impl Panel {
+    pub fn is_empty(&self) -> bool {
+        self.terminals.is_empty()
+    }
+
+    pub fn holds(id: ItemId) -> bool {
+        id.0 >= PANEL_IDS
+    }
+
+    pub fn active_item(&self) -> Option<&Item> {
+        self.terminals
+            .get(self.active)
+            .or_else(|| self.terminals.last())
+    }
+
+    pub fn item_mut(&mut self, id: ItemId) -> Option<&mut Item> {
+        self.terminals.iter_mut().find(|i| i.id == id)
+    }
+
+    /// Takes `item` in under a panel id, makes it active and returns that id.
+    pub fn adopt(&mut self, mut item: Item) -> ItemId {
+        let highest = self.terminals.iter().map(|i| i.id.0).max();
+        item.id = ItemId(highest.map_or(PANEL_IDS, |h| h + 1));
+        let id = item.id;
+        self.terminals.push(item);
+        self.active = self.terminals.len() - 1;
+        id
+    }
+
+    /// Removes a terminal; the one after it shows next, or the one before when it was last.
+    pub fn take(&mut self, id: ItemId) -> Option<Item> {
+        let at = self.terminals.iter().position(|i| i.id == id)?;
+        let item = self.terminals.remove(at);
+        if self.active > at {
+            self.active -= 1;
+        }
+        self.active = self.active.min(self.terminals.len().saturating_sub(1));
+        Some(item)
+    }
+
+    pub fn activate(&mut self, id: ItemId) -> bool {
+        match self.terminals.iter().position(|i| i.id == id) {
+            Some(at) => {
+                self.active = at;
+                true
+            }
+            None => false,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Project {
@@ -14,6 +76,8 @@ pub struct Project {
     /// The command that starts Claude Code here (e.g. a profile wrapper like `claude-tlsc`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Panel::is_empty")]
+    pub panel: Panel,
     /// Phase 3 stored a single shell here; read only to migrate it into `layout`.
     #[serde(default, skip_serializing)]
     terminal: Option<u64>,
@@ -29,6 +93,7 @@ impl Project {
             root,
             layout: default_layout(),
             claude_command: None,
+            panel: Panel::default(),
             terminal: None,
         }
     }
@@ -145,6 +210,58 @@ mod tests {
         assert!(p.layout.is_none());
         let p: Project = serde_json::from_str(r#"{"root":"/n/a"}"#).unwrap();
         assert!(p.layout.is_some());
+    }
+
+    fn terminal() -> Item {
+        Item {
+            id: ItemId(2),
+            kind: ItemKind::Terminal { session: Some(7) },
+            view: None,
+        }
+    }
+
+    #[test]
+    fn panel_terminals_take_ids_no_layout_uses_and_keep_their_session() {
+        let mut panel = Panel::default();
+        let a = panel.adopt(terminal());
+        let b = panel.adopt(terminal());
+        assert_eq!((a, b), (ItemId(PANEL_IDS), ItemId(PANEL_IDS + 1)));
+        assert!(Panel::holds(a) && !Panel::holds(ItemId(2)));
+        assert_eq!(panel.active_item().map(|i| i.id), Some(b));
+        assert_eq!(
+            panel.take(b).map(|i| i.kind),
+            Some(ItemKind::Terminal { session: Some(7) })
+        );
+        assert_eq!(panel.active_item().map(|i| i.id), Some(a));
+    }
+
+    #[test]
+    fn closing_a_panel_terminal_shows_its_neighbour() {
+        let mut panel = Panel::default();
+        let ids: Vec<ItemId> = (0..3).map(|_| panel.adopt(terminal())).collect();
+        assert!(panel.activate(ids[0]));
+        panel.take(ids[2]);
+        assert_eq!(panel.active_item().map(|i| i.id), Some(ids[0]));
+        assert!(panel.activate(ids[1]));
+        panel.take(ids[0]);
+        assert_eq!(panel.active_item().map(|i| i.id), Some(ids[1]));
+        panel.take(ids[1]);
+        assert!(panel.is_empty() && panel.active == 0);
+    }
+
+    #[test]
+    fn the_panel_is_saved_only_when_it_holds_a_terminal() {
+        let mut p = Project::new("/n/a".into());
+        assert!(!serde_json::to_string(&p).unwrap().contains("panel"));
+        p.panel.adopt(terminal());
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.panel, p.panel);
+        let old: Project = serde_json::from_str(r#"{"root":"/n/a"}"#).unwrap();
+        assert!(old.panel.is_empty());
+        let mut stale = p.panel.clone();
+        stale.active = 9;
+        assert!(stale.active_item().is_some());
     }
 
     #[test]

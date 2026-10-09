@@ -11,6 +11,7 @@ use super::panes::{DIVIDER_HIT, Drag, clamp_drawer_height, resize_handle};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum DrawerTab {
+    Terminal,
     Containers,
     Playwright,
     Tests,
@@ -24,6 +25,7 @@ pub(super) enum DrawerTab {
 impl DrawerTab {
     fn label(self) -> &'static str {
         match self {
+            Self::Terminal => "Terminal",
             Self::Containers => "Containers",
             Self::Playwright => "Playwright",
             Self::Tests => "Tests",
@@ -61,7 +63,7 @@ impl Shell {
         self.drawer_changed(cx);
     }
 
-    fn drawer_changed(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn drawer_changed(&mut self, cx: &mut Context<Self>) {
         match (
             std::mem::replace(&mut self.drawer_shown, self.drawer),
             self.drawer,
@@ -119,6 +121,7 @@ impl Shell {
         let t = cx.theme().clone();
         let tabs = [
             DrawerTab::Problems,
+            DrawerTab::Terminal,
             DrawerTab::Containers,
             DrawerTab::Playwright,
             DrawerTab::Tests,
@@ -146,7 +149,10 @@ impl Shell {
                 .when(!active, |el| {
                     el.hover(|s| s.text_color(t.color.content_secondary))
                 })
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if candidate == DrawerTab::Terminal {
+                        return this.show_terminal_panel(window, cx);
+                    }
                     this.drawer = Some(candidate);
                     this.drawer_changed(cx);
                 }))
@@ -179,6 +185,7 @@ impl Shell {
             DrawerTab::Changes => self.render_changes_count(cx),
             DrawerTab::Search => self.render_search_status(cx),
             DrawerTab::Problems => None,
+            DrawerTab::Terminal => self.render_terminal_panel_actions(cx),
         };
         let content = match tab {
             DrawerTab::Notifications => self.render_notifications(cx),
@@ -189,10 +196,11 @@ impl Shell {
             DrawerTab::Changes => self.render_changes(cx),
             DrawerTab::Search => self.render_search(cx),
             DrawerTab::Problems => self.render_problems(cx),
+            DrawerTab::Terminal => self.render_terminal_panel(cx),
         };
-        // The search field is the drawer's only input; once it is hidden its focus has nowhere to go.
+        // Only the search field and the panel terminal take focus; once hidden it has nowhere to go.
         if self.drawer_focus.contains_focused(window, cx)
-            && (closing.is_some() || tab != DrawerTab::Search)
+            && (closing.is_some() || !matches!(tab, DrawerTab::Search | DrawerTab::Terminal))
         {
             self.focus_active_item(window, cx);
         }

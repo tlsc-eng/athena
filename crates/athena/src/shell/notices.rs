@@ -5,7 +5,7 @@ use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
 use athena_ui::ActiveTheme;
 use athena_ui::motion::{self, Closing};
-use athena_workspace::{ItemId, ItemKind};
+use athena_workspace::{ItemId, ItemKind, Panel};
 use gpui::{Animation, AnyElement, Context, FontWeight, Hsla, Task, Window, div, prelude::*, px};
 use serde::{Deserialize, Serialize};
 
@@ -181,13 +181,14 @@ impl Shell {
 
     /// Project, tab and view showing a daemon session, if any project holds it.
     fn find_session(&self, session: Session) -> Option<(PathBuf, ItemId)> {
+        let kind = ItemKind::Terminal {
+            session: Some(session),
+        };
         self.workspace.projects.iter().find_map(|p| {
-            let item = p.layout.as_ref()?.items().find(|i| {
-                i.kind
-                    == ItemKind::Terminal {
-                        session: Some(session),
-                    }
-            })?;
+            let mut items = p.layout.iter().flat_map(|l| l.items());
+            let item = items
+                .find(|i| i.kind == kind)
+                .or_else(|| p.panel.terminals.iter().find(|i| i.kind == kind))?;
             Some((p.root.clone(), item.id))
         })
     }
@@ -197,6 +198,13 @@ impl Shell {
         let Some((root, item)) = target else {
             return false;
         };
+        if Panel::holds(*item) {
+            return window.is_window_active()
+                && self.drawer == Some(super::drawer::DrawerTab::Terminal)
+                && self.workspace.active_project().is_some_and(|p| {
+                    &p.root == root && p.panel.active_item().is_some_and(|i| i.id == *item)
+                });
+        }
         window.is_window_active()
             && self.workspace.active_project().is_some_and(|p| {
                 &p.root == root
@@ -456,6 +464,10 @@ impl Shell {
             return;
         };
         self.switch_to(index, cx);
+        if Panel::holds(item) {
+            self.focus_pending = false;
+            return self.activate_panel_terminal(item, window, cx);
+        }
         let found = self.workspace.projects[index]
             .layout
             .as_ref()

@@ -6,8 +6,8 @@ use athena_preview::{DocEvent, DocView, PreviewEvent, PreviewView, is_document_p
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
 use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
 use athena_workspace::{
-    Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Rect,
-    ViewState,
+    Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Panel,
+    Rect, ViewState,
 };
 use gpui::{
     Animation, AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, ElementId, Entity,
@@ -174,13 +174,15 @@ impl Shell {
         let view = match &item.kind {
             ItemKind::Terminal { session } => {
                 let view = cx.new(|cx| TerminalView::new(root.to_path_buf(), *session, cx));
-                let (project_root, item_id) = key.clone();
-                cx.subscribe(&view, move |this, _, event: &TerminalEvent, cx| {
+                // Looked up by view, as a terminal moved between the panel and a pane changes id.
+                cx.subscribe(&view, move |this, view, event: &TerminalEvent, cx| {
                     let session = match event {
                         TerminalEvent::Attached(session) => session,
                         TerminalEvent::ContextMenu { open } => {
-                            let key = (project_root.clone(), item_id);
-                            return this.note_item_menu(key, *open, cx);
+                            if let Some(key) = this.terminal_key(&view) {
+                                this.note_item_menu(key, *open, cx);
+                            }
+                            return;
                         }
                         TerminalEvent::Changed => {
                             this.check_playwright_run(cx);
@@ -194,13 +196,18 @@ impl Shell {
                             return this.open_file_link(path.clone(), *line, *column, cx);
                         }
                     };
-                    let item = this
+                    let Some((project_root, item_id)) = this.terminal_key(&view) else {
+                        return;
+                    };
+                    let project = this
                         .workspace
                         .projects
                         .iter_mut()
-                        .find(|p| p.root == project_root)
-                        .and_then(|p| p.layout.as_mut())
-                        .and_then(|l| l.item_mut(item_id));
+                        .find(|p| p.root == project_root);
+                    let item = project.and_then(|p| match Panel::holds(item_id) {
+                        true => p.panel.item_mut(item_id),
+                        false => p.layout.as_mut()?.item_mut(item_id),
+                    });
                     if let Some(item) = item {
                         item.kind = ItemKind::Terminal {
                             session: Some(*session),
@@ -355,6 +362,34 @@ impl Shell {
         Some(view)
     }
 
+    fn terminal_key(&self, view: &Entity<TerminalView>) -> Option<(PathBuf, ItemId)> {
+        self.items.iter().find_map(|(key, v)| match v {
+            ItemView::Terminal(t) if t == view => Some(key.clone()),
+            _ => None,
+        })
+    }
+
+    /// Takes a tab out of the editor area without closing its view, as closing it would.
+    pub(super) fn take_from_layout(&mut self, root: &Path, item: ItemId) -> Option<Item> {
+        let project = self
+            .workspace
+            .projects
+            .iter_mut()
+            .find(|p| p.root == root)?;
+        let layout = project.layout.as_mut()?;
+        let (pane, at) = layout.find_item(item)?;
+        let shown = layout.pane(pane)?.active == at;
+        let taken = layout.pane(pane)?.items[at].clone();
+        if !close_keeping_active(layout, item) {
+            project.layout = None;
+            self.history.forget_root(root);
+        }
+        if shown {
+            self.content_switches.note(root, pane);
+        }
+        Some(taken)
+    }
+
     /// Copies each open editor's place into its tab, so the next save carries it.
     pub(super) fn capture_view_states(&mut self, cx: &gpui::App) {
         for ((root, id), view) in &self.items {
@@ -403,7 +438,7 @@ impl Shell {
     }
 
     /// A 6 px square before the label: Claude's state, or a bell nobody has seen yet.
-    fn item_badge(
+    pub(super) fn item_badge(
         &self,
         root: &Path,
         item: &Item,
@@ -1122,7 +1157,7 @@ impl Shell {
         }
     }
 
-    fn after_layout_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn after_layout_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The eased split's path may now name another split.
         self.ratio_anim = None;
         self.note_editor_pane();
@@ -1371,6 +1406,7 @@ impl Shell {
                     pane: pane_id,
                     item: item_id,
                     label: label.clone().into(),
+                    terminal: matches!(item.kind, ItemKind::Terminal { .. }),
                 };
                 let insertion = div()
                     .absolute()
@@ -1731,6 +1767,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.drop_hint = None;
+        let from_panel = Panel::holds(drag.item);
+        let Some(drag) = self.adopt_dragged(drag, to, window, cx) else {
+            return;
+        };
         let Some(layout) = self.active_layout() else {
             return;
         };
@@ -1742,10 +1782,29 @@ impl Shell {
             .find_item(item)
             .filter(|(p, _)| *p == to)
             .map(|(_, at)| at);
-        if layout.move_item(item, to, strip_drop_index(here, before, len)) {
+        if layout.move_item(item, to, strip_drop_index(here, before, len)) || from_panel {
             self.zoomed = None;
             self.after_tab_moved(item, drag.pane, None, window, cx);
         }
+    }
+
+    /// A panel terminal dropped on a pane joins it first, so the drop then moves an ordinary tab.
+    fn adopt_dragged(
+        &mut self,
+        drag: &TabDrag,
+        to: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<TabDrag> {
+        if !Panel::holds(drag.item) {
+            return Some(drag.clone());
+        }
+        let item = self.panel_terminal_to_editor(drag.item, Some(to), window, cx)?;
+        Some(TabDrag {
+            pane: to,
+            item,
+            ..drag.clone()
+        })
     }
 
     /// A tab dropped on a pane's content: its centre joins the pane, an edge splits it.
@@ -1761,6 +1820,11 @@ impl Shell {
             .take()
             .filter(|(p, _)| *p == target)
             .map_or(DropZone::Center, |(_, z)| z);
+        let from_panel = Panel::holds(drag.item);
+        let Some(drag) = self.adopt_dragged(drag, target, window, cx) else {
+            return;
+        };
+        let drag = &drag;
         let Some(layout) = self.active_layout() else {
             return;
         };
@@ -1774,7 +1838,8 @@ impl Shell {
         let moved = match split {
             None => {
                 let len = layout.pane(target).map_or(0, |p| p.items.len());
-                (drag.pane != target && layout.move_item(drag.item, target, len)).then_some(None)
+                let moved = drag.pane != target && layout.move_item(drag.item, target, len);
+                (moved || from_panel).then_some(None)
             }
             Some((axis, first)) => layout
                 .split_with_item(target, axis, drag.item, first)

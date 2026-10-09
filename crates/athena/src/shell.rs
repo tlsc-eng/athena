@@ -30,6 +30,7 @@ mod settings;
 mod shortcuts;
 mod status_bar;
 mod tasks;
+mod terminal_panel;
 mod tests_view;
 mod tree;
 mod usage_view;
@@ -812,6 +813,26 @@ impl Render for Shell {
                 this.open_palette(palette::Mode::Commands, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleNotifications, _, cx| this.toggle_drawer(cx)))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ToggleTerminalPanel, w, cx| {
+                    this.toggle_terminal_panel(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::NewPanelTerminal, w, cx| {
+                    this.new_panel_terminal(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::MoveTerminalToPanel, w, cx| {
+                    this.move_terminal(true, w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::MoveTerminalToEditor, w, cx| {
+                    this.move_terminal(false, w, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &ShowContainers, _, cx| {
                 this.toggle_drawer_tab(drawer::DrawerTab::Containers, cx)
             }))

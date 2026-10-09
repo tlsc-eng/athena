@@ -14,6 +14,8 @@ pub(super) struct TabDrag {
     pub pane: PaneId,
     pub item: ItemId,
     pub label: SharedString,
+    /// A terminal, which the bottom panel takes too.
+    pub terminal: bool,
 }
 
 /// The caption that follows the cursor while a tab is dragged.

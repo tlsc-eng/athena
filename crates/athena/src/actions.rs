@@ -73,6 +73,10 @@ actions!(
         OpenKeyboardShortcuts,
         OpenSettings,
         ToggleInlayHints,
+        ToggleTerminalPanel,
+        NewPanelTerminal,
+        MoveTerminalToPanel,
+        MoveTerminalToEditor,
     ]
 );
 
@@ -145,6 +149,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-b", ToggleFileTree, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
+        KeyBinding::new("ctrl-`", ToggleTerminalPanel, None),
+        // macOS reports ⌃⇧` as ⌃~, so that is the binding that matches; the other is for the menu.
+        KeyBinding::new("ctrl-~", NewPanelTerminal, None),
+        KeyBinding::new("ctrl-shift-`", NewPanelTerminal, None),
         KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
         KeyBinding::new("cmd-shift-v", TogglePreview, None),
         KeyBinding::new("cmd-shift-s", SaveAs, None),
@@ -296,6 +304,10 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
                 MenuItem::action("Reveal Active File in Tree", RevealInTree),
                 MenuItem::action("Problems", ShowProblems),
+                MenuItem::action("Terminal", ToggleTerminalPanel),
+                MenuItem::action("New Terminal in Panel", NewPanelTerminal),
+                MenuItem::action("Move Terminal into Panel", MoveTerminalToPanel),
+                MenuItem::action("Move Terminal into Editor Area", MoveTerminalToEditor),
                 MenuItem::action("Notifications", ToggleNotifications),
                 MenuItem::action("Containers", ShowContainers),
                 MenuItem::action("Playwright", ShowPlaywright),
@@ -422,6 +434,23 @@ mod tests {
             "Select All Occurrences",
         ] {
             assert!(selection.contains(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn terminal_panel_keystrokes_parse() {
+        for (source, key, shift) in [
+            ("ctrl-`", "`", false),
+            ("ctrl-~", "~", false),
+            ("ctrl-shift-`", "`", true),
+        ] {
+            let k = Keystroke::parse(source).unwrap();
+            assert!(k.modifiers.control && !k.modifiers.platform, "{source}");
+            assert_eq!(
+                (k.key.as_str(), k.modifiers.shift),
+                (key, shift),
+                "{source}"
+            );
         }
     }
 
