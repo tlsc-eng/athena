@@ -85,6 +85,12 @@ impl SemanticAnswer {
     }
 }
 
+impl From<Value> for SemanticAnswer {
+    fn from(result: Value) -> Self {
+        Self(result)
+    }
+}
+
 fn numbers(value: Option<&Value>) -> Option<Vec<u32>> {
     value?
         .as_array()?

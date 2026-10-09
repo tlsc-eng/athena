@@ -62,6 +62,9 @@ pub struct EditorSettings {
     pub linked_editing: Option<bool>,
     /// VS Code's `editor.minimap.enabled`; on unless turned off.
     pub minimap: Option<bool>,
+    /// VS Code's `editor.semanticHighlighting.enabled`: colour names as the language server
+    /// classifies them.
+    pub semantic_highlighting: Option<bool>,
 }
 
 /// Which code actions put a lightbulb beside the cursor's line; the rest wait for Cmd+.
@@ -97,6 +100,7 @@ impl EditorSettings {
             lightbulb: over.lightbulb.or(self.lightbulb),
             linked_editing: over.linked_editing.or(self.linked_editing),
             minimap: over.minimap.or(self.minimap),
+            semantic_highlighting: over.semantic_highlighting.or(self.semantic_highlighting),
         }
     }
 
@@ -119,6 +123,13 @@ impl EditorSettings {
             "minimap" => {
                 let flag = value.get("enabled").unwrap_or(value).as_bool();
                 self.minimap = Some(flag.ok_or("must be true or false")?);
+            }
+            // VS Code's "configuredByTheme" is on: every Athena theme colours semantic tokens.
+            "semantic_highlighting" => {
+                self.semantic_highlighting = Some(match value.as_str() {
+                    Some("configuredByTheme") => true,
+                    _ => flag()?,
+                });
             }
             "lightbulb" => {
                 self.lightbulb = Some(match (value.as_str(), value.as_bool()) {
@@ -171,6 +182,7 @@ fn editor_key(key: &str) -> &str {
         "wordWrap" => "word_wrap",
         "linkedEditing" => "linked_editing",
         "minimap.enabled" => "minimap",
+        "semanticHighlighting" | "semanticHighlighting.enabled" => "semantic_highlighting",
         "lightbulb.enabled" => "lightbulb",
         "codeActionsOnSave" => "code_actions_on_save",
         other => other,
@@ -254,6 +266,15 @@ impl Settings {
     /// curated set of inlay hints when `editor.inlay_hints` is on and the user chose none.
     pub fn server_config(&self, program: &str) -> Value {
         let mut config = self.lsp.get(program).cloned().unwrap_or(Value::Null);
+        // gopls sends no semantic tokens unless asked, yet VS Code shows them by default.
+        if program == "gopls" && self.editor.semantic_highlighting != Some(false) {
+            if !config.is_object() {
+                config = json!({});
+            }
+            if config.get("semanticTokens").is_none() {
+                config["semanticTokens"] = json!(true);
+            }
+        }
         if self.editor.inlay_hints != Some(true) {
             return config;
         }
@@ -1693,9 +1714,48 @@ mod tests {
     }
 
     #[test]
+    fn semantic_highlighting_asks_gopls_for_tokens_unless_turned_off() {
+        let (s, problems) = parse(r#"{"editor.semanticHighlighting.enabled": false}"#).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.editor.semantic_highlighting, Some(false));
+        assert_eq!(s.server_config("gopls"), Value::Null);
+        let (s, _) =
+            parse(r#"{"editor": {"semanticHighlighting.enabled": "configuredByTheme"}}"#).unwrap();
+        assert_eq!(s.editor.semantic_highlighting, Some(true));
+        assert_eq!(
+            Settings::default().server_config("gopls"),
+            json!({"semanticTokens": true})
+        );
+        let (mut s, _) = parse(r#"{"lsp": {"gopls": {"semanticTokens": false}}}"#).unwrap();
+        assert_eq!(
+            s.server_config("gopls"),
+            json!({"semanticTokens": false}),
+            "the user's own"
+        );
+        s.languages.insert(
+            "go".into(),
+            EditorSettings {
+                semantic_highlighting: Some(false),
+                ..EditorSettings::default()
+            },
+        );
+        assert_eq!(
+            s.editor_for(Some(Lang::Go)).semantic_highlighting,
+            Some(false)
+        );
+        assert_eq!(
+            Settings::default().server_config("typescript-language-server"),
+            Value::Null
+        );
+    }
+
+    #[test]
     fn inlay_hints_add_curated_server_settings_unless_the_user_chose_some() {
         let (mut s, _) = parse(r#"{"lsp": {"gopls": {"staticcheck": true}}}"#).unwrap();
-        assert_eq!(s.server_config("gopls"), json!({"staticcheck": true}));
+        assert_eq!(
+            s.server_config("gopls"),
+            json!({"staticcheck": true, "semanticTokens": true})
+        );
         s.editor.inlay_hints = Some(true);
         let go = s.server_config("gopls");
         assert_eq!(go["staticcheck"], json!(true));
@@ -1704,7 +1764,7 @@ mod tests {
             .insert("gopls".into(), json!({"hints": {"constantValues": true}}));
         assert_eq!(
             s.server_config("gopls"),
-            json!({"hints": {"constantValues": true}})
+            json!({"hints": {"constantValues": true}, "semanticTokens": true})
         );
         let ts = s.server_config("typescript-language-server");
         assert_eq!(

@@ -66,6 +66,30 @@ pub enum Token {
     Emphasis,
     Strong,
     Error,
+    /// Only a language server's semantic tokens tell these apart from other names.
+    Parameter,
+    TypeParameter,
+}
+
+/// How a semantic token of the standard type `kind` is coloured; `None` leaves the tree-sitter
+/// colour, which already gets keywords, strings, numbers, comments and operators right and
+/// splits strings into escapes and format verbs a semantic token would paint over.
+pub fn semantic_token(kind: &str, readonly: bool, default_library: bool) -> Option<Token> {
+    Some(match kind {
+        "variable" | "property" | "enumMember" if readonly => Token::Constant,
+        "variable" if default_library => Token::VariableBuiltin,
+        "variable" | "event" => Token::Variable,
+        "parameter" => Token::Parameter,
+        "property" => Token::Property,
+        "enumMember" => Token::Constant,
+        "function" | "method" | "macro" => Token::Function,
+        "namespace" => Token::Namespace,
+        "type" | "class" | "enum" | "interface" | "struct" => Token::Type,
+        "typeParameter" => Token::TypeParameter,
+        "decorator" => Token::Attribute,
+        "label" => Token::Label,
+        _ => return None,
+    })
 }
 
 /// Highlights one line without a parse tree; ranges are byte offsets within the line.
@@ -545,6 +569,43 @@ pub struct Syntax {
     /// What has been read of the bracket tokens under each node with many children, by node
     /// id, for the tree as it is now; a 300k-element JSON array is otherwise walked every frame.
     brackets: RefCell<HashMap<usize, BracketScan>>,
+    semantic: Semantic,
+}
+
+/// A language server's semantic tokens as byte ranges, sorted and apart, moved with each edit
+/// so they stay on their names until the server's next answer replaces them.
+#[derive(Default)]
+struct Semantic {
+    tokens: Vec<(Range<usize>, Token)>,
+    /// The buffer version the server's answer described; edits since have moved the tokens.
+    version: Option<u64>,
+}
+
+impl Semantic {
+    /// Tokens before the edit stay, those after it move by its length, one the edit fell inside
+    /// grows or shrinks with it, and one it reached across is dropped.
+    fn edit(&mut self, edit: &InputEdit) {
+        let (start, old_end, new_end) = (edit.start_byte, edit.old_end_byte, edit.new_end_byte);
+        let first = self.tokens.partition_point(|(r, _)| r.end <= start);
+        let after = self.tokens.partition_point(|(r, _)| r.start < old_end);
+        let moved = |at: usize| at + new_end - old_end;
+        for (r, _) in &mut self.tokens[after..] {
+            *r = moved(r.start)..moved(r.end);
+        }
+        // Few tokens touch the edit; one it fell inside is resized, the rest are dropped.
+        let touched: Vec<_> = self.tokens[first..after.max(first)]
+            .iter()
+            .filter(|(r, _)| r.start < start && old_end <= r.end && moved(r.end) > r.start)
+            .map(|(r, t)| (r.start..moved(r.end), *t))
+            .collect();
+        self.tokens.splice(first..after.max(first), touched);
+    }
+
+    fn within(&self, bytes: &Range<usize>) -> &[(Range<usize>, Token)] {
+        let from = self.tokens.partition_point(|(r, _)| r.end <= bytes.start);
+        let to = self.tokens.partition_point(|(r, _)| r.start < bytes.end);
+        &self.tokens[from..to.max(from)]
+    }
 }
 
 /// A parse to run off the UI thread, over a snapshot of the text and the edited tree it reuses.
@@ -609,6 +670,7 @@ impl Syntax {
             stale: false,
             parsing: None,
             brackets: RefCell::default(),
+            semantic: Semantic::default(),
         };
         syntax.reparse(rope);
         syntax
@@ -625,6 +687,7 @@ impl Syntax {
 
     /// Moves the tree past an edit without parsing; several edits can share one [`Self::reparse`].
     pub fn edit_tree(&mut self, edit: &InputEdit) {
+        self.semantic.edit(edit);
         if let Backend::Tree {
             tree: Some(tree), ..
         } = &mut self.backend
@@ -719,14 +782,27 @@ impl Syntax {
         let mut best: HashMap<(usize, usize), (usize, Token)> = HashMap::new();
         capture_tokens(query, tree, rope, bytes.clone(), first_wins, &mut best);
         if self.lang == Lang::Markdown {
-            markdown_inline(tree, rope, bytes, &mut best);
+            markdown_inline(tree, rope, bytes.clone(), &mut best);
         }
         let mut out: Vec<_> = best
             .into_iter()
             .map(|((start, end), (_, token))| (start..end, token))
             .collect();
         out.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
+        // After the tree's ranges, so a semantic token paints over what tree-sitter guessed.
+        out.extend_from_slice(self.semantic.within(&bytes));
         out
+    }
+
+    /// Lays a language server's semantic tokens, sorted byte ranges, over the tree's colours;
+    /// `version` is the buffer version they describe.
+    pub fn set_semantic(&mut self, tokens: Vec<(Range<usize>, Token)>, version: Option<u64>) {
+        self.semantic = Semantic { tokens, version };
+    }
+
+    /// The buffer version the semantic tokens were last given for.
+    pub fn semantic_version(&self) -> Option<u64> {
+        self.semantic.version
     }
 }
 
@@ -1331,6 +1407,126 @@ fn f() -> usize { MAX_LEN + Self::LIMIT + Some(1).unwrap() }
         assert_eq!(token_for("text.title"), Some(Token::Heading));
         assert_eq!(token_for("none"), None);
         assert_eq!(token_for("stringy"), None);
+    }
+
+    fn edit(start: usize, old_end: usize, new_end: usize) -> InputEdit {
+        InputEdit {
+            start_byte: start,
+            old_end_byte: old_end,
+            new_end_byte: new_end,
+            start_position: Point::default(),
+            old_end_position: Point::default(),
+            new_end_position: Point::default(),
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_move_with_edits_and_drop_where_an_edit_reached_across_them() {
+        let mut layer = Semantic {
+            tokens: vec![
+                (0..4, Token::Function),
+                (10..13, Token::Parameter),
+                (20..25, Token::Type),
+                (30..32, Token::Variable),
+            ],
+            version: Some(1),
+        };
+        layer.edit(&edit(6, 6, 8));
+        assert_eq!(
+            layer.tokens,
+            [
+                (0..4, Token::Function),
+                (12..15, Token::Parameter),
+                (22..27, Token::Type),
+                (32..34, Token::Variable),
+            ],
+            "typed between tokens"
+        );
+        layer.edit(&edit(13, 13, 14));
+        assert_eq!(
+            layer.tokens[1],
+            (12..16, Token::Parameter),
+            "typed inside a name"
+        );
+        layer.edit(&edit(16, 16, 17));
+        assert_eq!(
+            layer.tokens[1],
+            (12..16, Token::Parameter),
+            "typed after it"
+        );
+        assert_eq!(layer.tokens[2], (24..29, Token::Type));
+        layer.edit(&edit(26, 35, 26));
+        assert_eq!(
+            layer.tokens,
+            [(0..4, Token::Function), (12..16, Token::Parameter)],
+            "a deletion reaching across drops what it touched"
+        );
+        layer.edit(&edit(0, 0, 3));
+        assert_eq!(
+            layer.tokens[0],
+            (3..7, Token::Function),
+            "typed before the first"
+        );
+        assert_eq!(layer.within(&(0..4)), [(3..7, Token::Function)]);
+        assert_eq!(layer.within(&(7..16)), [(15..19, Token::Parameter)]);
+        assert!(layer.within(&(8..15)).is_empty());
+    }
+
+    #[test]
+    fn semantic_tokens_paint_over_the_tree_only_for_names() {
+        let src = "package main\n\nfunc f(n int) int { return n }\n";
+        let rope = Rope::from_str(src);
+        let mut syntax = Syntax::new(Lang::Go, &rope);
+        let at = |needle: &str| {
+            let i = src.rfind(needle).unwrap();
+            i..i + needle.len()
+        };
+        syntax.set_semantic(
+            vec![
+                (at("(n").start + 1..at("(n").end, Token::Parameter),
+                (at("n }").start..at("n }").start + 1, Token::Parameter),
+            ],
+            Some(3),
+        );
+        assert_eq!(syntax.semantic_version(), Some(3));
+        let painted = |byte: usize| {
+            syntax
+                .highlights(&rope, 0..src.len())
+                .into_iter()
+                .rfind(|(r, _)| r.contains(&byte))
+                .map(|(_, t)| t)
+        };
+        assert_eq!(painted(at("n }").start), Some(Token::Parameter));
+        assert_eq!(
+            painted(at("func").start),
+            Some(Token::Keyword),
+            "the tree's colours stay"
+        );
+        assert_eq!(
+            semantic_token("parameter", false, false),
+            Some(Token::Parameter)
+        );
+        assert_eq!(
+            semantic_token("variable", true, true),
+            Some(Token::Constant)
+        );
+        assert_eq!(
+            semantic_token("variable", false, true),
+            Some(Token::VariableBuiltin)
+        );
+        assert_eq!(
+            semantic_token("method", false, false),
+            Some(Token::Function)
+        );
+        assert_eq!(
+            semantic_token("typeParameter", false, false),
+            Some(Token::TypeParameter)
+        );
+        for left in [
+            "keyword", "string", "number", "comment", "operator", "regexp", "unknown",
+        ] {
+            assert_eq!(semantic_token(left, false, false), None, "{left}");
+        }
     }
 
     #[test]

@@ -831,6 +831,8 @@ fn token_color(token: Token, syntax: &SyntaxColors) -> Hsla {
         Token::Heading => syntax.heading,
         Token::Error => syntax.error,
         Token::Variable | Token::Emphasis | Token::Strong => syntax.text,
+        Token::Parameter => syntax.parameter,
+        Token::TypeParameter => syntax.type_parameter,
     }
 }
 

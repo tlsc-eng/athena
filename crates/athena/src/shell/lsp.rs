@@ -1,16 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use athena_editor::{
     Completion, EditorView, HoverBlock, Inlay, Lang, LspRequest, Marker, MarkerSeverity,
-    Occurrence, Resolved, ServerEdit, Signature,
+    Occurrence, Resolved, SemanticSpan, ServerEdit, Signature, Token,
 };
 use athena_lsp::{
     Client, CompletionItem, Config, Diagnostic, Event, Location, MarkupBlock, Position, Range,
-    ServerKind, Severity,
+    SemanticAnswer, SemanticLegend, SemanticReply, ServerKind, Severity,
 };
 use athena_proto::{DiagnosticInfo, NoticeKind};
 use athena_ui::ActiveTheme;
@@ -105,6 +105,79 @@ pub(super) struct LspState {
     held_back: HashSet<PathBuf>,
     /// Each editor's last suggestions as the server sent them, to resolve one on request.
     completions: HashMap<EntityId, (u64, Rc<Client>, Vec<CompletionItem>)>,
+    /// Each document's semantic tokens as its server last sent them, which a delta builds on.
+    semantic: HashMap<PathBuf, SemanticDoc>,
+}
+
+#[derive(Default)]
+struct SemanticDoc {
+    /// The server instance the tokens came from; a restarted one starts again from nothing.
+    client: Weak<Client>,
+    result_id: Option<String>,
+    data: Arc<Vec<u32>>,
+    /// One request at a time, so each delta builds on the answer before it.
+    busy: bool,
+    /// The newest request that came while one was in flight.
+    queued: Option<(WeakEntity<EditorView>, u64)>,
+}
+
+/// The colour of each of a server's token types, by whether it is read-only and whether it is
+/// from the standard library.
+struct SemanticTable {
+    types: Vec<[Option<Token>; 4]>,
+    readonly: u32,
+    default_library: u32,
+}
+
+impl SemanticTable {
+    fn new(legend: &SemanticLegend) -> Self {
+        Self {
+            types: legend
+                .types
+                .iter()
+                .map(|kind| {
+                    [(false, false), (false, true), (true, false), (true, true)]
+                        .map(|(ro, lib)| athena_editor::semantic_token(kind, ro, lib))
+                })
+                .collect(),
+            readonly: legend.modifier_bit("readonly"),
+            default_library: legend.modifier_bit("defaultLibrary"),
+        }
+    }
+}
+
+/// The result id and token data a later delta builds on, and the coloured spans.
+type Decoded = (Option<String>, Arc<Vec<u32>>, Vec<SemanticSpan>);
+
+/// A semantic tokens answer read, applied to the data before it if it is a delta, and decoded
+/// into coloured spans; `None` if it could not be read. Runs off the UI thread.
+fn decode_semantic(
+    answer: SemanticAnswer,
+    previous: &[u32],
+    table: &SemanticTable,
+) -> Option<Decoded> {
+    let (id, data) = match answer.parse()? {
+        SemanticReply::Full(tokens) => (tokens.result_id, tokens.data),
+        SemanticReply::Delta { result_id, edits } => (
+            result_id,
+            athena_lsp::apply_semantic_edits(previous, &edits)?,
+        ),
+    };
+    let spans = athena_lsp::decode_semantic_tokens(&data)
+        .into_iter()
+        .filter_map(|t| {
+            let colours = table.types.get(t.kind as usize)?;
+            let ro = usize::from(t.modifiers & table.readonly != 0);
+            let lib = usize::from(t.modifiers & table.default_library != 0);
+            Some(SemanticSpan {
+                line: t.line,
+                start: t.start,
+                length: t.length,
+                token: colours[ro * 2 + lib]?,
+            })
+        })
+        .collect();
+    Some((id, Arc::new(data), spans))
 }
 
 impl LspState {
@@ -334,8 +407,9 @@ fn push_triggers(editor: &Entity<EditorView>, client: &Client, cx: &mut Context<
     editor.update(cx, |e, cx| {
         e.set_completion_triggers(Some(completion));
         e.set_signature_triggers(signature);
-        // A file shown before its server was ready asks for its hints now.
+        // A file shown before its server was ready asks for its hints and tokens now.
         e.refresh_inlay_hints(cx);
+        e.refresh_semantic_tokens(cx);
     });
 }
 
@@ -818,7 +892,12 @@ impl Shell {
                 self.local_notice(NoticeKind::Message { title, body: why }, cx);
             }
             Event::RefreshInlayHints => self.refresh_inlay_hints(&key, cx),
-            Event::RefreshSemanticTokens | Event::RefreshCodeLens => {}
+            Event::RefreshSemanticTokens => {
+                for editor in self.server_editors(&key, cx) {
+                    editor.update(cx, |e, cx| e.refresh_semantic_tokens(cx));
+                }
+            }
+            Event::RefreshCodeLens => {}
             Event::Message { severity, text } => {
                 let title = key.1.label().to_string();
                 match severity {
@@ -902,18 +981,100 @@ impl Shell {
     }
 
     fn refresh_inlay_hints(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
-        let docs: Vec<PathBuf> = self
-            .lsp
+        for editor in self.server_editors(key, cx) {
+            editor.update(cx, |e, cx| e.refresh_inlay_hints(cx));
+        }
+    }
+
+    /// The editors showing a file that `key` has open as its main server.
+    fn server_editors(&self, key: &ServerKey, cx: &Context<Self>) -> Vec<Entity<EditorView>> {
+        self.lsp
             .documents
             .iter()
             .filter(|(_, k)| *k == key)
-            .map(|(doc, _)| doc.clone())
-            .collect();
-        for doc in docs {
-            for editor in self.editors_showing(&doc, cx) {
-                editor.update(cx, |e, cx| e.refresh_inlay_hints(cx));
-            }
+            .flat_map(|(doc, _)| self.editors_showing(doc, cx))
+            .collect()
+    }
+
+    /// Asks the server for the file's semantic tokens, as a delta on its last answer where it
+    /// can; reading and decoding the answer happen off the UI thread.
+    fn lsp_semantic_tokens(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        if let Some(entry) = self.lsp.semantic.get_mut(&doc)
+            && entry.busy
+        {
+            entry.queued = Some((editor.downgrade(), request));
+            return;
         }
+        self.flush_change(&doc, editor, cx);
+        let Some((client, legend)) = self
+            .document_client(&doc)
+            .and_then(|c| c.semantic_legend().map(|l| (c, l)))
+        else {
+            editor.update(cx, |e, cx| e.show_semantic_tokens(request, Vec::new(), cx));
+            return;
+        };
+        let table = SemanticTable::new(&legend);
+        let entry = self.lsp.semantic.entry(doc.clone()).or_default();
+        if !entry
+            .client
+            .upgrade()
+            .is_some_and(|c| Rc::ptr_eq(&c, &client))
+        {
+            *entry = SemanticDoc {
+                client: Rc::downgrade(&client),
+                ..SemanticDoc::default()
+            };
+        }
+        entry.busy = true;
+        let previous_id = entry.result_id.clone();
+        let previous = entry.data.clone();
+        let weak = editor.downgrade();
+        cx.spawn(async move |this, cx| {
+            let decoded = match client.semantic_tokens(&doc, previous_id.as_deref()).await {
+                Ok(answer) => {
+                    cx.background_spawn(async move { decode_semantic(answer, &previous, &table) })
+                        .await
+                }
+                Err(why) => {
+                    tracing::debug!("semantic tokens failed: {why}");
+                    None
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                let entry = this.lsp.semantic.get_mut(&doc);
+                let queued = entry.and_then(|entry| {
+                    entry.busy = false;
+                    if entry
+                        .client
+                        .upgrade()
+                        .is_some_and(|c| Rc::ptr_eq(&c, &client))
+                    {
+                        // An unreadable answer leaves nothing a delta could build on.
+                        let (id, data) = match &decoded {
+                            Some((id, data, _)) => (id.clone(), data.clone()),
+                            None => (None, Arc::default()),
+                        };
+                        entry.result_id = id;
+                        entry.data = data;
+                    }
+                    entry.queued.take()
+                });
+                if let Some((_, _, spans)) = decoded {
+                    tracing::debug!("semantic tokens → {}", spans.len());
+                    let _ = weak.update(cx, |e, cx| e.show_semantic_tokens(request, spans, cx));
+                }
+                if let Some((editor, request)) = queued.and_then(|(e, r)| Some((e.upgrade()?, r))) {
+                    this.lsp_semantic_tokens(&editor, request, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Asks the server for the inlay hints on `lines` of the editor's file.
@@ -1537,6 +1698,7 @@ impl Shell {
                 line,
                 character,
             } => self.lsp_linked_editing(editor, request, position((line, character)), cx),
+            LspRequest::SemanticTokens { request } => self.lsp_semantic_tokens(editor, request, cx),
         }
     }
 
@@ -1980,6 +2142,7 @@ impl Shell {
             return;
         }
         self.lsp.changes.remove(&doc);
+        self.lsp.semantic.remove(&doc);
         self.breadcrumbs_closed(&doc);
         let keys = self.lsp.documents.remove(&doc).into_iter();
         for key in keys.chain(self.lsp.linters.remove(&doc).into_iter().flatten()) {
@@ -2091,6 +2254,50 @@ mod tests {
             _events: Task::ready(()),
         };
         (client, server)
+    }
+
+    #[test]
+    fn semantic_answers_decode_into_colours_by_type_and_modifiers() {
+        let legend = SemanticLegend {
+            types: ["variable", "parameter", "keyword", "function"]
+                .map(String::from)
+                .to_vec(),
+            modifiers: ["definition", "readonly", "defaultLibrary"]
+                .map(String::from)
+                .to_vec(),
+        };
+        let table = SemanticTable::new(&legend);
+        let full = serde_json::json!({"resultId": "7", "data": [
+            1, 4, 5, 0, 0,
+            0, 6, 1, 1, 0,
+            0, 2, 3, 2, 0,
+            1, 0, 3, 0, 0b110,
+            0, 4, 3, 3, 0b100,
+            0, 4, 2, 9, 0
+        ]});
+        let (id, data, spans) = decode_semantic(full.into(), &[], &table).unwrap();
+        assert_eq!(id.as_deref(), Some("7"));
+        let shown: Vec<(u32, u32, Token)> =
+            spans.iter().map(|s| (s.line, s.start, s.token)).collect();
+        assert_eq!(
+            shown,
+            [
+                (1, 4, Token::Variable),
+                (1, 10, Token::Parameter),
+                (2, 0, Token::Constant),
+                (2, 4, Token::Function),
+            ],
+            "keywords keep the tree's colour; an unknown type index is skipped"
+        );
+        let delta = serde_json::json!({"resultId": "8", "edits": [{"start": 0, "deleteCount": 1, "data": [3]}]});
+        let (_, after, spans) = decode_semantic(delta.into(), &data, &table).unwrap();
+        assert_eq!(after.len(), data.len());
+        assert_eq!(
+            spans[0].line, 3,
+            "the delta moved the first token down two lines"
+        );
+        let bad = serde_json::json!({"edits": [{"start": 99, "deleteCount": 1, "data": []}]});
+        assert!(decode_semantic(bad.into(), &data, &table).is_none());
     }
 
     #[test]

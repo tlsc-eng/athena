@@ -18,6 +18,9 @@ const HIGHLIGHT_DELAY: Duration = Duration::from_millis(250);
 const INLAY_DELAY: Duration = Duration::from_millis(300);
 /// Hints are asked for this many lines above and below the screen, so short scrolls need none.
 const INLAY_MARGIN: usize = 100;
+/// Typing pauses this long before semantic tokens are asked for again; until they come, the
+/// last ones stay on their names as the text moves.
+const SEMANTIC_DELAY: Duration = Duration::from_millis(300);
 
 // Handled by the shell, which talks to the language server, as they bubble up from the editor.
 actions!(
@@ -64,6 +67,80 @@ pub enum LspRequest {
         line: u32,
         character: u32,
     },
+    /// The file's semantic tokens; answer with [`EditorView::show_semantic_tokens`].
+    SemanticTokens { request: u64 },
+}
+
+/// A semantic token where a language server put it: zero-based line, UTF-16 start and length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticSpan {
+    pub line: u32,
+    pub start: u32,
+    pub length: u32,
+    pub token: crate::Token,
+}
+
+/// Steps along one line of a rope from UTF-16 column to UTF-16 column, as tokens on a line come
+/// in order; a column past the line's end stops at its end.
+struct LineCursor<'a> {
+    chars: ropey::iter::Chars<'a>,
+    utf16: usize,
+    byte: usize,
+}
+
+impl LineCursor<'_> {
+    fn advance(&mut self, to: usize) -> usize {
+        while self.utf16 < to {
+            match self.chars.next() {
+                Some(c) if c != '\n' && c != '\r' => {
+                    self.utf16 += c.len_utf16();
+                    self.byte += c.len_utf8();
+                }
+                _ => {
+                    self.utf16 = usize::MAX;
+                    break;
+                }
+            }
+        }
+        self.byte
+    }
+}
+
+/// The byte ranges `spans` cover in `rope`, sorted and apart; a span out of order, empty, past
+/// the end, or overlapping the one before is left out.
+pub(crate) fn place_semantic(
+    rope: &ropey::Rope,
+    spans: &[SemanticSpan],
+) -> Vec<(Range<usize>, crate::Token)> {
+    let mut out: Vec<(Range<usize>, crate::Token)> = Vec::with_capacity(spans.len());
+    let mut line_no = None;
+    let mut cursor: Option<LineCursor> = None;
+    for s in spans {
+        let line = s.line as usize;
+        if line >= rope.len_lines() || line_no.is_some_and(|l| l > line) {
+            continue;
+        }
+        if line_no != Some(line) {
+            line_no = Some(line);
+            cursor = Some(LineCursor {
+                chars: rope.line(line).chars(),
+                utf16: 0,
+                byte: rope.line_to_byte(line),
+            });
+        }
+        let Some(c) = cursor.as_mut() else {
+            continue;
+        };
+        if (s.start as usize) < c.utf16 {
+            continue;
+        }
+        let start = c.advance(s.start as usize);
+        let end = c.advance(s.start as usize + s.length as usize);
+        if start < end && out.last().is_none_or(|(r, _)| r.end <= start) {
+            out.push((start..end, s.token));
+        }
+    }
+    out
 }
 
 /// An edit that linked editing repeats in the other ranges.
@@ -277,6 +354,21 @@ pub(crate) struct Inlays {
     pending: Option<(u64, u64)>,
     requests: u64,
     timer: Option<Task<()>>,
+}
+
+/// Semantic tokens: whether to ask, and the request in flight.
+#[derive(Default)]
+pub(crate) struct Semantic {
+    enabled: bool,
+    /// The buffer version last asked about, or waited on.
+    asked: Option<u64>,
+    /// Ask even if another view of the buffer already has this version's tokens.
+    forced: bool,
+    /// The request in flight and the buffer version it was asked for.
+    pending: Option<(u64, u64)>,
+    requests: u64,
+    timer: Option<Task<()>>,
+    placing: Option<Task<()>>,
 }
 
 /// The inline field F2 opens over a symbol.
@@ -774,6 +866,116 @@ impl EditorView {
         cx.notify();
     }
 
+    /// VS Code's `editor.semanticHighlighting.enabled`: colour names as the language server
+    /// classifies them, over the syntax colours.
+    pub fn set_semantic_highlighting(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.semantic.enabled == enabled {
+            return;
+        }
+        self.semantic = Semantic {
+            enabled,
+            ..Semantic::default()
+        };
+        if !enabled && let Some(shared) = self.buffer.clone() {
+            shared
+                .buffer
+                .borrow_mut()
+                .set_semantic_tokens(Vec::new(), None);
+            shared.parsed.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    /// Asks for semantic tokens again, as after the server said they are out of date.
+    pub fn refresh_semantic_tokens(&mut self, cx: &mut Context<Self>) {
+        self.semantic.asked = None;
+        self.semantic.forced = true;
+        cx.notify();
+    }
+
+    /// Asks for the file's semantic tokens once typing pauses after a change; called every
+    /// frame. A file's first tokens are asked for at once.
+    pub(crate) fn schedule_semantic(&mut self, cx: &mut Context<Self>) {
+        if !self.semantic.enabled || !self.completing_attached() {
+            return;
+        }
+        let Some(version) = self.version() else {
+            return;
+        };
+        if self.semantic.asked == Some(version) {
+            return;
+        }
+        self.semantic.asked = Some(version);
+        let had = self.buf().and_then(|b| b.semantic_version());
+        // Another view of the same buffer may have brought this version's tokens already.
+        if had == Some(version) && !self.semantic.forced {
+            return;
+        }
+        let delay = if had.is_none() && self.semantic.requests == 0 {
+            Duration::ZERO
+        } else {
+            SEMANTIC_DELAY
+        };
+        self.semantic.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                this.semantic.timer = None;
+                this.semantic.forced = false;
+                this.semantic.requests += 1;
+                let request = this.semantic.requests;
+                this.semantic.pending = Some((request, version));
+                cx.emit(EditorEvent::Lsp(LspRequest::SemanticTokens { request }));
+            });
+        }));
+    }
+
+    /// The answer to [`LspRequest::SemanticTokens`], placed in the text off the UI thread; an
+    /// answer for text that changed since is dropped and asked for again.
+    pub fn show_semantic_tokens(
+        &mut self,
+        request: u64,
+        spans: Vec<SemanticSpan>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((asked, version)) = self.semantic.pending else {
+            return;
+        };
+        if asked != request || !self.semantic.enabled {
+            return;
+        }
+        self.semantic.pending = None;
+        let Some(rope) = self
+            .buf()
+            .filter(|b| b.version() == version)
+            .map(|b| b.rope().clone())
+        else {
+            self.semantic.asked = None;
+            cx.notify();
+            return;
+        };
+        self.semantic.placing = Some(cx.spawn(async move |this, cx| {
+            let placed = cx
+                .background_spawn(async move { place_semantic(&rope, &spans) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.semantic.placing = None;
+                let Some(shared) = this.buffer.clone() else {
+                    return;
+                };
+                if shared.buffer.borrow().version() != version {
+                    this.semantic.asked = None;
+                    cx.notify();
+                    return;
+                }
+                shared
+                    .buffer
+                    .borrow_mut()
+                    .set_semantic_tokens(placed, Some(version));
+                shared.parsed.update(cx, |_, cx| cx.notify());
+            });
+        }));
+    }
+
     /// Shows the code action lightbulb on a zero-based line, or hides it.
     pub fn set_lightbulb(&mut self, line: Option<u32>, cx: &mut Context<Self>) {
         let line = line.map(|l| l as usize);
@@ -810,6 +1012,162 @@ impl EditorView {
 mod tests {
     use super::*;
     use crate::buffer::{Cursor, Selection};
+
+    fn span(line: u32, start: u32, length: u32, token: crate::Token) -> SemanticSpan {
+        SemanticSpan {
+            line,
+            start,
+            length,
+            token,
+        }
+    }
+
+    #[test]
+    fn semantic_spans_land_on_bytes_past_wide_chars_tabs_and_line_ends() {
+        use crate::Token::{Function, Parameter, Type, Variable};
+        let text = "a😀b\tcd\r\n日本 x\nlast";
+        let rope = ropey::Rope::from_str(text);
+        let placed = place_semantic(
+            &rope,
+            &[
+                span(0, 0, 1, Variable),
+                span(0, 3, 1, Function),
+                span(0, 5, 2, Type),
+                span(0, 6, 9, Parameter),
+                span(1, 0, 2, Type),
+                span(1, 3, 1, Variable),
+                span(0, 0, 1, Variable),
+                span(2, 2, 10, Function),
+                span(9, 0, 1, Type),
+            ],
+        );
+        let shown: Vec<(&str, crate::Token)> =
+            placed.iter().map(|(r, t)| (&text[r.clone()], *t)).collect();
+        assert_eq!(
+            shown,
+            [
+                ("a", Variable),
+                ("b", Function),
+                ("cd", Type),
+                ("日本", Type),
+                ("x", Variable),
+                ("st", Function),
+            ],
+            "an emoji is two UTF-16 units; overlaps, out-of-order lines and lines past the end go"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_follow_typing_until_the_next_answer() {
+        let mut b = Buffer::new(
+            "package main\n\nfunc f(n int) int { return n }\n",
+            Some("/p/main.go".into()),
+        );
+        let placed = place_semantic(b.rope(), &[span(2, 7, 1, crate::Token::Parameter)]);
+        b.set_semantic_tokens(placed, Some(b.version()));
+        let painted = |b: &Buffer, needle: &str| {
+            let text = b.text(0..b.len_chars());
+            let at = text.find(needle).unwrap();
+            b.highlights(0..b.len_lines())
+                .into_iter()
+                .rfind(|(r, _)| r.contains(&at))
+                .map(|(_, t)| t)
+        };
+        assert_eq!(painted(&b, "n int"), Some(crate::Token::Parameter));
+        let mut c = Cursor::at(b.line_start(2) + 5);
+        b.insert(&mut c, "oo");
+        assert_eq!(painted(&b, "n int"), Some(crate::Token::Parameter));
+        assert_ne!(b.semantic_version(), Some(b.version()), "now out of date");
+    }
+
+    /// The cost semantic tokens add: decoding a 2k-line file's tokens off the UI thread, and on
+    /// the UI thread, moving them with each keystroke and painting 60 lines.
+    /// `cargo test -p athena-editor --release --lib -- --ignored semantic_cost --nocapture`
+    #[test]
+    #[ignore]
+    fn semantic_cost_on_a_2k_line_go_file() {
+        use std::time::Instant;
+        for functions in [400, 2000] {
+            let text: String = (0..functions)
+            .map(|i| format!("func f{i}(alpha int, beta string) int {{\n\tgamma := alpha * {i}\n\t// note {i}\n\treturn gamma + len(beta)\n}}\n"))
+            .collect();
+            println!("{} lines", functions * 5);
+            let mut spans = Vec::new();
+            for (line, text) in text.lines().enumerate() {
+                let mut at = 0;
+                for word in text.split(|c: char| !c.is_alphanumeric()) {
+                    if !word.is_empty() {
+                        spans.push(span(
+                            line as u32,
+                            at,
+                            word.len() as u32,
+                            crate::Token::Variable,
+                        ));
+                    }
+                    at += word.len() as u32 + 1;
+                }
+            }
+            let data: Vec<u32> = spans
+                .iter()
+                .scan((0u32, 0u32), |(line, start), s| {
+                    let dl = s.line - *line;
+                    let ds = if dl == 0 { s.start - *start } else { s.start };
+                    (*line, *start) = (s.line, s.start);
+                    Some([dl, ds, s.length, 0, 0])
+                })
+                .flatten()
+                .collect();
+            let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            let decoded = athena_lsp_free_decode(&data);
+            let placed = place_semantic(&ropey::Rope::from_str(&text), &decoded);
+            println!(
+                "decode + place {} tokens (background): {:.2} ms",
+                placed.len(),
+                ms(t)
+            );
+            for layer in [false, true, false, true] {
+                let mut b = Buffer::new(&text, Some("/p/main.go".into()));
+                if layer {
+                    b.set_semantic_tokens(placed.clone(), Some(b.version()));
+                }
+                let mut c = Cursor::at(b.line_start(functions * 5 / 2) + 1);
+                let mut keys = Vec::new();
+                for ch in "x := alpha + beta\n".repeat(40).chars() {
+                    let t = Instant::now();
+                    match ch {
+                        '\n' => b.newline(&mut c),
+                        ch => b.type_char(&mut c, ch),
+                    }
+                    let first = b.line_of(c.head()).saturating_sub(30);
+                    std::hint::black_box(b.highlights(first..first + 60));
+                    keys.push(ms(t));
+                }
+                keys.sort_by(f64::total_cmp);
+                let avg = keys.iter().sum::<f64>() / keys.len() as f64;
+                println!(
+                    "keystroke + 60-line highlights, semantic layer {layer}: avg {avg:.3} ms, p99 {:.3} ms, max {:.3} ms",
+                    keys[keys.len() * 99 / 100],
+                    keys[keys.len() - 1]
+                );
+            }
+        }
+    }
+
+    /// The protocol's relative decoding, as athena-lsp does it, without depending on it.
+    fn athena_lsp_free_decode(data: &[u32]) -> Vec<SemanticSpan> {
+        let (mut line, mut start) = (0, 0);
+        data.chunks(5)
+            .map(|t| {
+                if t[0] > 0 {
+                    (line, start) = (line + t[0], t[1]);
+                } else {
+                    start += t[1];
+                }
+                span(line, start, t[2], crate::Token::Variable)
+            })
+            .collect()
+    }
 
     #[test]
     fn linked_ranges_given_end_first_are_put_in_order() {

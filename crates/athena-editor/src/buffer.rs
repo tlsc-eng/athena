@@ -812,6 +812,22 @@ impl Buffer {
         syntax.highlights(&self.rope, start..end)
     }
 
+    /// Lays a language server's semantic tokens, sorted byte ranges, over the syntax colours.
+    pub fn set_semantic_tokens(
+        &mut self,
+        tokens: Vec<(Range<usize>, Token)>,
+        version: Option<u64>,
+    ) {
+        if let Some(syntax) = self.syntax.as_mut() {
+            syntax.set_semantic(tokens, version);
+        }
+    }
+
+    /// The buffer version the semantic tokens were last given for.
+    pub fn semantic_version(&self) -> Option<u64> {
+        self.syntax.as_ref()?.semantic_version()
+    }
+
     pub fn char_to_byte(&self, char: usize) -> usize {
         self.rope.char_to_byte(char)
     }

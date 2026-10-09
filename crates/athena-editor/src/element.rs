@@ -241,6 +241,8 @@ fn style_for(token: Token, syntax: &SyntaxColors) -> TokenStyle {
         Token::Heading => syntax.heading,
         Token::Error => syntax.error,
         Token::Variable | Token::Emphasis | Token::Strong => syntax.text,
+        Token::Parameter => syntax.parameter,
+        Token::TypeParameter => syntax.type_parameter,
     };
     TokenStyle {
         weight: if matches!(token, Token::Heading | Token::Strong) {

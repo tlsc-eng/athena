@@ -486,6 +486,7 @@ pub struct EditorView {
     pub(crate) rename: Option<crate::lsp_ui::RenameBox>,
     pub(crate) occurrences: crate::lsp_ui::Occurrences,
     pub(crate) inlays: crate::lsp_ui::Inlays,
+    pub(crate) semantic: crate::lsp_ui::Semantic,
     /// The completed snippet whose stops Tab visits.
     pub(crate) snippet: Option<crate::snippet::Snippet>,
     /// The zero-based line showing the code action lightbulb.
@@ -592,6 +593,7 @@ impl EditorView {
             rename: None,
             occurrences: Default::default(),
             inlays: Default::default(),
+            semantic: Default::default(),
             snippet: None,
             lightbulb: None,
             pending_top: None,
@@ -1719,6 +1721,7 @@ impl Render for EditorView {
         }
         self.schedule_occurrences(focused, cx);
         self.schedule_inlays(cx);
+        self.schedule_semantic(cx);
         self.schedule_linked(focused, cx);
         let root = div()
             .id("editor")

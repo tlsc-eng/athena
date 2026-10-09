@@ -44,7 +44,7 @@ pub use image::{ImageView, is_image_path};
 pub use large::{LargeFileView, is_large_file};
 pub use lsp_ui::{
     ConfirmRename, FormatSelection, GoToImplementation, GoToTypeDefinition, Inlay, LspRequest,
-    Occurrence, RenameSymbol, ShowCallHierarchy, ShowCodeActions, ShowTypeHierarchy,
+    Occurrence, RenameSymbol, SemanticSpan, ShowCallHierarchy, ShowCodeActions, ShowTypeHierarchy,
 };
 pub use merge_conflicts::{
     CompareMergeConflicts, ConflictBlock, Resolution, count_merge_conflicts, find_merge_conflicts,
@@ -55,7 +55,7 @@ pub use run_marks::{Coverage, RunMark, RunState, RunTestAt, TestSymbol, find_tes
 pub use save::{SaveSettings, Tidy, resolve_tidy};
 pub use signature::Signature;
 pub use smart_select::{ExpandSelection, ShrinkSelection};
-pub use syntax::{Lang, Token};
+pub use syntax::{Lang, Token, semantic_token};
 pub use view::{
     AddCursorAbove, AddCursorBelow, AddNextOccurrence, CopyLinesDown, CopyLinesUp, EditorEvent,
     EditorStatus, EditorView, GutterMark, Marker, MarkerSeverity, MoveLinesDown, MoveLinesUp,
