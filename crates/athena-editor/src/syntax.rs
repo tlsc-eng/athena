@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ropey::Rope;
 use streaming_iterator::StreamingIterator;
@@ -422,21 +423,74 @@ enum Backend {
 pub struct Syntax {
     lang: Lang,
     backend: Backend,
+    /// The tree was moved past edits that no parse has seen yet.
+    stale: bool,
+    /// The background parse in flight, and the edits made since its snapshot to replay on its tree.
+    parsing: Option<(u64, Vec<InputEdit>)>,
+}
+
+/// A parse to run off the UI thread, over a snapshot of the text and the edited tree it reuses.
+pub(crate) struct ParseJob {
+    ticket: u64,
+    lang: Lang,
+    rope: Rope,
+    tree: Tree,
+}
+
+/// The tree a [`ParseJob`] produced, for [`Syntax::finish_parse`].
+pub(crate) struct Parsed {
+    ticket: u64,
+    tree: Option<Tree>,
+}
+
+impl ParseJob {
+    pub fn run(self) -> Parsed {
+        let tree = parser_for(self.lang)
+            .and_then(|mut parser| parse_rope(&mut parser, &self.rope, Some(&self.tree)));
+        Parsed {
+            ticket: self.ticket,
+            tree,
+        }
+    }
+}
+
+fn parser_for(lang: Lang) -> Option<Parser> {
+    let Engine::Grammar { language, .. } = &lang.spec().engine else {
+        return None;
+    };
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language())
+        .expect("grammar matches tree-sitter ABI");
+    Some(parser)
+}
+
+fn parse_rope(parser: &mut Parser, rope: &Rope, old: Option<&Tree>) -> Option<Tree> {
+    let mut chunks = |byte: usize, _| -> &[u8] {
+        if byte >= rope.len_bytes() {
+            return &[];
+        }
+        let (chunk, start, _, _) = rope.chunk_at_byte(byte);
+        &chunk.as_bytes()[byte - start..]
+    };
+    parser.parse_with_options(&mut chunks, old, None)
 }
 
 impl Syntax {
     pub fn new(lang: Lang, rope: &Rope) -> Self {
         let backend = match &lang.spec().engine {
-            Engine::Grammar { language, .. } => {
-                let mut parser = Parser::new();
-                parser
-                    .set_language(&language())
-                    .expect("grammar matches tree-sitter ABI");
-                Backend::Tree { parser, tree: None }
-            }
+            Engine::Grammar { .. } => Backend::Tree {
+                parser: parser_for(lang).expect("a grammar has a parser"),
+                tree: None,
+            },
             Engine::Lines(scan) => Backend::Lines(*scan),
         };
-        let mut syntax = Self { lang, backend };
+        let mut syntax = Self {
+            lang,
+            backend,
+            stale: false,
+            parsing: None,
+        };
         syntax.reparse(rope);
         syntax
     }
@@ -457,6 +511,10 @@ impl Syntax {
         } = &mut self.backend
         {
             tree.edit(edit);
+            self.stale = true;
+            if let Some((_, edits)) = &mut self.parsing {
+                edits.push(*edit);
+            }
         }
     }
 
@@ -464,14 +522,63 @@ impl Syntax {
         let Backend::Tree { parser, tree } = &mut self.backend else {
             return;
         };
-        let mut chunks = |byte: usize, _| -> &[u8] {
-            if byte >= rope.len_bytes() {
-                return &[];
-            }
-            let (chunk, start, _, _) = rope.chunk_at_byte(byte);
-            &chunk.as_bytes()[byte - start..]
+        *tree = parse_rope(parser, rope, tree.as_ref());
+        self.stale = false;
+        // Whatever is in flight started from an older tree than this one.
+        self.parsing = None;
+    }
+
+    /// Whether the tree has been parsed since the last edit, so it knows about every token.
+    pub fn is_current(&self) -> bool {
+        !self.stale && self.parsing.is_none()
+    }
+
+    /// A parse of `rope` to run elsewhere, unless the tree is current or one is in flight.
+    pub(crate) fn start_parse(&mut self, rope: &Rope) -> Option<ParseJob> {
+        let Backend::Tree {
+            tree: Some(tree), ..
+        } = &self.backend
+        else {
+            return None;
         };
-        *tree = parser.parse_with_options(&mut chunks, tree.as_ref(), None);
+        if !self.stale || self.parsing.is_some() {
+            return None;
+        }
+        static TICKETS: AtomicU64 = AtomicU64::new(0);
+        let ticket = TICKETS.fetch_add(1, Ordering::Relaxed);
+        let job = ParseJob {
+            ticket,
+            lang: self.lang,
+            rope: rope.clone(),
+            tree: tree.clone(),
+        };
+        self.parsing = Some((ticket, Vec::new()));
+        self.stale = false;
+        Some(job)
+    }
+
+    /// Takes the tree a job produced, moved past the edits made while it ran; false if the job
+    /// was superseded and nothing changed.
+    pub(crate) fn finish_parse(&mut self, parsed: Parsed) -> bool {
+        if self
+            .parsing
+            .as_ref()
+            .is_none_or(|(t, _)| *t != parsed.ticket)
+        {
+            return false;
+        }
+        let (_, edits) = self.parsing.take().unwrap_or_default();
+        let Backend::Tree { tree, .. } = &mut self.backend else {
+            return false;
+        };
+        // A parse that gave up keeps the edited tree; retrying at once could spin.
+        if let Some(mut fresh) = parsed.tree {
+            for edit in &edits {
+                fresh.edit(edit);
+            }
+            *tree = Some(fresh);
+        }
+        true
     }
 
     /// Highlighted byte ranges intersecting `bytes`, outer before inner so inner ones paint last.

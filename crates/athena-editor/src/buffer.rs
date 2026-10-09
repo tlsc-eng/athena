@@ -12,7 +12,7 @@ use tree_sitter::{InputEdit, Point};
 
 use crate::display::{Fold, TAB_WIDTH, indent_fold_at};
 use crate::pairs::{self, AutoClosed};
-use crate::syntax::{Lang, Syntax, Token, bracket_pair};
+use crate::syntax::{Lang, ParseJob, Parsed, Syntax, Token, bracket_pair};
 
 /// Typing within this window joins the previous undo step.
 pub(crate) const UNDO_GROUP: Duration = Duration::from_millis(500);
@@ -424,6 +424,8 @@ pub struct Buffer {
     /// Set while several changes share one parse, which is owed once they are all applied.
     defer_parse: bool,
     parse_owed: bool,
+    /// Edits only move the tree; whoever owns the buffer runs [`Self::start_parse`] elsewhere.
+    background_parse: bool,
 }
 
 /// What a file looked like on disk; tools that keep the modification time still change its size.
@@ -485,6 +487,7 @@ impl Buffer {
             batch: None,
             defer_parse: false,
             parse_owed: false,
+            background_parse: false,
         }
     }
 
@@ -791,14 +794,45 @@ impl Buffer {
 
     fn reparse(&mut self, edit: &InputEdit) {
         if let Some(syntax) = self.syntax.as_mut() {
-            if self.defer_parse {
+            if self.defer_parse || self.background_parse {
                 syntax.edit_tree(edit);
-                self.parse_owed = true;
+                self.parse_owed |= self.defer_parse;
             } else {
                 syntax.edit(edit, &self.rope);
             }
         }
         self.version += 1;
+    }
+
+    /// Leaves parsing after edits to [`Self::start_parse`], so typing never waits for a parse.
+    pub(crate) fn parse_in_background(&mut self) {
+        self.background_parse = true;
+    }
+
+    /// A parse of the current text to run off the UI thread, when the tree is behind the text
+    /// and no parse is already running.
+    pub(crate) fn start_parse(&mut self) -> Option<ParseJob> {
+        self.syntax.as_mut()?.start_parse(&self.rope)
+    }
+
+    /// Swaps in a background parse's tree; false if it was superseded.
+    pub(crate) fn finish_parse(&mut self, parsed: Parsed) -> bool {
+        self.syntax
+            .as_mut()
+            .is_some_and(|syntax| syntax.finish_parse(parsed))
+    }
+
+    /// Parses now if the tree lags the text, for checks that must see the last keystroke's tokens.
+    /// Within a batch the tree already lags its own edits, as it always has.
+    fn settle_parse(&mut self) {
+        if self.defer_parse && self.parse_owed {
+            return;
+        }
+        if let Some(syntax) = self.syntax.as_mut()
+            && !syntax.is_current()
+        {
+            syntax.reparse(&self.rope);
+        }
     }
 
     /// Runs `f` with parsing put off until it returns, so its changes cost one parse.
@@ -808,6 +842,7 @@ impl Buffer {
         if !nested {
             self.defer_parse = false;
             if std::mem::take(&mut self.parse_owed)
+                && !self.background_parse
                 && let Some(syntax) = self.syntax.as_mut()
             {
                 syntax.reparse(&self.rope);
@@ -1662,6 +1697,7 @@ impl Buffer {
             return;
         }
         if let Some(close) = close {
+            self.settle_parse();
             let prev = (head > 0).then(|| self.rope.char(head - 1));
             if pairs::should_close(ch, prev, next, self.in_string_or_comment(head)) {
                 self.replace(c, range, &format!("{ch}{close}"), EditKind::Insert);
@@ -1946,13 +1982,13 @@ impl Buffer {
         if line + 1 >= self.len_lines() {
             return None;
         }
-        let close = self.syntax.as_ref().and_then(|syntax| {
+        let close = self.syntax.as_ref().and_then(|_| {
             let start = self.rope.line_to_byte(line);
             let end = self.rope.line_to_byte(line + 1);
             let mut best = None;
             for (i, b) in self.rope.byte_slice(start..end).bytes().enumerate() {
                 if matches!(b, b'{' | b'[' | b'(')
-                    && let Some(partner) = syntax.bracket_partner(start + i)
+                    && let Some(partner) = self.bracket_partner(start + i)
                 {
                     let partner_line = self.rope.byte_to_line(partner);
                     if partner_line > line && best.is_none_or(|b| partner_line > b) {
@@ -1978,12 +2014,28 @@ impl Buffer {
             i < self.len_chars() && bracket_pair(&self.rope.char(i).to_string()).is_some()
         })?;
         let byte = self.rope.char_to_byte(at);
-        if let Some(syntax) = &self.syntax
-            && let Some(partner) = syntax.bracket_partner(byte)
-        {
+        if let Some(partner) = self.bracket_partner(byte) {
             return Some((at, self.rope.byte_to_char(partner)));
         }
         self.scan_bracket(at).map(|partner| (at, partner))
+    }
+
+    /// The tree's partner for the bracket at `byte`, if the text still holds both brackets there;
+    /// a tree waiting for a background parse can point at text that has moved.
+    fn bracket_partner(&self, byte: usize) -> Option<usize> {
+        let partner = self.syntax.as_ref()?.bracket_partner(byte)?;
+        let len = self.rope.len_bytes();
+        if byte >= len || partner >= len {
+            return None;
+        }
+        let here = self.rope.byte(byte);
+        let (open, close) = bracket_pair(std::str::from_utf8(&[here]).ok()?)?;
+        let want = if open.as_bytes()[0] == here {
+            close
+        } else {
+            open
+        };
+        (self.rope.byte(partner) == want.as_bytes()[0]).then_some(partner)
     }
 
     /// Plain nesting count, for text without a parse tree or brackets the tree leaves unpaired.
@@ -3396,6 +3448,146 @@ mod tests {
             "the tree was parsed after the last edit"
         );
         assert_eq!(cs.len(), 200);
+    }
+
+    /// Runs background parses inline until the tree is current, as the editor's executor would.
+    fn parse_all(b: &mut Buffer) {
+        while let Some(job) = b.start_parse() {
+            assert!(b.finish_parse(job.run()));
+        }
+    }
+
+    #[test]
+    fn a_background_parse_ends_with_the_highlights_of_a_fresh_parse() {
+        let text = "fn f() {\n    let a = 1;\n}\n".repeat(50);
+        let mut b = buf(&text, "/x/a.rs");
+        b.parse_in_background();
+        let mut c = Cursor::at(b.line_start(20) + 4);
+        typed(&mut b, &mut c, "let s = \"x\"; // done");
+        b.newline(&mut c);
+        assert!(
+            !b.highlights(0..b.len_lines()).is_empty(),
+            "the edited old tree still paints"
+        );
+        parse_all(&mut b);
+        let fresh = buf(&b.full_text(), "/x/a.rs");
+        assert_eq!(
+            b.highlights(0..b.len_lines()),
+            fresh.highlights(0..fresh.len_lines())
+        );
+    }
+
+    #[test]
+    fn edits_made_while_a_parse_runs_are_replayed_on_its_tree() {
+        let mut b = buf("fn f() {}\nfn g() {}\n", "/x/a.rs");
+        b.parse_in_background();
+        assert!(b.start_parse().is_none(), "a current tree needs no parse");
+        let mut c = Cursor::at(0);
+        b.insert(&mut c, "pub ");
+        let job = b.start_parse().expect("the tree lags the text");
+        assert!(b.start_parse().is_none(), "one parse at a time");
+        let mut tail = Cursor::at(b.len_chars());
+        b.insert(&mut tail, "const N: u8 = 1;\n");
+        assert!(b.finish_parse(job.run()));
+        assert!(
+            b.highlights(0..1).contains(&(0..3, Token::Keyword)),
+            "the landed tree knows the first edit"
+        );
+        parse_all(&mut b);
+        let fresh = buf(&b.full_text(), "/x/a.rs");
+        assert_eq!(
+            b.highlights(0..b.len_lines()),
+            fresh.highlights(0..fresh.len_lines())
+        );
+    }
+
+    #[test]
+    fn a_pair_typed_in_a_comment_not_yet_parsed_is_not_closed() {
+        let mut b = buf("fn f() {\n    let s = ;\n}\n", "/x/a.rs");
+        b.parse_in_background();
+        let mut c = Cursor::at(b.line_start(1) + 12);
+        typed(&mut b, &mut c, "// ");
+        let job = b.start_parse().expect("the tree lags the text");
+        typed(&mut b, &mut c, "(");
+        assert_eq!(b.line(1).trim_end(), "    let s = // (;");
+        assert!(
+            !b.finish_parse(job.run()),
+            "the parse the pair needed superseded the one in flight"
+        );
+    }
+
+    #[test]
+    fn bracket_matches_from_a_lagging_tree_point_only_at_brackets() {
+        let mut b = buf("fn f() { g(h[1]); }\n", "/x/a.rs");
+        b.parse_in_background();
+        let mut c = Cursor::default();
+        b.replace(&mut c, 10..11, "", EditKind::Delete);
+        b.replace(&mut c, 3..3, "]{", EditKind::Insert);
+        b.replace(&mut c, 0..2, "", EditKind::Delete);
+        let is_bracket =
+            |b: &Buffer, at: usize| bracket_pair(&b.rope.char(at).to_string()).is_some();
+        for at in 0..=b.len_chars() {
+            if let Some((here, partner)) = b.matching_bracket(at) {
+                assert!(is_bracket(&b, here) && is_bracket(&b, partner), "{at}");
+            }
+        }
+    }
+
+    /// `cargo test -p athena-editor --release --lib -- --ignored keystroke_cost --nocapture`
+    #[test]
+    #[ignore]
+    fn keystroke_cost_on_a_2k_line_rust_file() {
+        let text: String = (0..400)
+            .map(|i| format!("fn f{i}(x: u32) -> u32 {{\n    let y = x * {i};\n    // note {i}\n    y + 1\n}}\n"))
+            .collect();
+        let micros = |d: Duration| d.as_secs_f64() * 1e6;
+        let report = |name: &str, mut times: Vec<f64>| {
+            if times.is_empty() {
+                return;
+            }
+            times.sort_by(f64::total_cmp);
+            let avg = times.iter().sum::<f64>() / times.len() as f64;
+            let at = |q: usize| times[(times.len() * q / 100).min(times.len() - 1)];
+            println!(
+                "{name}: n={} avg={avg:.0}us p50={:.0}us p99={:.0}us max={:.0}us",
+                times.len(),
+                at(50),
+                at(99),
+                at(100)
+            );
+        };
+        // Inline parsing; parses landing between keys; parses that never land before the next key.
+        for (mode, background, land) in [
+            ("sync", false, false),
+            ("background", true, true),
+            ("background, typing faster than parses", true, false),
+        ] {
+            let mut b = buf(&text, "/x/a.rs");
+            assert!(b.len_lines() >= 2000);
+            if background {
+                b.parse_in_background();
+            }
+            let mut c = Cursor::at(b.line_start(1000) + 4);
+            let (mut keys, mut parses) = (Vec::new(), Vec::new());
+            for ch in "let value = compute(a, b);\n".repeat(40).chars() {
+                let t = Instant::now();
+                match ch {
+                    '\n' => b.newline(&mut c),
+                    ch => b.type_char(&mut c, ch),
+                }
+                let first = b.line_of(c.head()).saturating_sub(30);
+                std::hint::black_box(b.highlights(first..first + 60));
+                keys.push(micros(t.elapsed()));
+                if land && let Some(job) = b.start_parse() {
+                    let t = Instant::now();
+                    let parsed = job.run();
+                    parses.push(micros(t.elapsed()));
+                    b.finish_parse(parsed);
+                }
+            }
+            report(&format!("{mode}, UI thread per key"), keys);
+            report(&format!("{mode}, background parse"), parses);
+        }
     }
 
     #[test]

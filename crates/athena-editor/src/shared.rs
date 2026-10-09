@@ -14,22 +14,50 @@ pub(crate) struct SharedBuffer {
     pub buffer: RefCell<Buffer>,
     /// Notified after each change, so the other views catch up and redraw.
     pub signal: Entity<Signal>,
+    /// Notified when a background parse lands, so views redraw with its highlights.
+    pub parsed: Entity<Signal>,
     recovery_id: u64,
 }
 
 pub(crate) struct Signal;
 
 impl SharedBuffer {
-    fn new(buffer: Buffer, cx: &mut App) -> Rc<Self> {
+    fn new(mut buffer: Buffer, cx: &mut App) -> Rc<Self> {
+        buffer.parse_in_background();
         Rc::new(Self {
             buffer: RefCell::new(buffer),
             signal: cx.new(|_| Signal),
+            parsed: cx.new(|_| Signal),
             recovery_id: recovery::next_id(),
         })
     }
 
-    pub fn changed(&self, cx: &mut App) {
+    pub fn changed(self: &Rc<Self>, cx: &mut App) {
         self.signal.update(cx, |_, cx| cx.notify());
+        self.parse_soon(cx);
+    }
+
+    /// Parses the text on the background executor if the tree lags it, then again for any edits
+    /// made meanwhile; the UI keeps the edited old tree until then.
+    fn parse_soon(self: &Rc<Self>, cx: &mut App) {
+        let Some(job) = self.buffer.borrow_mut().start_parse() else {
+            return;
+        };
+        let this = Rc::downgrade(self);
+        cx.spawn(async move |cx| {
+            let parsed = cx.background_spawn(async move { job.run() }).await;
+            cx.update(|cx| {
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                if this.buffer.borrow_mut().finish_parse(parsed) {
+                    this.parsed.update(cx, |_, cx| cx.notify());
+                }
+                this.parse_soon(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Hands unsaved text to the recovery list, or takes it off once saved.

@@ -374,7 +374,7 @@ pub struct EditorView {
     pub(crate) cursor: Cursors,
     /// The buffer version this view's cursor and folds have followed up to.
     seen: u64,
-    _buffer_watch: Option<Subscription>,
+    _buffer_watch: Vec<Subscription>,
     error: Option<String>,
     path: PathBuf,
     pub(crate) focus: FocusHandle,
@@ -463,7 +463,10 @@ impl EditorView {
             Err(e) => (None, Some(format!("{e:#}"))),
         };
         let seen = buffer.as_ref().map_or(0, |b| b.buffer.borrow().version());
-        let watch = buffer.as_ref().map(|b| Self::watch(b, cx));
+        let watch = buffer
+            .as_ref()
+            .map(|b| Self::watch(b, cx))
+            .unwrap_or_default();
         Self {
             buffer,
             cursor: Cursors::default(),
@@ -566,8 +569,15 @@ impl EditorView {
         cx.notify();
     }
 
-    fn watch(shared: &SharedBuffer, cx: &mut Context<Self>) -> Subscription {
-        cx.observe(&shared.signal, |this, _, cx| this.buffer_changed(cx))
+    fn watch(shared: &SharedBuffer, cx: &mut Context<Self>) -> Vec<Subscription> {
+        vec![
+            cx.observe(&shared.signal, |this, _, cx| this.buffer_changed(cx)),
+            cx.observe(&shared.parsed, |this, _, cx| {
+                // Fold regions come from the tree's bracket pairs.
+                *this.fold_cache.borrow_mut() = Default::default();
+                cx.notify();
+            }),
+        ]
     }
 
     pub(crate) fn buf(&self) -> Option<Ref<'_, Buffer>> {
@@ -1959,7 +1969,7 @@ impl EditorView {
             return;
         };
         self.seen = shared.buffer.borrow().version();
-        self._buffer_watch = Some(Self::watch(&shared, cx));
+        self._buffer_watch = Self::watch(&shared, cx);
         self.cursor = Cursors::default();
         self.buffer = Some(shared);
         self.changed(cx);
@@ -2050,7 +2060,7 @@ impl EditorView {
             fork.save()?;
             let fork = shared::adopt(fork, &path, cx);
             self.seen = fork.buffer.borrow().version();
-            self._buffer_watch = Some(Self::watch(&fork, cx));
+            self._buffer_watch = Self::watch(&fork, cx);
             self.cursor
                 .follow(std::iter::empty(), fork.buffer.borrow().len_chars());
             self.buffer = Some(fork);
