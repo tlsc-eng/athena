@@ -3,9 +3,9 @@
 Athena is a macOS IDE built around terminals that outlive the window and around Claude Code.
 Shells run in a separate session daemon (`athena-mux`), so quitting or updating the app does not
 kill them; the window reattaches on the next launch. Projects get split panes of terminals, an
-editor with language-server support, a git diff viewer with hunk staging and a commit box, a
-browser preview, and read-only views of Playwright results and Docker containers. Claude Code
-sessions show their state on the tab, each file Claude edits can be reviewed as one diff against
+editor with language-server support, a git diff viewer with hunk staging, a commit box and
+fetch, pull and push, a test runner for Go, Vitest and Jest, a browser preview, and read-only
+views of Playwright results and Docker containers. Claude Code sessions show their state on the tab, each file Claude edits can be reviewed as one diff against
 the version from before the session, and an MCP server lets Claude read the editor and terminals.
 Optionally Athena also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
 or reject, and the editor selection goes with each prompt.
@@ -90,12 +90,17 @@ its shells running.
 
 ![The editor with a diagnostic and the References drawer](docs/screenshots/editor.png)
 
-- Syntax highlighting for 16 languages (see [Languages](#languages)), each token class in its own
+- Syntax highlighting for 21 languages (see [Languages](#languages)), each token class in its own
   colour, and the bracket matching the one at the cursor highlighted.
 - Find and replace in file (`cmd-f`, `cmd-alt-f` for the replace row): Enter in the replace field
   replaces the current match and moves on, `cmd-enter` or **Replace All** replaces every match,
-  each as one undo step. Toggle comment, undo/redo, go to line (`line`, `line:column` or
-  `line,column`).
+  each as one undo step. The find field has VS Code's Match Case, Match Whole Word and Use Regular
+  Expression toggles (`Aa`, `ab`, `.*`, or `cmd-alt-c`, `cmd-alt-w`, `cmd-alt-r` while the bar
+  has focus; bare Alt is left for typing ç, ∑ and ®), which stay set when the bar closes. An
+  invalid regex turns the field red with a one-line error. In regex mode the replacement fills in
+  `$1`, `$&`, `\n` and `\t`; a `$2` the regex has no group for stays as typed. `cmd-d` follows the
+  toggles while the bar is open.
+- Toggle comment, undo/redo, go to line (`line`, `line:column` or `line,column`).
 - Indenting: Tab on a selection spanning lines indents them, Shift+Tab, `cmd-]` and `cmd-[`
   indent and outdent to the next tab stop in the file's style, skipping empty lines. Tab on a
   selection inside one line still replaces it, as in VS Code.
@@ -135,14 +140,29 @@ its shells running.
   focused editor, `Ln N, Col M` with the selected character count, or "3 selections (15
   characters selected)" with several carets (click: go to line), the indentation (click: indent
   with 2, 4 or 8 spaces or tabs, or convert the file's indentation),
-  `UTF-8`, `LF` or `CRLF`, the language (click: highlight as another language) and a dot for its
-  language server (starting, running or failed; hover for the program).
+  `UTF-8`, `LF` or `CRLF` (click: convert every line break to the other, as one undo step), the
+  language (click: highlight as another language) and a dot for its language server (starting,
+  running or failed; hover for the program). Beside the branch a sync cell shows the commits to
+  pull and push (see Git below).
 - Code folding by brackets, falling back to indentation: chevrons in the gutter on hover, fold
   and unfold at the cursor or everywhere with the `cmd-k` chords below.
 - With a language server: diagnostics, go to definition, find references (listed in a drawer
   tab; clicking a row opens the file at that line), hover docs (rest the pointer on a word for
   half a second), completion as you type (Up/Down to move, Enter or Tab to accept, Escape to
   close; accepting can also add an import) and signature help while typing call arguments.
+- Completion snippets keep their tab stops: Tab moves to the next placeholder and Shift+Tab to
+  the previous one, a placeholder used in several places gets a caret in each so they are typed
+  together, and `$0` (or the snippet's end), Escape or Tab once the caret has left the snippet
+  ends it.
+- Once the cursor rests for 250 ms on a symbol, the language server's other uses of it are marked:
+  reads in the find-match colour, writes in a stronger one. The marks follow edits until the next
+  answer.
+- Breadcrumbs under the tab strip name the file folder by folder, then the symbols holding the
+  cursor (from the language server). Clicking a folder or the file lists that folder's entries,
+  folders first; clicking a symbol lists the symbols beside it, and choosing one jumps there.
+- Inlay hints (parameter names, inferred types) inside the line, when the language server sends
+  them; gopls and typescript-language-server send none until asked, so they stay hidden until
+  **Toggle inlay hints** or an `lsp` setting asks for some (see [Settings](#settings)).
 - Also with a language server: rename symbol (`f2` opens a field over the symbol with the old name
   selected; Enter renames it in every file, open files as one undo step each and closed files saved
   to disk), quick fixes and refactorings (`cmd-.` lists them in a menu at the cursor, preferred
@@ -160,9 +180,13 @@ its shells running.
   files only; for Go it also organizes imports. "Toggle format on save" (palette, File menu) turns
   it on or off for every language with a server. Auto save does not format.
 - Trim trailing whitespace and insert a final newline on save: off by default, as in VS Code, and
-  turned on in settings.json or `.editorconfig`. Trimming leaves blanks inside multi-line strings
-  (raw strings, template literals, docstrings, YAML block scalars), and an auto save leaves them
-  on any line where a tab of that file has a caret.
+  turned on in settings.json or `.editorconfig`, as one undo step. Trimming leaves blanks inside
+  multi-line strings (raw strings, template literals, docstrings, heredocs, YAML block scalars),
+  and an auto save leaves them on any line where a tab of that file has a caret.
+- `.editorconfig` files are read from the file's folder upwards until one says `root = true`;
+  nearer files and later sections win and `unset` clears a property. `indent_style` and
+  `indent_size` set the indentation when the file opens; `end_of_line`,
+  `trim_trailing_whitespace` and `insert_final_newline` apply on save and win over settings.json.
 - Go to file (fuzzy) and a command palette. A file opens in the editor pane used last, or in a
   new pane beside the focused one with Cmd+click in the tree or Cmd+Enter in Go to file.
 - Two tabs on the same file share one buffer: edits, undo and the unsaved marker are the file's;
@@ -205,19 +229,54 @@ information rather than triggering the install dialog).
   first: tracked files go back to their staged or committed version, untracked ones move to the
   Trash. Discard and Revert keep a copy of the replaced file in
   `~/Library/Application Support/athena/discarded` for 30 days.
+- Merge conflicts: a conflicted file's `<<<<<<<` blocks are tinted as in VS Code (current green,
+  incoming blue, a diff3 base grey), and a row after each `<<<<<<<` line offers **Accept Current
+  Change**, **Accept Incoming Change**, **Accept Both Changes** (one undo step each, keeping CRLF
+  and a missing final newline) and **Compare Changes** (a diff tab of every block resolved to
+  each side). A block with another `<<<<<<<` inside gets no actions. The Changes tab header says
+  "2 conflicts in 1 file"; marker lines left outside any block still count as a conflict. Saving a
+  conflicted file with no conflicts left offers a **Stage** toast to mark it resolved.
 - **Switch branch…** (palette, the branch button by the commit box, or the branch in the status
   bar) lists local then remote branches with their age and last subject. Typing a new name offers
   to create it; a remote branch without a local one is checked out tracking it. Switching is never
-  forced, so git's refusal over local changes is shown as is.
+  forced, so git's refusal over local changes is shown as is. After the branches it lists
+  **Stash changes**, **Stash changes (include untracked)** and one **Pop stash@{n}** row per
+  stash; the stash that was picked is the one popped even if the list renumbered meanwhile.
+- Fetch, pull and push: the status bar's sync cell beside the branch shows "↓2 ↑1" against the
+  upstream, **Publish** when the branch has none, or "Pulling…" while one runs. Clicking it offers
+  Pull and Push (or Publish Branch), Fetch, Stash Changes, Stash Changes (Include Untracked) and
+  Pop Stash…; the palette has the same as **Git: Fetch**, **Git: Pull**, **Git: Push**, **Git:
+  Stash**, **Git: Stash (include untracked)** and **Git: Pop stash…**. Pull is `git pull
+  --ff-only`, so diverged branches are refused with git's own message. Publish Branch asks first
+  and runs `git push -u` to `origin`, or to the only remote. One fetch, pull, push or stash runs at
+  a time; another is refused with a toast. A branch whose upstream was deleted shows nothing to
+  pull or push.
+- Git never waits on a prompt: remote commands run with `GIT_TERMINAL_PROMPT=0`,
+  `GIT_ASKPASS=/usr/bin/true`, `SSH_ASKPASS_REQUIRE=never` and `ssh -o BatchMode=yes` (unless you
+  set `GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand`, which are left as they are), in a session
+  of their own without a terminal, so a password or passphrase prompt fails at once. Use an ssh
+  agent or a credential helper. A remote command is stopped after 5 minutes, ssh included.
+- Autofetch (`"git": {"autofetch": true}` in [settings.json](#settings), off by default as in VS
+  Code) fetches the active project every three minutes while the window is in front.
 - Status is re-read every 5 seconds while the window is in front and shortly after a save, a file
   operation or a change on disk. The title bar and the status bar show the branch.
 
 **Workspace**
 
-- Find and replace in project (`cmd-shift-f`): a Search drawer tab with a literal, smart-case
-  search (case matters once the query has a capital), honouring `.gitignore` and skipping binary
-  files and files over 1 MB; up to 2000 matches. Up/Down walk the matches, Enter opens one.
-  **Replace All** asks first, then replaces in open editors (one undo step each) and on disk.
+- Find and replace in project (`cmd-shift-f`): a Search drawer tab honouring `.gitignore` and
+  skipping binary files and files over 1 MB; up to 2000 matches. Up/Down walk the matches, Enter
+  opens one. It has the editor's three toggles and keys (`cmd-alt-c`, `cmd-alt-w`, `cmd-alt-r`);
+  with Match Case off, case does not matter even when the query has capitals, as in VS Code. The
+  `⋯` button shows **Files to include** and **Files to exclude**: comma-separated globs that match
+  at any depth unless they start with `./`, a folder standing for everything in it. An invalid
+  regex or glob turns its field red and shows the error in place of results. Each project keeps
+  its query, fields and results while the app runs.
+- With text in the replace field, clicking a match opens a Replace Preview diff tab of that file,
+  which follows the replace text. **Replace All** fills in `$1`, `$&` and `\n` in regex mode, runs
+  only for finished results of the query in the field, asks first, then replaces in open editors
+  (one undo step each) and on disk. When the results stopped at 2000 it refuses ("Too many
+  results to replace safely") rather than rewrite files you have not seen; narrow the search or
+  the files to include.
 - Right-click menus. Tree: New File, New Folder, Rename, Delete (to the Trash), Reveal in Finder,
   Copy Path, Copy Relative Path, Open to the Side. Tabs: Close, Close Others, Close to the Right,
   Close All, Reveal in Finder, Copy Path, Copy Relative Path, Reveal in File Tree, Split Right /
@@ -234,6 +293,30 @@ information rather than triggering the install dialog).
   240 px); double-click a divider between panes to split the space evenly. Sizes are saved.
 - Panels, tabs, panes, the palette, menus, toasts and find bars fade in and out; with Reduce
   Motion on they appear at once.
+
+**Tests and tasks**
+
+- Go tests (`func TestX(t *testing.T)`, `FuzzX`) in `_test.go` files and Vitest or Jest tests
+  (`describe`, `it`, `test`, with `.only`, `.skip` and the like) in `*.test.*`, `*.spec.*` and
+  `__tests__/` files get a green ▶ in the gutter; clicking it runs that test or group, and after
+  the run it becomes a green, red or grey dot (amber while running). `.each` tests and titles built
+  from template substitutions get no mark, since no fixed name matches them. Go subtests
+  (`t.Run`) are shown in the results but run with their parent.
+- Go runs `go test -json` from the module root. JavaScript runs `npx --no vitest run` or `npx --no
+  jest` with the JSON reporter from the nearest `package.json` that depends on Vitest or Jest (or
+  names it in its `test` script).
+- A **Tests** drawer tab lists suites (Go packages, test files) and their tests with pass/fail
+  dots, durations and a summary, with **Run All**, **Re-run Failed** and **Stop**. Clicking a test
+  shows its output with `file:line` places clickable; hovering offers Run and Go to Test. A failed
+  run opens the tab at the first failure. The palette has **Tests**, **Tests: run test at
+  cursor**, **Tests: run tests in current file**, **Tests: run all tests**, **Tests: re-run failed
+  tests** and **Tests: stop**.
+- Runs have a 15-minute limit; Stop, the limit and quitting Athena kill the whole process group,
+  test binaries and workers included.
+- **Run task…** (palette) lists the project's `package.json` scripts ("npm: build", run through
+  pnpm, yarn or bun when their lockfile is there) and its Makefile targets ("make: test"), and
+  types the command into a new terminal tab in the project folder. Names that would not type
+  safely into a shell (control characters, a leading `-`) are left out.
 
 **Claude Code**
 
@@ -426,6 +509,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-shift-s` | Save as |
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |
 | `cmd-shift-f` | Find in project |
+| `cmd-,` | Open settings.json |
 | `cmd-alt-shift-g` | Toggle inline blame |
 | `cmd-=` (or `cmd-+`) / `cmd--` | Zoom editor and terminal text in / out |
 | `cmd-0` | Reset zoom |
@@ -446,7 +530,8 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 
 Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
 commands without a key: Toggle auto save, Toggle format on save, Toggle word wrap by default,
-Source control changes, Switch branch…, Reveal active file in tree, Open file to the side, Open
+Toggle inlay hints, Source control changes, Switch branch…, the six **Git:** commands, Run task…,
+Tests and the five **Tests:** commands, Reveal active file in tree, Open file to the side, Open
 Markdown preview, New browser preview, Clear recently opened, the three **Theme:** commands, Open
 keyboard shortcuts file and the Claude Code and Playwright commands. With an editor focused it
 also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
@@ -455,8 +540,8 @@ implementations, Go to type definition, the five multi-cursor commands and Toggl
 a terminal focused, Copy last command output and Scroll to previous / next command. In Go to
 file, `@` lists the file's symbols, `#` searches workspace symbols and `>` lists commands.
 
-The menu bar has Athena, File, Selection, View and Window menus. Selection holds Select All, the
-line copy and move commands and the multi-cursor commands. View includes Word Wrap and Theme, and
+The menu bar has Athena, File, Selection, View and Window menus. Athena holds Settings…
+(`cmd-,`). Selection holds Select All, the line copy and move commands and the multi-cursor commands. View includes Word Wrap and Theme, and
 File includes Open Recent, the settings toggles (auto save, format on save, word wrap by default,
 Claude Code integration) and Keyboard Shortcuts.
 
@@ -517,10 +602,12 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `alt`-click | Add or remove a caret |
 | `shift-alt`-drag | Column selection |
 | `alt-z` | Toggle word wrap for the tab |
+| `cmd-alt-c` / `cmd-alt-w` / `cmd-alt-r` (find bar focused) | Toggle match case / whole word / regex |
+| `tab` / `shift-tab` (in a completed snippet) | Next / previous tab stop |
 
 While the suggestion list is open, Up / Down move through it and Enter or Tab accepts. Clicking a
-chevron in the gutter folds or unfolds that block. In the find bar's replace field, `enter`
-replaces the current match and `cmd-enter` replaces all. In the rename field, `enter` renames and
+chevron in the gutter folds or unfolds that block. Escape leaves a snippet's tab stops. In the
+find bar's replace field, `enter` replaces the current match and `cmd-enter` replaces all. In the rename field, `enter` renames and
 `escape` or a click elsewhere cancels.
 
 Image viewer (`crates/athena-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd--` zoom in / out,
@@ -545,6 +632,7 @@ keys while the image viewer has focus.
 | `enter` in Go to file | Open the file |
 | `cmd-enter` in Go to file | Open the file in a new pane beside the focused one |
 | `up` / `down`, `enter` in the Search tab | Walk the matches, open the selected one |
+| `cmd-alt-c` / `cmd-alt-w` / `cmd-alt-r` in the Search tab's fields | Toggle match case / whole word / regex |
 | `escape` in the Search tab | Close it |
 | `enter` / `escape` in a tree name field | Create or rename / cancel |
 | `cmd-enter` in the Changes tab's message field | Commit |
@@ -629,9 +717,12 @@ as soon as you save:
 `"editor.word_wrap": true` works too, as do VS Code's spellings (`"files.trimTrailingWhitespace"`,
 `"editor.formatOnSave"`, `"editor.tabSize"` and so on), so its settings can be pasted in. Trimming
 trailing whitespace and inserting a final newline are off by default, as in VS Code; these settings
-or an `.editorconfig` (which wins) turn them on. The palette and File menu toggles (auto save, format on
-save, word wrap, theme, Claude Code integration) write their key into this file, changing only
-that key's value or adding it at the end of its object, so comments and layout stay. A key left
+or an `.editorconfig` (which wins) turn them on. The palette and menu toggles (auto save, format on
+save, word wrap, inlay hints, theme, Claude Code integration) write only their own key into this
+file, changing that key's value where the parser reads it (the last one, if it is spelled twice)
+or adding it at the end of its object, so comments and layout stay. A file Athena cannot read
+(a missing comma, a bare `tru`) is never rewritten: the toggle still takes effect, kept in
+`workspace.json`, and a toast says settings.json was not updated. A key left
 out falls back to the choice `workspace.json` already held, so nothing set before settings.json
 existed is lost. ⌘= and ⌘- write `editor.font_size` only once the file has it. Each `lsp` entry
 goes to that server as its `initializationOptions` when it starts, answers its
@@ -640,9 +731,18 @@ object), and is sent again with `workspace/didChangeConfiguration` when the file
 Problems (an unknown key, a wrong type) are listed in a toast and in `app.log` while the rest
 applies; a file that is not valid JSON leaves the settings in force as they were.
 
+`"[lang]"` blocks take the editor settings for one language, by VS Code's language id: `go`,
+`typescript`, `typescriptreact`, `javascript`, `yaml`, `json`, `toml`, `shellscript`, `rust`,
+`python`, `css`, `html`, `markdown`, `swift`, `dockerfile`, `dotenv`, `go.mod`, `go.sum`,
+`makefile`, `sql` and `proto`. Unlike VS Code, Athena has no built-in per-language defaults for
+saving, so a global `"trim_trailing_whitespace": true` also trims Markdown unless a
+`"[markdown]"` block turns it off. Markdown tabs always wrap until the tab itself is toggled with
+`alt-z`; a `"[markdown]"` `word_wrap` of `false` does not stop that yet. `lsp` entries are keyed by the server's program name (`gopls`,
+`typescript-language-server`; `tsserver` is read as the latter).
+
 Inlay hints (parameter names before arguments, inferred types after names) are drawn in muted
 text inside the line whenever the language server sends them. As with VS Code's Go extension,
-gopls sends none until its `hints` settings ask for some. **Toggle Inlay Hints** in the palette
+gopls sends none until its `hints` settings ask for some. **Toggle inlay hints** in the palette
 sets `editor.inlay_hints`: `true` also asks gopls for `assignVariableTypes`,
 `compositeLiteralFields`, `constantValues`, `functionTypeParameters`, `parameterNames` and
 `rangeVariableTypes`, and typescript-language-server for parameter names of literals, return
