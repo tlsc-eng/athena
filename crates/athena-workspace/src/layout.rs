@@ -52,6 +52,10 @@ pub enum ItemKind {
         path: PathBuf,
         base: DiffBase,
     },
+    /// The settings editor.
+    Settings,
+    /// The keyboard shortcuts editor.
+    Shortcuts,
 }
 
 /// What a diff tab compares, VS Code's way: the staged change, the unstaged change, or a
@@ -93,7 +97,7 @@ impl ItemKind {
             | Self::Image { path }
             | Self::Rendered { path }
             | Self::Diff { path, .. } => Some(path),
-            Self::Terminal { .. } | Self::Preview { .. } => None,
+            Self::Terminal { .. } | Self::Preview { .. } | Self::Settings | Self::Shortcuts => None,
         }
     }
 }

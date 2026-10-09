@@ -71,7 +71,9 @@ actions!(
         ThemeLight,
         ThemeDark,
         OpenKeyboardShortcuts,
+        OpenKeyboardShortcutsJson,
         OpenSettings,
+        OpenSettingsJson,
         ToggleInlayHints,
         ToggleMinimap,
         ToggleTerminalPanel,
@@ -170,6 +172,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-p", QuickOpen, None),
         KeyBinding::new("cmd-shift-p", CommandPalette, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        // VS Code's chord; a terminal keeps ⌘K for clearing its scrollback at once.
+        KeyBinding::new("cmd-k cmd-s", OpenKeyboardShortcuts, Some("!Terminal")),
         KeyBinding::new("cmd-b", ToggleFileTree, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
         KeyBinding::new("ctrl-`", ToggleTerminalPanel, None),

@@ -346,6 +346,8 @@ impl Shell {
                 ItemView::Doc(view)
             }
             ItemKind::Diff { path, base } => self.new_diff_view(root, path, base, cx),
+            ItemKind::Settings => self.new_settings_view(root, cx),
+            ItemKind::Shortcuts => self.new_shortcuts_view(cx),
             ItemKind::Preview { url } => {
                 let view = cx.new(|cx| PreviewView::new(root.to_path_buf(), url.clone(), cx));
                 let (project_root, item_id) = key.clone();
@@ -444,6 +446,8 @@ impl Shell {
             (None, ItemKind::Preview { url }) => athena_preview::label_for(url),
             (None, ItemKind::Rendered { path }) => athena_preview::doc_label_for(path),
             (None, ItemKind::Diff { path, base }) => super::review::diff_title(path, base),
+            (None, ItemKind::Settings) => "Settings".into(),
+            (None, ItemKind::Shortcuts) => "Keyboard Shortcuts".into(),
         }
     }
 

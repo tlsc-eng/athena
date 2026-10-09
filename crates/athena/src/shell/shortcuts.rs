@@ -2,11 +2,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use athena_workspace::ItemKind;
 use athena_workspace::watch::FolderWatcher;
-use gpui::{Context, Window};
+use gpui::{AppContext as _, Context, Entity, Window};
 
 use super::Shell;
+use super::item::ItemView;
 use super::notices::ToastAction;
+use super::shortcuts_ui::{KeymapEdit, ShortcutsEvent, ShortcutsView};
 use crate::keymap;
 
 /// Problems listed on the toast; the rest are in app.log.
@@ -76,6 +79,7 @@ impl Shell {
     fn apply_keymap(&mut self, cx: &mut Context<Self>) -> Option<u64> {
         let problems = keymap::reload(cx);
         crate::actions::rebuild_menus(&self.workspace.recent, cx);
+        self.refresh_shortcuts_views(cx);
         if problems.is_empty() {
             return None;
         }
@@ -115,6 +119,59 @@ impl Shell {
                 cx,
             ),
             Err(e) => self.transient_notice("Could not create keymap.json", format!("{e:#}"), cx),
+        }
+    }
+
+    /// The Keyboard Shortcuts tab, or keymap.json when no project is open to hold a tab.
+    pub(super) fn open_shortcuts_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.active {
+            Some(_) => self.open_kind(ItemKind::Shortcuts, window, cx),
+            None => self.open_keymap_file(window, cx),
+        }
+    }
+
+    pub(super) fn new_shortcuts_view(&mut self, cx: &mut Context<Self>) -> ItemView {
+        let view = cx.new(ShortcutsView::new);
+        cx.subscribe(&view, |this, _, event: &ShortcutsEvent, cx| match event {
+            ShortcutsEvent::Edit(edit) => this.edit_keymap(edit, cx),
+            ShortcutsEvent::OpenJson => match keymap::ensure_file() {
+                Ok(path) => {
+                    this.pending_open = Some(path);
+                    cx.notify();
+                }
+                Err(e) => this.transient_notice("Could not create keymap.json", format!("{e:#}"), cx),
+            },
+        })
+        .detach();
+        ItemView::Shortcuts(view)
+    }
+
+    /// Writes a change from the Keyboard Shortcuts tab to keymap.json and puts it in force now,
+    /// ahead of the file watcher.
+    fn edit_keymap(&mut self, edit: &KeymapEdit, cx: &mut Context<Self>) {
+        let written = keymap::ensure_file()
+            .and_then(|path| crate::settings::edit_at(&path, |text| edit.apply(text)));
+        match written {
+            Ok(_) => {
+                keymap::reload(cx);
+                crate::actions::rebuild_menus(&self.workspace.recent, cx);
+            }
+            Err(e) => self.transient_notice("keymap.json was not updated", format!("{e:#}"), cx),
+        }
+        self.refresh_shortcuts_views(cx);
+    }
+
+    fn refresh_shortcuts_views(&mut self, cx: &mut Context<Self>) {
+        let views: Vec<Entity<ShortcutsView>> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                ItemView::Shortcuts(v) => Some(v.clone()),
+                _ => None,
+            })
+            .collect();
+        for view in views {
+            view.update(cx, |v, cx| v.reload(cx));
         }
     }
 }

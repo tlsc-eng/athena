@@ -5,6 +5,9 @@ use athena_preview::{DocView, PreviewView};
 use athena_term::{ClaudeState, TerminalView};
 use gpui::{AnyElement, App, Entity, FocusHandle, Focusable, IntoElement};
 
+use super::settings_ui::SettingsView;
+use super::shortcuts_ui::ShortcutsView;
+
 /// The live view behind a tab.
 #[derive(Clone)]
 pub(super) enum ItemView {
@@ -16,6 +19,8 @@ pub(super) enum ItemView {
     Preview(Entity<PreviewView>),
     Doc(Entity<DocView>),
     Diff(Entity<DiffView>),
+    Settings(Entity<SettingsView>),
+    Shortcuts(Entity<ShortcutsView>),
 }
 
 impl ItemView {
@@ -28,6 +33,8 @@ impl ItemView {
             Self::Preview(v) => v.focus_handle(cx),
             Self::Doc(v) => v.focus_handle(cx),
             Self::Diff(v) => v.focus_handle(cx),
+            Self::Settings(v) => v.focus_handle(cx),
+            Self::Shortcuts(v) => v.focus_handle(cx),
         }
     }
 
@@ -40,6 +47,8 @@ impl ItemView {
             Self::Preview(v) => v.clone().into_any_element(),
             Self::Doc(v) => v.clone().into_any_element(),
             Self::Diff(v) => v.clone().into_any_element(),
+            Self::Settings(v) => v.clone().into_any_element(),
+            Self::Shortcuts(v) => v.clone().into_any_element(),
         }
     }
 
@@ -59,6 +68,8 @@ impl ItemView {
             Self::Preview(v) => v.read(cx).label(),
             Self::Doc(v) => v.read(cx).label(),
             Self::Diff(v) => v.read(cx).label(),
+            Self::Settings(v) => v.read(cx).label(),
+            Self::Shortcuts(v) => v.read(cx).label(),
         }
     }
 
@@ -70,7 +81,9 @@ impl ItemView {
             | Self::Large(_)
             | Self::Preview(_)
             | Self::Doc(_)
-            | Self::Diff(_) => None,
+            | Self::Diff(_)
+            | Self::Settings(_)
+            | Self::Shortcuts(_) => None,
         }
     }
 

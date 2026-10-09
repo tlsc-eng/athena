@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 pub mod schema;
 
 /// What a new settings.json holds: an empty object, with every setting shown commented out.
-const TEMPLATE: &str = include_str!("settings-template.jsonc");
+pub(crate) const TEMPLATE: &str = include_str!("settings-template.jsonc");
 
 /// The gopls hints Toggle Inlay Hints turns on when the user has chosen none.
 const GOPLS_HINTS: &[&str] = &[
@@ -754,14 +754,20 @@ pub fn ensure_project_file(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn edit_at(path: &Path, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<String> {
+/// Rewrites the file at `path` with `edit`, through a symlink and keeping its mode, replacing it
+/// whole so a reader never sees half of it.
+pub(crate) fn edit_at(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<String> {
     // A settings.json linked from a dotfiles checkout is updated there, not replaced by a copy.
     let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let text =
         std::fs::read_to_string(&target).with_context(|| format!("read {}", target.display()))?;
     let updated = edit(&text).map_err(|why| anyhow!("{why}"))?;
     if updated != text {
-        let tmp = target.with_file_name(format!(".settings.json.{}", std::process::id()));
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        let tmp = target.with_file_name(format!(".{name}.{}", std::process::id()));
         std::fs::write(&tmp, &updated)?;
         if let Ok(meta) = std::fs::metadata(&target) {
             std::fs::set_permissions(&tmp, meta.permissions())?;
@@ -787,10 +793,7 @@ pub fn unset_value(text: &str, keys: &[&str]) -> Result<String, String> {
     parse(text)?;
     let mut out = text.to_string();
     // Each pass removes the spelling parse reads, which may uncover an earlier one.
-    loop {
-        let Some(root) = root_object(&out)? else {
-            break;
-        };
+    while let Some(root) = root_object(&out)? {
         let Some((object, member)) = read_from(&root, keys) else {
             break;
         };

@@ -530,6 +530,7 @@ pub static SETTINGS: &[Setting] = &[
 ];
 
 /// The setting `keys` name, whichever spelling they use.
+#[cfg(test)]
 pub fn find(keys: &[&str]) -> Option<&'static Setting> {
     let name = super::setting_name(None, &keys.join("."));
     SETTINGS

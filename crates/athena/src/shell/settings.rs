@@ -6,13 +6,14 @@ use std::time::SystemTime;
 
 use athena_editor::{EditorView, Indent, Lang, SaveSettings};
 use athena_ui::{CODE_SIZE, CODE_ZOOM, Theme};
-use athena_workspace::{LinterTrust, Preferences, Workspace};
-use gpui::{Context, Entity, Window};
-use serde_json::Value;
+use athena_workspace::{ItemKind, LinterTrust, Preferences, ThemeChoice, Workspace};
+use gpui::{AppContext as _, Context, Entity, Window};
+use serde_json::{Value, json};
 
 use super::Shell;
 use super::item::ItemView;
 use super::notices::ToastAction;
+use super::settings_ui::{Scope, SettingsEvent, SettingsView};
 use crate::settings::{self, Settings};
 
 /// Problems listed on the toast; the rest are in app.log.
@@ -33,6 +34,7 @@ pub(super) struct SettingsState {
     pub(super) projects: HashMap<PathBuf, ProjectSettings>,
     project_toast: Option<u64>,
 }
+
 
 pub(super) struct ProjectSettings {
     settings: Settings,
@@ -116,6 +118,7 @@ impl Shell {
                         this.apply_settings(file.clone(), Some(window), cx);
                     }
                     this.report_settings(result.map(|(_, p)| p).map_err(|why| vec![why]), cx);
+                    this.refresh_settings_views(cx);
                 });
                 if reloaded.is_err() {
                     return;
@@ -331,6 +334,7 @@ impl Shell {
         };
         if self.refresh_project_settings(&root, cx) {
             self.project_settings_changed(&root, cx);
+            self.refresh_settings_views(cx);
         }
     }
 
@@ -430,7 +434,139 @@ impl Shell {
                 );
             }
         }
+        self.refresh_settings_views(cx);
     }
+
+    /// Removes a setting from settings.json, as the Settings tab's Reset does.
+    fn unset_setting(&mut self, keys: &[&str], cx: &mut Context<Self>) {
+        let unset = settings::ensure_file()
+            .and_then(|path| settings::unset_at(&path, keys))
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|text| settings::parse(&text));
+        match unset {
+            Ok((file, _)) => self.apply_settings(file, None, cx),
+            Err(why) => self.transient_notice("settings.json was not updated", why, cx),
+        }
+        self.refresh_settings_views(cx);
+    }
+
+    /// Sets, or with `None` removes, a setting in the project's `.athena/settings.json`.
+    fn write_project_setting(
+        &mut self,
+        root: &Path,
+        keys: &[&str],
+        value: Option<&Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let written = settings::ensure_project_file(root).and_then(|path| {
+            match value {
+                Some(value) => settings::write_at(&path, keys, value),
+                None => settings::unset_at(&path, keys),
+            }
+            .map(|_| path)
+        });
+        match written {
+            Ok(path) => self.project_settings_saved(&path, cx),
+            Err(e) => self.transient_notice(
+                ".athena/settings.json was not updated",
+                format!("{e:#}"),
+                cx,
+            ),
+        }
+        self.refresh_settings_views(cx);
+    }
+
+    /// Cmd+,: the Settings tab, or settings.json when no project is open to hold a tab.
+    pub(super) fn open_settings_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workspace.active {
+            Some(_) => self.open_kind(ItemKind::Settings, window, cx),
+            None => self.open_settings_file(window, cx),
+        }
+    }
+
+    pub(super) fn new_settings_view(&mut self, root: &Path, cx: &mut Context<Self>) -> ItemView {
+        let fallback = self.settings_fallback();
+        let view = cx.new(|cx| SettingsView::new(root.to_path_buf(), fallback, cx));
+        let root = root.to_path_buf();
+        cx.subscribe(&view, move |this, _, event: &SettingsEvent, cx| match event {
+            SettingsEvent::Set {
+                scope: Scope::User,
+                keys,
+                value,
+            } => this.write_setting(keys, value.clone(), cx),
+            SettingsEvent::Unset {
+                scope: Scope::User,
+                keys,
+            } => this.unset_setting(keys, cx),
+            SettingsEvent::Set {
+                scope: Scope::Project,
+                keys,
+                value,
+            } => this.write_project_setting(&root, keys, Some(value), cx),
+            SettingsEvent::Unset {
+                scope: Scope::Project,
+                keys,
+            } => this.write_project_setting(&root, keys, None, cx),
+            SettingsEvent::OpenJson(scope) => {
+                let path = match scope {
+                    Scope::User => settings::ensure_file(),
+                    Scope::Project => settings::ensure_project_file(&root),
+                };
+                match path {
+                    Ok(path) => {
+                        this.pending_open = Some(path);
+                        cx.notify();
+                    }
+                    Err(e) => this.transient_notice("Could not create the file", format!("{e:#}"), cx),
+                }
+            }
+        })
+        .detach();
+        ItemView::Settings(view)
+    }
+
+    /// What applies where no settings file sets a setting: workspace.json's last choice.
+    fn settings_fallback(&self) -> HashMap<String, Value> {
+        let p = self.settings.fallback;
+        let theme = match p.theme {
+            ThemeChoice::System => "system",
+            ThemeChoice::Light => "light",
+            ThemeChoice::Dark => "dark",
+        };
+        let font = CODE_SIZE + self.workspace.ui.font_zoom as f32;
+        [
+            ("editor.format_on_save", json!(p.format_on_save.unwrap_or(false))),
+            ("editor.word_wrap", json!(p.word_wrap)),
+            ("editor.autosave_delay_ms", json!(p.autosave_delay_ms)),
+            ("editor.font_size", json!(font as i64)),
+            ("ide_integration", json!(p.ide_integration)),
+            ("theme", json!(theme)),
+            ("window.zoom_level", json!(self.workspace.ui.zoom_level)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+
+    /// Shows open Settings tabs the files as they are now.
+    fn refresh_settings_views(&mut self, cx: &mut Context<Self>) {
+        let views: Vec<Entity<SettingsView>> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                ItemView::Settings(v) => Some(v.clone()),
+                _ => None,
+            })
+            .collect();
+        if views.is_empty() {
+            return;
+        }
+        let fallback = self.settings_fallback();
+        for view in views {
+            view.update(cx, |v, cx| v.reload(fallback.clone(), cx));
+        }
+    }
+
 
     /// Opens settings.json as a tab, creating it with every setting commented out first if needed.
     pub(super) fn open_settings_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {

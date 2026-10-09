@@ -36,7 +36,9 @@ mod rename;
 mod review;
 mod search;
 mod settings;
+mod settings_ui;
 mod shortcuts;
+mod shortcuts_ui;
 mod snippets;
 mod status_bar;
 mod tasks;
@@ -1032,11 +1034,21 @@ impl Render for Shell {
             }))
             .on_action(
                 cx.listener(|this, _: &crate::actions::OpenKeyboardShortcuts, w, cx| {
+                    this.open_shortcuts_ui(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenKeyboardShortcutsJson, w, cx| {
                     this.open_keymap_file(w, cx)
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &crate::actions::OpenSettings, w, cx| {
+                    this.open_settings_ui(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenSettingsJson, w, cx| {
                     this.open_settings_file(w, cx)
                 }),
             )

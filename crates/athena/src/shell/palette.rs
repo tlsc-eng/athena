@@ -385,11 +385,16 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Theme: light", Box::new(actions::ThemeLight)),
         ("Theme: dark", Box::new(actions::ThemeDark)),
+        ("Open settings", Box::new(actions::OpenSettings)),
+        ("Open settings (JSON)", Box::new(actions::OpenSettingsJson)),
         (
-            "Open keyboard shortcuts file",
+            "Open keyboard shortcuts",
             Box::new(actions::OpenKeyboardShortcuts),
         ),
-        ("Open settings (JSON)", Box::new(actions::OpenSettings)),
+        (
+            "Open keyboard shortcuts (JSON)",
+            Box::new(actions::OpenKeyboardShortcutsJson),
+        ),
         (
             "Snippets: configure snippets for this language",
             Box::new(super::snippets::ConfigureSnippets),

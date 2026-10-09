@@ -151,6 +151,24 @@ pub fn problems_at(
         .collect()
 }
 
+/// Each entry's command, `athena::`-qualified and with its `-` kept; `None` for an entry with none.
+pub fn entry_commands(text: &str) -> Vec<Option<String>> {
+    let json = strip_jsonc(text);
+    let Ok(entries) = serde_json::from_str::<Vec<Value>>(&json) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .map(|e| {
+            let command = e.get("command")?.as_str()?;
+            Some(match command.strip_prefix('-') {
+                Some(name) => format!("-{}", qualified(name)),
+                None => qualified(command),
+            })
+        })
+        .collect()
+}
+
 /// One binding as keymap.json spells it, `key` in Athena's spelling (`cmd-k cmd-t`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewEntry {
