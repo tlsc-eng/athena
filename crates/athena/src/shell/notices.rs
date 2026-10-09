@@ -5,8 +5,11 @@ use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
 use athena_ui::ActiveTheme;
 use athena_ui::motion::{self, Closing};
-use athena_workspace::{ItemId, ItemKind, Panel};
-use gpui::{Animation, AnyElement, Context, FontWeight, Hsla, Task, Window, div, prelude::*, px};
+use athena_workspace::{ItemId, ItemKind, Panel, Rect};
+use gpui::{
+    Animation, AnyElement, Bounds, Context, FontWeight, Hsla, Pixels, Task, Window, canvas, div,
+    prelude::*, px,
+};
 use serde::{Deserialize, Serialize};
 
 use super::Shell;
@@ -109,6 +112,13 @@ fn duration(ms: u64) -> String {
 }
 
 /// Title and body for a notice, as shown in toasts, the drawer and macOS banners.
+/// Whether toasts drawn over `toasts` would land on a pane at `pane`, a web preview's or not.
+pub(super) fn covers(toasts: Bounds<Pixels>, pane: Rect) -> bool {
+    let (left, top) = (f32::from(toasts.left()), f32::from(toasts.top()));
+    let (right, bottom) = (f32::from(toasts.right()), f32::from(toasts.bottom()));
+    left < pane.x + pane.w && pane.x < right && top < pane.y + pane.h && pane.y < bottom
+}
+
 pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, String) {
     let place = project.unwrap_or("Athena");
     match kind {
@@ -590,6 +600,19 @@ impl Shell {
                 }
             })
             .collect();
+        let area = self.toast_area.clone();
+        let shell = cx.entity().downgrade();
+        // Web previews are native views above gpui, so they learn where the toasts are drawn.
+        let recorder = canvas(
+            move |bounds, _, cx| {
+                if area.replace(Some(bounds)) != Some(bounds) {
+                    shell.update(cx, |_, cx| cx.notify()).ok();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         Some(
             div()
                 .absolute()
@@ -598,6 +621,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
+                .child(recorder)
                 .children(cards)
                 .into_any_element(),
         )
@@ -687,5 +711,31 @@ impl Shell {
             self.notifications.iter_mut().for_each(|n| n.read = true);
             self.notices_changed(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, size};
+
+    fn pane(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn toasts_cover_only_the_panes_they_overlap() {
+        // A 1280×800 window: toasts in the bottom-right corner, 360 wide.
+        let toasts = Bounds::new(point(px(904.), px(600.)), size(px(360.), px(184.)));
+        let right = pane(640., 36., 640., 700.);
+        let left = pane(48., 36., 591., 700.);
+        let above = pane(640., 36., 640., 564.);
+        assert!(covers(toasts, right));
+        assert!(!covers(toasts, left), "ends left of the toasts");
+        assert!(!covers(toasts, above), "ends just where they start");
+        assert!(
+            covers(toasts, pane(900., 590., 10., 20.)),
+            "a corner overlap counts"
+        );
     }
 }

@@ -97,6 +97,8 @@ pub struct Shell {
     notices_path: PathBuf,
     next_notice: u64,
     toasts: Vec<notices::Toast>,
+    /// Where the toasts were last drawn, so web previews under them can step aside.
+    toast_area: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     drawer: Option<drawer::DrawerTab>,
     /// The drawer state `drawer_changed` last saw, to tell opening from closing.
     drawer_shown: Option<drawer::DrawerTab>,
@@ -249,6 +251,7 @@ impl Shell {
             notifications,
             notices_path,
             toasts: Vec::new(),
+            toast_area: Rc::default(),
             drawer: None,
             drawer_shown: None,
             drawer_opening: None,

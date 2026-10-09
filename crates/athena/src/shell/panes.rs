@@ -549,15 +549,28 @@ impl Shell {
             || self.context_menu.is_some()
             || !self.item_menus.is_empty()
             || self.usage_open();
+        let toasts = self.toast_area.get().filter(|_| !self.toasts.is_empty());
         if let Some(project) = self.workspace.active_project().filter(|_| !covered)
             && let Some(layout) = &project.layout
         {
+            let area = self.pane_area();
             let panes = match self.zoomed.and_then(|z| layout.pane(z)) {
-                Some(pane) => vec![pane],
-                None => layout.panes(),
+                Some(pane) => vec![(pane, area)],
+                None => {
+                    let rects = layout.layout(area).0;
+                    let rect = |id| rects.iter().find(|(p, _)| *p == id).map(|(_, r)| *r);
+                    layout
+                        .panes()
+                        .into_iter()
+                        .filter_map(|p| Some((p, rect(p.id)?)))
+                        .collect()
+                }
             };
-            for item in panes.into_iter().filter_map(|p| p.active_item()) {
-                shown.insert((project.root.clone(), item.id));
+            for (pane, rect) in panes {
+                let under_toast = toasts.is_some_and(|t| super::notices::covers(t, rect));
+                if let Some(item) = pane.active_item().filter(|_| !under_toast) {
+                    shown.insert((project.root.clone(), item.id));
+                }
             }
         }
         for (key, view) in &self.items {
