@@ -488,11 +488,14 @@ impl Shell {
     /// part, as VS Code runs its file participants: those that ask are sent `willRenameFiles`
     /// first and their edit (TypeScript's updated imports) is applied, confirmed when it reaches
     /// several files; then `rename` runs, and if it returns true they hear `didRenameFiles`.
+    /// `replace` says `rename` may replace what is at `to`; otherwise edits wait on `to` being free.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn rename_with_servers(
         &mut self,
         root: &Path,
         from: PathBuf,
         to: PathBuf,
+        replace: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
         rename: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> bool + 'static,
@@ -522,7 +525,8 @@ impl Shell {
                 }
             }
         };
-        if asked.is_empty() {
+        // A rename bound to fail must not first rewrite other files' imports.
+        if asked.is_empty() || !fileops::renamable(&from, &to, replace) {
             return after(rename(self, window, cx));
         }
         let versions = self.versions_for_request(cx);
@@ -575,7 +579,7 @@ impl Shell {
                 apply = answer.await == Ok(CONFIRMED);
             }
             let _ = this.update_in(cx, |this, window, cx| {
-                if apply {
+                if apply && fileops::renamable(&from, &to, replace) {
                     for edit in &edits {
                         if let Err(why) = this.apply_requested_edit(edit, &versions, cx) {
                             this.lsp_failed("Imports not updated", why, cx);

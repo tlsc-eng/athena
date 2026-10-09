@@ -35,6 +35,19 @@ pub(super) fn rename(from: &Path, to: &Path) -> Result<()> {
     fs::rename(from, to).with_context(|| describe("rename", from))
 }
 
+/// Whether `rename` (or `move_to` with `replace`) would go ahead: `from` is there and `to` is
+/// free, or is `from` itself under another case.
+pub(super) fn renamable(from: &Path, to: &Path, replace: bool) -> bool {
+    let Ok(source) = fs::symlink_metadata(from) else {
+        return false;
+    };
+    match fs::symlink_metadata(to) {
+        Err(_) => true,
+        Ok(_) if replace => true,
+        Ok(existing) => (existing.dev(), existing.ino()) == (source.dev(), source.ino()),
+    }
+}
+
 /// Moves `from` to `to`, first sending what is at `to` to the Trash when `replace` is set; across
 /// volumes it copies, then trashes the original.
 pub(super) fn move_to(
@@ -222,6 +235,20 @@ mod tests {
         rename(&a, &dir.join("c.rs")).unwrap();
         assert!(!a.exists());
         assert_eq!(fs::read_to_string(dir.join("c.rs")).unwrap(), "a");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_rename_that_can_go_ahead_is_renamable() {
+        let dir = scratch("renamable");
+        let (a, b) = (dir.join("a.rs"), dir.join("b.rs"));
+        fs::write(&a, "a").unwrap();
+        assert!(renamable(&a, &b, false));
+        assert!(renamable(&a, &dir.join("A.rs"), false));
+        fs::write(&b, "b").unwrap();
+        assert!(!renamable(&a, &b, false));
+        assert!(renamable(&a, &b, true));
+        assert!(!renamable(&dir.join("gone.rs"), &dir.join("c.rs"), false));
         fs::remove_dir_all(&dir).unwrap();
     }
 

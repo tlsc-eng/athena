@@ -214,24 +214,32 @@ impl Shell {
                     return;
                 };
                 let (old, new) = (from.clone(), dest.clone());
-                this.rename_with_servers(&root, old, new, window, cx, move |this, window, cx| {
-                    let replaced = match replacing {
-                        true => tabs_under(&this.workspace.projects, &dest),
-                        false => Vec::new(),
-                    };
-                    let result = fileops::move_to(&from, &dest, replacing, fileops::trash);
-                    let moved = result.is_ok();
-                    if moved {
-                        // Before the watcher sees the new file, so no tab of the old one reloads it.
-                        for (root, item) in replaced {
-                            this.remove_item_from(&root, item, window, cx);
+                this.rename_with_servers(
+                    &root,
+                    old,
+                    new,
+                    replacing,
+                    window,
+                    cx,
+                    move |this, window, cx| {
+                        let replaced = match replacing {
+                            true => tabs_under(&this.workspace.projects, &dest),
+                            false => Vec::new(),
+                        };
+                        let result = fileops::move_to(&from, &dest, replacing, fileops::trash);
+                        let moved = result.is_ok();
+                        if moved {
+                            // Before the watcher sees the new file, so no tab of the old one reloads it.
+                            for (root, item) in replaced {
+                                this.remove_item_from(&root, item, window, cx);
+                            }
+                            this.retarget_items(&from, &dest, cx);
+                            this.reload_changed_files(cx);
                         }
-                        this.retarget_items(&from, &dest, cx);
-                        this.reload_changed_files(cx);
-                    }
-                    this.after_tree_drop(result, &dest, cx);
-                    moved
-                });
+                        this.after_tree_drop(result, &dest, cx);
+                        moved
+                    },
+                );
             });
         })
         .detach();

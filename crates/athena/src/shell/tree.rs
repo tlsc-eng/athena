@@ -48,6 +48,8 @@ pub(super) struct Edit {
     pub target: PathBuf,
     pub kind: EditKind,
     pub input: Entity<TextInput>,
+    /// A rename waits on language servers; another Enter or blur must not submit it again.
+    pub pending: bool,
     pub _subscriptions: Vec<Subscription>,
 }
 

@@ -199,6 +199,7 @@ impl Shell {
                     };
                     let same_project = this.active_root().as_ref() == Some(&edit.root);
                     let outcome = blur_outcome(
+                        edit.pending,
                         window.is_window_active(),
                         field.is_focused(window),
                         this.focus.contains_focused(window, cx),
@@ -221,6 +222,7 @@ impl Shell {
             target,
             kind,
             input,
+            pending: false,
             _subscriptions: subscriptions,
         });
         window.focus(&focus);
@@ -236,7 +238,7 @@ impl Shell {
 
     /// Creates or renames from the inline field; `by_enter` keeps the field open on an error.
     fn submit_tree_edit(&mut self, by_enter: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = self.tree.editing.as_ref() else {
+        let Some(edit) = self.tree.editing.as_ref().filter(|e| !e.pending) else {
             return;
         };
         let name = edit.input.read(cx).text().trim().to_string();
@@ -261,10 +263,14 @@ impl Shell {
                     let path = target.with_file_name(&name);
                     if let Some(root) = self.active_root() {
                         let (from, to) = (target.clone(), path.clone());
+                        if let Some(edit) = self.tree.editing.as_mut() {
+                            edit.pending = true;
+                        }
                         self.rename_with_servers(
                             &root,
                             from,
                             to,
+                            false,
                             window,
                             cx,
                             move |this, w, cx| match fileops::rename(&target, &path) {
@@ -274,6 +280,9 @@ impl Shell {
                                     true
                                 }
                                 Err(err) => {
+                                    if let Some(edit) = this.tree.editing.as_mut() {
+                                        edit.pending = false;
+                                    }
                                     let body = format!("{err:#}");
                                     this.transient_notice("Could not do that", body, cx);
                                     if !by_enter {
@@ -567,14 +576,16 @@ enum BlurOutcome {
 }
 
 /// On losing focus, clicking elsewhere in the project keeps what was typed (as in VS Code), a field
-/// that vanished (scrolled away, tree hidden) or a project switch drops it, and an app switch waits.
+/// that vanished (scrolled away, tree hidden) or a project switch drops it, and an app switch or a
+/// rename already under way waits.
 fn blur_outcome(
+    pending: bool,
     window_active: bool,
     still_focused: bool,
     moved_to_drawn: bool,
     same_project: bool,
 ) -> BlurOutcome {
-    if !window_active {
+    if pending || !window_active {
         BlurOutcome::Keep
     } else if still_focused {
         BlurOutcome::Cancel { refocus: true }
@@ -601,22 +612,33 @@ mod tests {
 
     #[test]
     fn a_tree_edit_commits_only_when_focus_moves_elsewhere_in_its_project() {
-        assert_eq!(blur_outcome(true, false, true, true), BlurOutcome::Commit);
+        assert_eq!(
+            blur_outcome(false, true, false, true, true),
+            BlurOutcome::Commit
+        );
         // Scrolled off or hidden: the field is gone but still holds focus.
         assert_eq!(
-            blur_outcome(true, true, false, true),
+            blur_outcome(false, true, true, false, true),
             BlurOutcome::Cancel { refocus: true }
         );
         // A project switch moved focus to the other project's tab.
         assert_eq!(
-            blur_outcome(true, false, true, false),
+            blur_outcome(false, true, false, true, false),
             BlurOutcome::Cancel { refocus: false }
         );
         assert_eq!(
-            blur_outcome(true, false, false, true),
+            blur_outcome(false, true, false, false, true),
             BlurOutcome::Cancel { refocus: true }
         );
-        assert_eq!(blur_outcome(false, true, false, true), BlurOutcome::Keep);
+        assert_eq!(
+            blur_outcome(false, false, true, false, true),
+            BlurOutcome::Keep
+        );
+        // Enter already sent the rename to the language servers.
+        assert_eq!(
+            blur_outcome(true, true, true, true, true),
+            BlurOutcome::Keep
+        );
     }
 
     #[test]
