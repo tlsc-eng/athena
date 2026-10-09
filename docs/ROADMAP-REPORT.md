@@ -1,4 +1,4 @@
-# Roadmap report: v0.2.0 to v0.8.0
+# Roadmap report: v0.2.0 to v0.9.0
 
 What happened while you were away, for the roadmap in `piped-orbiting-stearns.md` (Phases A–E).
 
@@ -11,6 +11,7 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
 - Release: v0.6.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.6.0 (tap `f79bd1b`, installed here)
 - Release: v0.7.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.7.0 (tap `e001a6b`, installed here)
 - Release: v0.8.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.8.0 (tap `2a0ce2a`, installed here)
+- Release: v0.9.0 — <link added at release>
 
 The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
 v0.5. For v0.6 the lanes ran GUI QA with synthetic keys only, while you were idle, so anything
@@ -18,8 +19,192 @@ that needs a mouse click is unverified. v0.7 was the same, except that the git a
 the fix sweep could take screenshots with the screen unlocked; the workbench lane ran locked
 until its last two captures. v0.8's lanes and fix sweep ran their QA apps in isolated `HOME`s
 with synthetic keys while you were idle and captured them on screen, and the installed v0.7.0 got
-a visual QA sweep of its own. Everything below marked **unverified on screen** is
+a visual QA sweep of its own. v0.9's lanes ran their QA apps the same way, but the screen was
+locked for most of them, so few GUI checks happened, and Delve never ran a program end to end on
+this Mac (see the v0.9.0 incident). Everything below marked **unverified on screen** is
 covered by unit tests, logs or synthetic-key runs, but nobody has looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+
+## v0.9.0
+
+Plan: [plans/v0.9.md](plans/v0.9.md), three file-disjoint lanes (debugger, language features,
+big and foreign files with a minimap), `v0.8.0..main`, then a review pass and one fix sweep. The
+v0.8.0 section follows this one.
+
+### What shipped
+
+**Debugger** (`7bf13ea`, `743912c`, `fdb4a78`, `3be09d4`, `46721e4`, `0ed8256`, `7cfcb07`)
+- A new `athena-dap` crate speaks the Debug Adapter Protocol on plain threads, as `athena-lsp`
+  does: one writer, a reader matching replies by `request_seq`, a watchdog (10 s per request,
+  300 s for launch), the adapter in its own process group and a reaper that kills the group and
+  removes the session's private scratch folder.
+- Go through Delve: `dlv dap --client-addr unix:<socket>`, found on the login shell's `PATH` and
+  started through it, never installed. **F5** debugs the first `"type": "go"` entry in
+  `.vscode/launch.json` (request, mode auto/debug/test/exec, program, args, env, buildFlags, cwd
+  and VS Code's workspace and file variables), else the open file's package, tests for a
+  `_test.go` file. Right-clicking a test's ▶ offers Debug Test, and **Debug: debug test at
+  cursor** runs only that test or subtest.
+- Breakpoints in the gutter (click or **F9**; conditional, hit count, logpoints, disabled and
+  unplaced drawn apart), moving with edits, kept per project in `breakpoints.json` beside
+  `workspace.json`. A stop opens the paused line (amber band and arrow), loads locals and
+  re-expands what was open, and evaluates the watch expressions; hover evaluates while paused.
+- A **Debug** drawer tab (Call Stack by goroutine, Breakpoints, Variables, Watch, Debug Console),
+  title-bar controls while a session runs, a **Run** menu and eleven **Debug:** palette commands.
+  F5, Shift+F5, Cmd+Shift+F5, F6, F10, F11 and Shift+F11 are bound outside terminals (nothing used
+  them), F9 in the editor.
+- MCP tool `debug_state`: read-only status, stop reason, paused goroutine, location, 20 frames
+  and 50 locals, answered from the last stop, so it never resumes or steps the program.
+
+**Language features** (`71e55b1`, `fb485c5`, `74bb734`, `5475b1c`, `c5759a1`, `e908bbd`, `fdef526`)
+- Semantic tokens (full and delta) from gopls and typescript-language-server over the tree-sitter
+  colours, names only; parameters and type parameters got theme colours in both themes. Decoding
+  and placement run off the UI thread; keystroke cost is unchanged within noise on 2 k- and
+  10 k-line files ([perf/2026-10-v0.9-semantic.md](perf/2026-10-v0.9-semantic.md)).
+- Code lenses for the lines on screen, resolved together, drawn muted after the line; a click
+  runs the command through `workspace/executeCommand` or lists a lens's references.
+- User snippets from `snippets/<language id>.json` and `*.code-snippets` in the app support
+  folder, in VS Code's format with its variables and transforms, after the server's suggestions;
+  **Snippets: configure …** in the palette.
+- Inlay hints on wrapped lines, each on the row it belongs to, dropped when they would push code
+  past the edge.
+
+**Big and foreign files, minimap** (`58bb2c8`, `86fa17e`, `2ab0591`, `0f293fa`, `c17b818`, `68c6b4d`)
+- Encodings through `encoding_rs`: UTF-8 with or without BOM, UTF-16 LE/BE with BOM, Shift JIS and
+  EUC-JP by their kana, else Windows 1252; saved back byte for byte, refused when the bytes do not
+  round-trip. Reopen / Save with Encoding from the status bar (14 encodings).
+- Git views decode every version in the file's encoding, and hunk stage, unstage and revert
+  write it back in that encoding only when both sides agree and decode without loss. UTF-16 files
+  get gutter marks from an in-process line diff numbered as `git diff -U0` numbers them.
+- Files over 50 MB open in a read-only large-file view (positional reads, a sparse background
+  line index, find over the whole file in 4 MB blocks); over 2 GB and binary are still refused.
+- A minimap (on by default, `editor.minimap.enabled`, **Toggle Minimap**), coloured from cached
+  highlight spans: about 4 µs a cached frame and 0.8 ms to recompute 300 rows on a 10,000-line
+  file in release.
+
+Screenshots from the QA builds: [semantic colours, a gopls code lens, inlay hints on a wrapped line
+and the minimap](screenshots/v0.9/01-semantic-lens.png), [a user snippet in the suggestions with
+its body beside the list](screenshots/v0.9/02-snippet.png), and [two breakpoints in the gutter
+before any launch](screenshots/v0.9/03-breakpoints.png) (the window was in the background, hence
+dimmed; no session ran, see Verification).
+
+### Decisions made without you
+
+- **Delve dials in.** `dlv dap` has no stdio mode, so the client listens on a Unix socket in the
+  session's scratch folder and Delve connects with `--client-addr`. Delve is started as
+  `$SHELL -lc 'exec "$0" "$@"' dlv …` so goenv-style shims work; `$SHELL` is used only when it is
+  sh, bash, zsh, ksh or dash, since fish and nu cannot run that line, and `/bin/zsh` otherwise
+  (`f7ff64b`).
+- **Debugging and lens commands sit behind the project trust answer.** Debugging builds and runs
+  project code, so it uses the v0.8 "project code" answer, asked before launch.json is even read,
+  with the Cancel-first button order. The review extended the gate to code lens and code action
+  server commands (`47f6a92`); reference lenses still list at once.
+- **Delve's binary goes in the scratch folder**, not the project, and the program's output comes
+  as DAP events (`outputMode remote`) for the Debug Console. Attach is refused for now.
+- **Developer Mode is not touched.** Athena never runs `DevToolsSecurity`; a launch macOS holds for
+  a password says in the Debug Console how to stop it asking, and the README documents it.
+- Breakpoints and watch expressions live in their own `breakpoints.json` beside `workspace.json`,
+  with paths relative to each project, written through a temp file and rename (`39cf51b`).
+- A Delve `continued` event arrives before every step's reply (`sendStepResponse` in Delve
+  1.27.1), which cleared the stack on each F10; steps now ignore it until the next stop
+  (`7cfcb07`).
+- **Code lenses are drawn after the line, not above it** as the plan said (and VS Code does): they
+  reuse the merge-conflict actions' drawing after the text, so no row is added. See Known gaps.
+- Semantic highlighting, code lens and the minimap are on by default, as in VS Code; VS Code's
+  `"configuredByTheme"` reads as on, and gopls gets `semanticTokens: true` unless its settings set
+  it. Only names take semantic colours, so keywords, strings and comments keep tree-sitter's finer
+  classes.
+- Snippet transforms follow VS Code's own format parser (`430f623`) rather than Rust's
+  `Regex::replace`; variables inside a choice stay literal, as VS Code keeps them.
+- **The large-file view reads with `pread`, not a memory map**, so a file truncated underneath it
+  cannot fault the app. The 50 MB editor limit stays; the view has no selection or copy.
+- Detection is deliberately narrow: only Japanese multibyte encodings are guessed (by kana), and
+  everything else that is not UTF-8 or BOM'd UTF-16 opens as Windows 1252, which round-trips any
+  byte, so nothing is lost before you pick the right encoding.
+- Files with a `working-tree-encoding` attribute are refused for hunk operations like filtered
+  files (`530fd73`); a hunk is staged with the byte order mark the index's copy has (`d314251`).
+
+### Review fixes
+
+A review of `v0.8.0..7cfcb07` found 15 issues (no critical or high: 8 medium, 3 low-medium,
+4 low) plus six minor ones and three follow-ups the debugger lane left. All are fixed on main:
+- Code lens and code action server commands (go generate, run test, go mod tidy) ran project
+  code without the trust answer (`47f6a92`).
+- A semantic tokens delta whose edit end overflowed panicked (`3958c15`).
+- A failed launch or a finishing stop could end a newer session (`39cf51b`); closing a project did
+  not stop its session (`39cf51b`).
+- Quitting left Delve and its scratch folder behind while clones of the client lived (`f7ff64b`,
+  `39cf51b`); `$SHELL` under fish or nu broke Delve's start (`f7ff64b`).
+- A wrapped minimap line cost characters times breaks: 57 s for a 1 MB line in a debug build, now
+  about 90 ms (`47bdc8b`).
+- The Debug Console had no line cap (a `\r` progress bar grew without end) and laid out 5000 lines
+  per event; now 4 KB lines, events batched per update and a `uniform_list` (`39cf51b`).
+- Low-medium: invalid UTF-8 from Delve ended output forwarding (`f7ff64b`); `breakpoints.json` was
+  written in place, so a truncated file reset to defaults and the next save erased it; it is now
+  renamed into place and a corrupt one kept aside (`39cf51b`); snippet transforms went to
+  `Regex::replace` (`$1_test` read as a group name, no `/upcase`, flags ignored) (`430f623`).
+- Low: `working-tree-encoding` files were peeked and staged in a guessed encoding (`530fd73`);
+  session generations restarted at 0 (`39cf51b`); Restart skipped the trust check, disallowing did
+  not stop a session, and `debug_state` did not shorten names (`39cf51b`); `killpg` could hit a
+  recycled group after the leader was reaped (`f7ff64b`).
+- Minor: stale semantic colours after a null or failed reply (`f62ce86`); the minimap kept old
+  colours when tokens were re-sent for the same text (`5ea3706`); the large-file view ended lines
+  only at LF (`5b4f7d2`); a clipboard with a comma split a snippet choice (`430f623`); a doc
+  comment had drifted (`47f6a92`); staging a peeked hunk failed with a misleading message when
+  the index's copy differed in its byte order mark (`d314251`).
+- Follow-ups from the debugger lane (`39cf51b`): a breakpoint Delve verifies on another line now
+  moves there; a panic shows the first frame under the project root rather than
+  `runtime/panic.go`; Go test rows in the Tests tab get a Debug link.
+
+Within the lanes, before the review: newly opened editors showed no breakpoints and steps cleared
+the paused marks (`7cfcb07`); the minimap was not recoloured on a language change and pointer
+hovers over it asked the server about the text beneath (`0f293fa`); semantic tokens were appended
+out of order for the minimap (`e908bbd`); inlay hints pushed unwrapped rows past the edge while
+wrapping (`fdef526`).
+
+### Verification
+
+- Unit tests throughout, with fake adapters (an in-process socket pair, `/bin/sleep` and `nc`
+  dial-in scripts, one that exits early, one writing a `\377` byte), launch.json parsing and
+  substitution, breakpoint edit-following, session hand-over between two sessions, a corrupt
+  `breakpoints.json` set aside, a 5000-update `\r` line capped, and a `debug_state` reply with
+  5000-character names kept under one 64 KiB app frame. The fix commits report the full gate.
+- **Delve was never run end to end on this Mac.** The Delve integration test (a breakpoint in a
+  temp module, a local and a struct field, an evaluate, a step, running to the end) skips when
+  Developer Mode is off, because launching then asks for an administrator password, and it is off
+  here. The debugger lane's QA app got as far as breakpoints in the gutter (screenshot above),
+  a capture after a relaunch with the same two breakpoints, and `debug_state` answering `not_debugging` through
+  `athena mcp-stdio`; the captures named "paused" and "stepped" show the same unpaused window, so
+  no stop, step, Debug tab, hover value or title-bar control has been seen on screen.
+- gopls 0.23 integration tests: semantic tokens classify a function, a parameter and a read-only
+  constant before and after an edit; code lenses (go generate, and the test lens when enabled)
+  resolve and run. The language lane's QA app showed them on screen in both themes (screenshots
+  above), with a snippet suggested and expanded and inlay hints on a wrapped line.
+- Encodings: round trips for UTF-16 LE/BE, Shift JIS, EUC-JP, all 255 non-zero Latin-1 bytes and
+  UTF-8 with BOM, edit-and-save byte comparisons, refusals; Shift JIS and UTF-16 diffs staged
+  against real repositories with the index holding exactly the bytes on disk; UTF-16 gutter hunks
+  matching `git diff -U0`. Large files: a sparse 100 MB file (index in steps, paging around a hole,
+  find both ways and wrapping, a mixed CR/CRLF/LF file), a 2 GB + 1 byte refusal. Minimap
+  geometry, block and budget tests. None of the files lane's work was looked at on screen.
+- Unverified: most GUI checks, because the screen was locked for most of the lanes' QA (the
+  encoding picker, the large-file view, the minimap's dragging, the trust prompts for Debug and
+  for a lens command, the Run menu); typescript-language-server was not installed, so its
+  semantic tokens and code lenses are untested against a real server.
+
+### Known gaps
+
+- Code lenses are drawn after their line, not on a row above it as in VS Code.
+- Cyrillic, Chinese and Korean files are not detected (only Japanese is) and open as Windows 1252;
+  **Reopen with Encoding** fixes them per file.
+- The large-file view has no selection or copy.
+- typescript-language-server's semantic tokens and reference/implementation lenses have not run
+  against a real server.
+- The debugger has not run end to end here (see Verification); attach is not supported.
+
+### Incident
+
+- During the debugger lane's QA, a Delve probe started a launch while the screen was locked, and
+  macOS put up its administrator-password dialog (Delve taking control of a process without
+  Developer Mode). An agent dismissed the dialog with Escape. Nothing was typed into it and
+  nothing was authorised, and Developer Mode was left as it was.
 
 ## v0.8.0
 
@@ -1250,3 +1435,28 @@ For v0.8.0:
 50. Quit with the terminal panel open and two terminal tabs, relaunch: both tabs have their
     folder or program as title and the panel is open. A Markdown list mixing `- [ ]` items and
     plain ones keeps the plain bullets.
+
+For v0.9.0:
+
+51. Enable Developer Mode once (`sudo DevToolsSecurity -enable`) and install Delve (`go install
+    github.com/go-delve/delve/cmd/dlv@latest`). In a Go project, set a breakpoint in a test,
+    right-click its ▶ and pick Debug Test: the trust prompt (Escape cancels, then Allow and
+    Debug), the stop on the amber line, the Debug tab's Call Stack and Variables, hover over a
+    variable, then F10 (with Fn), Shift+F11 and F5 to the end. Try the Debug link in the Tests tab
+    and the title bar's buttons. While paused, ask Claude for `debug_state`.
+52. Add a conditional breakpoint and a logpoint from the gutter's right-click menu, quit and
+    relaunch: they come back. Add a `.vscode/launch.json` with `"program": "${workspaceFolder}"`
+    and press F5 in a non-test file.
+53. Open a Shift JIS file and a UTF-16 LE file with a BOM: the status bar names each; edit, save
+    and check `git diff` shows only your change. Stage one hunk from the peek. Reopen a Latin-1
+    file as Windows 1251 and back, and Save with Encoding as UTF-8.
+54. Open a file over 50 MB (`seq 1 15000000 > big.log` makes one of about 170 MB): the banner,
+    scrolling, Cmd+F for `14999999`.
+55. Look at the minimap in a long file: drag the slider, click below it, and run **Toggle
+    minimap**. Narrow the pane below 520 px: it hides.
+56. In a Go file with a `//go:generate` line: the "run go generate" lens; click it in a project
+    not yet asked (the trust prompt), then in an allowed one. Check parameters and constants take
+    their semantic colours in both themes.
+57. **Snippets: configure snippets for this language** in a Go file, add one using
+    `$TM_FILENAME_BASE` and `${1:/upcase}`, save, then type its prefix. Turn on word wrap and
+    inlay hints on a long call.
