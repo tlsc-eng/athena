@@ -1,5 +1,5 @@
 use std::ops::Range;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use athena_editor::{EditorView, Lens};
 use athena_lsp::{Client, CodeLens};
@@ -12,7 +12,15 @@ use super::lsp::document_key;
 const KEPT_ANSWERS: usize = 3;
 
 /// One code lens answer: the request it answered, the server, and its resolved lenses.
-pub(super) type LensAnswer = (u64, Rc<Client>, Vec<CodeLens>);
+pub(super) type LensAnswer = (u64, Weak<Client>, Vec<CodeLens>);
+
+/// Keeps an answer without keeping its server alive: one that a trust answer replaced must exit.
+fn keep(kept: &mut Vec<LensAnswer>, request: u64, client: &Rc<Client>, lenses: Vec<CodeLens>) {
+    kept.push((request, Rc::downgrade(client), lenses));
+    if kept.len() > KEPT_ANSWERS {
+        kept.remove(0);
+    }
+}
 
 /// Whether Athena can run a lens: the server runs its command, or it lists references.
 fn runnable(client: &Client, lens: &CodeLens) -> bool {
@@ -79,11 +87,12 @@ impl Shell {
             tracing::debug!("code lens → {}", lenses.len());
             let shown = shown(&client, &lenses);
             let _ = this.update(cx, |this, _| {
-                let kept = this.lsp.lenses.entry(id).or_default();
-                kept.push((request, client, lenses));
-                if kept.len() > KEPT_ANSWERS {
-                    kept.remove(0);
-                }
+                keep(
+                    this.lsp.lenses.entry(id).or_default(),
+                    request,
+                    &client,
+                    lenses,
+                );
             });
             let _ = weak.update(cx, |e, cx| e.show_code_lenses(request, shown, cx));
         })
@@ -112,7 +121,7 @@ impl Shell {
         if !places.is_empty() {
             return self.show_locations(places, cx);
         }
-        let Some(command) = lens.command else {
+        let (Some(command), Some(client)) = (lens.command, client.upgrade()) else {
             return;
         };
         let path = editor.read(cx).path().to_path_buf();
@@ -185,5 +194,24 @@ mod tests {
             ],
             "a server that never started runs nothing; a lens with no command is not shown"
         );
+    }
+
+    #[test]
+    fn kept_answers_do_not_keep_a_replaced_server_running() {
+        let (client, _) = Client::start_local(
+            athena_lsp::ServerKind::Go,
+            "/nonexistent/gopls".into(),
+            "/tmp".into(),
+            athena_lsp::Config::default(),
+        );
+        let client = Rc::new(client);
+        let mut kept = Vec::new();
+        for request in 1..=5 {
+            keep(&mut kept, request, &client, Vec::new());
+        }
+        assert_eq!(kept.iter().map(|k| k.0).collect::<Vec<_>>(), [3, 4, 5]);
+        assert_eq!(Rc::strong_count(&client), 1);
+        drop(client);
+        assert!(kept[2].1.upgrade().is_none());
     }
 }
