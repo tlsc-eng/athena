@@ -493,6 +493,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "athena-dap"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "libc",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "athena-editor"
 version = "0.8.0"
 dependencies = [

@@ -78,6 +78,7 @@ athena-playwright = { path = "crates/athena-playwright" }
 athena-testing = { path = "crates/athena-testing" }
 athena-preview = { path = "crates/athena-preview" }
 athena-lsp = { path = "crates/athena-lsp" }
+athena-dap = { path = "crates/athena-dap" }
 
 [profile.release]
 lto = "thin"
