@@ -62,7 +62,7 @@ struct LineBlocks {
 /// Lines' blocks, valid for one text version, parse, language and wrap width.
 #[derive(Default)]
 struct Cache {
-    key: (u64, u64, Option<Lang>, Option<usize>),
+    key: (u64, u64, Option<Lang>, Option<usize>, Option<u64>),
     lines: HashMap<usize, Rc<LineBlocks>>,
 }
 
@@ -184,7 +184,13 @@ impl Minimap {
         wrap: Option<usize>,
     ) -> Vec<Rc<LineBlocks>> {
         let mut cache = self.cache.borrow_mut();
-        let key = (buffer.version(), buffer.parses(), buffer.lang(), wrap);
+        let key = (
+            buffer.version(),
+            buffer.parses(),
+            buffer.lang(),
+            wrap,
+            buffer.semantic_version(),
+        );
         if cache.key != key {
             *cache = Cache {
                 key,

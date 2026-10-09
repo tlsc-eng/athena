@@ -788,9 +788,9 @@ impl Syntax {
             .into_iter()
             .map(|((start, end), (_, token))| (start..end, token))
             .collect();
-        out.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
-        // After the tree's ranges, so a semantic token paints over what tree-sitter guessed.
+        // The sort is stable, so a semantic token paints over a tree range it equals.
         out.extend_from_slice(self.semantic.within(&bytes));
+        out.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
         out
     }
 
@@ -1497,6 +1497,11 @@ fn f() -> usize { MAX_LEN + Self::LIMIT + Some(1).unwrap() }
                 .map(|(_, t)| t)
         };
         assert_eq!(painted(at("n }").start), Some(Token::Parameter));
+        let all = syntax.highlights(&rope, 0..src.len());
+        assert!(
+            all.is_sorted_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end))),
+            "sorted, as the minimap reads them"
+        );
         assert_eq!(
             painted(at("func").start),
             Some(Token::Keyword),

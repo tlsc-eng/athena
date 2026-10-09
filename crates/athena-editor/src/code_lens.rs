@@ -216,7 +216,8 @@ impl EditorView {
                 .filter(|(l, _)| focused && *l == line && line == head_line)
                 .map_or(0, |(_, c)| c.chars().count() + 3);
             let x = origin.x + layout.cell * (3 + caption) as f32;
-            let room = layout.origin.x + self.viewport.width - x;
+            let right = self.viewport.width - crate::minimap::width(self, self.viewport.width);
+            let room = layout.origin.x + right - x;
             if room > px(0.) {
                 out.push(
                     anchored()
