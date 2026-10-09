@@ -69,6 +69,7 @@ athena-workspace = { path = "crates/athena-workspace" }
 athena-ui = { path = "crates/athena-ui" }
 athena-containers = { path = "crates/athena-containers" }
 athena-playwright = { path = "crates/athena-playwright" }
+athena-testing = { path = "crates/athena-testing" }
 athena-preview = { path = "crates/athena-preview" }
 athena-lsp = { path = "crates/athena-lsp" }
 

@@ -1,0 +1,68 @@
+{
+  "numFailedTests": 1,
+  "success": false,
+  "testResults": [
+    {
+      "name": "/work/web/src/math.test.ts",
+      "status": "failed",
+      "message": "",
+      "assertionResults": [
+        {
+          "ancestorTitles": [
+            "math"
+          ],
+          "fullName": "math adds",
+          "status": "passed",
+          "title": "adds",
+          "duration": 0.41366699999997536,
+          "failureMessages": [],
+          "location": {
+            "line": 2,
+            "column": 3
+          }
+        },
+        {
+          "ancestorTitles": [
+            "math"
+          ],
+          "fullName": "math fails",
+          "status": "failed",
+          "title": "fails",
+          "duration": 1.373958000000016,
+          "failureMessages": [
+            "AssertionError: expected 2 to be 3 // Object.is equality\n    at /work/web/src/math.test.ts:6:19"
+          ],
+          "location": {
+            "line": 5,
+            "column": 3
+          }
+        },
+        {
+          "ancestorTitles": [
+            "math"
+          ],
+          "fullName": "math skipped",
+          "status": "skipped",
+          "title": "skipped",
+          "failureMessages": [],
+          "location": {
+            "line": 8,
+            "column": 6
+          }
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "top level",
+          "status": "passed",
+          "title": "top level",
+          "duration": 0.02845800000000054,
+          "failureMessages": [],
+          "location": {
+            "line": 10,
+            "column": 1
+          }
+        }
+      ]
+    }
+  ]
+}

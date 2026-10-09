@@ -1,0 +1,67 @@
+{"ImportPath":"example.com/m/broken [example.com/m/broken.test]","Action":"build-output","Output":"# example.com/m/broken [example.com/m/broken.test]\n"}
+{"ImportPath":"example.com/m/broken [example.com/m/broken.test]","Action":"build-output","Output":"broken/b_test.go:5:28: undefined: undefined\n"}
+{"ImportPath":"example.com/m/broken [example.com/m/broken.test]","Action":"build-fail"}
+{"Action":"start","Package":"example.com/m/broken"}
+{"Action":"output","Package":"example.com/m/broken","Output":"FAIL\texample.com/m/broken [build failed]\n"}
+{"Action":"fail","Package":"example.com/m/broken","Elapsed":0,"FailedBuild":"example.com/m/broken [example.com/m/broken.test]"}
+{"Action":"start","Package":"example.com/m/notests"}
+{"Action":"output","Package":"example.com/m/notests","Output":"?   \texample.com/m/notests\t[no test files]\n"}
+{"Action":"skip","Package":"example.com/m/notests","Elapsed":0}
+{"Action":"start","Package":"example.com/m/pan"}
+{"Action":"start","Package":"example.com/m/sub"}
+{"Action":"run","Package":"example.com/m/sub","Test":"TestPass"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestPass","Output":"=== RUN   TestPass\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestPass","Output":"    a_test.go:6: hello\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestPass","Output":"--- PASS: TestPass (0.00s)\n"}
+{"Action":"pass","Package":"example.com/m/sub","Test":"TestPass","Elapsed":0}
+{"Action":"run","Package":"example.com/m/sub","Test":"TestFail"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestFail","Output":"=== RUN   TestFail\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestFail","Output":"    a_test.go:11: Add(1, 1) = 2, want 3\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestFail","Output":"--- FAIL: TestFail (0.00s)\n"}
+{"Action":"fail","Package":"example.com/m/sub","Test":"TestFail","Elapsed":0}
+{"Action":"run","Package":"example.com/m/sub","Test":"TestSkip"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSkip","Output":"=== RUN   TestSkip\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSkip","Output":"    a_test.go:16: not today\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n"}
+{"Action":"skip","Package":"example.com/m/sub","Test":"TestSkip","Elapsed":0}
+{"Action":"run","Package":"example.com/m/sub","Test":"TestSub"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSub","Output":"=== RUN   TestSub\n"}
+{"Action":"run","Package":"example.com/m/sub","Test":"TestSub/one"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSub/one","Output":"=== RUN   TestSub/one\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSub/one","Output":"--- PASS: TestSub/one (0.00s)\n"}
+{"Action":"pass","Package":"example.com/m/sub","Test":"TestSub/one","Elapsed":0}
+{"Action":"run","Package":"example.com/m/sub","Test":"TestSub/two"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSub/two","Output":"=== RUN   TestSub/two\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSub/two","Output":"    a_test.go:21: boom\n"}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSub/two","Output":"--- FAIL: TestSub/two (0.00s)\n"}
+{"Action":"fail","Package":"example.com/m/sub","Test":"TestSub/two","Elapsed":0}
+{"Action":"output","Package":"example.com/m/sub","Test":"TestSub","Output":"--- FAIL: TestSub (0.00s)\n"}
+{"Action":"fail","Package":"example.com/m/sub","Test":"TestSub","Elapsed":0}
+{"Action":"output","Package":"example.com/m/sub","Output":"FAIL\n"}
+{"Action":"run","Package":"example.com/m/pan","Test":"TestOK"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestOK","Output":"=== RUN   TestOK\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestOK","Output":"--- PASS: TestOK (0.00s)\n"}
+{"Action":"pass","Package":"example.com/m/pan","Test":"TestOK","Elapsed":0}
+{"Action":"run","Package":"example.com/m/pan","Test":"TestPanics"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"=== RUN   TestPanics\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"--- FAIL: TestPanics (0.00s)\n"}
+{"Action":"output","Package":"example.com/m/sub","Output":"FAIL\texample.com/m/sub\t0.530s\n"}
+{"Action":"fail","Package":"example.com/m/sub","Elapsed":0.531}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"panic: assignment to entry in nil map [recovered, repanicked]\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"goroutine 4 [running]:\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"testing.tRunner.func1.2({0x10518ec40, 0x1051d8e10})\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"\t/go/src/testing/testing.go:1974 +0x1a0\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"testing.tRunner.func1()\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"\t/go/src/testing/testing.go:1977 +0x318\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"panic({0x10518ec40?, 0x1051d8e10?})\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"\t/go/src/runtime/panic.go:860 +0x12c\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"example.com/m/pan.TestPanics(0x6d1f84678488?)\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"\t/work/m/pan/p_test.go:9 +0x34\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"testing.tRunner(0x6d1f84678488, 0x1051b7f08)\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"\t/go/src/testing/testing.go:2036 +0xc4\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"created by testing.(*T).Run in goroutine 1\n"}
+{"Action":"output","Package":"example.com/m/pan","Test":"TestPanics","Output":"\t/go/src/testing/testing.go:2101 +0x3a8\n"}
+{"Action":"fail","Package":"example.com/m/pan","Test":"TestPanics","Elapsed":0}
+{"Action":"output","Package":"example.com/m/pan","Output":"FAIL\texample.com/m/pan\t0.533s\n"}
+{"Action":"fail","Package":"example.com/m/pan","Elapsed":0.533}

@@ -594,6 +594,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "athena-testing"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "athena-ui"
 version = "0.5.0"
 dependencies = [
