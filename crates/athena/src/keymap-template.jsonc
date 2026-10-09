@@ -3,6 +3,8 @@
 // unless theirs names a context nested inside it. "-command" removes a default.
 // {"key": "cmd-k cmd-t", "command": "athena::NewTerminal"},
 // {"key": "cmd-d", "command": "-athena::SplitRight"},
-// {"key": "f5", "command": "athena::ShowProblems", "when": "Editor"}
+// {"key": "f5", "command": "athena::ShowProblems", "when": "Editor"},
+// {"key": "alt-f3", "command": "editor::ShowNextChange", "when": "Editor"},
+// {"key": "shift-alt-f3", "command": "editor::ShowPreviousChange", "when": "Editor"}
 [
 ]
