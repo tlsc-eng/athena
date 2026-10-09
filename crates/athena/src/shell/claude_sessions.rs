@@ -362,6 +362,13 @@ impl Shell {
                 if state.root.as_ref() == Some(&root) {
                     state.loading = None;
                     state.hooks_on = hooks_on;
+                    // The newest session opens on first view: it is usually the one to review.
+                    if state.rows.is_empty()
+                        && state.expanded.is_empty()
+                        && let Some(first) = rows.first()
+                    {
+                        state.expanded.insert(first.id.clone());
+                    }
                     if *state.rows != rows {
                         state.rows = Rc::new(rows);
                     }
@@ -411,7 +418,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// Moves the review to another file; with none running, starts one on the newest session
+    /// that changed files.
     fn step_review(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review.sessions.review.is_none() {
+            let rows = self.review.sessions.rows.clone();
+            if let Some(row) = rows.iter().find(|r| !r.files.is_empty()) {
+                self.start_review(row, window, cx);
+            }
+            return;
+        }
         let Some(review) = self.review.sessions.review.as_mut() else {
             return;
         };
