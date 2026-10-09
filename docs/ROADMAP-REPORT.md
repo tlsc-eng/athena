@@ -1,4 +1,4 @@
-# Roadmap report: v0.2.0, v0.3.0, v0.4.0 and v0.5.0
+# Roadmap report: v0.2.0 to v0.6.0
 
 What happened while you were away, for the roadmap in `piped-orbiting-stearns.md` (Phases A–E).
 
@@ -8,10 +8,171 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
   installed here with `brew upgrade --cask athena`)
 - Release: v0.4.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.4.0 (tap `7aa6afb`, installed here)
 - Release: v0.5.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.5.0 (tap `b75ca95`, installed here)
+- Release: v0.6.0 — <link added at release>
 
 The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
-v0.5. Everything below marked **unverified on screen** is covered by unit tests, logs or
-synthetic-key runs, but nobody has looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+v0.5. For v0.6 the lanes ran GUI QA with synthetic keys only, while you were idle, so anything
+that needs a mouse click is unverified. Everything below marked **unverified on screen** is
+covered by unit tests, logs or synthetic-key runs, but nobody has looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+
+## v0.6.0
+
+Plan: [plans/v0.6.md](plans/v0.6.md), three file-disjoint lanes (search and saving, language
+server settings and UI, tests, tasks, conflicts and git remotes), `v0.5.0..main`, then a review
+pass. The v0.5.0 section follows this one.
+
+### What shipped
+
+**Search and saving** (`599dbf8`, `95169e6`, `339090a`, `6eafaa3`)
+- The editor find bar gets VS Code's Match Case, Match Whole Word and Use Regular Expression
+  toggles (`Aa`, `ab`, `.*`, Cmd+Alt+C/W/R). Regex mode shows an invalid pattern inline and fills
+  in `$1`, `$&`, `\n` and `\t` on Replace; the toggles survive closing the bar and Cmd+D follows
+  them while it is open.
+- Project search gets the same toggles, Files to include / Files to exclude globs (VS Code's
+  rules), `$1` replacement in regex mode, a Replace Preview diff tab when a match is clicked with
+  replace text present, and its query, fields and results kept per project while the app runs.
+- Save tidying: trim trailing whitespace and insert a final newline, as one undo step;
+  `.editorconfig` (indentation on open, line endings, trimming and the final newline on save); and
+  the status bar's LF/CRLF converts every line break. Auto save now waits for a pending format.
+
+**Language servers and the editor** (`35fe4ed`, `b95bbd0`, `44d0771`, `db30fb7`, `bbfbe02`,
+`7470bfa`, `ba2cf52`, `e40e351`, `807a1c1`, `55e8291`, `41c56d9`)
+- `settings.json` in the data folder: JSONC, reloaded on save, problems in a toast. It holds
+  `editor.*` (format on save, trimming, final newline, word wrap, font size, tab size, auto save
+  delay, inlay hints), `"[lang]"` blocks by VS Code's language id, `theme`, `ide_integration`,
+  `git.autofetch` and `lsp.<program>`, which goes to the server as `initializationOptions`, as
+  `workspace/configuration` answers and through `didChangeConfiguration`. VS Code's spellings
+  (`files.trimTrailingWhitespace`, `editor.tabSize`) are read too. Open Settings (JSON) is on
+  Cmd+, and in the Athena menu; palette toggles write their key into the file and `workspace.json`
+  stays the fallback.
+- Inlay hints drawn inside the line, with Toggle inlay hints turning on a curated gopls and
+  typescript-language-server set.
+- `textDocument/documentHighlight` marks other uses of the symbol at the cursor (reads and writes
+  in different colours) after a 250 ms rest.
+- Breadcrumbs under the tab strip: folders, the file and the symbols holding the cursor, each
+  with a dropdown.
+- Completion snippets keep their tab stops: Tab / Shift+Tab, mirrored placeholders typed
+  together, `$0` or Escape to finish.
+- Grammars for go.mod / go.work, go.sum, Makefiles, SQL and Protocol Buffers (all MIT tree-sitter
+  crates; Athena carries its own queries for go.mod, go.sum and proto).
+
+**Tests, tasks, conflicts and git** (`a9dbd91`, `fb42753`, `2fe55e2`, `b976a73`, `564e2bf`,
+`578c017`, `5756c89`, `34735a6`)
+- A new `athena-testing` crate runs `go test -json`, Vitest and Jest (JSON reporter) in their own
+  process group with a time limit and reads the reports. Test files get a green ▶ in the gutter
+  per test or group, which turns into a pass, fail or skip dot; a Tests drawer tab lists suites
+  and tests with output, clickable `file:line`, Run All, Re-run Failed and Stop; six palette
+  commands.
+- Run task… lists `package.json` scripts (npm, pnpm, yarn or bun by lockfile) and Makefile
+  targets and types the command into a new terminal tab.
+- Merge conflicts: tinted blocks, VS Code's Accept Current / Incoming / Both and Compare Changes
+  row, a conflict count in the Changes tab and a Stage toast once none are left.
+- Git: fetch, `pull --ff-only`, push and Publish Branch, ahead/behind in a status bar sync cell,
+  stash, stash with untracked files and pop in the branch picker, the sync cell's menu and the
+  palette, and autofetch every three minutes when `git.autofetch` is on.
+
+Screenshots from the lanes' QA builds: [the Search tab with its toggles](screenshots/v0.6/01-search.png),
+[run marks in a TypeScript and a Go test file with the Tests tab after a run](screenshots/v0.6/02-tests.png)
+(the status bar shows ↓1 ↑1), and [breadcrumbs, inlay hints and a highlighted variable](screenshots/v0.6/03-lsp.png).
+
+### Decisions made without you
+
+- **Trimming and the final newline are off by default for every language**, as in VS Code. The
+  lane first shipped them on for Go, TS/JS, Rust, Python, YAML and JSON, but the review found that
+  trimming then ate blanks that are part of the text inside raw strings, template literals and
+  docstrings. Off matches VS Code, which this release follows for defaults. Now settings.json or `.editorconfig` turns them on, and when
+  on, a line whose break lies inside a string literal (by the tree-sitter parse) keeps its blanks
+  (`f1082c2`).
+- **Markdown is no longer special-cased** for saving. The lane had given it the final newline but
+  not trimming, since two trailing spaces are a line break there; with both off by default there
+  is nothing to special-case, and a `"[markdown]"` block can say what you want.
+- **Autofetch is off**, as VS Code's `git.autofetch` is; when on it fetches the active project
+  every three minutes while the window is in front, and its failures stay quiet.
+- **Pull is `git pull --ff-only`**: a diverged branch is refused with git's own message rather than
+  merged or rebased behind your back. Publish Branch asks first and names the remote (origin, or
+  the only one).
+- **Inlay hints are off in practice**: gopls and typescript-language-server send none unless
+  configured, as with VS Code's Go extension. Toggle inlay hints writes `editor.inlay_hints` and
+  adds a curated set unless your `lsp` entry chooses its own; `false` hides every hint.
+- The find toggles are only on Cmd+Alt+C/W/R. The plan's bare Alt+C/W/R took the keys macOS uses
+  to type ç, ∑ and ® into a query (`18680b1`).
+- Replace All refuses while results are cut short at 2000, instead of rewriting files nobody saw
+  (`f6a41dd`).
+- Git remote commands never wait on a prompt, and only one fetch, pull, push or stash runs at a
+  time (`c4cf875`, `ab7329a`).
+- Run task types a command line into a terminal, since the terminal spawns an interactive shell
+  rather than an argv; names that would act as keystrokes or options are dropped, `make` gets `--`
+  (`a76c419`).
+- The settings writer refuses a file `serde_json` cannot read and edits the member the parser
+  actually keeps (the last of a duplicated key), so a toggle never damages or silently misses
+  settings.json (`c4d269f`).
+- Compare Changes and Replace Preview tabs are never saved in `workspace.json`.
+
+### Review fixes
+
+A review of `v0.5.0..807a1c1` found 15 issues (1 high, 12 medium or medium-low, 2 low) plus four
+low notes. All are fixed on main:
+- Accepting a conflict whose block held a lone CR panicked (high); an unclosed `<<<<<<<` hid the
+  real block after it and offered "All conflicts resolved, Stage" (`75cdb7c`).
+- The settings writer rewrote invalid files and edited the first of a duplicated key while the
+  parser keeps the last (`c4d269f`).
+- Replace All with truncated results rewrote files never shown (`f6a41dd`).
+- Test output only arrived at EOF, so a leftover child holding the pipe blanked the panel; test
+  processes outlived Athena; a timed-out run discarded its written report (`c99c083`).
+- Bare Alt+C/W/R blocked typing ç, ∑, ® in the find bars (`18680b1`).
+- ssh could prompt on `/dev/tty` or hang, and a timed-out ssh was orphaned (`c4cf875`).
+- Remote ops and stash had no busy guard, so Publish or a double click could run two at once
+  (`ab7329a`).
+- Trimming on by default ignored string literals, and an auto save trimmed the caret line of
+  another tab on the same file (`f1082c2`).
+- Task names with control characters or a leading `-` were injected into the terminal
+  (`a76c419`).
+- `$2` for a missing group deleted text, whole-word search was quadratic on long words, and a
+  refused save had already tidied the buffer (`a86c92c`).
+- Lows: Pop stash popped by a stale index (`37770fb`), a deleted upstream showed ↓0 ↑0
+  (`6a78412`), JS test titles with escapes never matched `-t` (`5f33d6e`), an unclosed snippet
+  placeholder left a phantom tab stop (`8f39d22`).
+
+Before the review, from the lanes' own QA: the conflict actions row painted over the palette and
+ran into the next pane, and the sync cell flashed "Publish" at launch (`578c017`); a dependency's
+compile error showed only "[build failed]" (`5756c89`); editors shown before their server was
+ready never asked for inlay hints (`55e8291`); the settings template's examples sat outside the
+braces (`41c56d9`).
+
+### Verification
+
+- Unit tests throughout, plus gopls integration tests for inlay hints (by default, configured, and
+  after `didChangeConfiguration`) and documentHighlight, real `go test -json` and Vitest fixtures,
+  git remote ops against a local bare remote, fake ssh scripts and an unreachable remote for the
+  no-prompt rules, 3000 generated settings documents checked against the parser, and process
+  group tests for the test runner (orphans, timeouts, `kill_now`).
+- GUI QA: each lane ran its debug build in an isolated `HOME` with a visible window, **driven by
+  synthetic keys only, and only while you were idle** (the scripts stopped as soon as HID input
+  appeared). Covered that way: find toggles, invalid and valid regex, saving with
+  `.editorconfig`, project search with regex, run marks in Go and TypeScript files, a palette test
+  run with results in the Tests tab, Run task…, the branch picker's stash rows, a palette fetch,
+  documentHighlight, breadcrumbs, snippet completion and Toggle inlay hints. These runs were on
+  the lane builds, before the review fixes (the search run still used bare Alt+W, and
+  typescript-language-server was not installed in its `HOME`). Only the three screenshots above
+  are kept; the rest of the QA captures were scratch files.
+- **Unverified (they need a mouse click)**: clicking a gutter ▶, the conflict Accept / Compare
+  row and the Stage toast, breadcrumb dropdowns, the status bar's sync cell menu and LF/CRLF
+  menu, the Publish Branch confirmation, clicking a Search match for Replace Preview, the Search
+  details `⋯` button, the Replace All prompt, rows, hover Run / Go to Test and `file:line` links
+  in the Tests tab, and picking a stash to pop.
+
+### Known gaps
+
+- Per-language defaults do not beat global settings yet, as they do in VS Code: Athena has none
+  for saving, so a global `trim_trailing_whitespace: true` also trims Markdown unless a
+  `"[markdown]"` block says otherwise. Relatedly, Markdown always wraps unless its tab is toggled;
+  a `"[markdown]"` `word_wrap: false` does not stop it.
+- Go subtests (`t.Run`) appear in the results but cannot be run on their own; their parent runs.
+- Jest is read only through the JSON report shape it shares with Vitest; the fixture is a real
+  Vitest report, and no real Jest run was checked.
+- typescript-language-server settings (the inlay hint preferences, `lsp` passthrough) are
+  untested against a real server; gopls is covered by integration tests.
+- Lines that wrap are drawn without inlay hints.
 
 ## v0.5.0
 
@@ -592,3 +753,22 @@ For v0.5.0:
     outside a terminal; edit `keymap.json` with a bad entry and watch for the toast. In zsh, run a
     failing command: red dot, Cmd+Up jumps to it.
 23. Quit with folds, a scrolled editor and wrap on in one tab, relaunch: all three come back.
+
+For v0.6.0:
+
+24. Open Settings (JSON) (Cmd+comma), set `"editor": {"trim_trailing_whitespace": true}` and save:
+    no toast. Save a Go file with a trailing space inside a raw string and one after code: only
+    the second goes. Break the file (drop a comma) and run Toggle inlay hints: a "settings.json was
+    not updated" toast, the file left as it was.
+25. In an editor, Cmd+F with Cmd+Alt+C / W / R, then type `ç` with Alt+C into the query. Regex
+    `(\w+)_(\w+)` replaced with `$2_$1`.
+26. Cmd+Shift+F, open the `⋯` details, include `*.go`; type replace text and click a match: the
+    Replace Preview tab. Search something with over 2000 hits and click Replace All: refused.
+27. In a Go test file click a gutter ▶, then the Tests tab: Re-run Failed, a `file:line` link,
+    hover Run / Go to Test. Same in a Vitest project and, if you have one, a Jest project.
+28. Make a merge conflict, open the file: click Accept Current / Incoming / Both and Compare
+    Changes; save with no markers left and press Stage on the toast.
+29. Click the status bar's sync cell: Fetch, Pull, Push (or Publish Branch on a new branch, which
+    should ask first); Stash, then pick the stash from Pop Stash…. Click LF and convert to CRLF.
+30. Click each breadcrumb (a folder, the file, a symbol). Run Run task… with a Makefile target.
+31. Turn on `"git": {"autofetch": true}` and leave the window in front for three minutes.
