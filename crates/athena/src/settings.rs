@@ -860,13 +860,13 @@ fn remove_member(text: &str, object: &Object, at: usize) -> String {
 pub(crate) fn remove_span(text: &str, span: Range<usize>, prev_end: Option<usize>) -> String {
     let line_start = text[..span.start].rfind('\n').map_or(0, |i| i + 1);
     let own_line = text[line_start..span.start].trim().is_empty();
-    let start = if own_line { line_start } else { span.start };
     let mut scan = Scan {
         s: text.as_bytes(),
         i: span.end,
     };
     scan.skip_blank();
     if scan.peek() == Some(b',') {
+        let start = if own_line { line_start } else { span.start };
         let after = scan.i + 1;
         let line_end = text[after..].find('\n').map_or(text.len(), |i| after + i);
         let rest = text[after..line_end].trim_start();
@@ -877,18 +877,37 @@ pub(crate) fn remove_span(text: &str, span: Range<usize>, prev_end: Option<usize
         };
         return format!("{}{}", &text[..start], &text[end..]);
     }
-    if let Some(prev_end) = prev_end {
-        return format!("{}{}", &text[..prev_end], &text[span.end..]);
-    }
+    // The last entry: only the comma before it goes, not the comments between them.
+    let comma = prev_end.and_then(|end| {
+        let mut scan = Scan {
+            s: text.as_bytes(),
+            i: end,
+        };
+        scan.skip_blank();
+        (scan.peek() == Some(b',')).then_some(scan.i)
+    });
+    let before = &text[line_start..span.start];
+    let own_line = own_line || comma.is_some_and(|c| c >= line_start) && before.trim() == ",";
     let line_end = text[span.end..]
         .find('\n')
         .map_or(text.len(), |i| span.end + i);
     let rest = &text[span.end..line_end];
-    let end = match own_line && rest.trim().is_empty() {
-        true => (line_end + 1).min(text.len()),
-        false => span.end + (rest.len() - rest.trim_start().len()),
+    let after_blank = span.end + (rest.len() - rest.trim_start().len());
+    let (start, end) = match own_line {
+        true if rest.trim().is_empty() || rest.trim_start().starts_with("//") => {
+            (line_start, (line_end + 1).min(text.len()))
+        }
+        true => (line_start, after_blank),
+        false => match comma {
+            Some(c) if text[c + 1..span.start].trim().is_empty() => (c, after_blank),
+            _ if rest.trim().is_empty() => (line_start + before.trim_end().len(), after_blank),
+            _ => (span.start, after_blank),
+        },
     };
-    format!("{}{}", &text[..start], &text[end..])
+    match comma.filter(|&c| c < start) {
+        Some(c) => format!("{}{}{}", &text[..c], &text[c + 1..start], &text[end..]),
+        None => format!("{}{}", &text[..start], &text[end..]),
+    }
 }
 
 /// Where a top-level JSON array's entries sit: its brackets and each entry's bytes.
@@ -1315,7 +1334,7 @@ impl Scan<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn set(text: &str, keys: &[&str], value: Value) -> String {
@@ -1792,6 +1811,156 @@ mod tests {
             "{\n  \"editor\": { /* keep */ }\n}",
             "an editor block with a comment in it stays"
         );
+    }
+
+    #[test]
+    fn unsetting_the_last_member_keeps_the_comments_before_it() {
+        for (text, want) in [
+            (
+                "{\n  \"ide_integration\": true,\n  // note\n  // \"theme\": \"light\",\n  \"theme\": \"dark\" // mine\n}\n",
+                "{\n  \"ide_integration\": true\n  // note\n  // \"theme\": \"light\",\n}\n",
+            ),
+            (
+                "{\n  \"ide_integration\": true, // about it\n  \"theme\": \"dark\"\n}",
+                "{\n  \"ide_integration\": true // about it\n}",
+            ),
+            (
+                "{\"ide_integration\": true /* x */, \"theme\": \"dark\"}",
+                "{\"ide_integration\": true /* x */}",
+            ),
+            (
+                "{\n  \"ide_integration\": true\n  , \"theme\": \"dark\"\n}",
+                "{\n  \"ide_integration\": true\n}",
+            ),
+            (
+                "{\n  \"ide_integration\": true,\n  /* c */ \"theme\": \"dark\"\n}",
+                "{\n  \"ide_integration\": true\n  /* c */\n}",
+            ),
+            (
+                "{\n  // only\n  \"theme\": \"dark\" // mine\n}",
+                "{\n  // only\n}",
+            ),
+        ] {
+            assert_eq!(unset_value(text, &["theme"]).unwrap(), want, "from\n{text}");
+        }
+    }
+
+    /// The numbered comments in `text`: `c` ones stand alone or comment out an entry, `t` ones
+    /// end an entry's line.
+    pub(crate) fn comment_marks(text: &str) -> Vec<&str> {
+        text.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| {
+                w.len() > 1
+                    && w.starts_with(['c', 't'])
+                    && w[1..].bytes().all(|b| b.is_ascii_digit())
+            })
+            .collect()
+    }
+
+    /// `entries` as a JSONC list or object between random numbered comments; each `t` comment
+    /// comes with the entries on its line, `usize::MAX` standing for the opening bracket.
+    pub(crate) fn commented_entries(
+        entries: &[String],
+        (open, close): (&str, &str),
+        next: &mut impl FnMut(usize) -> usize,
+    ) -> (String, Vec<(String, Vec<usize>)>) {
+        let mut text = String::from(open);
+        let mut n = 0;
+        let mut ends = Vec::new();
+        let mut line = vec![usize::MAX];
+        let mut line_open = false;
+        for (i, entry) in entries.iter().enumerate() {
+            for _ in 0..next(3) {
+                n += 1;
+                text.push_str(&match next(3) {
+                    0 => format!("\n  // c{n}"),
+                    1 => format!("\n  // {}, // c{n}", entries[next(entries.len())]),
+                    _ => format!("\n  /* c{n} */"),
+                });
+                line_open = true;
+            }
+            if line_open || next(4) != 0 {
+                text.push_str("\n  ");
+                line.clear();
+            } else {
+                text.push(' ');
+            }
+            text.push_str(entry);
+            line.push(i);
+            if i + 1 < entries.len() || next(3) == 0 {
+                text.push(',');
+            }
+            line_open = next(2) == 0;
+            if line_open {
+                n += 1;
+                text.push_str(&format!(" // t{n}"));
+                ends.push((format!("t{n}"), line.clone()));
+            }
+        }
+        for _ in 0..next(3) {
+            n += 1;
+            text.push_str(&format!("\n  // c{n}"));
+        }
+        text.push('\n');
+        text.push_str(close);
+        (text, ends)
+    }
+
+    #[test]
+    fn unsetting_keeps_every_comment_but_the_one_ending_the_removed_line() {
+        let mut state: u64 = 0x3c6e_f372_fe94_f82b;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n.max(1) as u64) as usize
+        };
+        let members: [(&[&str], &str); 6] = [
+            (&["theme"], "\"theme\": \"dark\""),
+            (&["ide_integration"], "\"ide_integration\": true"),
+            (&["git", "autofetch"], "\"git.autofetch\": true"),
+            (&["editor", "tab_size"], "\"editor.tabSize\": 4"),
+            (&["editor", "word_wrap"], "\"editor.word_wrap\": true"),
+            (
+                &["editor", "format_on_save"],
+                "\"editor.formatOnSave\": true",
+            ),
+        ];
+        for _ in 0..3000 {
+            let mut order: Vec<usize> = (0..members.len()).collect();
+            for i in (1..order.len()).rev() {
+                order.swap(i, next(i + 1));
+            }
+            order.truncate(1 + next(members.len()));
+            let entries: Vec<String> = order.iter().map(|&m| members[m].1.into()).collect();
+            let (text, ends) = commented_entries(&entries, ("{", "}"), &mut next);
+            let gone = order[next(order.len())];
+            let out = unset_value(&text, members[gone].0).unwrap();
+            let (before, _) = parse(&text).unwrap();
+            let (after, problems) = parse(&out).unwrap();
+            assert!(problems.is_empty(), "{problems:?} in\n{out}");
+            for (keys, _) in members {
+                let setting = schema::find(keys).unwrap();
+                let want = match keys == members[gone].0 {
+                    true => None,
+                    false => setting.value_in(&before),
+                };
+                assert_eq!(
+                    setting.value_in(&after),
+                    want,
+                    "{keys:?} in\n{text}\nbecame\n{out}"
+                );
+            }
+            let at = order.iter().position(|&m| m == gone).unwrap();
+            let mut want = comment_marks(&text);
+            want.retain(|m| !ends.iter().any(|(t, line)| t == m && *line == [at]));
+            assert_eq!(
+                comment_marks(&out),
+                want,
+                "{:?} unset in\n{text}\nbecame\n{out}",
+                members[gone].0
+            );
+        }
     }
 
     #[test]

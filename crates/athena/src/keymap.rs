@@ -922,6 +922,56 @@ mod tests {
     }
 
     #[test]
+    fn removing_the_last_entry_keeps_the_comments_and_commented_out_entries_before_it() {
+        let text = "[\n  {\"key\": \"cmd-1\", \"command\": \"NewTerminal\"}, // one\n  // {\"key\": \"cmd-9\", \"command\": \"QuickOpen\"},\n  /* two */\n  {\"key\": \"cmd-3\", \"command\": \"SplitRight\"} // three\n]\n";
+        assert_eq!(
+            remove_entries(text, &[1]).unwrap(),
+            "[\n  {\"key\": \"cmd-1\", \"command\": \"NewTerminal\"} // one\n  // {\"key\": \"cmd-9\", \"command\": \"QuickOpen\"},\n  /* two */\n]\n"
+        );
+    }
+
+    #[test]
+    fn removing_entries_keeps_every_comment_but_the_ones_ending_removed_lines() {
+        use crate::settings::tests::{comment_marks, commented_entries};
+        let mut state: u64 = 0xa54f_f53a_5f1d_36f1;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n.max(1) as u64) as usize
+        };
+        for _ in 0..3000 {
+            let count = 1 + next(6);
+            let entries: Vec<String> = (0..count)
+                .map(|i| format!("{{\"key\": \"f{}\", \"command\": \"Command{i}\"}}", i + 1))
+                .collect();
+            let (text, ends) = commented_entries(&entries, ("[", "]"), &mut next);
+            let removed: Vec<usize> = (0..count).filter(|_| next(3) == 0).collect();
+            let out = remove_entries(&text, &removed).unwrap();
+            let kept: Vec<Option<String>> = (0..count)
+                .filter(|i| !removed.contains(i))
+                .map(|i| Some(format!("athena::Command{i}")))
+                .collect();
+            assert_eq!(
+                entry_commands(&out),
+                kept,
+                "{removed:?} removed from\n{text}\nbecame\n{out}"
+            );
+            let mut want = comment_marks(&text);
+            want.retain(|m| {
+                !ends
+                    .iter()
+                    .any(|(t, line)| t == m && line.iter().all(|i| removed.contains(i)))
+            });
+            assert_eq!(
+                comment_marks(&out),
+                want,
+                "{removed:?} removed from\n{text}\nbecame\n{out}"
+            );
+        }
+    }
+
+    #[test]
     fn the_recorder_takes_a_chord_and_enter_or_escape_ends_it() {
         let k = |s: &str| Keystroke::parse(s).unwrap();
         let mut r = Recorder::default();
