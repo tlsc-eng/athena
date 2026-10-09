@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use athena_ui::{ContextMenu, InputEvent, MenuItem, TextInput};
-use athena_workspace::{Axis, ItemId, PaneId};
+use athena_workspace::{Axis, ItemId, ItemKind, PaneId};
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, Focusable, Pixels, Point, PromptLevel, SharedString,
     Window, prelude::*,
@@ -408,6 +408,7 @@ impl Shell {
             return;
         };
         let file = p.items[index].kind.file().cloned();
+        let terminal = matches!(p.items[index].kind, ItemKind::Terminal { .. });
         let others: Vec<ItemId> = ids.iter().copied().filter(|&i| i != item).collect();
         let right = ids[index + 1..].to_vec();
         let can_split = ids.len() > 1 || file.is_some();
@@ -431,6 +432,14 @@ impl Shell {
             }),
             MenuItem::separator(),
         ];
+        if terminal {
+            items.push(shell_item(
+                "Move Terminal into Panel",
+                cx,
+                move |this, w, cx| this.terminal_to_panel(item, w, cx),
+            ));
+            items.push(MenuItem::separator());
+        }
         if let Some(file) = file {
             items.extend(path_items(&root, &file));
             items.push(shell_item("Reveal in File Tree", cx, move |this, _, cx| {
@@ -450,6 +459,30 @@ impl Shell {
             })
             .disabled(!can_split),
         );
+        self.open_context_menu(position, items, window, cx);
+    }
+
+    /// Right-click on a panel terminal's row.
+    pub(super) fn open_panel_terminal_menu(
+        &mut self,
+        item: ItemId,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let items = vec![
+            shell_item("Move into Editor Area", cx, move |this, w, cx| {
+                this.panel_terminal_to_editor(item, None, w, cx);
+            }),
+            shell_item("New Terminal", cx, |this, w, cx| {
+                this.new_panel_terminal(w, cx)
+            })
+            .hint("⌃⇧`"),
+            MenuItem::separator(),
+            shell_item("Kill Terminal", cx, move |this, w, cx| {
+                this.close_panel_terminal(item, w, cx)
+            }),
+        ];
         self.open_context_menu(position, items, window, cx);
     }
 

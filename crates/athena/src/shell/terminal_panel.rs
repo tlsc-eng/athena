@@ -2,7 +2,9 @@ use std::path::Path;
 
 use athena_ui::{ActiveTheme, Button, ButtonKind, Tooltip, empty_state};
 use athena_workspace::{Item, ItemId, ItemKind, Layout, PaneId, Panel};
-use gpui::{AnyElement, Context, FontWeight, MouseButton, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, Window, div, prelude::*, px,
+};
 
 use super::Shell;
 use super::dnd::{TabDrag, TabGhost};
@@ -401,6 +403,13 @@ impl Shell {
                 el.hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
             })
             .on_click(cx.listener(move |this, _, w, cx| this.activate_panel_terminal(id, w, cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, w, cx| {
+                    cx.stop_propagation();
+                    this.open_panel_terminal_menu(id, event.position, w, cx)
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, _, w, cx| this.close_panel_terminal(id, w, cx)),
