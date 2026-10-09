@@ -2,10 +2,11 @@
 
 Athena is a macOS IDE built around terminals that outlive the window and around Claude Code.
 Shells run in a separate session daemon (`athena-mux`), so quitting or updating the app does not
-kill them; the window reattaches on the next launch. Projects get split panes of terminals, an
-editor with language-server support, a git diff viewer with hunk staging, a commit box and
-fetch, pull and push, a test runner for Go, Vitest and Jest, a browser preview, and read-only
-views of Playwright results and Docker containers. Claude Code sessions show their state on the tab, each file Claude edits can be reviewed as one diff against
+kill them; the window reattaches on the next launch. Projects get split panes of terminals and a
+terminal panel under them, an editor with language-server support, a git diff viewer with hunk
+staging, file history and blame, a commit box and fetch, pull and push, a test runner for Go,
+Vitest and Jest, a browser preview, and read-only views of Playwright results and Docker
+containers. Claude Code sessions show their state on the tab, each file Claude edits can be reviewed as one diff against
 the version from before the session, and an MCP server lets Claude read the editor and terminals.
 Optionally Athena also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
 or reject, and the editor selection goes with each prompt.
@@ -41,6 +42,18 @@ its shells running.
 - Shell sessions are owned by `athena-mux`, which keeps running when the window closes. Restored
   tabs reattach to the same shells with their scrollback.
 - Split panes right and down, zoom a pane, move focus between panes with the keyboard.
+- A terminal panel under the panes, as in VS Code: ``ctrl-` `` shows the drawer's **Terminal** tab
+  and focuses it (opening a terminal if there is none), or hides it when it has focus;
+  ``ctrl-shift-` `` opens another. The tab's header has New Terminal, Move to Editor Area and Kill;
+  once there are two, the panel lists its terminals on the right as sub-tabs, whose right-click
+  menu has Move into Editor Area, New Terminal and Kill Terminal. A terminal moves between the
+  panel and the editor area, keeping its shell, through those menus (a terminal tab's menu has
+  Move Terminal into Panel), the View menu, the palette's **Terminal:** commands, or by dragging
+  a sub-tab onto a pane or a terminal tab onto the panel.
+  Panel terminals belong to the daemon like any other and come back on the next launch. With the
+  keyboard in a panel terminal, `cmd-w` closes that terminal rather than the editor area's tab.
+  Claude Code and the MCP tools see panel terminals too, and a notification still leads to its
+  terminal after it moves.
 - zsh shell integration (OSC 133) marks commands; one that runs longer than 10 seconds posts a
   notification when it finishes. `ATHENA_NOTIFY_AFTER_SECS` changes the threshold and
   `ATHENA_SHELL_INTEGRATION=0` turns the integration off; set them in the environment the daemon
@@ -92,6 +105,12 @@ its shells running.
 
 - Syntax highlighting for 21 languages (see [Languages](#languages)), each token class in its own
   colour, and the bracket matching the one at the cursor highlighted.
+- Bracket pairs coloured by nesting depth, as VS Code does by default: three colours in turn
+  (gold, orchid and blue in the dark theme; blue, green and brown in the light one). Brackets
+  inside strings and comments are skipped and a closer with no opener keeps its usual colour;
+  sticky scroll headers are coloured the same way. `"editor.bracketPairColorization.enabled":
+  false` (or `"bracket_pair_colorization": false` in `"editor"` or a `"[lang]"` block) turns it
+  off.
 - Find and replace in file (`cmd-f`, `cmd-alt-f` for the replace row): Enter in the replace field
   replaces the current match and moves on, `cmd-enter` or **Replace All** replaces every match,
   each as one undo step. The find field has VS Code's Match Case, Match Whole Word and Use Regular
@@ -126,7 +145,8 @@ its shells running.
   after a blank where there is one, with continuation rows indented like their line. Up and Down
   move by screen row, Home and End stop at the row's edges first, and the line number is shown on
   a line's first row only. Tabs that have not chosen follow **Toggle Word Wrap by Default** (File
-  menu or palette, off to begin with); Markdown files wrap unless their tab turns it off.
+  menu or palette, off to begin with); Markdown files wrap unless their tab turns it off or a
+  `"[markdown]"` block sets `"word_wrap": false`.
 - Sticky scroll: the header lines of the blocks around the top of the view (a function, an
   `impl`, a class) stay pinned above the code, outermost first, at most five and never more than
   a third of the view. Clicking one jumps to it.
@@ -134,8 +154,14 @@ its shells running.
   Python and YAML), with the guide of the cursor's block drawn brighter. Spaces and tabs inside the
   selection are shown as dots and arrows.
 - Zoom editor and terminal text together with `cmd-=` / `cmd--` / `cmd-0` (1 px steps, 6 to 40 px,
-  default 13 px; also in the View menu). The zoom is saved with the workspace. The rest of the
-  interface keeps its size.
+  default 13 px; also in the View menu). The zoom is saved with the workspace.
+- Zoom the whole interface with `cmd-alt-=` / `cmd-alt--` / `cmd-alt-0` (View > Zoom Interface In
+  / Out / Reset Interface Zoom, or the palette): text, tabs, tree and drawer rows, the title and
+  status bars, menus, buttons and toasts grow together in 10% steps, from three steps down to
+  five up. Code text keeps the size the keys above give it. The level is saved with the
+  workspace; `"window": { "zoom_level": 1 }` in settings.json sets it, and the keys update it
+  there once the file has it. With macOS's Accessibility Zoom keyboard shortcuts on, the system
+  takes these keys first.
 - A status bar under the panes shows the project's branch (click: switch branch) and, for the
   focused editor, `Ln N, Col M` with the selected character count, or "3 selections (15
   characters selected)" with several carets (click: go to line), the indentation (click: indent
@@ -186,7 +212,8 @@ its shells running.
   error/warning counter in the title bar toggles the tab.
 - Format on save: `cmd-s` asks the language server to format the file first, by default in Go
   files only; for Go it also organizes imports. "Toggle format on save" (palette, File menu) turns
-  it on or off for every language with a server. Auto save does not format.
+  it on or off for every language with a server, except that Go keeps formatting until a
+  `"[go]"` block turns it off (see [Settings](#settings)). Auto save does not format.
 - Trim trailing whitespace and insert a final newline on save: off by default, as in VS Code, and
   turned on in settings.json or `.editorconfig`, as one undo step. Trimming leaves blanks inside
   multi-line strings (raw strings, template literals, docstrings, heredocs, YAML block scalars),
@@ -217,9 +244,28 @@ information rather than triggering the install dialog).
 - Tree rows and tab labels take the file's status colour (modified, added, untracked, deleted,
   conflicted, ignored), tree rows also show the status letter, and folders take the most severe
   status inside them.
-- The editor gutter marks added, modified and removed lines against `HEAD` (from the saved file).
+- The editor gutter marks added, modified and removed lines of the saved file against the index,
+  as VS Code's quick diff does, so staging a change clears its bar.
+- Quick diff peek: clicking a change bar, or `alt-f3` / `shift-alt-f3` from the cursor, opens a
+  peek under the change with the index's lines for it in red and **Stage**, **Revert**, previous,
+  next and close buttons; Escape closes it. It diffs the buffer, unsaved edits included, and
+  follows edits while open. Revert is an undoable edit; Stage writes only that change to the
+  index and refuses if the index changed meanwhile. A file that goes through a `filter` attribute
+  (Git LFS, git-crypt) gets a message to stage or revert the whole file instead, as hunk staging
+  does.
 - Inline blame (`cmd-alt-shift-g`, off by default): "author · 3 days ago · summary" after the
   cursor's line, "Not committed yet" for edited lines.
+- File blame (**Git: Toggle file blame** in the palette, or View > Toggle File Blame) adds a
+  column to the focused editor, like GitLens: an age bar on every line, brighter for newer
+  commits, and the author and age where each commit's lines start. Hovering shows the commit's
+  author, age, id and summary; clicking opens what that commit did to the file (through renames),
+  or the uncommitted changes for lines not committed yet. Unsaved edits are blamed after a 500 ms
+  pause and on save.
+- Timeline (**Git: Open timeline**, or View > Open Timeline): a drawer tab listing the active
+  file's commits through renames, newest first, with subject, author and age (the id in a
+  tooltip), following the active tab. Clicking a commit opens what it did to the file against
+  its parent; **Compare with Current** on the row or its right-click menu compares that version
+  with the working tree. It lists at most the last 500 commits.
 - A **Changes** drawer tab lists Staged Changes, Changes and Untracked, with Stage / Unstage on
   each row and group (Stage All and Discard All leave conflicted files alone). Hovering a row also
   offers Open File and Discard.
@@ -231,9 +277,18 @@ information rather than triggering the install dialog).
   **Revert** acts on that change alone; a staging action is refused if the index changed since
   the diff was made, and Revert refuses a file that changed since. Open diffs reload when git
   status is re-read. Binary, non-UTF-8 and files over 20 MB show why there is no diff.
-- A commit box above the list: type a one-line message and press `cmd-enter` or **Commit**.
-  **Amend** fills in the last commit's subject, keeps its body, and refuses to commit if `HEAD`
-  moved since. With nothing staged it offers to stage everything and commit. **Discard** asks
+- In a diff, drag to select text on either side (Shift+click extends); `cmd-c` copies only that
+  side's lines, including any inside hidden regions, and `cmd-a` selects everything. **Hide
+  Unchanged** in the toolbar folds unchanged stretches down to three lines around each change,
+  each fold a bar that opens on click; it starts on for diffs over 500 rows. Right-click offers
+  Copy, Select All, the change's Stage, Unstage or Revert This Change where the diff allows it, and
+  Open File.
+- Compare two files: **Select for Compare** on a file in the tree's right-click menu, then
+  **Compare with Selected** on another opens a side-by-side diff, the selected file on the left.
+- A commit box above the list takes several lines: Enter breaks the line, `cmd-enter` or
+  **Commit** commits, paste keeps line breaks, and the box grows to six rows before it scrolls.
+  **Amend** fills in the last commit's whole message and refuses to commit if `HEAD` moved since.
+  With nothing staged it offers to stage everything and commit. **Discard** asks
   first: tracked files go back to their staged or committed version, untracked ones move to the
   Trash. Discard and Revert keep a copy of the replaced file in
   `~/Library/Application Support/athena/discarded` for 30 days.
@@ -264,6 +319,15 @@ information rather than triggering the install dialog).
   set `GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand`, which are left as they are), in a session
   of their own without a terminal, so a password or passphrase prompt fails at once. Use an ssh
   agent or a credential helper. A remote command is stopped after 5 minutes, ssh included.
+- Reading a repository never runs a command its config names. For status, the gutter, the peek,
+  blame, the timeline and stored versions, Athena switches off every configured filter driver
+  (clean, smudge and process), passes `--no-textconv` and turns `log.showSignature` off, so
+  opening a cloned repository cannot run its drivers; built-in line-ending conversion still
+  applies. Drivers configured inside a submodule are not covered yet: git status, which looks
+  into submodules, can still run them. Commands that write (staging or discarding a whole file,
+  switching branches, stash, pull, commit and its hooks) run the filters as git would, since
+  skipping them would store or check out the wrong bytes; hunk staging, unstaging and reverting
+  are refused for a filtered file for the same reason.
 - Autofetch (`"git": {"autofetch": true}` in [settings.json](#settings), off by default as in VS
   Code) fetches the active project every three minutes while the window is in front.
 - Status is re-read every 5 seconds while the window is in front and shortly after a save, a file
@@ -286,14 +350,28 @@ information rather than triggering the install dialog).
   results to replace safely") rather than rewrite files you have not seen; narrow the search or
   the files to include.
 - Right-click menus. Tree: New File, New Folder, Rename, Delete (to the Trash), Reveal in Finder,
-  Copy Path, Copy Relative Path, Open to the Side. Tabs: Close, Close Others, Close to the Right,
-  Close All, Reveal in Finder, Copy Path, Copy Relative Path, Reveal in File Tree, Split Right /
+  Copy Path, Copy Relative Path, Open to the Side, and on files Select for Compare / Compare with
+  Selected. Tabs: Close, Close Others, Close to the Right, Close All, Move Terminal into Panel (on
+  a terminal), Reveal in Finder, Copy Path, Copy Relative Path, Reveal in File Tree, Split Right /
   Down with that tab. Editor: Go to Definition, Find References, Go to Implementations, Go to Type
-  Definition, Show Call Hierarchy, Rename Symbol, Quick Fix…, Cut, Copy, Paste, Toggle Line Comment. Terminal: Copy,
-  Paste, Select All, Find, Clear.
+  Definition, Show Call Hierarchy, Rename Symbol, Quick Fix…, Cut, Copy, Paste, Toggle Line
+  Comment. Terminal: Copy, Paste, Select All, Find, Clear. Panel terminal rows: Move into Editor
+  Area, New Terminal, Kill Terminal. Diffs and Timeline rows have their own (see Git above).
 - Drag a tab onto another tab or strip to move it, onto the middle of a pane to join it, or onto
   an edge of a pane to split it there; the terminal or editor keeps running. Drop a folder from
   Finder to open it as a project, a file to open it in a tab.
+- Drag a file tree entry onto a folder to move it there (onto a file means that file's folder,
+  onto the empty tree the project folder); hold Option to copy instead, named "name copy.ext" when
+  the name is taken, in the background. As in VS Code a move asks "Are you sure you want to move …
+  into …?" first; **Move and Don't Ask Again** writes `"explorer": { "confirmDragAndDrop": false }`
+  into settings.json, and setting it back to `true` brings the question back. When the name is
+  taken the move asks to replace, and the entry it replaces goes to the Trash; its tabs close.
+  Open tabs of the moved files follow it, unsaved edits kept, the tree shows the new place and git
+  status refreshes. Some drops are refused: into the entry itself or a folder inside it, a
+  replace whose target holds the entry (dragging `pkg/pkg` up beside `pkg` would trash the folder
+  it sits in), and a replace of a file with unsaved changes (save or close it first). Dropping
+  into the folder the entry is already in, or letting go of a folder over its own row, does
+  nothing. Between volumes a move copies, then sends the original to the Trash.
 - Back and forward through visited tabs and cursor positions (mouse buttons 4 and 5, `ctrl--` /
   `ctrl-shift--`, View menu); in a browser preview they walk the page's history.
 - The tab strip scrolls sideways when tabs overflow; a middle click closes a tab.
@@ -395,6 +473,16 @@ join the Problems tab labelled with their source and rule, as `eslint(no-unused-
 fixes join the `cmd-.` menu. `"eslint": { "fixOnSave": true }` makes `cmd-s` apply ESLint's
 fix-all first (off by default).
 
+Since running them runs the project's code, Athena asks once per project folder before the first
+start: "Run ESLint and Biome from proj?" (naming only the ones it installs) with **Allow** and
+**Don't Allow** (Escape). Only a project that installs one of them is asked, nothing starts
+until it is allowed, and the answer is kept with the project in `workspace.json`. **Allow project linters (ESLint, Biome)** and
+**Disallow project linters (ESLint, Biome)** in the palette change it for the active project:
+allowing starts them for its open files, disallowing stops them and clears what they reported.
+They start without `SSH_AUTH_SOCK`, `NODE_OPTIONS` and `NODE_PATH` from your environment, ESLint
+resolves its library only from the project's own `node_modules`, and each server's whole process
+group is stopped with it (Biome's background daemon exits once its proxy is gone).
+
 ## Claude Code integration
 
 ### MCP server
@@ -413,7 +501,7 @@ process tree which pane the calling Claude session runs in.
 | `list_projects` | Projects open in Athena; `current` marks the one this session runs in. |
 | `get_active_file` | Focused editor's path, cursor, selection and unsaved state. |
 | `open_file` | Opens a project file in the editor, optionally at a line. |
-| `list_terminals` | Terminals with session id, title, cwd, running program and Claude state. |
+| `list_terminals` | Terminals (tabs and the bottom panel) with session id, title, cwd, running program and Claude state. |
 | `read_terminal` | Recent output of a terminal as plain text. |
 | `run_in_terminal` | Types a command into a terminal; runs only if you approve it within 60 seconds. |
 | `list_project_files` | A project's files, honouring `.gitignore`; secrets such as `.env` and keys are left out. |
@@ -515,7 +603,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-alt-1…9` | Select project 1–9 |
 | `cmd-t` | New terminal |
 | `cmd-shift-t` | New Claude session |
-| `cmd-w` | Close tab |
+| `cmd-w` | Close tab (with a panel terminal focused: close that terminal) |
 | `cmd-{` | Previous tab |
 | `cmd-}` | Next tab |
 | `cmd-1…9` | Select tab 1–9 |
@@ -526,6 +614,8 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-alt-up` | Focus pane up (in an editor: add cursor above) |
 | `cmd-alt-down` | Focus pane down (in an editor: add cursor below) |
 | `cmd-shift-enter` | Zoom pane |
+| ``ctrl-` `` | Show and focus the terminal panel, or hide it when it has focus |
+| ``ctrl-shift-` `` | New terminal in the panel (bound as `ctrl-~` too, which is what macOS reports for it) |
 | `cmd-b` | Toggle file tree |
 | `cmd-shift-s` | Save as |
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |
@@ -534,6 +624,8 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-alt-shift-g` | Toggle inline blame |
 | `cmd-=` (or `cmd-+`) / `cmd--` | Zoom editor and terminal text in / out |
 | `cmd-0` | Reset zoom |
+| `cmd-alt-=` (or `cmd-alt-+`) / `cmd-alt--` | Zoom the whole interface in / out |
+| `cmd-alt-0` | Reset interface zoom |
 | `cmd-shift-m` | Problems tab |
 | `cmd-shift-o` | Go to symbol in file |
 | `cmd-alt-o` | Go to symbol in workspace |
@@ -551,19 +643,23 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 
 Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
 commands without a key: Toggle auto save, Toggle format on save, Toggle word wrap by default,
-Toggle inlay hints, Source control changes, Switch branch…, the six **Git:** commands, Run task…,
-Tests and the five **Tests:** commands, Reveal active file in tree, Open file to the side, Open
-Markdown preview, New browser preview, Clear recently opened, the three **Theme:** commands, Open
-keyboard shortcuts file and the Claude Code and Playwright commands. With an editor focused it
-also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
+Toggle inlay hints, Source control changes, Switch branch…, the eight **Git:** commands (Toggle
+file blame and Open timeline among them), Run task…, Tests and the five **Tests:** commands,
+**Terminal: move into panel** and **Terminal: move into editor area** (beside toggle panel and
+new in panel), Focus outline, Show explorer, Allow project linters and Disallow project linters,
+Reveal active file in tree, Open file to the side, Open Markdown preview, New browser preview,
+Clear recently opened, the three **Theme:** commands, Open keyboard shortcuts file and the Claude
+Code and Playwright commands. With an editor focused it also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
 no key, since `cmd-shift-enter` is Zoom pane), Insert line below, Rename symbol, Quick fix, Go to
 implementations, Go to type definition, the five multi-cursor commands and Toggle word wrap; with
 a terminal focused, Copy last command output and Scroll to previous / next command. In Go to
 file, `@` lists the file's symbols, `#` searches workspace symbols and `>` lists commands.
 
 The menu bar has Athena, File, Selection, View and Window menus. Athena holds Settings…
-(`cmd-,`). Selection holds Select All, the line copy and move commands and the multi-cursor commands. View includes Word Wrap and Theme, and
-File includes Open Recent, the settings toggles (auto save, format on save, word wrap by default,
+(`cmd-,`). Selection holds Select All, the line copy and move commands and the multi-cursor
+commands. View includes Word Wrap, Theme, the terminal panel commands (Terminal, New Terminal in
+Panel, Move Terminal into Panel / into Editor Area), Toggle File Blame, Open Timeline and the
+interface zoom commands, and File includes Open Recent, the settings toggles (auto save, format on save, word wrap by default,
 Claude Code integration) and Keyboard Shortcuts.
 
 On a Mac keyboard the `f`-keys need Fn unless "Use F1, F2, etc. keys as standard function keys" is
@@ -588,6 +684,7 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `cmd`-click | Go to definition |
 | `shift-f12`, `cmd-alt-r` | Find references |
 | `shift-alt-h` | Show call hierarchy |
+| `alt-f3` / `shift-alt-f3` | Quick diff peek at the next / previous change |
 | `alt-left` / `alt-right` | Move by word |
 | `cmd-left` / `cmd-right`, `home` / `end` | Line start / end |
 | `cmd-up` / `cmd-down` | Document start / end |
@@ -598,7 +695,7 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `cmd-shift-up` / `cmd-shift-down` | Extend selection to document start / end |
 | `alt-backspace` | Delete word back |
 | `cmd-backspace` | Delete to line start |
-| `escape` | Close find, suggestions, hover or signature help / back to one caret / clear selection |
+| `escape` | Close find, suggestions, hover, signature help or the quick diff peek / back to one caret / clear selection |
 | `ctrl-g`, `cmd-l` | Go to line |
 | `ctrl-space` | Show completions |
 | `cmd-k cmd-i` | Show hover docs at the cursor |
@@ -645,6 +742,9 @@ keys while the image viewer has focus.
 | `pageup` / `pagedown` | Scroll a page |
 | `cmd-up` / `cmd-down` | Top / bottom |
 | `cmd-enter` / `cmd-backspace` | Accept / reject a change Claude proposes |
+| `cmd-c` | Copy the selected side's lines |
+| `cmd-a` | Select everything |
+| `shift`-click | Extend the selection |
 
 ### File tree, palette and Search tab (text field keys: `crates/athena-ui/src/input.rs`)
 
@@ -658,6 +758,7 @@ keys while the image viewer has focus.
 | `escape` in the Search tab | Close it |
 | `enter` / `escape` in a tree name field | Create or rename / cancel |
 | `cmd-enter` in the Changes tab's message field | Commit |
+| `enter`, `up` / `down` in the Changes tab's message field | New line, move between lines |
 | `cmd-a` in any text field | Select all |
 
 ### Terminal (`crates/athena-term/src/view.rs`)
@@ -723,13 +824,16 @@ as soon as you save:
     "tab_size": 4,                   // files whose indentation cannot be detected
     "autosave_delay_ms": 1000,       // 0 turns auto save off
     "trim_trailing_whitespace": true,
-    "insert_final_newline": true
+    "insert_final_newline": true,
+    "bracket_pair_colorization": true  // colour brackets by nesting depth (on by default)
   },
   "[markdown]": { "trim_trailing_whitespace": false },   // per language, by VS Code's id
   "theme": "system",                 // "system", "light" or "dark"
   "ide_integration": false,
   "git": { "autofetch": true },      // fetch every three minutes; off by default, as in VS Code
   "eslint": { "fixOnSave": true },   // cmd-s applies ESLint's fixes first; off by default
+  "explorer": { "confirmDragAndDrop": false },   // move tree entries without asking
+  "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   "lsp": {
     "gopls": { "staticcheck": true, "hints": { "parameterNames": true } },
     "typescript-language-server": { "preferences": { "importModuleSpecifierPreference": "relative" } }
@@ -747,8 +851,8 @@ or adding it at the end of its object, so comments and layout stay. A file Athen
 (a missing comma, a bare `tru`) is never rewritten: the toggle still takes effect, kept in
 `workspace.json`, and a toast says settings.json was not updated. A key left
 out falls back to the choice `workspace.json` already held, so nothing set before settings.json
-existed is lost. ⌘= and ⌘- write `editor.font_size` only once the file has it. Each `lsp` entry
-goes to that server as its `initializationOptions` when it starts, answers its
+existed is lost. ⌘= and ⌘- write `editor.font_size`, and ⌥⌘= and ⌥⌘- `window.zoom_level`, only
+once the file has it. Each `lsp` entry goes to that server as its `initializationOptions` when it starts, answers its
 `workspace/configuration` requests (gopls asks for the `gopls` section and gets the whole
 object), and is sent again with `workspace/didChangeConfiguration` when the file changes.
 Problems (an unknown key, a wrong type) are listed in a toast and in `app.log` while the rest
@@ -792,8 +896,9 @@ athena mcp-stdio              MCP server for Claude Code
 
 Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
 each editor tab's cursor, scroll line, folds and wrap choice, recently closed folders, panel
-sizes, the text zoom, the theme (`System`, `Light` or `Dark`) and the `autosave_delay_ms`,
-`format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
+sizes, the text and interface zoom, the theme (`System`, `Light` or `Dark`), each project's
+panel terminals and its answer about running the project's linters, and the
+`autosave_delay_ms`, `format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
 integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
