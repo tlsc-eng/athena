@@ -4,10 +4,13 @@ Athena is a macOS IDE built around terminals that outlive the window and around 
 Shells run in a separate session daemon (`athena-mux`), so quitting or updating the app does not
 kill them; the window reattaches on the next launch. Projects get split panes of terminals and a
 terminal panel under them, an editor with language-server support, a git diff viewer with hunk
-staging, file history and blame, a commit box and fetch, pull and push, a test runner for Go,
-Vitest and Jest, a browser preview, and read-only views of Playwright results and Docker
-containers. Claude Code sessions show their state on the tab, each file Claude edits can be reviewed as one diff against
-the version from before the session, and an MCP server lets Claude read the editor and terminals.
+staging, file history and blame, a commit box and fetch, pull and push, worktrees, CI status and
+pull requests through the GitHub CLI, a test runner for Go, Vitest and Jest, a browser preview, and
+read-only views of Playwright results and Docker containers. Claude Code sessions show their state
+and todo progress on the tab, a Claude tab lists each session's changed files, cost estimate and
+plan with Resume, each file Claude edits can be reviewed as one diff against the version from
+before the session, and an MCP server lets Claude read the editor, language servers, tests and
+terminals.
 Optionally Athena also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
 or reject, and the editor selection goes with each prompt.
 
@@ -50,7 +53,8 @@ its shells running.
   panel and the editor area, keeping its shell, through those menus (a terminal tab's menu has
   Move Terminal into Panel), the View menu, the palette's **Terminal:** commands, or by dragging
   a sub-tab onto a pane or a terminal tab onto the panel.
-  Panel terminals belong to the daemon like any other and come back on the next launch. With the
+  Panel terminals belong to the daemon like any other and come back on the next launch, the
+  drawer open on them if it was open when Athena quit. With the
   keyboard in a panel terminal, `cmd-w` closes that terminal rather than the editor area's tab.
   Claude Code and the MCP tools see panel terminals too, and a notification still leads to its
   terminal after it moves.
@@ -353,6 +357,32 @@ information rather than triggering the install dialog).
   are refused for a filtered file for the same reason.
 - Autofetch (`"git": {"autofetch": true}` in [settings.json](#settings), off by default as in VS
   Code) fetches the active project every three minutes while the window is in front.
+- Worktrees: **Git: Open worktree…**, **Git: Create worktree…** and **Git: Delete worktree…** in
+  the palette, and **Create worktree…** in the branch picker. A new worktree checks out a new
+  branch made at `HEAD`, a local branch no other worktree has, or a remote branch as a new
+  tracking branch; it is made beside the main worktree as `<repo>-<branch>` and opens as a
+  project. Picking a branch that another worktree has checked out opens that worktree instead of a
+  switch git would refuse. In the project rail, linked worktrees sit right after their main
+  repository, joined to it by a short line ("worktree of …" in the tooltip). Deleting is refused
+  while a project is open in the worktree or a folder inside it, or a terminal (Claude's included)
+  sits in it; one with uncommitted or untracked changes is deleted only after **Delete Anyway**,
+  and one whose folder is already gone can still be removed. The worktree's branch is kept.
+- GitHub, through the [GitHub CLI](https://cli.github.com) (`gh`) when it is installed and signed
+  in to github.com: a dot in the status bar for the latest workflow run on the current branch
+  (amber while it runs, green or red when it passed or failed, grey when cancelled or skipped;
+  the tooltip names the workflow and commit, a click opens the run), read when a branch is first
+  seen, every two minutes while the window is in front and after a fetch or push. **GitHub:
+  Create pull request** runs `gh pr create --web`, which opens GitHub's form in the browser and
+  writes nothing; a branch without an upstream or with unpushed commits is stopped with a notice
+  first, so gh never pushes it. **GitHub: View pull request checks** lists the pull request's
+  checks in the palette, failures first, each opening its run.
+- gh never prompts: it runs with `GH_PROMPT_DISABLED=1`, no stdin, in a session of its own
+  without a terminal, with pager and update notices off, and is stopped after 20 seconds (60 for
+  Create pull request). It is looked up on the login shell's `PATH`, then in Homebrew's folders,
+  and git commands it runs get `core.fsmonitor=false`. Without gh, or signed out of github.com,
+  the dot stays hidden and the two palette entries say in one line what is missing ("Needs gh:
+  brew install gh", "Needs gh auth login"); Athena checks again every two minutes, so a fresh
+  `gh auth login` is picked up.
 - Status is re-read every 5 seconds while the window is in front and shortly after a save, a file
   operation or a change on disk. The title bar and the status bar show the branch.
 
@@ -409,8 +439,16 @@ information rather than triggering the install dialog).
   (`describe`, `it`, `test`, with `.only`, `.skip` and the like) in `*.test.*`, `*.spec.*` and
   `__tests__/` files get a green ▶ in the gutter; clicking it runs that test or group, and after
   the run it becomes a green, red or grey dot (amber while running). `.each` tests and titles built
-  from template substitutions get no mark, since no fixed name matches them. Go subtests
-  (`t.Run`) are shown in the results but run with their parent.
+  from template substitutions get no mark, since no fixed name matches them.
+- Go subtests get their own ▶ when `t.Run` names them with a string literal, nested ones too.
+  Running one asks for `-run '^TestX$/^name$'`, each level escaped and spelled as `go test`
+  reports it (spaces as underscores), so only that subtest runs; a subtest that runs several times
+  in a loop (`name`, `name#01`, …) runs every time and its mark shows the worst result. Several
+  subtests of different tests run their whole tests.
+- **Tests: run all tests with coverage** runs `go test -coverprofile` over the module at the
+  project root and tints each measured line number in the gutter: green where a statement on it
+  ran, red where none did. **Tests: toggle coverage** hides and shows the tints, and editing a
+  file drops its coverage, since the lines no longer match the profile.
 - Go runs `go test -json` from the module root. JavaScript runs `npx --no vitest run` or `npx --no
   jest` with the JSON reporter from the nearest `package.json` that depends on Vitest or Jest (or
   names it in its `test` script).
@@ -419,7 +457,7 @@ information rather than triggering the install dialog).
   shows its output with `file:line` places clickable; hovering offers Run and Go to Test. A failed
   run opens the tab at the first failure. The palette has **Tests**, **Tests: run test at
   cursor**, **Tests: run tests in current file**, **Tests: run all tests**, **Tests: re-run failed
-  tests** and **Tests: stop**.
+  tests**, **Tests: stop** and the two coverage commands.
 - Runs have a 15-minute limit; Stop, the limit and quitting Athena kill the whole process group,
   test binaries and workers included.
 - **Run task…** (palette) lists the project's `package.json` scripts ("npm: build", run through
@@ -442,8 +480,12 @@ information rather than triggering the install dialog).
   tokens and an estimated cost. A session expands to its todo list and plan and to each file it
   changed with +/− line counts; open a file's diff, step through them all with **Review All**
   (palette: **Claude: Review next/previous changed file**), or **Revert** one file to before the
-  session (a copy of the current file is kept in `discarded/` for 30 days). **Resume** opens a
-  terminal running `claude --resume <id>` with that profile's `CLAUDE_CONFIG_DIR`.
+  session (a copy of the current file is kept in `discarded/` for 30 days). Revert is refused
+  while an editor of that file (opened through a link or not) has unsaved changes, since saving
+  them would undo it; a clean editor reloads. The newest session starts expanded, and **Claude:
+  Review next changed file** starts a review of it from the keyboard. **Resume** opens a terminal
+  running `claude --resume <id>` in the project folder, with `CLAUDE_CONFIG_DIR` set for a
+  profile other than `~/.claude`.
 - Costs are estimates from built-in list prices, not a bill; models without a price show
   "cost n/a". Set your own in settings.json, in USD per million tokens:
   `"claude": { "prices": { "claude-sonnet-5": { "input": 3, "output": 15 } } }` (cache prices
@@ -509,24 +551,33 @@ fixes join the `cmd-.` menu. `"eslint": { "fixOnSave": true }` makes `cmd-s` app
 fix-all first (off by default).
 
 Since running them runs the project's code, Athena asks once per project folder before the first
-start: "Run ESLint, Biome and TypeScript from proj?" (naming only what it installs) with **Allow**
-and **Don't Allow** (Escape). One answer covers everything the project brings: its linters, its
-own TypeScript, and project settings that choose what language servers run (below). Only a
-project that brings one of them is asked, and the answer is kept with the project in
-`workspace.json`. **Allow project linters (ESLint, Biome)** and **Disallow project linters
-(ESLint, Biome)** in the palette change it for the active project: allowing starts them for its
-open files, disallowing stops them and clears what they reported.
+start whether to allow the project's code: "Run ESLint, Biome and TypeScript from proj?" (naming
+only what it installs), or "Use proj's language server settings?" for a project that brings only
+such settings. One answer covers everything the project brings: its linters, its own TypeScript,
+and project settings that choose what language servers run (see [Project
+settings](#project-settings)); until it is allowed, the project's editor settings still apply.
+Only a project that brings one of them is asked, and the answer is kept with the project in
+`workspace.json`. The buttons are **Don't Allow** and **Allow**: Escape is Don't Allow, Return
+answers neither, and only a click (or Space on the focused button) allows. Deleting a worktree
+with changes, updating imports on a rename and reverting a Claude edit ask the same way.
+**Allow project code (linters, TypeScript, project settings)** and **Disallow project code
+(linters, TypeScript, project settings)** in the palette change the answer for the active
+project: allowing starts its linters for its open files, disallowing stops them and clears what
+they reported, and either answer restarts the project's language servers with the settings it
+allows.
 They start without `SSH_AUTH_SOCK`, `NODE_OPTIONS` and `NODE_PATH` from your environment, ESLint
 resolves its library only from the project's own `node_modules`, and each server's whole process
 group is stopped with it (Biome's background daemon exits once its proxy is gone).
 
 typescript-language-server would otherwise load the project's `node_modules/typescript` (or one
-in a folder above it) and the tsconfig plugins beside it, so until the project is allowed Athena
-points it at the TypeScript installed beside the server or with `tsc` (`npm install -g
-typescript`); once allowed it uses the project's own, as VS Code's "Use Workspace Version" does.
-A project with its own TypeScript and no global one to stand in waits, with a notice, until it is
-allowed. gopls runs with `GOTOOLCHAIN=local`, so a `toolchain` line in `go.mod` never downloads
-and runs another Go, unless its settings name one: `"lsp": { "gopls": { "env": { "GOTOOLCHAIN":
+in a folder above it, or one linked in from elsewhere as pnpm does) and the tsconfig plugins
+beside it, so until the project is allowed Athena points it at the TypeScript installed beside the
+server or with `tsc` (`npm install -g typescript`); once allowed it uses the project's own, as VS
+Code's "Use Workspace Version" does. A project that can reach a TypeScript of its own and has no
+global one to stand in waits, with a notice, until it is allowed.
+
+gopls runs with `GOTOOLCHAIN=local`, so a `toolchain` line in `go.mod` never downloads and runs
+another Go, unless its settings name one: `"lsp": { "gopls": { "env": { "GOTOOLCHAIN":
 "auto" } } }` (VS Code's `go.toolsEnvVars` in a project's `.vscode/settings.json` reads the same).
 
 ## Claude Code integration
@@ -542,6 +593,10 @@ claude mcp add -s user athena -- athena mcp-stdio
 The server holds no state; each tool asks the running Athena window, which works out from the
 process tree which pane the calling Claude session runs in.
 
+The language server tools (`lsp_definition`, `lsp_references`, `document_symbols`) and
+`read_buffer` work only on files open in an Athena editor tab; for any other file they answer
+that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB message.
+
 | Tool | What it does |
 |---|---|
 | `list_projects` | Projects open in Athena; `current` marks the one this session runs in. |
@@ -553,11 +608,11 @@ process tree which pane the calling Claude session runs in.
 | `list_project_files` | A project's files, honouring `.gitignore`; secrets such as `.env` and keys are left out. |
 | `get_diagnostics` | Errors and warnings from the language servers. |
 | `open_diff` | Shows the user a file's uncommitted changes in the diff viewer (unstaged by default, `staged` for the index). |
-| `lsp_definition`, `lsp_references` | Definition or references of the symbol at a 1-based line plus the symbol's text (or a UTF-16 column), from the language server that has the file open, unsaved edits included. Up to 200 locations. |
-| `document_symbols` | Functions, types and other symbols of an open file with the lines they span. |
+| `lsp_definition`, `lsp_references` | Definition or references of the symbol at a 1-based line plus the symbol's text (or a UTF-16 column), from the language server that has the file open, unsaved edits included. Up to 200 locations; the source line is quoted only for files in an open project that are not secrets such as `.env` or keys. |
+| `document_symbols` | Functions, types and other symbols of an open file with the lines they span (at most 2000). |
 | `get_open_editors` | Every editor tab: path, project, unsaved changes, focused. |
-| `read_buffer` | An open file's text including unsaved changes (at most 512 KiB). |
-| `run_tests`, `get_test_results` | Start go test or Vitest/Jest in the Tests panel (all, a package or file, or one test by name), then read counts and failures. |
+| `read_buffer` | An open file's text including unsaved changes: 256 KiB unless `max_bytes` asks for more, never over 512 KiB, with the full size. |
+| `run_tests`, `get_test_results` | Start go test or Vitest/Jest in the Tests panel (all, a package or file, or one test or `TestX/subtest` by name), then read counts and failures. The path must lie in the session's own project. Vitest and Jest run the project's `node_modules`, so for Claude they run only once the project's code is allowed; a Go and JavaScript run keeps its go test and says what was skipped. |
 | `git_status` | Branch, ahead/behind and changed files of a project; ignored files left out. |
 
 ### Hooks
@@ -697,15 +752,17 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 
 Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
 commands without a key: Toggle auto save, Toggle format on save, Toggle word wrap by default,
-Toggle inlay hints, Source control changes, Switch branch…, the eight **Git:** commands (Toggle
-file blame and Open timeline among them), Run task…, Tests and the five **Tests:** commands,
+Toggle inlay hints, Source control changes, Switch branch…, the eleven **Git:** commands (Toggle
+file blame, Open timeline and the three worktree commands among them), the two **GitHub:**
+commands, Run task…, Tests and the seven **Tests:** commands, the three **Claude:** commands,
 **Terminal: move into panel** and **Terminal: move into editor area** (beside toggle panel and
-new in panel), Focus outline, Show explorer, Allow project linters and Disallow project linters,
+new in panel), Focus outline, Show explorer, Allow project code and Disallow project code,
 Reveal active file in tree, Open file to the side, Open Markdown preview, New browser preview,
 Clear recently opened, the three **Theme:** commands, Open keyboard shortcuts file and the Claude
 Code and Playwright commands. With an editor focused it also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
 no key, since `cmd-shift-enter` is Zoom pane), Insert line below, Rename symbol, Quick fix, Go to
-implementations, Go to type definition, the five multi-cursor commands and Toggle word wrap; with
+implementations, Go to type definition, Show type hierarchy (no key), Expand selection, Shrink
+selection, Format selection, the five multi-cursor commands and Toggle word wrap; with
 a terminal focused, Copy last command output and Scroll to previous / next command. In Go to
 file, `@` lists the file's symbols, `#` searches workspace symbols and `>` lists commands.
 
@@ -721,7 +778,7 @@ on in System Settings. A system or app shortcut set on the same keys (`cmd-.` is
 take them before Athena sees them; Quick Fix… in the editor's right-click menu does the same as
 `cmd-.`.
 
-### Editor (`crates/athena-editor/src/view.rs`, `lsp_ui.rs`)
+### Editor (`crates/athena-editor/src/view.rs`, `lsp_ui.rs`, `smart_select.rs`)
 
 | Keys | Action |
 |---|---|
@@ -881,7 +938,10 @@ as soon as you save:
     "autosave_delay_ms": 1000,       // 0 turns auto save off
     "trim_trailing_whitespace": true,
     "insert_final_newline": true,
-    "bracket_pair_colorization": true  // colour brackets by nesting depth (on by default)
+    "bracket_pair_colorization": true, // colour brackets by nesting depth (on by default)
+    "lightbulb": "quickfix",         // "all" adds refactorings, "off" hides it
+    "linked_editing": false,         // rename a JSX/TSX closing tag as you type its opening one
+    "codeActionsOnSave": { "source.organizeImports": "explicit" }
   },
   "[markdown]": { "trim_trailing_whitespace": false },   // per language, by VS Code's id
   "theme": "system",                 // "system", "light" or "dark"
@@ -943,8 +1003,9 @@ apply as soon as they are saved in Athena, or when the next file of the project 
 
 Server settings can name programs, plugins, build flags and toolchains, so a project's `lsp`
 entries (and `gopls`, `go.toolsEnvVars`, `typescript.*` from `.vscode`) apply only once the
-project is allowed; a project that has them asks the same once-per-project question as its
-linters. Its editor settings apply either way. Settings a server reads only as it starts (which
+project's code is allowed; a project that has them gets the same once-per-project question as
+its linters (see [Languages](#languages)). Until then the rest of the file, its editor settings
+included, applies as usual. Settings a server reads only as it starts (which
 TypeScript and plugins tsserver loads, gopls's `GOTOOLCHAIN`) restart that server when they
 change; the rest are sent to it as they change.
 
@@ -985,7 +1046,7 @@ athena mcp-stdio              MCP server for Claude Code
 Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
 each editor tab's cursor, scroll line, folds and wrap choice, recently closed folders, panel
 sizes, the text and interface zoom, the theme (`System`, `Light` or `Dark`), each project's
-panel terminals and its answer about running the project's linters, and the
+panel terminals and its answer about running the project's code, and the
 `autosave_delay_ms`, `format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
 integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
