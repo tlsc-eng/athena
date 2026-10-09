@@ -52,7 +52,8 @@ pub fn check(program: Option<PathBuf>) -> Gh {
         return Gh::Missing;
     };
     let mut cmd = gh(&program, Path::new("/"));
-    cmd.args(["auth", "status"]);
+    // Only github.com matters here; another host's expired token must not hide the features.
+    cmd.args(["auth", "status", "--hostname", "github.com"]);
     match run_output(cmd, None, QUERY_LIMIT, &Cancel::default()) {
         Ok(out) if out.status.success() => Gh::Ready(program),
         _ => Gh::SignedOut,
@@ -71,6 +72,14 @@ fn gh(program: &Path, dir: &Path) -> Command {
         .env("NO_COLOR", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null());
+    // gh runs git in the repository, whose own config must not make that run a command.
+    let n: usize = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    cmd.env(format!("GIT_CONFIG_KEY_{n}"), "core.fsmonitor")
+        .env(format!("GIT_CONFIG_VALUE_{n}"), "false")
+        .env("GIT_CONFIG_COUNT", (n + 1).to_string());
     new_session(&mut cmd);
     cmd
 }
@@ -283,6 +292,7 @@ mod tests {
             r#"here=$(dirname "$0")
 [ -t 0 ] && echo tty >> "$here/log"
 echo "$GH_PROMPT_DISABLED $* in $(pwd -P)" >> "$here/log"
+git config core.fsmonitor >> "$here/log"
 case "$1 $2" in
   "auth status") exit 0 ;;
   "run list") echo '[{"status":"completed","conclusion":"failure","url":"https://github.com/o/r/actions/runs/1","workflowName":"CI","displayTitle":"Fix it"}]' ;;
@@ -312,10 +322,14 @@ esac"#,
         assert_eq!(
             log.lines().collect::<Vec<_>>(),
             [
-                "1 auth status in /".to_string(),
+                "1 auth status --hostname github.com in /".to_string(),
+                "false".to_string(),
                 format!("1 run list --branch=feat/x --limit=1 --json=status,conclusion,url,workflowName,displayTitle in {root}"),
+                "false".to_string(),
                 format!("1 pr create --web in {root}"),
+                "false".to_string(),
                 format!("1 pr checks --json=name,workflow,bucket,link in {root}"),
+                "false".to_string(),
             ]
             .iter()
             .map(String::as_str)

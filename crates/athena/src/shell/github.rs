@@ -69,9 +69,13 @@ impl Shell {
             loop {
                 cx.background_executor().timer(CI_EVERY).await;
                 let alive = this.update_in(cx, |this, window, cx| {
-                    if window.is_window_active()
-                        && let Some(root) = this.active_root()
-                    {
+                    if !window.is_window_active() {
+                        return;
+                    }
+                    // Signing in (or installing gh) in a terminal brings the features back.
+                    if !matches!(this.git.github.gh, Some(Gh::Ready(_))) {
+                        this.check_gh(None, window, cx);
+                    } else if let Some(root) = this.active_root() {
                         this.refresh_ci(root, cx);
                     }
                 });
@@ -96,7 +100,7 @@ impl Shell {
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.git.github.checking = false;
-                let first = this.git.github.gh.is_none();
+                let was_ready = matches!(this.git.github.gh, Some(Gh::Ready(_)));
                 this.git.github.gh = Some(found.clone());
                 match (found, then) {
                     (Gh::Ready(program), Some(then)) => then(this, program, window, cx),
@@ -108,7 +112,7 @@ impl Shell {
                             cx,
                         );
                     }
-                    (Gh::Ready(_), None) if first => {
+                    (Gh::Ready(_), None) if !was_ready => {
                         if let Some(root) = this.active_root() {
                             this.refresh_ci(root, cx);
                         }
