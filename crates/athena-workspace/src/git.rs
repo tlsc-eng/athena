@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -338,6 +339,63 @@ fn run(cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
     run_within(cmd, stdin, TIMEOUT)
 }
 
+/// A git that talks to a remote: no prompt can wait on a terminal or dialog nobody sees.
+fn remote_git(root: &Path) -> Command {
+    let mut probe = git(root);
+    probe.args(["config", "--get", "core.sshCommand"]);
+    let ssh_configured = ["GIT_SSH_COMMAND", "GIT_SSH"]
+        .iter()
+        .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+        || run(probe, None).is_ok_and(|out| !out.trim_ascii().is_empty());
+    let mut cmd = git(root);
+    never_prompt(&mut cmd, ssh_configured);
+    cmd
+}
+
+/// The user's own ssh command is left alone; without a terminal its prompts still fail at once.
+fn never_prompt(cmd: &mut Command, ssh_configured: bool) {
+    cmd.env("GIT_ASKPASS", "/usr/bin/true")
+        .env("SSH_ASKPASS_REQUIRE", "never");
+    if !ssh_configured {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
+    unsafe {
+        cmd.pre_exec(|| match libc::setsid() {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+}
+
+/// Whether the child has exited and with status 0, left unreaped so its id cannot be reused
+/// while its group is signalled.
+fn exited(pid: libc::pid_t) -> Option<bool> {
+    // SAFETY: an all-zero siginfo_t is a valid value for waitid to fill in.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waits on our own child with WNOWAIT, so `Child::wait` still reaps it.
+    let r = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if r == -1 {
+        let interrupted = std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
+        return (!interrupted).then_some(false);
+    }
+    (info.si_pid == pid).then_some(info.si_code == libc::CLD_EXITED && info.si_status == 0)
+}
+
+/// A remote op leads its own session, so its ssh and helpers go with it.
+fn kill_all(child: &mut Child) {
+    // SAFETY: the child is not reaped yet, so a group with its id can only be its own.
+    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+    let _ = child.kill();
+}
+
 /// Error from a run killed for taking longer than its time limit.
 #[derive(Debug)]
 pub struct TimedOut(Duration);
@@ -378,12 +436,13 @@ fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<
     let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
     let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
     let deadline = Instant::now() + limit;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+    let pid = child.id() as libc::pid_t;
+    let succeeded = loop {
+        if let Some(succeeded) = exited(pid) {
+            break succeeded;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            kill_all(&mut child);
             let _ = child.wait();
             return Err(TimedOut(limit).into());
         }
@@ -394,9 +453,15 @@ fn run_within(mut cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<
         pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .map_err(|_| TimedOut(limit))
     };
-    let stdout = collect(stdout)?;
-    if !status.success() {
-        let stderr = collect(stderr)?;
+    let stdout = collect(stdout);
+    let stderr = (!succeeded).then(|| collect(stderr));
+    if stdout.is_err() || stderr.as_ref().is_some_and(Result::is_err) {
+        kill_all(&mut child);
+    }
+    let status = child.wait()?;
+    let stdout = stdout?;
+    if let Some(stderr) = stderr {
+        let stderr = stderr?;
         // `git commit` with nothing staged explains itself on stdout.
         let said = [stderr, stdout]
             .into_iter()
@@ -735,21 +800,21 @@ const REMOTE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// `git fetch` from the branch's remote, or origin.
 pub fn fetch(root: &Path) -> Result<()> {
-    let mut cmd = git(root);
+    let mut cmd = remote_git(root);
     cmd.arg("fetch");
     run_within(cmd, None, REMOTE_TIMEOUT).map(drop)
 }
 
 /// `git pull --ff-only`: git refuses, and says why, when the branches have diverged.
 pub fn pull(root: &Path) -> Result<()> {
-    let mut cmd = git(root);
+    let mut cmd = remote_git(root);
     cmd.args(["pull", "--ff-only"]);
     run_within(cmd, None, REMOTE_TIMEOUT).map(drop)
 }
 
 /// `git push`, or with `publish` the branch to that remote, setting it as the upstream.
 pub fn push(root: &Path, publish: Option<(&str, &str)>) -> Result<()> {
-    let mut cmd = git(root);
+    let mut cmd = remote_git(root);
     cmd.arg("push");
     if let Some((remote, branch)) = publish {
         if remote.starts_with('-') || branch.starts_with('-') {
@@ -1083,6 +1148,110 @@ mod tests {
         let err = run_within(cmd, None, Duration::from_millis(200)).unwrap_err();
         assert!(err.is::<TimedOut>());
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A repository whose origin is over ssh, with `ssh_command` as its core.sshCommand.
+    fn ssh_remote_repo(name: &str, ssh_command: Option<&str>) -> PathBuf {
+        let dir = committed_repo(name, "x\n");
+        repo_git(
+            &dir,
+            &["remote", "add", "origin", "athena-test.invalid:x.git"],
+        );
+        if let Some(ssh) = ssh_command {
+            repo_git(&dir, &["config", "core.sshCommand", ssh]);
+        }
+        dir
+    }
+
+    fn script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_users_ssh_that_asks_on_the_terminal_fails_at_once() {
+        if !available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-git-tty-{}", std::process::id()));
+        let fake = dir.with_extension("ssh");
+        let ran = dir.with_extension("ran");
+        let _ = std::fs::remove_file(&ran);
+        script(
+            &fake,
+            &format!(
+                "touch '{}'; read answer < /dev/tty || exit 1",
+                ran.display()
+            ),
+        );
+        let repo = ssh_remote_repo("tty", fake.to_str());
+        let mut cmd = remote_git(&repo);
+        cmd.env_remove("GIT_SSH_COMMAND")
+            .env_remove("GIT_SSH")
+            .arg("fetch");
+        let started = Instant::now();
+        let err = run_within(cmd, None, Duration::from_secs(20)).unwrap_err();
+        assert!(!err.is::<TimedOut>(), "the prompt waited on a terminal");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(ran.exists(), "the configured ssh command was not used");
+        for path in [&fake, &ran] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn ssh_runs_in_batch_mode_unless_the_user_configured_it() {
+        if !available() {
+            return;
+        }
+        let bin = std::env::temp_dir().join(format!("athena-git-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        let said = bin.join("args");
+        script(
+            &bin.join("ssh"),
+            &format!("echo \"$@\" > '{}'; exit 1", said.display()),
+        );
+        let repo = ssh_remote_repo("batch", None);
+        let mut cmd = git(&repo);
+        never_prompt(&mut cmd, false);
+        cmd.env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("fetch");
+        run_within(cmd, None, Duration::from_secs(20)).unwrap_err();
+        let args = std::fs::read_to_string(&said).unwrap();
+        assert!(args.contains("BatchMode=yes"), "{args}");
+        let _ = std::fs::remove_dir_all(bin);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn a_remote_op_past_its_limit_takes_its_ssh_down_too() {
+        if !available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-git-hang-{}", std::process::id()));
+        let fake = dir.with_extension("ssh");
+        let marker = dir.with_extension("left");
+        let _ = std::fs::remove_file(&marker);
+        script(
+            &fake,
+            &format!("(sleep 2; touch '{}') & sleep 30", marker.display()),
+        );
+        let repo = ssh_remote_repo("hang", fake.to_str());
+        let mut cmd = remote_git(&repo);
+        cmd.env_remove("GIT_SSH_COMMAND")
+            .env_remove("GIT_SSH")
+            .arg("fetch");
+        let started = Instant::now();
+        let err = run_within(cmd, None, Duration::from_millis(500)).unwrap_err();
+        assert!(err.is::<TimedOut>());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(!marker.exists(), "ssh's child outlived the timeout");
+        let _ = std::fs::remove_file(fake);
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]

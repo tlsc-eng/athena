@@ -623,6 +623,7 @@ name = "athena-workspace"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "libc",
  "notify",
  "serde",
  "serde_json",
