@@ -498,6 +498,7 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "athena-lsp",
  "libc",
  "serde_json",
  "tracing",
