@@ -63,6 +63,16 @@ impl EditorSettings {
 
     fn set(&mut self, key: &str, value: &Value) -> Result<(), String> {
         let flag = || value.as_bool().ok_or("must be true or false");
+        // VS Code's own spellings work too, so its settings can be pasted in.
+        let key = match key {
+            "formatOnSave" => "format_on_save",
+            "trimTrailingWhitespace" => "trim_trailing_whitespace",
+            "insertFinalNewline" => "insert_final_newline",
+            "fontSize" => "font_size",
+            "tabSize" => "tab_size",
+            "autoSaveDelay" => "autosave_delay_ms",
+            other => other,
+        };
         match key {
             "format_on_save" => self.format_on_save = Some(flag()?),
             "trim_trailing_whitespace" => self.trim_trailing_whitespace = Some(flag()?),
@@ -268,7 +278,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 editor_block(lang, value, key, &mut problems)
             }
             k => match k.split_once('.') {
-                Some(("editor", rest)) => settings.editor.set(rest, value),
+                Some(("editor" | "files", rest)) => settings.editor.set(rest, value),
                 Some(("lsp", name)) => {
                     settings.lsp.insert(server_name(name).into(), value.clone());
                     Ok(())
@@ -292,7 +302,10 @@ fn editor_block(
 ) -> Result<(), String> {
     let map = value.as_object().ok_or("must be an object")?;
     for (key, value) in map {
-        let bare = key.strip_prefix("editor.").unwrap_or(key);
+        let bare = key
+            .strip_prefix("editor.")
+            .or_else(|| key.strip_prefix("files."))
+            .unwrap_or(key);
         if let Err(why) = into.set(bare, value) {
             problems.push(format!("\"{block}\": \"{key}\" {why}"));
         }
@@ -696,7 +709,8 @@ mod tests {
             r#"{
               "editor": {"format_on_save": true, "tab_size": 4, "bogus": 1},
               "editor.word_wrap": true,
-              "[markdown]": {"editor.trim_trailing_whitespace": false, "word_wrap": false},
+              "[markdown]": {"files.trimTrailingWhitespace": false, "word_wrap": false},
+              "files.insertFinalNewline": false,
               "theme": "purple",
               "lsp": {"gopls": {"staticcheck": true}, "tsserver": {"preferences": {}}},
               "nope": 1,
@@ -714,6 +728,7 @@ mod tests {
             Some(true),
             "falls back to the editor block"
         );
+        assert_eq!(md.insert_final_newline, Some(false));
         assert_eq!(s.editor_for(Some(Lang::Go)).word_wrap, Some(true));
         assert_eq!(s.theme, None);
         assert!(s.lsp.contains_key("typescript-language-server"));

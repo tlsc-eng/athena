@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::rc::Rc;
 
-use athena_editor::{EditorView, Indent, Lang};
+use athena_editor::{EditorView, Indent, Lang, SaveSettings};
 use athena_ui::{CODE_SIZE, CODE_ZOOM, Theme};
 use athena_workspace::{Preferences, Workspace};
 use gpui::{Context, Entity, Window};
@@ -184,7 +184,8 @@ impl Shell {
         cx.notify();
     }
 
-    /// Format on save, word wrap and auto save for `editor`, by its language.
+    /// Format on save, whitespace tidying, word wrap, auto save and inlay hints for `editor`,
+    /// by its language; an `.editorconfig` still wins over the tidying settings.
     pub(super) fn apply_editor_settings(
         &self,
         editor: &Entity<EditorView>,
@@ -199,11 +200,16 @@ impl Shell {
             .unwrap_or(self.workspace.autosave_delay_ms);
         let autosave = (ms > 0).then(|| std::time::Duration::from_millis(ms));
         let inlays = e.inlay_hints != Some(false);
+        let tidy = SaveSettings {
+            trim_trailing_whitespace: e.trim_trailing_whitespace,
+            insert_final_newline: e.insert_final_newline,
+        };
         editor.update(cx, |v, cx| {
             v.set_format_on_save(format);
             v.set_word_wrap_default(wrap, cx);
             v.set_autosave(autosave, cx);
             v.set_inlay_hints(inlays, cx);
+            v.set_save_settings(tidy);
         });
     }
 

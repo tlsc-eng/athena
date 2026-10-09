@@ -617,7 +617,9 @@ as soon as you save:
 }
 ```
 
-`"editor.word_wrap": true` works too. The palette and File menu toggles (auto save, format on
+`"editor.word_wrap": true` works too, as do VS Code's spellings (`"files.trimTrailingWhitespace"`,
+`"editor.formatOnSave"`, `"editor.tabSize"` and so on), so its settings can be pasted in. Trimming
+and the final newline override each language's defaults, and an `.editorconfig` overrides both. The palette and File menu toggles (auto save, format on
 save, word wrap, theme, Claude Code integration) write their key into this file, changing only
 that key's value or adding it at the end of its object, so comments and layout stay. A key left
 out falls back to the choice `workspace.json` already held, so nothing set before settings.json
