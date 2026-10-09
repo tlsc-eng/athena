@@ -5,7 +5,7 @@ use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
 use athena_ui::ActiveTheme;
 use athena_ui::motion::{self, Closing};
-use athena_workspace::{ItemId, ItemKind, Panel, Rect};
+use athena_workspace::{ItemId, ItemKind, Panel, Project, Rect};
 use gpui::{
     Animation, AnyElement, Bounds, Context, FontWeight, Hsla, Pixels, Task, Window, canvas, div,
     prelude::*, px,
@@ -28,7 +28,9 @@ const RECONNECT_AFTER: Duration = Duration::from_secs(2);
 pub(super) struct Notification {
     id: u64,
     project: Option<PathBuf>,
-    item: Option<ItemId>,
+    /// Kept rather than the tab's id, which changes when the terminal moves to or from the panel.
+    #[serde(default)]
+    session: Option<Session>,
     kind: NoticeKind,
     at: u64,
     read: bool,
@@ -189,18 +191,9 @@ impl Shell {
         }));
     }
 
-    /// Project, tab and view showing a daemon session, if any project holds it.
+    /// Project and tab showing a daemon session, if any project holds it.
     fn find_session(&self, session: Session) -> Option<(PathBuf, ItemId)> {
-        let kind = ItemKind::Terminal {
-            session: Some(session),
-        };
-        self.workspace.projects.iter().find_map(|p| {
-            let mut items = p.layout.iter().flat_map(|l| l.items());
-            let item = items
-                .find(|i| i.kind == kind)
-                .or_else(|| p.panel.terminals.iter().find(|i| i.kind == kind))?;
-            Some((p.root.clone(), item.id))
-        })
+        find_session(&self.workspace.projects, session)
     }
 
     /// True when the user is looking at that tab right now.
@@ -253,7 +246,7 @@ impl Shell {
         let notification = Notification {
             id: self.next_notice,
             project: target.as_ref().map(|(r, _)| r.clone()),
-            item: target.as_ref().map(|(_, i)| *i),
+            session: target.as_ref().and(notice.pane),
             kind: notice.kind,
             at: notice.at,
             read: watching || self.drawer == Some(super::drawer::DrawerTab::Notifications),
@@ -292,7 +285,7 @@ impl Shell {
         self.notifications.push(Notification {
             id,
             project: None,
-            item: None,
+            session: None,
             kind,
             at: now_ms(),
             read: true,
@@ -442,9 +435,16 @@ impl Shell {
             return;
         };
         n.read = true;
-        let target = n.project.clone().zip(n.item);
-        if let Some((root, item)) = target {
-            self.focus_item(&root, item, window, cx);
+        let (project, session) = (n.project.clone(), n.session);
+        match session.and_then(|s| self.find_session(s)) {
+            Some((root, item)) => self.focus_item(&root, item, window, cx),
+            None => {
+                let index =
+                    project.and_then(|r| self.workspace.projects.iter().position(|p| p.root == r));
+                if let Some(index) = index {
+                    self.switch_to(index, cx);
+                }
+            }
         }
         self.notices_changed(cx);
     }
@@ -714,10 +714,53 @@ impl Shell {
     }
 }
 
+/// Project and tab showing a daemon session, if any project holds it.
+fn find_session(projects: &[Project], session: Session) -> Option<(PathBuf, ItemId)> {
+    let kind = ItemKind::Terminal {
+        session: Some(session),
+    };
+    projects.iter().find_map(|p| {
+        let item = p.items().find(|i| i.kind == kind)?;
+        Some((p.root.clone(), item.id))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use athena_workspace::Item;
     use gpui::{point, size};
+
+    #[test]
+    fn a_notice_finds_its_terminal_after_it_moves_and_not_the_one_reusing_its_id() {
+        let terminal = |session| Item {
+            id: ItemId(0),
+            kind: ItemKind::Terminal { session },
+            view: None,
+        };
+        let mut project = Project::new("/p".into());
+        let first = project.panel.adopt(terminal(Some(7)));
+        let projects = std::slice::from_ref(&project);
+        assert_eq!(find_session(projects, 7), Some(("/p".into(), first)));
+
+        let moved = project.panel.take(first).unwrap();
+        let layout = project.layout.as_mut().unwrap();
+        let focused = layout.focused;
+        let id = layout.add_item(focused, moved.kind).unwrap();
+        let reused = project.panel.adopt(terminal(Some(8)));
+        assert_eq!(reused, first, "the panel hands the freed id out again");
+        let projects = std::slice::from_ref(&project);
+        assert_eq!(find_session(projects, 7), Some(("/p".into(), id)));
+    }
+
+    #[test]
+    fn notifications_saved_with_a_tab_id_still_load() {
+        let json = r#"[{"id":3,"project":"/p","item":4294967296,
+            "kind":"ClaudeStopped","at":1,"read":false}]"#;
+        let list: Vec<Notification> = serde_json::from_str(json).unwrap();
+        assert_eq!(list[0].session, None);
+        assert_eq!(list[0].project.as_deref(), Some(Path::new("/p")));
+    }
 
     fn pane(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect { x, y, w, h }
