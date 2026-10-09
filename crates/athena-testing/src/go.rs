@@ -108,6 +108,8 @@ pub fn parse_go_json(text: &str, module: Option<&GoModule>) -> Report {
     struct Pending {
         suite: Suite,
         tests: Vec<TestCase>,
+        /// The package whose compile error stopped this one, which may be a dependency.
+        failed_build: Option<String>,
     }
     let mut order: Vec<String> = Vec::new();
     let mut pending: HashMap<String, Pending> = HashMap::new();
@@ -140,6 +142,7 @@ pub fn parse_go_json(text: &str, module: Option<&GoModule>) -> Report {
                     tests: Vec::new(),
                 },
                 tests: Vec::new(),
+                failed_build: None,
             }
         });
         let output = v["Output"].as_str().filter(|o| !is_framing(o));
@@ -149,6 +152,9 @@ pub fn parse_go_json(text: &str, module: Option<&GoModule>) -> Report {
             }
             if let Some(o) = outcome(action) {
                 entry.suite.outcome = o;
+            }
+            if let Some(failed) = v["FailedBuild"].as_str() {
+                entry.failed_build = failed.split(' ').next().map(String::from);
             }
             continue;
         };
@@ -182,8 +188,9 @@ pub fn parse_go_json(text: &str, module: Option<&GoModule>) -> Report {
         let Some(mut p) = pending.remove(&pkg) else {
             continue;
         };
-        if let Some(out) = build.remove(&pkg) {
-            p.suite.output.insert_str(0, &out);
+        let culprit = p.failed_build.as_deref().unwrap_or(&pkg);
+        if let Some(out) = build.get(culprit).or_else(|| build.get(&pkg)) {
+            p.suite.output.insert_str(0, out);
         }
         p.suite.tests = p.tests;
         let no_tests = p.suite.tests.is_empty() && p.suite.outcome == Outcome::Skipped;
@@ -296,6 +303,21 @@ mod tests {
         );
         assert!(!r.suites.iter().any(|s| s.name.ends_with("notests")));
         assert_eq!(r.broken(), 1);
+    }
+
+    #[test]
+    fn a_dependency_that_does_not_compile_shows_its_error_on_the_package() {
+        let text = r##"{"ImportPath":"internal/goos","Action":"build-output","Output":"# internal/goos\n"}
+{"ImportPath":"internal/goos","Action":"build-output","Output":"compile: version mismatch\n"}
+{"ImportPath":"internal/goos","Action":"build-fail"}
+{"Action":"start","Package":"m/calc"}
+{"Action":"output","Package":"m/calc","Output":"FAIL\tm/calc [build failed]\n"}
+{"Action":"fail","Package":"m/calc","Elapsed":0,"FailedBuild":"internal/goos"}"##;
+        let r = parse_go_json(text, None);
+        assert_eq!(
+            r.suites[0].output,
+            "# internal/goos\ncompile: version mismatch\nFAIL\tm/calc [build failed]\n"
+        );
     }
 
     #[test]
