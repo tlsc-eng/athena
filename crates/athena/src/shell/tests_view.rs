@@ -7,7 +7,7 @@ use athena_editor::{EditorEvent, EditorView, RunMark, RunState, RunTestAt, TestS
 use athena_lsp::Position;
 use athena_testing::{
     Ended, Framework, GoModule, Job, Outcome, Report, Stop, Suite, TestCase, find_go_module,
-    find_js_package, go_job, go_run_pattern, js_job, js_name_pattern,
+    find_js_package, go_job, go_run_pattern, go_subtest_pattern, js_job, js_name_pattern,
 };
 use athena_ui::{ActiveTheme, ButtonKind, Theme, empty_state};
 use gpui::{
@@ -145,13 +145,24 @@ fn report_file() -> Option<PathBuf> {
     Some(runs.join(format!("tests-{stamp}.json")))
 }
 
-/// `go test` for the package in `dir`, limited to the tests `names` (all when empty).
-fn plan_go(root: &Path, dir: &Path, mut names: Vec<String>) -> Option<Planned> {
+/// `go test` for the package in `dir`, limited to the tests or subtests `wanted` (all when empty).
+fn plan_go(root: &Path, dir: &Path, mut wanted: Vec<Vec<String>>) -> Option<Planned> {
     let module = find_go_module(dir, root)?;
-    names.sort();
-    names.dedup();
-    let pattern = (!names.is_empty()).then(|| go_run_pattern(&names));
-    let wanted = (!names.is_empty()).then(|| names.into_iter().map(|n| vec![n]).collect());
+    wanted.sort();
+    wanted.dedup();
+    // One `-run` cannot name subtests of different tests, so several mean their whole tests.
+    if wanted.len() > 1 {
+        wanted.iter_mut().for_each(|t| t.truncate(1));
+        wanted.dedup();
+    }
+    let pattern = match wanted.as_slice() {
+        [] => None,
+        [one] => Some(go_subtest_pattern(one)),
+        many => Some(go_run_pattern(
+            &many.iter().map(|t| t[0].clone()).collect::<Vec<_>>(),
+        )),
+    };
+    let wanted = (!wanted.is_empty()).then_some(wanted);
     Some(Planned {
         job: go_job(&module, &[module.package_arg(dir)], pattern),
         module: Some(module),
@@ -188,9 +199,10 @@ fn plan_file(
         return plan_js(root, path, titles);
     }
     // A Go package's tests are named, not filed; a file's own are the ones it declares.
-    let names: Vec<String> = match titles {
-        Some((titles, _)) => vec![titles.first()?.clone()],
-        None => symbols.iter().map(|s| s.titles[0].clone()).collect(),
+    let names: Vec<Vec<String>> = match titles {
+        Some((titles, _)) if !titles.is_empty() => vec![titles.to_vec()],
+        Some(_) => return None,
+        None => symbols.iter().map(|s| vec![s.titles[0].clone()]).collect(),
     };
     if names.is_empty() {
         return None;
@@ -226,7 +238,7 @@ fn plan_failed(root: &Path, report: &Report) -> Vec<Planned> {
         .into_iter()
         .filter_map(|(suite, tests)| match (suite.framework, &suite.file) {
             (Framework::Go, _) => {
-                let names = tests.iter().map(|t| t.titles[0].clone()).collect();
+                let names = tests.iter().map(|t| vec![t.titles[0].clone()]).collect();
                 plan_go(root, &suite.dir, names)
             }
             (_, Some(file)) => {
@@ -492,10 +504,7 @@ impl Shell {
             return;
         };
         let planned = match (suite.framework, &suite.file) {
-            (Framework::Go, _) => {
-                let names = titles.map(|t| vec![t[0].clone()]).unwrap_or_default();
-                plan_go(&root, &suite.dir, names)
-            }
+            (Framework::Go, _) => plan_go(&root, &suite.dir, titles.into_iter().collect()),
             (_, Some(file)) => plan_js(&root, file, titles.as_deref().map(|t| (t, false))),
             _ => None,
         };
@@ -1191,6 +1200,21 @@ mod tests {
         );
         assert_eq!(plan_all(&dir)[0].job.args, ["test", "-json", "./..."]);
         assert!(plan_file(&dir, &file, None, &[]).is_none());
+
+        let sub = strings(&["TestA", "adds_1+1"]);
+        let one_sub = plan_file(&dir, &file, Some((&sub, false)), &symbols).unwrap();
+        assert_eq!(
+            one_sub.job.args,
+            ["test", "-json", "-run", r"^TestA$/^adds_1\+1$", "./svc"]
+        );
+        assert!(one_sub.scope.covers(&file, &strings(&["TestA"])));
+        assert!(one_sub.scope.covers(&file, &sub));
+        assert!(!one_sub.scope.covers(&file, &strings(&["TestA", "other"])));
+        let mixed = plan_go(&dir, &dir.join("svc"), vec![sub, strings(&["TestB", "x"])]).unwrap();
+        assert_eq!(
+            mixed.job.args,
+            ["test", "-json", "-run", "^(TestA|TestB)$", "./svc"]
+        );
 
         let failed = Report {
             suites: vec![Suite {

@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-pub use go::{GoModule, find_go_module, go_job, go_run_pattern, parse_go_json};
+pub use go::{GoModule, find_go_module, go_job, go_run_pattern, go_subtest_pattern, parse_go_json};
 pub use js::{find_js_package, js_framework, js_job, js_name_pattern, parse_js_report};
 pub use run::{Ended, Finished, Stop, run};
 

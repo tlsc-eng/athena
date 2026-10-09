@@ -127,14 +127,152 @@ fn go_tests(root: Node, src: &str, out: &mut Vec<TestSymbol>) {
             _ => false,
         };
         if runnable {
+            let titles = vec![name.to_string()];
             out.push(TestSymbol {
                 line: func.start_position().row,
                 end_line: func.end_position().row,
-                titles: vec![name.to_string()],
+                titles: titles.clone(),
                 group: false,
             });
+            if let (Some(t), Some(body)) =
+                (go_testing_t(params, src), func.child_by_field_name("body"))
+            {
+                go_subtests(body, src, t, &titles, out);
+            }
         }
     }
+}
+
+/// The name of a parameter list's only parameter when it is a `*testing.T`.
+fn go_testing_t<'a>(params: Node, src: &'a str) -> Option<&'a str> {
+    let mut pc = params.walk();
+    let mut list = params.named_children(&mut pc);
+    let (Some(param), None) = (list.next(), list.next()) else {
+        return None;
+    };
+    let ty: String = text_of(param.child_by_field_name("type")?, src)
+        .split_whitespace()
+        .collect();
+    if ty != "*testing.T" {
+        return None;
+    }
+    Some(text_of(param.child_by_field_name("name")?, src))
+}
+
+/// `t.Run("name", func(t *testing.T) { … })` calls with a literal name, nested ones included.
+fn go_subtests(node: Node, src: &str, t: &str, parents: &[String], out: &mut Vec<TestSymbol>) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let Some((name, func, inner_t)) = go_run_call(child, src, t) else {
+            go_subtests(child, src, t, parents, out);
+            continue;
+        };
+        let mut titles = parents.to_vec();
+        // `go test` names a subtest by its rewritten name, and a `/` in it nests another level.
+        titles.extend(go_subtest_name(&name).split('/').map(String::from));
+        out.push(TestSymbol {
+            line: child.start_position().row,
+            end_line: child.end_position().row,
+            titles: titles.clone(),
+            group: false,
+        });
+        if let Some(body) = func.child_by_field_name("body") {
+            go_subtests(body, src, inner_t, &titles, out);
+        }
+    }
+}
+
+/// A `t.Run` call on the test's own `t`: the subtest's name, its function and that one's `t`.
+fn go_run_call<'a>(call: Node<'a>, src: &'a str, t: &str) -> Option<(String, Node<'a>, &'a str)> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let callee = call.child_by_field_name("function")?;
+    let receiver = callee.child_by_field_name("operand")?;
+    if callee.kind() != "selector_expression"
+        || receiver.kind() != "identifier"
+        || text_of(receiver, src) != t
+        || text_of(callee.child_by_field_name("field")?, src) != "Run"
+    {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let mut ac = args.walk();
+    let mut list = args.named_children(&mut ac);
+    let (Some(name), Some(func), None) = (list.next(), list.next(), list.next()) else {
+        return None;
+    };
+    if func.kind() != "func_literal" {
+        return None;
+    }
+    let inner_t = go_testing_t(func.child_by_field_name("parameters")?, src)?;
+    let raw = text_of(name, src);
+    let body = raw.get(1..raw.len().checked_sub(1)?)?;
+    let name = match name.kind() {
+        "interpreted_string_literal" => go_unescape(body)?,
+        // Go drops carriage returns from raw strings.
+        "raw_string_literal" => body.replace('\r', ""),
+        _ => return None,
+    };
+    Some((name, func, inner_t))
+}
+
+/// A Go interpreted string literal's body as its value; `None` for an escape that is not UTF-8.
+fn go_unescape(body: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(body.len());
+    let mut chars = body.chars();
+    let hex = |chars: &mut std::str::Chars, n: usize| {
+        let digits: String = chars.take(n).collect();
+        (digits.len() == n).then(|| u32::from_str_radix(&digits, 16).ok())?
+    };
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            bytes.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+            continue;
+        }
+        let unicode = |n: u32, bytes: &mut Vec<u8>| -> Option<()> {
+            bytes.extend_from_slice(char::from_u32(n)?.encode_utf8(&mut [0; 4]).as_bytes());
+            Some(())
+        };
+        match chars.next()? {
+            'a' => bytes.push(0x07),
+            'b' => bytes.push(0x08),
+            'f' => bytes.push(0x0c),
+            'n' => bytes.push(b'\n'),
+            'r' => bytes.push(b'\r'),
+            't' => bytes.push(b'\t'),
+            'v' => bytes.push(0x0b),
+            'x' => bytes.push(u8::try_from(hex(&mut chars, 2)?).ok()?),
+            'u' => unicode(hex(&mut chars, 4)?, &mut bytes)?,
+            'U' => unicode(hex(&mut chars, 8)?, &mut bytes)?,
+            d @ '0'..='7' => {
+                let rest: String = chars.by_ref().take(2).collect();
+                bytes.push(u8::from_str_radix(&format!("{d}{rest}"), 8).ok()?);
+            }
+            other @ ('\\' | '"' | '\'') => bytes.push(other as u8),
+            _ => return None,
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The name `go test` gives a subtest: spaces become `_` and control characters are escaped,
+/// as the testing package's `rewrite` does.
+fn go_subtest_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            c if c.is_whitespace() => out.push('_'),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            c if c.is_control() && (c as u32) < 0x80 => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `describe("x", …)`, `it.only("y", …)` and the like: whether it groups, and its title.
@@ -321,6 +459,50 @@ mod tests {
         );
         assert_eq!(found[0].end_line, 5);
         assert!(find_tests(Lang::Go, Path::new("p/a.go"), src).is_empty());
+    }
+
+    #[test]
+    fn go_subtests_with_literal_names_are_found_under_their_test() {
+        let src = "package p\n\nimport \"testing\"\n\n\
+                   func TestMath(t *testing.T) {\n\
+                   \tt.Run(\"adds two\", func(t *testing.T) {\n\
+                   \t\tt.Run(`deep`, func(u *testing.T) {})\n\
+                   \t})\n\
+                   \tfor _, tc := range cases {\n\
+                   \t\tt.Run(tc.name, func(t *testing.T) {})\n\
+                   \t\tt.Run(\"in\\tloop\", func(t *testing.T) {})\n\
+                   \t}\n\
+                   \tother.Run(\"not t\", func(t *testing.T) {})\n\
+                   \tt.Run(\"a/b\", func(t *testing.T) {})\n\
+                   }\n";
+        let found = find_tests(Lang::Go, Path::new("p/m_test.go"), src);
+        let titles: Vec<(String, usize)> = found
+            .iter()
+            .map(|t| (t.titles.join(" > "), t.line))
+            .collect();
+        let expected = [
+            ("TestMath", 4),
+            ("TestMath > adds_two", 5),
+            ("TestMath > adds_two > deep", 6),
+            ("TestMath > in_loop", 10),
+            ("TestMath > a > b", 13),
+        ];
+        let expected: Vec<(String, usize)> =
+            expected.iter().map(|(t, l)| (t.to_string(), *l)).collect();
+        assert_eq!(titles, expected);
+        assert_eq!((found[1].line, found[1].end_line), (5, 7));
+    }
+
+    #[test]
+    fn go_strings_unescape_and_subtest_names_are_rewritten_as_go_test_does() {
+        assert_eq!(
+            go_unescape(r#"a\"b\\c\x41\u00e9\101"#).as_deref(),
+            Some("a\"b\\cAéA")
+        );
+        assert_eq!(go_unescape(r"\q"), None);
+        assert_eq!(go_unescape(r"\xff"), None);
+        assert_eq!(go_subtest_name("two words\there"), "two_words_here");
+        assert_eq!(go_subtest_name("bell\u{7}nul\u{0}"), "bell\\anul\\x00");
     }
 
     #[test]

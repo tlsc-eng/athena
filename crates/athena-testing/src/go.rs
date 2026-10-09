@@ -61,6 +61,15 @@ pub fn go_run_pattern(names: &[String]) -> String {
     }
 }
 
+/// `^TestA$/^sub$` for one subtest: `go test` matches each `/`-separated part against one level.
+pub fn go_subtest_pattern(titles: &[String]) -> String {
+    titles
+        .iter()
+        .map(|t| format!("^{}$", regex::escape(t)))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// `go test -json` from the module root for `packages`, limited to tests matching `run`.
 pub fn go_job(module: &GoModule, packages: &[String], run: Option<String>) -> Job {
     let mut args = vec!["test".to_string(), "-json".to_string()];
@@ -349,6 +358,10 @@ mod tests {
         assert_eq!(
             go_run_pattern(&["TestA".into(), "TestB".into()]),
             "^(TestA|TestB)$"
+        );
+        assert_eq!(
+            go_subtest_pattern(&["TestA".into(), "adds_1+1".into(), "(x)".into()]),
+            r"^TestA$/^adds_1\+1$/^\(x\)$"
         );
         let job = go_job(&module(), &["./sub".into()], Some("^TestA$".into()));
         assert_eq!(job.args, ["test", "-json", "-run", "^TestA$", "./sub"]);
