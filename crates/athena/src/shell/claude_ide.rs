@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -78,6 +78,39 @@ fn read_text(path: &Path) -> Result<String, String> {
     review::read_file(path)
         .and_then(review::text)
         .map_err(|e| format!("{e:#}"))
+}
+
+/// `path` with symlinks and `..` resolved as the OS would, as far as it exists.
+fn resolve(path: &Path) -> PathBuf {
+    let parts: Vec<Component> = path.components().collect();
+    for n in (1..=parts.len()).rev() {
+        let Ok(mut real) = parts[..n].iter().collect::<PathBuf>().canonicalize() else {
+            continue;
+        };
+        for part in &parts[n..] {
+            match part {
+                Component::ParentDir => {
+                    real.pop();
+                }
+                Component::Normal(name) => real.push(name),
+                _ => {}
+            }
+        }
+        return real;
+    }
+    path.to_path_buf()
+}
+
+/// The project a proposed file really lands in, and the file's path under that project's root.
+fn proposal_target(roots: &[&Path], path: &Path) -> Option<(usize, PathBuf)> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let real = resolve(path);
+    roots.iter().enumerate().find_map(|(i, root)| {
+        let inside = real.strip_prefix(resolve(root)).ok()?;
+        Some((i, root.join(inside)))
+    })
 }
 
 /// A copy of `workspace` without proposal tabs, or `None` when it has none.
@@ -311,22 +344,20 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self
+        let roots: Vec<&Path> = self
             .workspace
             .projects
             .iter()
-            .position(|p| path.starts_with(&p.root))
-        {
-            Some(i) => self.switch_to(i, cx),
-            None if self.workspace.active.is_none() => {
-                // Claude Code then asks in the terminal instead.
-                if let Some(server) = &self.ide.server {
-                    server.resolve(&key, Verdict::Unavailable);
-                }
-                return;
+            .map(|p| p.root.as_path())
+            .collect();
+        let Some((project, path)) = proposal_target(&roots, &path) else {
+            // Claude Code then asks in the terminal instead.
+            if let Some(server) = &self.ide.server {
+                server.resolve(&key, Verdict::Unavailable);
             }
-            None => {}
-        }
+            return;
+        };
+        self.switch_to(project, cx);
         let id = key.id();
         self.close_proposal_tab(&id, window, cx);
         self.ide.proposals.insert(
@@ -725,6 +756,39 @@ mod tests {
         let big = std::fs::File::create(file("big.log")).unwrap();
         big.set_len(review::MAX_DIFF_BYTES as u64 + 1).unwrap();
         assert!(read_text(&file("big.log")).unwrap_err().contains("20 MB"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_proposal_lands_in_the_project_its_resolved_path_is_in() {
+        let dir = std::env::temp_dir().join(format!("athena-ide-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (proj, other) = (dir.join("proj"), dir.join("other"));
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(&proj, dir.join("link")).unwrap();
+        std::os::unix::fs::symlink(&other, proj.join("out")).unwrap();
+        let roots = [other.as_path(), proj.as_path()];
+        let target = |p: PathBuf| proposal_target(&roots, &p);
+
+        assert_eq!(
+            target(proj.join("src/new.rs")),
+            Some((1, proj.join("src/new.rs")))
+        );
+        assert_eq!(
+            target(proj.join("gone/../a.rs")),
+            Some((1, proj.join("a.rs")))
+        );
+        assert_eq!(target(dir.join("link/a.rs")), Some((1, proj.join("a.rs"))));
+        assert_eq!(target(proj.join("out/x.rs")), Some((0, other.join("x.rs"))));
+        assert_eq!(target(proj.join("../../etc/passwd")), None);
+        assert_eq!(target(PathBuf::from("proj/a.rs")), None);
+        let linked = [dir.join("link")];
+        let linked: Vec<&Path> = linked.iter().map(PathBuf::as_path).collect();
+        assert_eq!(
+            proposal_target(&linked, &proj.join("a.rs")),
+            Some((0, dir.join("link/a.rs")))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

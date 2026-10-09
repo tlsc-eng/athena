@@ -112,7 +112,7 @@ impl Session {
             Verdict::Rejected => rejected(&key),
             Verdict::Unavailable => {
                 return Err(ErrorData::internal_error(
-                    "Athena has no project open to show this change in",
+                    "The file is not in a project open in Athena",
                     None,
                 ));
             }
