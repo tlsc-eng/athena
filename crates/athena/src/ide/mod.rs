@@ -16,12 +16,21 @@ use rmcp::model::{CustomNotification, ServerNotification};
 use rmcp::{Peer, RoleServer, ServiceExt};
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 pub use lock::default_dir as default_lock_dir;
 
 /// How long quitting waits for rejected diffs to reach Claude Code.
 pub const QUIT_WAIT: Duration = Duration::from_millis(500);
+/// A connection that has not shown the token by then is dropped.
+const HANDSHAKE_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(5)
+};
+/// Connections still in the WebSocket handshake; any more are dropped unread, so a local process
+/// without the token cannot use up the window's file descriptors.
+const MAX_HANDSHAKES: usize = 16;
 
 /// One proposal Claude Code is waiting on: the connection and the tab name it chose.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -377,6 +386,7 @@ fn bind(previous: Option<u16>) -> io::Result<StdListener> {
 }
 
 async fn accept(listener: TcpListener, shared: Arc<Shared>) {
+    let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -389,24 +399,32 @@ async fn accept(listener: TcpListener, shared: Arc<Shared>) {
         if !peer.ip().is_loopback() {
             continue;
         }
-        tokio::spawn(serve(stream, shared.clone()));
+        let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+            tracing::debug!("ide: too many connections waiting to authenticate");
+            continue;
+        };
+        tokio::spawn(serve(stream, shared.clone(), permit));
     }
 }
 
 #[allow(clippy::result_large_err)]
-async fn serve(stream: tokio::net::TcpStream, shared: Arc<Shared>) {
+async fn serve(stream: tokio::net::TcpStream, shared: Arc<Shared>, permit: OwnedSemaphorePermit) {
     let token = shared.token.clone();
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, |req: &_, res| {
+    let handshake = tokio_tungstenite::accept_hdr_async(stream, |req: &_, res| {
         transport::admit(req, res, &token)
-    })
-    .await
-    {
-        Ok(ws) => ws,
-        Err(e) => {
+    });
+    let ws = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => {
             tracing::info!("ide: refused a connection: {e}");
             return;
         }
+        Err(_) => {
+            tracing::info!("ide: dropped a connection that did not finish its handshake");
+            return;
+        }
     };
+    drop(permit);
     let client = {
         let mut state = shared.lock();
         state.next_client += 1;

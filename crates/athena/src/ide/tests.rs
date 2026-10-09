@@ -254,6 +254,42 @@ fn a_wrong_or_missing_token_and_any_origin_are_refused_before_the_upgrade() {
     });
 }
 
+/// Whether the server closes `stream` within `wait`.
+async fn closed(stream: &mut TcpStream, wait: Duration) -> bool {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0; 64];
+    match tokio::time::timeout(wait, stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n == 0,
+        Ok(Err(_)) => true,
+        Err(_) => false,
+    }
+}
+
+#[test]
+fn connections_waiting_to_authenticate_are_capped_and_time_out() {
+    run(async || {
+        let f = Fixture::new("idle");
+        let port = f.server().port();
+        let mut idle = Vec::new();
+        for _ in 0..MAX_HANDSHAKES {
+            idle.push(TcpStream::connect(("127.0.0.1", port)).await.unwrap());
+        }
+        let mut extra = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        assert!(
+            closed(&mut extra, HANDSHAKE_TIMEOUT / 2).await,
+            "one over the cap is dropped at once"
+        );
+        assert!(
+            !closed(&mut idle[0], Duration::from_millis(50)).await,
+            "the ones before it wait for their handshake"
+        );
+        for stream in &mut idle {
+            assert!(closed(stream, HANDSHAKE_TIMEOUT * 3).await, "timed out");
+        }
+        f.connect().await;
+    });
+}
+
 #[test]
 fn an_accepted_diff_returns_file_saved_with_the_contents_and_a_rejected_one_says_so() {
     run(async || {
