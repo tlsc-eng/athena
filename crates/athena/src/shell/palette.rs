@@ -363,6 +363,14 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::OpenKeyboardShortcuts),
         ),
         ("Open settings (JSON)", Box::new(actions::OpenSettings)),
+        (
+            "Snippets: configure snippets for this language",
+            Box::new(super::snippets::ConfigureSnippets),
+        ),
+        (
+            "Snippets: configure global snippets",
+            Box::new(super::snippets::ConfigureGlobalSnippets),
+        ),
         ("Toggle inlay hints", Box::new(actions::ToggleInlayHints)),
         ("Toggle minimap", Box::new(actions::ToggleMinimap)),
     ]

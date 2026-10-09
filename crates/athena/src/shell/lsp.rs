@@ -473,8 +473,10 @@ impl Shell {
             self.pull_diagnostics(&key, &doc, cx);
             self.lsp.linters.entry(doc.clone()).or_default().push(key);
         }
-        if let Some(client) = self.document_client(&doc) {
-            push_triggers(editor, &client, cx);
+        match self.document_client(&doc) {
+            Some(client) => push_triggers(editor, &client, cx),
+            None if server_for(lang).is_none() => super::snippets::attach_snippets(editor, cx),
+            None => {}
         }
     }
 
@@ -1297,6 +1299,7 @@ impl Shell {
         }
         let path = editor.read(cx).path().to_path_buf();
         self.project_settings_saved(&path, cx);
+        self.snippets_saved(&path, cx);
     }
 
     pub(super) fn lsp_definition(
@@ -1634,10 +1637,9 @@ impl Shell {
     ) {
         let doc = document_key(editor.read(cx).path());
         self.flush_change(&doc, editor, cx);
+        let snippets = self.snippet_completions(editor, cx);
         let Some(client) = self.document_client(&doc) else {
-            editor.update(cx, |e, cx| {
-                e.show_completions(request, Vec::new(), false, cx)
-            });
+            editor.update(cx, |e, cx| e.show_completions(request, snippets, false, cx));
             return;
         };
         let at = Position {
@@ -1657,9 +1659,11 @@ impl Shell {
                 }
             };
             tracing::debug!("completion → {} items, incomplete {incomplete}", list.len());
+            // After the server's, so a resolve's index still names the server's item.
             let items = list
                 .iter()
                 .map(|item| completion(item.clone(), resolves))
+                .chain(snippets)
                 .collect();
             if resolves {
                 let _ = this.update(cx, |this, _| {

@@ -1,0 +1,12 @@
+// Snippets for every language, in VS Code's format; "scope" limits one to some languages by
+// their ids ("go,typescript"). Each has a prefix that brings it up in the suggestions, a body
+// ($1 and $2 are tab stops, ${1:text} a placeholder, $0 where the caret ends) and a description.
+// $TM_FILENAME, $CURRENT_YEAR, $CLIPBOARD and VS Code's other variables work.
+{
+  // "Copyright": {
+  //   "scope": "go,typescript",
+  //   "prefix": "copyright",
+  //   "body": "$LINE_COMMENT Copyright $CURRENT_YEAR ${1:Name}",
+  //   "description": "A copyright line"
+  // }
+}

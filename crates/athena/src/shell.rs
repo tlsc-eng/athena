@@ -35,6 +35,7 @@ mod review;
 mod search;
 mod settings;
 mod shortcuts;
+mod snippets;
 mod status_bar;
 mod tasks;
 mod terminal_panel;
@@ -772,6 +773,7 @@ impl Render for Shell {
         let root = git_view::bind_git_actions(div(), cx);
         let root = conflicts::bind_conflict_actions(tasks::bind_run_actions(root, cx), cx);
         let root = tests_view::bind_test_actions(root, cx);
+        let root = snippets::bind_snippet_actions(root, cx);
         let root = claude_sessions::bind_claude_actions(root, cx);
         let root = github::bind_github_actions(root, cx);
         root.track_focus(&self.focus)

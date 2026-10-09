@@ -216,6 +216,12 @@ impl EditorView {
         self.completing.triggers = triggers;
     }
 
+    /// Lets typing ask for suggestions in a file no language server has, for the user's
+    /// snippets; a server's trigger characters, once set, are kept.
+    pub fn offer_snippets(&mut self) {
+        self.completing.triggers.get_or_insert_with(Vec::new);
+    }
+
     /// Whether a language server has the file, so typing asks it for suggestions.
     pub(crate) fn completing_attached(&self) -> bool {
         self.completing.triggers.is_some()
