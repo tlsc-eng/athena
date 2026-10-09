@@ -13,7 +13,9 @@ plan with Resume, each file Claude edits can be reviewed as one diff against the
 before the session, and an MCP server lets Claude read the editor, language servers, tests, the
 debugger and terminals.
 Optionally Athena also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
-or reject, and the editor selection goes with each prompt.
+or reject, and the editor selection goes with each prompt. Projects can be spread over several
+windows, and settings and keyboard shortcuts each have an editor tab of their own beside their
+JSON files.
 
 It is written in Rust on [GPUI](https://crates.io/crates/gpui) and runs only on Apple silicon.
 
@@ -599,7 +601,7 @@ information rather than triggering the install dialog).
   once per project.
 - Tabs show whether Claude is working or waiting for input. With the project's hooks enabled,
   Athena also posts a notification when a session finishes or needs you.
-- An MCP server, `athena mcp-stdio`, answers from the running window (see below).
+- An MCP server, `athena mcp-stdio`, answers from the running app (see below).
 - With the project's hooks enabled, each file Claude edits posts a toast ("Claude edited main.go")
   whose **Review diff** opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
@@ -630,16 +632,28 @@ information rather than triggering the install dialog).
 - Workspace layout, open projects and tabs are restored on launch, each editor with its cursor,
   scroll position, folds and word wrap choice as they were left.
 - Open Recent (`ctrl-r` outside a terminal, or File > Open Recent) lists the last 20 project
-  folders you closed.
-- Several windows: New Window (`cmd-shift-n`), Open Project in New Window, Move Project to New
-  Window, Merge All Windows and Close Window. A project is open in one window at a time and keeps
-  its terminals and unsaved text when it moves. Moving a project ends its debug session, rejects
+  folders you closed, and every project of a window you closed, however many there are.
+- Several windows: New Window (`cmd-shift-n`), Open Project in New Window… (File), Move Project
+  to New Window (Window menu, or right-click a project in the rail), Merge All Windows and Close
+  Window, all in the palette too. Each window has its own projects, layout and drawer, and saves
+  its bounds. A project is open in one window at a time: opening it again (Open, Open Recent,
+  `athena <folder>`, a Finder drop) brings that window forward, and a new folder opens in the
+  focused window. The MCP tools, notifications and Claude Code's IDE connection reach every
+  window's projects. A project keeps its terminals and unsaved text when it moves. Moving a project ends its debug session, rejects
   Claude's pending proposals for it and restarts its language servers in the window it lands in;
   merging or closing a window also stops that window's debug session and test run. A closed
-  window's projects keep their shells running and stay in Open Recent until reopened; Clear
-  Recently Opened asks before ending them. Settings and Keyboard Shortcuts tabs are not restored
-  on launch. A v0.9 build opening the same workspace.json shows every project in one window and
+  window's projects keep their shells running (Claude Code sessions included) and stay in Open
+  Recent until reopened, which reattaches them; Clear Recently Opened asks first when any of
+  their terminals still run ("Clear and End Terminals"). Closing a window asks about its unsaved
+  files first, and closing the last window quits, as before. Quitting saves every window and the
+  next launch restores them all. Settings and Keyboard Shortcuts tabs are not saved, so they are
+  not restored on launch; this keeps workspace.json readable by v0.9, and tabs of a kind this
+  build does not know (from a later release) are dropped on load instead of setting the file
+  aside. A v0.9 build opening the same workspace.json shows every project in one window and
   forgets closed windows' projects, leaving their shells running.
+- Settings (`cmd-,`) and Keyboard Shortcuts (`cmd-k cmd-s`) open as tabs for editing
+  settings.json and keymap.json without writing JSON; see [Settings](#settings) and [Your own
+  shortcuts](#your-own-shortcuts).
 - Light and dark themes. By default Athena follows the macOS appearance and switches with it;
   View > Theme or the palette's **Theme:** commands pin light or dark. Both themes cover the
   interface, code, the terminal's 16 colours (tuned so Claude Code stays readable) and Markdown
@@ -653,7 +667,7 @@ information rather than triggering the install dialog).
 | TypeScript, TSX | `.ts`, `.mts`, `.cts`, `.tsx` | `typescript-language-server`, plus the project's ESLint / Biome |
 | JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | `typescript-language-server`, plus the project's ESLint / Biome |
 | YAML | `.yaml`, `.yml` | |
-| JSON | `.json`, `.jsonc`, `.json5`, `.prettierrc`, `.eslintrc`, `.babelrc` | the project's Biome |
+| JSON | `.json`, `.jsonc`, `.json5`, `.prettierrc`, `.eslintrc`, `.babelrc` | `vscode-json-language-server` if installed (optional), plus the project's Biome |
 | TOML | `.toml`, `Cargo.lock`, `uv.lock`, `poetry.lock` | |
 | Shell | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.bashrc`, `.profile`, `.envrc` and similar, `#!` scripts | |
 | Rust | `.rs` | |
@@ -732,8 +746,9 @@ Register Athena's MCP server once per Claude Code profile:
 claude mcp add -s user athena -- athena mcp-stdio
 ```
 
-The server holds no state; each tool asks the running Athena window, which works out from the
-process tree which pane the calling Claude session runs in.
+The server holds no state; each tool asks the running Athena, which works out from the process
+tree which pane (and window) the calling Claude session runs in; lists such as `list_projects`
+and `get_open_editors` cover every window.
 
 The language server tools (`lsp_definition`, `lsp_references`, `document_symbols`) and
 `read_buffer` work only on files open in an Athena editor tab; for any other file they answer
@@ -806,7 +821,7 @@ protocol is undocumented and may change between Claude Code releases. When it is
 
 - Athena listens on a random loopback port and writes `~/.claude/ide/<port>.lock` (owner-only,
   with a fresh token each launch). Claude Code finds Athena there; the lock lists the open
-  projects and is removed when Athena quits or the setting is turned off.
+  projects of every window and is removed when Athena quits or the setting is turned off.
 - New terminals get `CLAUDE_CODE_SSE_PORT`, so `claude` started in them connects by itself. In a
   session that was already running, type `/ide`. Athena listens on the same port after a restart
   when it is free, so older terminals keep finding it. A session daemon still running from
@@ -849,6 +864,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-shift-p` | Command palette |
 | `cmd-p` | Go to file |
 | `cmd-o` | Open project |
+| `cmd-shift-n` | New window |
 | `cmd-shift-w` | Close project |
 | `cmd-alt-[` | Previous project |
 | `cmd-alt-]` | Next project |
@@ -872,7 +888,8 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-shift-s` | Save as |
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |
 | `cmd-shift-f` | Find in project |
-| `cmd-,` | Open settings.json |
+| `cmd-,` | Settings tab |
+| `cmd-k cmd-s` | Keyboard Shortcuts tab (not in a terminal, where `cmd-k` clears the scrollback at once) |
 | `cmd-alt-shift-g` | Toggle inline blame |
 | `cmd-=` (or `cmd-+`) / `cmd--` | Zoom editor and terminal text in / out |
 | `cmd-0` | Reset zoom |
@@ -900,14 +917,16 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 
 Mouse buttons 4 and 5 go back and forward; a middle click on a tab closes it. The palette also has
 commands without a key: Toggle auto save, Toggle format on save, Toggle word wrap by default,
-Toggle inlay hints, Toggle minimap, Source control changes, Switch branch…, the eleven **Git:** commands (Toggle
+Toggle inlay hints, Toggle minimap, New window, Open project in new window, Move project to new
+window, Merge all windows, Close window, Source control changes, Switch branch…, the eleven **Git:** commands (Toggle
 file blame, Open timeline and the three worktree commands among them), the two **GitHub:**
 commands, Run task…, Tests and the seven **Tests:** commands, Debug and the eleven **Debug:**
 commands, the three **Claude:** commands,
 **Terminal: move into panel** and **Terminal: move into editor area** (beside toggle panel and
 new in panel), Focus outline, Show explorer, Allow project code and Disallow project code,
 Reveal active file in tree, Open file to the side, Open Markdown preview, New browser preview,
-Clear recently opened, the three **Theme:** commands, Open keyboard shortcuts file, the two
+Clear recently opened, the three **Theme:** commands, Open settings, Open settings (JSON), Open
+keyboard shortcuts, Open keyboard shortcuts (JSON), the two
 **Snippets:** commands and the Claude Code and Playwright commands. With an editor focused it also offers Go to line, Indent lines, Outdent lines, Toggle replace, Insert line above (which has
 no key, since `cmd-shift-enter` is Zoom pane), Insert line below, Rename symbol, Quick fix, Go to
 implementations, Go to type definition, Show type hierarchy (no key), Expand selection, Shrink
@@ -917,11 +936,12 @@ file, `@` lists the file's symbols, `#` searches workspace symbols and `>` lists
 
 The menu bar has Athena, File, Selection, View, Run and Window menus. Run holds the debugging
 commands and their keys. Athena holds Settings…
-(`cmd-,`). Selection holds Select All, the line copy and move commands and the multi-cursor
+(`cmd-,`). File has New Window, Open Project in New Window… and Close Window; Window has Move
+Project to New Window and Merge All Windows. Selection holds Select All, the line copy and move commands and the multi-cursor
 commands. View includes Word Wrap, Theme, the terminal panel commands (Terminal, New Terminal in
 Panel, Move Terminal into Panel / into Editor Area), Toggle File Blame, Open Timeline, Toggle
 Minimap and the interface zoom commands, and File includes Open Recent, the settings toggles (auto save, format on save, word wrap by default,
-Claude Code integration) and Keyboard Shortcuts.
+Claude Code integration) and Keyboard Shortcuts (the tab).
 
 On a Mac keyboard the `f`-keys need Fn unless "Use F1, F2, etc. keys as standard function keys" is
 on in System Settings. macOS also takes F11 (Show Desktop) and, on some setups, F10 for itself
@@ -1053,7 +1073,24 @@ closes it.
 
 ### Your own shortcuts
 
-**Open Keyboard Shortcuts File** (palette, or File > Keyboard Shortcuts) opens
+![The Keyboard Shortcuts tab with an entry Athena cannot use](docs/screenshots/v0.10/02-shortcuts.png)
+
+The **Keyboard Shortcuts** tab (`cmd-k cmd-s` outside a terminal, File > Keyboard Shortcuts, or
+**Open keyboard shortcuts** in the palette) lists every command with its keys, its `when` context
+and whether the binding is Athena's (Default) or yours (User). The search field matches command
+names and ids, keys (as `cmd-k` or `⌘K`), contexts and the words default and user; Up and Down
+move through the rows. Double-click a row, or press Return on it, to record new keys: press up to
+two keystrokes (a third starts over), Return saves and Escape cancels; keys such as `cmd-w` are
+recorded rather than acted on. While recording, the tab names the commands already on those keys
+("Also bound to …"). The right-click menu has Change Keybinding…, Add Keybinding…, Remove
+Keybinding, Reset Keybinding (removes your entries for the command) and Copy Command ID. Changes
+are written to keymap.json as VS Code writes them, keeping its comments: a changed default gets a
+new entry plus a `-` entry removing the old keys. An edit finds its entry in the file as it is
+when written, so a hand edit in between is not overwritten; when the entry is gone the edit is
+refused with a message. Entries of keymap.json that Athena cannot use are listed above the table
+with the reason and an Open keymap.json button.
+
+**Open keyboard shortcuts (JSON)** (palette, or the tab's button) opens
 `~/Library/Application Support/athena/keymap.json`, creating it with examples. It takes the same
 shape as VS Code's `keybindings.json`, and Athena applies it as soon as you save:
 
@@ -1077,14 +1114,34 @@ Command names are the action names in the source: `athena::…` (`crates/athena/
 Your entries come after Athena's, so on the same key in the same context yours win, and an entry
 without `when` takes its key in every context: Athena's bindings of that key, including the
 editor's and terminal's, no longer apply. Comments and trailing commas are allowed. Entries Athena cannot use (an unknown command, a key it cannot
-parse, a broken `when`) are listed in a toast and in `app.log`; the rest still apply.
+parse, a broken `when`) are listed in a toast, in `app.log`, as warnings on the entry in its
+editor and above the Keyboard Shortcuts table; the rest still apply.
 
 ### Settings
 
-**Open Settings (JSON)** (palette, ⌘, or Athena > Settings…) opens
-`~/Library/Application Support/athena/settings.json`, creating it with every setting commented
-out. Like VS Code's `settings.json` it allows comments and trailing commas, and Athena applies it
-as soon as you save:
+![The Settings tab](docs/screenshots/v0.10/01-settings.png)
+
+The **Settings** tab (`cmd-,`, Athena > Settings…, or **Open settings** in the palette) lists
+every setting Athena reads, grouped as Editor, Workbench, Explorer, Git, Claude and Language
+Servers, each with its title, description, key and a control: a checkbox, a number field (written
+once you pause typing or press Return; a value it cannot take is explained under the field and
+not written), a
+dropdown, or, for settings that hold structured values (`lsp`, `claude.prices`,
+`editor.codeActionsOnSave`), a link to the JSON file. Search matches titles, descriptions, keys
+and VS Code's spellings.
+**User** edits your settings.json; **Project · name** edits the active project's
+`.athena/settings.json`, creating it on the first change, and leaves out app-wide settings (see
+[Project settings](#project-settings)), which a project file cannot hold. A setting the scope's
+file sets is marked **Modified** with a **Reset** that removes it from that file; "Also set for
+this project" or "Also set in User" says the other file sets it too. Changes go through the same
+writer as the palette toggles, so comments and layout stay. When the file cannot be read, the tab
+says why, changes nothing and offers to open it. Like any tab it needs an open project; with none,
+`cmd-,` shows a notice with the path of settings.json instead.
+
+**Open settings (JSON)** (palette, or the tab's **Open Settings (JSON)** button, which opens the
+scope's file) opens `~/Library/Application Support/athena/settings.json`, creating it with every
+setting commented out. Like VS Code's `settings.json` it allows comments and trailing commas, and
+Athena applies it as soon as you save:
 
 ```jsonc
 {
@@ -1134,6 +1191,15 @@ once the file has it. Each `lsp` entry goes to that server as its `initializatio
 object), and is sent again with `workspace/didChangeConfiguration` when the file changes.
 Problems (an unknown key, a wrong type) are listed in a toast and in `app.log` while the rest
 applies; a file that is not valid JSON leaves the settings in force as they were.
+
+While settings.json, a project's `.athena/settings.json` or keymap.json is open in an editor,
+Athena checks it as you type and shows each problem beside the language servers' diagnostics: a
+warning on the key or entry it is about, an error on the line where the JSON stops parsing. If
+VS Code's JSON server, `vscode-json-language-server`, is on your login shell's `PATH` (`npm
+install -g vscode-langservers-extracted`), every JSON file opens in it, and it checks those three
+files against JSON schemas Athena generates from its settings and its commands. It is optional: Athena never installs it, does not mention it when it
+is missing, and looks for it only in absolute `PATH` folders, so a project's own binary is never
+picked up.
 
 `"[lang]"` blocks take the editor settings for one language, by VS Code's language id: `go`,
 `typescript`, `typescriptreact`, `javascript`, `yaml`, `json`, `toml`, `shellscript`, `rust`,
@@ -1217,7 +1283,7 @@ an unknown one keeps its default (`${NAME:default}`). Transforms follow VS Code'
 ## Command line
 
 ```text
-athena [<folder>]             open a folder in the running window, or start Athena with it
+athena [<folder>]             open a folder in Athena (the window that has it, else the focused one), or start Athena with it
 athena --version
 athena mux status             list the daemon's sessions
 athena mux stop               stop the daemon; its shells are hung up
@@ -1229,14 +1295,15 @@ athena mcp-stdio              MCP server for Claude Code
 
 ## Files and logs
 
-Everything lives in `~/Library/Application Support/athena`: `workspace.json` (projects, layout,
-each editor tab's cursor, scroll line, folds and wrap choice, recently closed folders, panel
+Everything lives in `~/Library/Application Support/athena`: `workspace.json` (each window's
+projects, bounds and layout, the projects of windows closed while Athena ran with their tabs and
+shell sessions, each editor tab's cursor, scroll line, folds and wrap choice, recently closed folders, panel
 sizes, the text and interface zoom, the theme (`System`, `Light` or `Dark`), each project's
 panel terminals and its answer about running the project's code, and the
 `autosave_delay_ms`, `format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
 integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, `breakpoints.json` (breakpoints and watch expressions per project; one that
 does not parse is kept aside as `breakpoints.json.corrupt-<time>`), `snippets/` (your snippets), the daemon and app sockets, `snapshots/` (copies taken before Claude's
-edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
+edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the app's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.
 
