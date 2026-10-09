@@ -249,6 +249,7 @@ impl Shell {
         self.schedule_save(cx);
         if !self.workspace.ide_integration {
             self.stop_ide(window, cx);
+            self.write_setting(&["ide_integration"], false.into(), cx);
             return self.transient_notice(
                 "Claude Code integration is off",
                 "Claude Code asks about edits in the terminal again.",
@@ -260,6 +261,7 @@ impl Shell {
             self.workspace.ide_integration = false;
             return;
         }
+        self.write_setting(&["ide_integration"], true.into(), cx);
         self.transient_notice(
             "Claude Code integration is on",
             "Claude sessions started in new terminals connect to Athena: proposed edits open as \
@@ -269,7 +271,7 @@ impl Shell {
         );
     }
 
-    fn stop_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn stop_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ide._events = None;
         self.ide._selection = None;
         self.ide.clients.clear();

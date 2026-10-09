@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use athena_editor::{
     Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, ServerEdit, Signature,
 };
 use athena_lsp::{
-    Client, CompletionItem, Diagnostic, Event, Location, MarkupBlock, Position, ServerKind,
+    Client, CompletionItem, Config, Diagnostic, Event, Location, MarkupBlock, Position, ServerKind,
     Severity,
 };
 use athena_proto::{DiagnosticInfo, NoticeKind};
@@ -40,6 +41,7 @@ type ServerKey = (PathBuf, ServerKind);
 
 struct Server {
     client: Rc<Client>,
+    config: Config,
     ready: bool,
     _events: Task<()>,
 }
@@ -280,7 +282,10 @@ impl Shell {
             return Some(server.client.clone());
         }
         tracing::info!(root = %key.0.display(), "starting {}", key.1.program());
-        let (client, events) = Client::start(key.1, document_key(&key.0));
+        let config: Config = Arc::new(RwLock::new(
+            self.settings.file.server_config(key.1.program()),
+        ));
+        let (client, events) = Client::start_with(key.1, document_key(&key.0), config.clone());
         let client = Rc::new(client);
         let event_key = key.clone();
         let task = cx.spawn(async move |this, cx| {
@@ -298,6 +303,7 @@ impl Shell {
             key.clone(),
             Server {
                 client: client.clone(),
+                config,
                 ready: false,
                 _events: task,
             },
@@ -385,6 +391,22 @@ impl Shell {
                     self.lsp_failed(&title, why.clone(), cx);
                 }
                 reply.send(result.map(drop));
+            }
+        }
+    }
+
+    /// Sends each running server its settings again where settings.json changed them.
+    pub(super) fn lsp_settings_changed(&mut self) {
+        for ((_, kind), server) in &self.lsp.servers {
+            let config = self.settings.file.server_config(kind.program());
+            let Ok(mut current) = server.config.write() else {
+                continue;
+            };
+            if *current != config {
+                *current = config.clone();
+                drop(current);
+                tracing::info!("{} settings changed", kind.program());
+                server.client.did_change_configuration(config);
             }
         }
     }

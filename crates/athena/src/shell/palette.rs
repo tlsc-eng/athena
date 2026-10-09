@@ -271,6 +271,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Open keyboard shortcuts file",
             Box::new(actions::OpenKeyboardShortcuts),
         ),
+        ("Open settings (JSON)", Box::new(actions::OpenSettings)),
     ]
 }
 

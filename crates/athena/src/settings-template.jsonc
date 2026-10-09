@@ -1,0 +1,26 @@
+// Athena settings. Comments and trailing commas are allowed, as in VS Code. A setting left out
+// keeps its default, or the choice last made from the command palette or the File menu.
+// Uncomment and edit any of these; Athena applies them as soon as the file is saved.
+//
+// "editor": {
+//   "format_on_save": true,          // ⌘S formats through the language server first
+//   "trim_trailing_whitespace": true,
+//   "insert_final_newline": true,
+//   "word_wrap": false,              // for tabs that have not chosen with ⌥Z
+//   "font_size": 13,
+//   "tab_size": 4,                   // for files whose indentation cannot be detected
+//   "autosave_delay_ms": 1000,       // 0 turns auto save off
+//   "inlay_hints": true              // off hides them; on also turns on a curated set
+// },
+// "[markdown]": { "trim_trailing_whitespace": false },
+// "theme": "system",                 // "system", "light" or "dark"
+// "ide_integration": false,          // Claude Code connects to Athena as its IDE
+// "lsp": {
+//   // Sent to each server as it starts and whenever this file changes.
+//   "gopls": { "hints": { "parameterNames": true }, "staticcheck": true },
+//   "typescript-language-server": {
+//     "preferences": { "includeInlayParameterNameHints": "all" }
+//   }
+// }
+{
+}

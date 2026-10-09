@@ -15,7 +15,8 @@ pub use input::{InputEvent, TextInput};
 pub use logo::{Glyph, Lockup};
 pub use menu::{ContextMenu, MenuItem};
 pub use theme::{
-    Appearance, CODE_ZOOM, Colors, Motion, Shape, SyntaxColors, TerminalColors, Theme, Typography,
+    Appearance, CODE_SIZE, CODE_ZOOM, Colors, Motion, Shape, SyntaxColors, TerminalColors, Theme,
+    Typography,
 };
 
 use gpui::{App, WindowAppearance};

@@ -15,6 +15,7 @@ impl Shell {
         self.workspace.ui.font_zoom = zoom;
         cx.global_mut::<Theme>().set_code_zoom(zoom);
         self.schedule_save(cx);
+        self.font_zoom_changed(zoom, cx);
         cx.notify();
     }
 }

@@ -589,6 +589,45 @@ without `when` takes its key in every context: Athena's bindings of that key, in
 editor's and terminal's, no longer apply. Comments and trailing commas are allowed. Entries Athena cannot use (an unknown command, a key it cannot
 parse, a broken `when`) are listed in a toast and in `app.log`; the rest still apply.
 
+### Settings
+
+**Open Settings (JSON)** (palette, ⌘, or Athena > Settings…) opens
+`~/Library/Application Support/athena/settings.json`, creating it with every setting commented
+out. Like VS Code's `settings.json` it allows comments and trailing commas, and Athena applies it
+as soon as you save:
+
+```jsonc
+{
+  "editor": {
+    "format_on_save": true,
+    "word_wrap": false,              // tabs that have not chosen with ⌥Z
+    "font_size": 14,
+    "tab_size": 4,                   // files whose indentation cannot be detected
+    "autosave_delay_ms": 1000,       // 0 turns auto save off
+    "trim_trailing_whitespace": true,
+    "insert_final_newline": true
+  },
+  "[markdown]": { "trim_trailing_whitespace": false },   // per language, by VS Code's id
+  "theme": "system",                 // "system", "light" or "dark"
+  "ide_integration": false,
+  "lsp": {
+    "gopls": { "staticcheck": true, "hints": { "parameterNames": true } },
+    "typescript-language-server": { "preferences": { "importModuleSpecifierPreference": "relative" } }
+  }
+}
+```
+
+`"editor.word_wrap": true` works too. The palette and File menu toggles (auto save, format on
+save, word wrap, theme, Claude Code integration) write their key into this file, changing only
+that key's value or adding it at the end of its object, so comments and layout stay. A key left
+out falls back to the choice `workspace.json` already held, so nothing set before settings.json
+existed is lost. ⌘= and ⌘- write `editor.font_size` only once the file has it. Each `lsp` entry
+goes to that server as its `initializationOptions` when it starts, answers its
+`workspace/configuration` requests (gopls asks for the `gopls` section and gets the whole
+object), and is sent again with `workspace/didChangeConfiguration` when the file changes.
+Problems (an unknown key, a wrong type) are listed in a toast and in `app.log` while the rest
+applies; a file that is not valid JSON leaves the settings in force as they were.
+
 ## Command line
 
 ```text
@@ -608,7 +647,7 @@ Everything lives in `~/Library/Application Support/athena`: `workspace.json` (pr
 each editor tab's cursor, scroll line, folds and wrap choice, recently closed folders, panel
 sizes, the text zoom, the theme (`System`, `Light` or `Dark`) and the `autosave_delay_ms`,
 `format_on_save`, `word_wrap` and `ide_integration` settings), `ide.env` (the Claude Code
-integration port that new terminals get), `keymap.json` (your shortcuts), `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
+integration port that new terminals get), `keymap.json` (your shortcuts), `settings.json`, `notifications.json`, the daemon and app sockets, `snapshots/` (copies taken before Claude's
 edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the window's log) and
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.

@@ -71,6 +71,7 @@ actions!(
         ThemeLight,
         ThemeDark,
         OpenKeyboardShortcuts,
+        OpenSettings,
     ]
 );
 
@@ -140,6 +141,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-{", PrevTab, None),
         KeyBinding::new("cmd-p", QuickOpen, None),
         KeyBinding::new("cmd-shift-p", CommandPalette, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-b", ToggleFileTree, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
         KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
@@ -233,6 +235,8 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
         Menu {
             name: "Athena".into(),
             items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Hide Athena", Hide),

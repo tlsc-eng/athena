@@ -245,7 +245,7 @@ pub fn merge(defaults: &[KeyBinding], rules: Vec<Rule>) -> Vec<KeyBinding> {
 }
 
 /// JSON with `//` and `/* */` comments and trailing commas removed, strings left alone.
-fn strip_jsonc(text: &str) -> String {
+pub(crate) fn strip_jsonc(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut in_string = false;

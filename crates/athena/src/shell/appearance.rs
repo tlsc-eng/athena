@@ -23,6 +23,12 @@ impl Shell {
         self.workspace.theme = choice;
         athena_ui::set_appearance(resolve(choice, window), cx);
         self.schedule_save(cx);
+        let name = match choice {
+            ThemeChoice::System => "system",
+            ThemeChoice::Light => "light",
+            ThemeChoice::Dark => "dark",
+        };
+        self.write_setting(&["theme"], name.into(), cx);
         cx.notify();
     }
 }

@@ -224,6 +224,7 @@ impl Shell {
                         restore_view_state(v, state, cx);
                     }
                 });
+                self.editor_settings_opened(&view, cx);
                 let tab = key.clone();
                 cx.subscribe(&view, move |this, view, event: &EditorEvent, cx| {
                     match event {
@@ -1930,6 +1931,8 @@ impl Shell {
         };
         self.transient_notice(title, body, cx);
         self.schedule_save(cx);
+        let ms = self.workspace.autosave_delay_ms;
+        self.write_setting(&["editor", "autosave_delay_ms"], ms.into(), cx);
     }
 
     /// Turns formatting on Cmd+S on or off for every language and every open editor.
@@ -1950,6 +1953,7 @@ impl Shell {
         };
         self.transient_notice(title, body.to_string(), cx);
         self.schedule_save(cx);
+        self.write_setting(&["editor", "format_on_save"], on.into(), cx);
     }
 
     /// Turns word wrap on or off for every editor tab that has not chosen with Alt+Z.
@@ -1973,6 +1977,7 @@ impl Shell {
         };
         self.transient_notice(title, body.to_string(), cx);
         self.schedule_save(cx);
+        self.write_setting(&["editor", "word_wrap"], on.into(), cx);
     }
 
     /// Cmd+Shift+S: writes the focused editor to a new file and keeps editing it there.

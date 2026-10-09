@@ -6,6 +6,7 @@ mod ide;
 mod keymap;
 mod mcp;
 mod procinfo;
+mod settings;
 mod shell;
 mod snapshots;
 mod system_notify;

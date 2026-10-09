@@ -33,7 +33,7 @@ pub struct Colors {
 }
 
 /// Editor and terminal font size before any zoom.
-const CODE_SIZE: f32 = 13.;
+pub const CODE_SIZE: f32 = 13.;
 
 /// Zoom steps, 1px each, keeping code between 6px and 40px.
 pub const CODE_ZOOM: RangeInclusive<i32> = -7..=27;

@@ -25,6 +25,7 @@ mod quit;
 mod rename;
 mod review;
 mod search;
+mod settings;
 mod shortcuts;
 mod status_bar;
 mod tasks;
@@ -104,6 +105,7 @@ pub struct Shell {
     playwright: playwright_view::PlaywrightState,
     tests: tests_view::TestsState,
     lsp: lsp::LspState,
+    settings: settings::SettingsState,
     problems: problems::ProblemsState,
     code_actions: code_actions::CodeActionState,
     git: git_view::GitState,
@@ -148,13 +150,14 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(
-        workspace: Workspace,
+        mut workspace: Workspace,
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let settings = settings::SettingsState::load(&mut workspace);
         cx.global_mut::<athena_ui::Theme>()
             .set_code_zoom(workspace.ui.font_zoom);
         athena_ui::set_appearance(appearance::resolve(workspace.theme, window), cx);
@@ -251,6 +254,7 @@ impl Shell {
             playwright: playwright_view::PlaywrightState::default(),
             tests: tests_view::TestsState::default(),
             lsp: lsp::LspState::default(),
+            settings,
             problems: problems::ProblemsState::default(),
             code_actions: code_actions::CodeActionState::default(),
             git: git_view::GitState::default(),
@@ -295,6 +299,7 @@ impl Shell {
         shell.start_git(window, cx);
         shell.start_ide(window, cx);
         shell.start_keymap(window, cx);
+        shell.start_settings(window, cx);
         crate::system_notify::set_badge(shell.unread());
         shell
     }
@@ -315,7 +320,8 @@ impl Shell {
         self.save_task = None;
         self.sync_ide_folders();
         self.capture_view_states(cx);
-        if let Err(err) = athena_workspace::save(&self.path, &self.persisted_workspace()) {
+        let persisted = self.settings.persisted(self.persisted_workspace());
+        if let Err(err) = athena_workspace::save(&self.path, &persisted) {
             tracing::error!("could not save the workspace: {err:#}");
         }
         if let Err(err) = notices::save(&self.notices_path, &self.notifications) {
@@ -906,6 +912,11 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &crate::actions::OpenKeyboardShortcuts, w, cx| {
                     this.open_keymap_file(w, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::OpenSettings, w, cx| {
+                    this.open_settings_file(w, cx)
                 }),
             )
             .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {

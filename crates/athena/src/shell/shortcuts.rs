@@ -13,7 +13,10 @@ use crate::keymap;
 const SHOWN_PROBLEMS: usize = 3;
 
 /// Watches keymap.json's folder and, when the file is a symlink, its target's folder too.
-fn watch_keymap(path: PathBuf, changed: async_channel::Sender<()>) -> Vec<FolderWatcher> {
+pub(super) fn watch_keymap(
+    path: PathBuf,
+    changed: async_channel::Sender<()>,
+) -> Vec<FolderWatcher> {
     let mut folders: Vec<(PathBuf, Option<PathBuf>)> = path
         .parent()
         .map(|dir| (dir.to_path_buf(), None))

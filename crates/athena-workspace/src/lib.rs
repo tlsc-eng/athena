@@ -46,6 +46,16 @@ pub struct Workspace {
     pub theme: ThemeChoice,
 }
 
+/// The workspace fields settings.json may set; workspace.json keeps them as the fallback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Preferences {
+    pub autosave_delay_ms: u64,
+    pub format_on_save: Option<bool>,
+    pub word_wrap: bool,
+    pub ide_integration: bool,
+    pub theme: ThemeChoice,
+}
+
 /// Which colour theme to show; `System` follows macOS's light or dark appearance.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeChoice {
@@ -121,6 +131,24 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    pub fn preferences(&self) -> Preferences {
+        Preferences {
+            autosave_delay_ms: self.autosave_delay_ms,
+            format_on_save: self.format_on_save,
+            word_wrap: self.word_wrap,
+            ide_integration: self.ide_integration,
+            theme: self.theme,
+        }
+    }
+
+    pub fn set_preferences(&mut self, p: Preferences) {
+        self.autosave_delay_ms = p.autosave_delay_ms;
+        self.format_on_save = p.format_on_save;
+        self.word_wrap = p.word_wrap;
+        self.ide_integration = p.ide_integration;
+        self.theme = p.theme;
+    }
+
     /// Adds `root` (or focuses it if already open) and returns its index.
     pub fn add_project(&mut self, root: PathBuf) -> usize {
         let root = canonical(&root);
@@ -427,6 +455,18 @@ mod tests {
             serde_json::from_str(r#"{"projects":[],"active":null,"window":null,"theme":"Light"}"#)
                 .unwrap();
         assert_eq!(light.theme, ThemeChoice::Light);
+    }
+
+    #[test]
+    fn preferences_round_trip_through_the_workspace() {
+        let mut w = Workspace::default();
+        let mut p = w.preferences();
+        p.word_wrap = true;
+        p.format_on_save = Some(false);
+        p.theme = ThemeChoice::Dark;
+        w.set_preferences(p);
+        assert_eq!(w.preferences(), p);
+        assert!(w.word_wrap);
     }
 
     #[test]
