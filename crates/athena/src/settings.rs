@@ -65,17 +65,7 @@ impl EditorSettings {
 
     fn set(&mut self, key: &str, value: &Value) -> Result<(), String> {
         let flag = || value.as_bool().ok_or("must be true or false");
-        // VS Code's own spellings work too, so its settings can be pasted in.
-        let key = match key {
-            "formatOnSave" => "format_on_save",
-            "trimTrailingWhitespace" => "trim_trailing_whitespace",
-            "insertFinalNewline" => "insert_final_newline",
-            "fontSize" => "font_size",
-            "tabSize" => "tab_size",
-            "autoSaveDelay" => "autosave_delay_ms",
-            other => other,
-        };
-        match key {
+        match editor_key(key) {
             "format_on_save" => self.format_on_save = Some(flag()?),
             "trim_trailing_whitespace" => self.trim_trailing_whitespace = Some(flag()?),
             "insert_final_newline" => self.insert_final_newline = Some(flag()?),
@@ -99,6 +89,19 @@ impl EditorSettings {
             _ => return Err("is not a setting".into()),
         }
         Ok(())
+    }
+}
+
+/// The setting an editor key names; VS Code's spellings work too, so its settings can be pasted.
+fn editor_key(key: &str) -> &str {
+    match key {
+        "formatOnSave" => "format_on_save",
+        "trimTrailingWhitespace" => "trim_trailing_whitespace",
+        "insertFinalNewline" => "insert_final_newline",
+        "fontSize" => "font_size",
+        "tabSize" => "tab_size",
+        "autoSaveDelay" => "autosave_delay_ms",
+        other => other,
     }
 }
 
@@ -358,9 +361,17 @@ fn write_at(path: &Path, keys: &[&str], value: &Value) -> Result<String> {
     Ok(updated)
 }
 
-/// `text` with `keys` set to `value`: the value in place if the key exists, else a new member
-/// at the end of its object, indented like its neighbours.
+/// `text` with `keys` set to `value`: the value in place where the setting is read from, else a
+/// new member at the end of its object, indented like its neighbours.
+/// Refuses text that [`parse`] cannot read, so a broken file is never rewritten.
 pub fn set_value(text: &str, keys: &[&str], value: &Value) -> Result<String, String> {
+    parse(text)?;
+    let out = set_parsed(text, keys, value)?;
+    parse(&out).map_err(|why| format!("settings.json would be left unreadable: {why}"))?;
+    Ok(out)
+}
+
+fn set_parsed(text: &str, keys: &[&str], value: &Value) -> Result<String, String> {
     let mut scan = Scan {
         s: text.as_bytes(),
         i: 0,
@@ -391,14 +402,14 @@ pub fn set_value(text: &str, keys: &[&str], value: &Value) -> Result<String, Str
         .filter(|i| !i.is_empty())
         .unwrap_or("  ")
         .to_string();
-    let dotted = keys.join(".");
-    if let Some(m) = root.members.iter().find(|m| m.key == dotted) {
+    if let Some(m) = read_from(&root, keys) {
         return Ok(replace(text, m, value, &unit));
     }
     let mut object = &root;
     for (depth, key) in keys.iter().enumerate() {
         let rest = &keys[depth + 1..];
-        match object.members.iter().find(|m| m.key == *key) {
+        // Of a repeated key serde keeps the last value, so that is the one to change.
+        match object.members.iter().rfind(|m| m.key == *key) {
             Some(m) if rest.is_empty() => return Ok(replace(text, m, value, &unit)),
             Some(Member {
                 object: Some(inner),
@@ -409,6 +420,64 @@ pub fn set_value(text: &str, keys: &[&str], value: &Value) -> Result<String, Str
         }
     }
     unreachable!("keys is never empty")
+}
+
+/// The member whose value [`parse`] ends up with for `keys`, whichever spelling or place it has.
+fn read_from<'a>(root: &'a Object, keys: &[&str]) -> Option<&'a Member> {
+    let target = match keys {
+        [key] => setting_name(None, key),
+        [block, rest @ ..] => setting_name(Some(block), &rest.join(".")),
+        [] => return None,
+    };
+    let mut found = None;
+    for m in as_read(root) {
+        if setting_name(None, &m.key) == target {
+            found = Some(m);
+        }
+        if keys.len() > 1
+            && m.key == keys[0]
+            && let Some(inner) = &m.object
+        {
+            for im in as_read(inner) {
+                if setting_name(Some(keys[0]), &im.key) == target {
+                    found = Some(im);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// `object`'s members in the order serde_json reads them: a repeated key keeps the place of its
+/// first appearance and the value of its last.
+fn as_read(object: &Object) -> Vec<&Member> {
+    let mut out: Vec<&Member> = Vec::new();
+    for m in &object.members {
+        match out.iter_mut().find(|e| e.key == m.key) {
+            Some(slot) => *slot = m,
+            None => out.push(m),
+        }
+    }
+    out
+}
+
+/// The dotted name of what a member spelled `key`, inside `block` if any, sets.
+fn setting_name(block: Option<&str>, key: &str) -> String {
+    let key = match block {
+        Some("editor") => {
+            let bare = key
+                .strip_prefix("editor.")
+                .or_else(|| key.strip_prefix("files."))
+                .unwrap_or(key);
+            return format!("editor.{}", editor_key(bare));
+        }
+        Some(block) => format!("{block}.{key}"),
+        None => key.to_string(),
+    };
+    match key.split_once('.') {
+        Some(("editor" | "files", rest)) => format!("editor.{}", editor_key(rest)),
+        _ => key,
+    }
 }
 
 fn nest(keys: &[&str], value: &Value) -> Value {
@@ -745,8 +814,189 @@ mod tests {
 
     #[test]
     fn a_broken_file_is_not_rewritten() {
-        assert!(set_value("{\"theme\": ", &["theme"], &json!("dark")).is_err());
-        assert!(set_value("{\"a\": 1} x", &["theme"], &json!("dark")).is_err());
+        for broken in [
+            "{\"theme\": ",
+            "{\"a\": 1} x",
+            "{\"a\": 1 \"b\": 2}",
+            "{\"a\": tru}",
+            "{\"a\": [1 2]}",
+            "{\"editor\": {\"word_wrap\": false \"tab_size\": 2}}",
+        ] {
+            assert!(parse(broken).is_err(), "{broken}");
+            assert!(
+                set_value(broken, &["editor", "word_wrap"], &json!(true)).is_err(),
+                "{broken}"
+            );
+        }
+        let dir = std::env::temp_dir().join(format!("athena-settings-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "{\"theme\": \"light\" \"x\": 1}").unwrap();
+        assert!(write_at(&file, &["theme"], &json!("dark")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "{\"theme\": \"light\" \"x\": 1}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_with_problems_is_still_written() {
+        let out = set(r#"{"theme": "purple"}"#, &["theme"], json!("dark"));
+        assert_eq!(out, r#"{"theme": "dark"}"#);
+    }
+
+    #[test]
+    fn the_occurrence_serde_reads_last_is_the_one_written() {
+        let cases: &[(&str, &[&str], Value, &str)] = &[
+            (
+                r#"{"theme": "light", "theme": "dark"}"#,
+                &["theme"],
+                json!("system"),
+                r#"{"theme": "light", "theme": "system"}"#,
+            ),
+            (
+                r#"{"editor": {"word_wrap": true}, "editor.word_wrap": true, "editor": {"word_wrap": true}}"#,
+                &["editor", "word_wrap"],
+                json!(false),
+                r#"{"editor": {"word_wrap": true}, "editor.word_wrap": false, "editor": {"word_wrap": true}}"#,
+            ),
+            (
+                r#"{"editor.word_wrap": true, "editor": {"word_wrap": true}}"#,
+                &["editor", "word_wrap"],
+                json!(false),
+                r#"{"editor.word_wrap": true, "editor": {"word_wrap": false}}"#,
+            ),
+            (
+                r#"{"editor": {"tab_size": 3}, "editor": {"word_wrap": true}}"#,
+                &["editor", "format_on_save"],
+                json!(false),
+                "{\"editor\": {\"tab_size\": 3}, \"editor\": {\"word_wrap\": true,\n\"format_on_save\": false}}",
+            ),
+            (
+                r#"{"editor": {"tab_size": 3, "tabSize": 2}}"#,
+                &["editor", "tab_size"],
+                json!(8),
+                r#"{"editor": {"tab_size": 3, "tabSize": 8}}"#,
+            ),
+            (
+                r#"{"files.insertFinalNewline": true, "editor": {"editor.insert_final_newline": true}}"#,
+                &["editor", "insert_final_newline"],
+                json!(false),
+                r#"{"files.insertFinalNewline": true, "editor": {"editor.insert_final_newline": false}}"#,
+            ),
+        ];
+        for (text, keys, value, want) in cases {
+            assert_eq!(set_value(text, keys, value).unwrap(), *want, "{text}");
+        }
+    }
+
+    /// One random settings.json; every member is a valid setting, some spelled twice or more.
+    fn random_settings(next: &mut impl FnMut(usize) -> usize) -> String {
+        let b = |n: usize| if n.is_multiple_of(2) { "true" } else { "false" };
+        let blank = |n: usize| [" ", "\n  ", " /* c */ ", "\n  // c\n  "][n % 4];
+        let inner = |next: &mut dyn FnMut(usize) -> usize| {
+            let mut members = Vec::new();
+            for _ in 0..next(5) {
+                let v = next(16);
+                members.push(match next(9) {
+                    0 => format!("\"word_wrap\": {}", b(v)),
+                    1 => format!("\"editor.word_wrap\": {}", b(v)),
+                    2 => format!("\"files.word_wrap\": {}", b(v)),
+                    3 => format!("\"tab_size\": {}", v + 1),
+                    4 => format!("\"tabSize\": {}", v + 1),
+                    5 => format!("\"editor.tabSize\": {}", v + 1),
+                    6 => format!("\"formatOnSave\": {}", b(v)),
+                    7 => format!("\"format_on_save\": {}", b(v)),
+                    _ => format!("\"autosave_delay_ms\": {}", v * 100),
+                });
+            }
+            members
+        };
+        let mut members = Vec::new();
+        for _ in 0..next(9) {
+            let v = next(16);
+            members.push(match next(12) {
+                0 | 1 => {
+                    let m = inner(next);
+                    let sep = format!(",{}", blank(next(4)));
+                    format!("\"editor\": {{{}}}", m.join(&sep))
+                }
+                2 => format!("\"editor.word_wrap\": {}", b(v)),
+                3 => format!("\"files.word_wrap\": {}", b(v)),
+                4 => format!("\"editor.tabSize\": {}", v + 1),
+                5 => format!("\"editor.tab_size\": {}", v + 1),
+                6 => format!("\"editor.formatOnSave\": {}", b(v)),
+                7 => format!("\"theme\": \"{}\"", ["light", "dark", "system"][v % 3]),
+                8 => format!("\"ide_integration\": {}", b(v)),
+                9 => format!("\"[go]\": {{{}}}", inner(next).join(", ")),
+                10 => format!("\"git\": {{\"autofetch\": {}}}", b(v)),
+                _ => format!("\"git.autofetch\": {}", b(v)),
+            });
+        }
+        let mut text = String::from("{");
+        for (i, m) in members.iter().enumerate() {
+            text.push_str(blank(next(4)));
+            text.push_str(m);
+            if i + 1 < members.len() || next(2) == 0 {
+                text.push(',');
+            }
+        }
+        text.push_str(if next(2) == 0 { "\n}\n" } else { "}" });
+        text
+    }
+
+    #[test]
+    fn writes_land_where_parse_reads_across_many_shapes() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n.max(1) as u64) as usize
+        };
+        for _ in 0..3000 {
+            let text = random_settings(&mut next);
+            let (before, problems) = parse(&text).unwrap();
+            assert!(problems.is_empty(), "{problems:?} in\n{text}");
+            let v = next(16);
+            let on = v.is_multiple_of(2);
+            let mut want = before;
+            let (keys, value): (&[&str], Value) = match next(7) {
+                0 => {
+                    want.editor.word_wrap = Some(on);
+                    (&["editor", "word_wrap"], json!(on))
+                }
+                1 => {
+                    want.editor.tab_size = Some(v + 1);
+                    (&["editor", "tab_size"], json!(v + 1))
+                }
+                2 => {
+                    want.editor.format_on_save = Some(on);
+                    (&["editor", "format_on_save"], json!(on))
+                }
+                3 => {
+                    want.editor.autosave_delay_ms = Some(v as u64 * 7);
+                    (&["editor", "autosave_delay_ms"], json!(v * 7))
+                }
+                4 => {
+                    want.editor.inlay_hints = Some(on);
+                    (&["editor", "inlay_hints"], json!(on))
+                }
+                5 => {
+                    want.theme = Some(ThemeChoice::Dark);
+                    (&["theme"], json!("dark"))
+                }
+                _ => {
+                    want.ide_integration = Some(on);
+                    (&["ide_integration"], json!(on))
+                }
+            };
+            let out = set_value(&text, keys, &value).unwrap();
+            let (after, problems) = parse(&out).unwrap();
+            assert!(problems.is_empty(), "{problems:?} in\n{out}");
+            assert_eq!(after, want, "{keys:?} = {value} in\n{text}\nbecame\n{out}");
+        }
     }
 
     #[test]
