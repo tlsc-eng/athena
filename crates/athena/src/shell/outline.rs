@@ -230,7 +230,7 @@ impl Shell {
             let active = self.outline.showing == outline;
             div()
                 .id(id)
-                .h(px(22.))
+                .h(t.ui(22.))
                 .px(px(8.))
                 .flex()
                 .items_center()
@@ -321,7 +321,7 @@ impl Shell {
             .child(
                 div().flex_none().px(px(8.)).py(px(6.)).child(
                     div()
-                        .h(px(24.))
+                        .h(t.ui(24.))
                         .px(px(6.))
                         .flex()
                         .items_center()
@@ -370,8 +370,8 @@ impl Shell {
                         div()
                             .id(("outline", n))
                             .w_full()
-                            .h(px(ROW_HEIGHT))
-                            .pl(px(8. + INDENT * row.depth as f32))
+                            .h(t.ui(ROW_HEIGHT))
+                            .pl(t.ui(8. + INDENT * row.depth as f32))
                             .pr(px(8.))
                             .flex()
                             .items_center()
