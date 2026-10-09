@@ -120,6 +120,12 @@ fn editor_encoding(editor: &Entity<EditorView>, cx: &gpui::App) -> FileEncoding 
         .map_or_else(FileEncoding::utf8, |s| s.encoding)
 }
 
+/// The editor's encoding with the byte order mark the index's copy has or lacks, as the peek
+/// shows and stages text without it and a hunk never adds or drops one.
+fn index_encoding(index: &[u8], editor: FileEncoding) -> FileEncoding {
+    athena_editor::decode_text(index, Some(editor)).map_or(editor, |d| d.encoding)
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -374,6 +380,10 @@ impl Shell {
             let done = cx
                 .background_executor()
                 .spawn(async move {
+                    let encoding = match git::show(&root, Rev::Index, &rel)? {
+                        Some(index) => index_encoding(&index, encoding),
+                        None => encoding,
+                    };
                     let expected = super::review::encoded(&expected, Ok(encoding))?;
                     let contents = super::review::encoded(&contents, Ok(encoding))?;
                     git::write_index_bytes(&root, &rel, &expected, Some(&contents))
@@ -445,6 +455,21 @@ mod tests {
         );
         assert_eq!(commit_diff(&blame, "0000000"), Some(DiffBase::Index));
         assert_eq!(commit_diff(&blame, "fffffff"), None);
+    }
+
+    #[test]
+    fn a_staged_hunk_keeps_the_index_copys_byte_order_mark() {
+        let with_bom = athena_editor::decode_text(b"\xEF\xBB\xBFa\n", None)
+            .unwrap()
+            .encoding;
+        let plain = FileEncoding::utf8();
+        assert_ne!(with_bom, plain);
+        let encode = |e: FileEncoding| e.encode_text("a\n").unwrap();
+        assert_eq!(encode(index_encoding(b"a\n", with_bom)), b"a\n");
+        assert_eq!(
+            encode(index_encoding(b"\xEF\xBB\xBFa\n", plain)),
+            b"\xEF\xBB\xBFa\n"
+        );
     }
 
     #[test]
