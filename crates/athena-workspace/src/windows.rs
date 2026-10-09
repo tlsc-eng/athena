@@ -213,6 +213,10 @@ mod tests {
         app.word_wrap = true;
         let mut second = window(&["/n/c", "/n/d"], 1, 500.);
         second.ui.tree_visible = false;
+        let mut tabs = Layout::new(ItemKind::Settings);
+        let pane = tabs.focused;
+        tabs.add_item(pane, ItemKind::Shortcuts).unwrap();
+        second.projects[0].layout = Some(tabs);
         let empty = window(&[], 0, 900.);
         let mut parked = Project::new(PathBuf::from("/n/old"));
         parked.panel.adopt(Item {
@@ -242,6 +246,10 @@ mod tests {
         );
         assert_eq!(windows[0], app);
         assert_eq!(roots(&windows[1]), ["/n/c", "/n/d"]);
+        assert_eq!(
+            windows[1].projects, second.projects,
+            "settings and shortcut tabs too"
+        );
         assert_eq!(windows[1].active, Some(1));
         assert_eq!(windows[1].window, bounds(500.));
         assert!(!windows[1].ui.tree_visible);
