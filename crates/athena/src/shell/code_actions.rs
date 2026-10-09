@@ -1,21 +1,24 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use athena_editor::EditorView;
 use athena_lsp::{Client, CodeAction, Command, FileChange, Position, Range, TextEdit};
 use athena_ui::MenuItem;
-use gpui::{Context, Entity, EntityId, Subscription, Task, WeakEntity, Window};
+use athena_workspace::LinterTrust;
+use gpui::{Context, Entity, EntityId, PromptLevel, Subscription, Task, WeakEntity, Window};
 
 use super::Shell;
 use super::edits::AskedAt;
-use super::lsp::{NO_SERVER, document_key};
+use super::lsp::{CONFIRMED, NO_SERVER, confirm_buttons, document_key};
 use crate::actions::ApplyCodeAction;
 use crate::settings::Lightbulb;
 
 /// The cursor rests this long before the server is asked whether its line has a quick fix.
 const LIGHTBULB_DELAY: Duration = Duration::from_millis(250);
+/// How long a command allowed from its prompt waits for the servers the allowing restarts.
+const RESTART_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub(super) struct CodeActionState {
@@ -23,6 +26,26 @@ pub(super) struct CodeActionState {
     watched: HashMap<EntityId, (WeakEntity<EditorView>, Subscription)>,
     lightbulb_task: Option<Task<()>>,
     menu: Option<Menu>,
+    /// Whether a server command is asking to let the project's code run.
+    asking: bool,
+}
+
+/// What a server command may do in a project, by the trust the project was given.
+#[derive(Debug, PartialEq, Eq)]
+enum Gate {
+    Run,
+    Ask,
+    Refuse,
+}
+
+/// Server commands such as gopls's `go generate` and `go test` lenses build or run the project's
+/// code, so they run only in a project allowed to, as Debug does.
+fn command_gate(trust: Option<LinterTrust>) -> Gate {
+    match trust {
+        Some(LinterTrust::Allowed) => Gate::Run,
+        Some(LinterTrust::NotAsked) => Gate::Ask,
+        Some(LinterTrust::Denied) | None => Gate::Refuse,
+    }
 }
 
 /// The actions the open Cmd+. menu offers, each with the index of the server it came from, the
@@ -67,11 +90,9 @@ pub(super) fn merge_save_edits(imports: Vec<TextEdit>, format: Vec<TextEdit>) ->
     imports.into_iter().chain(kept).collect()
 }
 
-/// The edits a whole-file source action such as `source.organizeImports` (gopls) or
-/// `source.fixAll.eslint` makes to `doc`, empty when it has nothing to change.
 /// Runs a server command, such as a code action's or a code lens's; any edit it makes arrives
 /// as `workspace/applyEdit`.
-pub(super) async fn run_command(client: &Client, command: &Command) -> Result<(), String> {
+async fn run_command(client: &Client, command: &Command) -> Result<(), String> {
     client
         .execute_command(command)
         .await
@@ -81,6 +102,8 @@ pub(super) async fn run_command(client: &Client, command: &Command) -> Result<()
         })
 }
 
+/// The edits a whole-file source action such as `source.organizeImports` (gopls) or
+/// `source.fixAll.eslint` makes to `doc`, empty when it has nothing to change.
 pub(super) async fn source_action_edits(client: &Client, doc: &Path, kind: &str) -> Vec<TextEdit> {
     let start = Position {
         line: 0,
@@ -112,6 +135,34 @@ pub(super) async fn source_action_edits(client: &Client, doc: &Path, kind: &str)
         })
         .flatten()
         .collect()
+}
+
+/// The server that took over from `old` at `root` once it is ready to run `command`; `None` if
+/// none is within [`RESTART_WAIT`].
+async fn restarted_client(
+    this: &WeakEntity<Shell>,
+    cx: &mut gpui::AsyncApp,
+    root: &Path,
+    old: &Rc<Client>,
+    command: &Command,
+) -> Option<Rc<Client>> {
+    let until = Instant::now() + RESTART_WAIT;
+    while Instant::now() < until {
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+        let found = this
+            .update(cx, |this, _| {
+                this.project_clients(root)
+                    .into_iter()
+                    .find(|c| !Rc::ptr_eq(c, old) && c.executes(&command.command))
+            })
+            .ok()?;
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 impl Shell {
@@ -331,25 +382,175 @@ impl Shell {
                 },
                 false => action,
             };
-            if let Some(edit) = &action.edit {
-                let applied =
-                    this.update(cx, |this, cx| this.apply_requested_edit(edit, &asked, cx));
-                match applied {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(why)) => {
-                        let _ = this.update(cx, |this, cx| this.lsp_failed(&action.title, why, cx));
-                        return;
-                    }
-                    Err(_) => return,
-                }
+            let _ = this.update(cx, |this, cx| {
+                let Some(command) = action.command.clone() else {
+                    this.apply_action_edit(&action, &asked, cx);
+                    return;
+                };
+                // The edit waits with the command, so a refused action changes nothing.
+                this.run_project_command(
+                    &doc,
+                    client,
+                    command,
+                    move |this, client, cx| {
+                        if this.apply_action_edit(&action, &asked, cx)
+                            && let Some(command) = action.command
+                        {
+                            this.spawn_command(client, command, cx);
+                        }
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Applies a code action's edit, if it has one; false when it could not be.
+    fn apply_action_edit(
+        &mut self,
+        action: &CodeAction,
+        asked: &AskedAt,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(edit) = &action.edit else {
+            return true;
+        };
+        match self.apply_requested_edit(edit, asked, cx) {
+            Ok(_) => true,
+            Err(why) => {
+                self.lsp_failed(&action.title, why, cx);
+                false
             }
-            if let Some(command) = &action.command
-                && let Err(why) = run_command(&client, command).await
-            {
-                let _ = this.update(cx, |this, cx| this.lsp_failed(&action.title, why, cx));
+        }
+    }
+
+    /// Has `client` run `command`, reporting a failure under the command's title.
+    pub(super) fn spawn_command(
+        &mut self,
+        client: Rc<Client>,
+        command: Command,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!(command = command.command, "server command runs");
+        cx.spawn(async move |this, cx| {
+            if let Err(why) = run_command(&client, &command).await {
+                let _ = this.update(cx, |this, cx| this.lsp_failed(&command.title, why, cx));
             }
         })
         .detach();
+    }
+
+    /// Calls `run` with the server to run `command` on once the project holding `path` may run
+    /// its code, asking first if it never was asked; allowing restarts the servers, so `run` gets
+    /// the restarted one.
+    pub(super) fn run_project_command(
+        &mut self,
+        path: &Path,
+        client: Rc<Client>,
+        command: Command,
+        run: impl FnOnce(&mut Self, Rc<Client>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.project_root_of(path);
+        let name = root
+            .as_ref()
+            .and_then(|r| self.workspace.projects.iter().find(|p| p.root == *r))
+            .map(|p| p.name());
+        let trust = root.as_deref().and_then(|r| self.linter_trust(r));
+        match (command_gate(trust), root, name) {
+            (Gate::Run, ..) => run(self, client, cx),
+            (Gate::Ask, Some(root), Some(name)) => {
+                self.ask_to_run(root, name, client, command, run, cx)
+            }
+            (_, _, name) => {
+                let body = match name {
+                    Some(name) => format!(
+                        "It has the language server build or run {name}'s code, which you chose \
+                         not to allow. To allow it, run \"Allow project code\" from the command \
+                         palette."
+                    ),
+                    None => "It has the language server build or run code, which Athena does \
+                             only for files of a project you open and allow."
+                        .into(),
+                };
+                self.transient_notice(
+                    format!("\"{}\" waits for this project to be allowed", command.title),
+                    body,
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn ask_to_run(
+        &mut self,
+        root: PathBuf,
+        name: String,
+        client: Rc<Client>,
+        command: Command,
+        run: impl FnOnce(&mut Self, Rc<Client>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if std::mem::replace(&mut self.code_actions.asking, true) {
+            return;
+        }
+        let shell = cx.entity();
+        // Deferred: a prompt cannot open while the window is busy handling this click.
+        cx.defer(move |cx| {
+            let window = cx
+                .active_window()
+                .or_else(|| cx.windows().into_iter().next());
+            let asked = window.map(|window| {
+                window.update(cx, |_, window, cx| {
+                    let answer = window.prompt(
+                        PromptLevel::Warning,
+                        &format!("Allow {name}'s code to run?"),
+                        Some(&format!(
+                            "\"{}\" has the language server build or run {name}'s code on this \
+                             Mac. Allowing also lets the linters and TypeScript it installs run, \
+                             and its settings choose what language servers run.",
+                            command.title
+                        )),
+                        &confirm_buttons("Cancel", "Allow and Run"),
+                        cx,
+                    );
+                    shell.update(cx, |_, cx| {
+                        cx.spawn(async move |this, cx| {
+                            let answer = answer.await;
+                            let allowed = this.update(cx, |this, cx| {
+                                this.code_actions.asking = false;
+                                let allowed = answer == Ok(CONFIRMED)
+                                    && this.active_root().as_ref() == Some(&root);
+                                if allowed {
+                                    this.change_linter_trust(true, cx);
+                                }
+                                allowed
+                            });
+                            if !allowed.unwrap_or(false) {
+                                return;
+                            }
+                            let restarted =
+                                restarted_client(&this, cx, &root, &client, &command).await;
+                            let _ = this.update(cx, |this, cx| match restarted {
+                                Some(client) => run(this, client, cx),
+                                None => this.lsp_failed(
+                                    &command.title,
+                                    "The language server did not restart after the project was \
+                                     allowed. Try again once it has."
+                                        .into(),
+                                    cx,
+                                ),
+                            });
+                        })
+                        .detach();
+                    });
+                })
+            });
+            if !matches!(asked, Some(Ok(()))) {
+                shell.update(cx, |this, _| this.code_actions.asking = false);
+            }
+        });
     }
 
     fn editor_for_doc(&self, doc: &Path, cx: &Context<Self>) -> Option<Entity<EditorView>> {
@@ -395,6 +596,18 @@ mod tests {
         assert_eq!(
             merge_save_edits(Vec::new(), vec![edit((0, 0), (0, 1), "x")]).len(),
             1
+        );
+    }
+
+    #[test]
+    fn server_commands_run_only_in_an_allowed_project_and_ask_where_never_asked() {
+        assert_eq!(command_gate(Some(LinterTrust::Allowed)), Gate::Run);
+        assert_eq!(command_gate(Some(LinterTrust::NotAsked)), Gate::Ask);
+        assert_eq!(command_gate(Some(LinterTrust::Denied)), Gate::Refuse);
+        assert_eq!(
+            command_gate(None),
+            Gate::Refuse,
+            "a file outside any project"
         );
     }
 

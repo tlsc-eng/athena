@@ -6,7 +6,6 @@ use athena_lsp::{Client, CodeLens};
 use gpui::{Context, Entity};
 
 use super::Shell;
-use super::code_actions::run_command;
 use super::lsp::document_key;
 
 /// Answers an editor keeps, so a click on a lens still on screen finds it after newer answers.
@@ -91,7 +90,8 @@ impl Shell {
         .detach();
     }
 
-    /// Runs a clicked lens: lists the references it carries, or has the server run its command.
+    /// Runs a clicked lens: lists the references it carries, or has the server run its command
+    /// once the project may run code.
     pub(super) fn run_code_lens(
         &mut self,
         editor: &Entity<EditorView>,
@@ -115,13 +115,14 @@ impl Shell {
         let Some(command) = lens.command else {
             return;
         };
-        tracing::debug!(command = command.command, "code lens runs");
-        cx.spawn(async move |this, cx| {
-            if let Err(why) = run_command(&client, &command).await {
-                let _ = this.update(cx, |this, cx| this.lsp_failed(&command.title, why, cx));
-            }
-        })
-        .detach();
+        let path = editor.read(cx).path().to_path_buf();
+        self.run_project_command(
+            &path,
+            client,
+            command.clone(),
+            move |this, client, cx| this.spawn_command(client, command, cx),
+            cx,
+        );
     }
 }
 
