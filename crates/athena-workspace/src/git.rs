@@ -527,13 +527,13 @@ pub fn status(root: &Path, prefix: &str, all_untracked: bool) -> Result<Snapshot
     })
 }
 
-/// Changed lines of the saved file against HEAD.
+/// Changed lines of the saved file against the index, as VS Code's quick diff compares them.
 pub fn diff_hunks(root: &Path, path: &Path) -> Result<Vec<Hunk>> {
     let rel = path
         .strip_prefix(root)
         .context("file is outside the project")?;
     let mut cmd = git(root);
-    cmd.args(["diff", "HEAD", "--no-color", "--no-ext-diff", "-U0", "--"])
+    cmd.args(["diff", "--no-color", "--no-ext-diff", "-U0", "--"])
         .arg(rel);
     Ok(parse_hunks(&String::from_utf8_lossy(&run(cmd, None)?)))
 }

@@ -16,6 +16,7 @@ mod lsp_ui;
 mod merge_conflicts;
 mod multi;
 mod pairs;
+mod peek;
 pub mod recovery;
 mod run_marks;
 mod save;
@@ -43,6 +44,7 @@ pub use merge_conflicts::{
     CompareMergeConflicts, ConflictBlock, Resolution, count_merge_conflicts, find_merge_conflicts,
     resolve_all,
 };
+pub use peek::{ShowNextChange, ShowPreviousChange};
 pub use run_marks::{RunMark, RunState, RunTestAt, TestSymbol, find_tests, is_test_file};
 pub use save::{SaveSettings, Tidy, resolve_tidy};
 pub use signature::Signature;
@@ -60,4 +62,5 @@ pub fn init(cx: &mut gpui::App) {
     diff_view::init(cx);
     image::init(cx);
     lsp_ui::init(cx);
+    peek::init(cx);
 }

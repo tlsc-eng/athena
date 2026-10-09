@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use athena_editor::{BlameCommit, EditorEvent, EditorView, GitGutterEvent, GutterBlame};
 use athena_workspace::DiffBase;
-use athena_workspace::git::{self, FileBlame};
+use athena_workspace::git::{self, FileBlame, Rev};
 use gpui::{Context, Entity, EntityId, Subscription, Task};
 
 use super::Shell;
@@ -14,7 +14,7 @@ use super::item::{ItemView, file_label};
 /// Typing pauses this long before the blame gutter is worked out again for the unsaved text.
 const REBLAME_DELAY: Duration = Duration::from_millis(500);
 
-/// The blame gutters shown, and the editors followed for them.
+/// The blame gutters shown, and the editors followed for them and for quick diff peeks.
 #[derive(Default)]
 pub(super) struct GutterState {
     blames: HashMap<EntityId, Blamed>,
@@ -228,7 +228,46 @@ impl Shell {
                     self.open_diff_soon(path, base, cx);
                 }
             }
+            GitGutterEvent::StageChange { contents, expected } => {
+                self.stage_from_peek(editor, &path, contents, expected, cx)
+            }
+            GitGutterEvent::PeekChange { line } => self.peek_change(editor, &path, line, cx),
         }
+    }
+
+    /// Reads the file's index version for the quick diff peek the editor asked for.
+    fn peek_change(
+        &mut self,
+        editor: &Entity<EditorView>,
+        path: &Path,
+        line: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.editor_root(editor) else {
+            return;
+        };
+        let path = under_root(&root, path);
+        let Ok(rel) = path.strip_prefix(&root).map(Path::to_path_buf) else {
+            return;
+        };
+        let weak = editor.downgrade();
+        cx.spawn(async move |this, cx| {
+            let base = cx
+                .background_executor()
+                .spawn(async move { super::review::text(git::show(&root, Rev::Index, &rel)?) })
+                .await;
+            match base {
+                Ok(base) => {
+                    let _ = weak.update(cx, |e, cx| e.show_change_peek(Some(base), line, cx));
+                }
+                Err(err) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.transient_notice("Can't show this change", format!("{err:#}"), cx)
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     /// Opens a diff from an event handler, which has no window to open it in.
@@ -242,6 +281,38 @@ impl Shell {
                 shell.update(cx, |this, cx| this.open_diff(path, base, window, cx))
             });
         });
+    }
+
+    fn stage_from_peek(
+        &mut self,
+        editor: &Entity<EditorView>,
+        path: &Path,
+        contents: String,
+        expected: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.editor_root(editor) else {
+            return;
+        };
+        let shown = path.to_path_buf();
+        let path = under_root(&root, path);
+        let Ok(rel) = path.strip_prefix(&root).map(Path::to_path_buf) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let done = cx
+                .background_executor()
+                .spawn(async move { git::write_index(&root, &rel, &expected, Some(&contents)) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = done {
+                    this.transient_notice("Could not stage the change", format!("{err:#}"), cx);
+                }
+                this.forget_gutter_marks(&shown);
+                this.git_kick(cx);
+            });
+        })
+        .detach();
     }
 }
 

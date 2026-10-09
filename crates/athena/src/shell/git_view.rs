@@ -43,8 +43,13 @@ struct Repo {
     decorations: Rc<Decorations>,
 }
 
-/// What a file's gutter marks were computed from, so unchanged files are not diffed again.
-type Signature = (Option<FileStatus>, Option<SystemTime>, u64);
+/// What a file's gutter marks were computed from, so unchanged files are not diffed again:
+/// its staged and unstaged status, modification time and size.
+type Signature = (
+    Option<(Option<FileStatus>, Option<FileStatus>)>,
+    Option<SystemTime>,
+    u64,
+);
 
 #[derive(Default)]
 pub(super) struct GitState {
@@ -193,10 +198,10 @@ fn marks_from(hunks: Vec<Hunk>) -> Vec<GutterMark> {
         .collect()
 }
 
-fn signature(path: &Path, status: Option<FileStatus>) -> Signature {
+fn signature(path: &Path, state: Option<(Option<FileStatus>, Option<FileStatus>)>) -> Signature {
     let meta = std::fs::metadata(path).ok();
     (
-        status,
+        state,
         meta.as_ref().and_then(|m| m.modified().ok()),
         meta.map_or(0, |m| m.len()),
     )
@@ -536,6 +541,23 @@ impl Shell {
             .get(&under_root(root, path))
     }
 
+    /// A file's staged and unstaged status, from the last status run.
+    fn git_entry_state(
+        &self,
+        root: &Path,
+        path: &Path,
+    ) -> Option<(Option<FileStatus>, Option<FileStatus>)> {
+        let repo = self.git.repos.get(root)?;
+        let path = under_root(root, path);
+        let (_, entry) = repo.entries.iter().find(|(p, _)| *p == path)?;
+        Some((entry.staged, entry.unstaged))
+    }
+
+    /// Forgets a file's gutter marks, after part of it was staged without its status changing.
+    pub(super) fn forget_gutter_marks(&mut self, path: &Path) {
+        self.git.marks.remove(path);
+    }
+
     /// A renamed file's old path, relative to the project, for diffing it against HEAD.
     pub(super) fn git_orig_path(&self, root: &Path, path: &Path) -> Option<PathBuf> {
         let repo = self.git.repos.get(root)?;
@@ -680,7 +702,7 @@ impl Shell {
         for editor in &editors {
             let path = editor.read(cx).path().to_path_buf();
             let status = self.git_status_for(&path);
-            let sig = signature(&path, status);
+            let sig = signature(&path, self.git_entry_state(root, &path));
             match self.git.marks.get(&path) {
                 Some((known, marks)) if *known == sig => {
                     let marks = marks.clone();

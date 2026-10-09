@@ -37,6 +37,12 @@ pub struct GutterBlame {
 pub enum GitGutterEvent {
     /// The blame gutter was clicked on a commit's lines.
     OpenCommit { sha: String },
+    /// The quick diff peek is wanted on the change at a zero-based line; answer with
+    /// [`EditorView::show_change_peek`].
+    PeekChange { line: usize },
+    /// Stage one change from the quick diff peek: the index text with it applied, and the
+    /// index text it was made from.
+    StageChange { contents: String, expected: String },
 }
 
 impl EventEmitter<GitGutterEvent> for EditorView {}

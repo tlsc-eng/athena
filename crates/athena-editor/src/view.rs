@@ -499,6 +499,7 @@ pub struct EditorView {
     pub(crate) merge: crate::merge_conflicts::MergeCache,
     pub(crate) run_marks: Vec<crate::run_marks::RunMark>,
     pub(crate) file_blame: crate::blame::FileBlame,
+    pub(crate) peek: Option<crate::peek::Peek>,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -592,6 +593,7 @@ impl EditorView {
             merge: Default::default(),
             run_marks: Vec::new(),
             file_blame: Default::default(),
+            peek: None,
         }
     }
 
@@ -982,7 +984,10 @@ impl EditorView {
         if self.click_run_mark(event.position, window, cx) {
             return;
         }
-        if self.click_fold_column(event.position, cx) || self.click_blame(event.position, cx) {
+        if self.click_change_bar(event.position, cx)
+            || self.click_fold_column(event.position, cx)
+            || self.click_blame(event.position, cx)
+        {
             return;
         }
         let Some(at) = self.char_at_position(event.position) else {
@@ -1900,7 +1905,7 @@ impl Render for EditorView {
                         {
                             return;
                         }
-                        if this.close_find(cx) {
+                        if this.close_find(cx) || this.close_peek(cx) {
                             return;
                         }
                         if this.cursor.is_multi() {
@@ -1924,12 +1929,19 @@ impl Render for EditorView {
                             this.open_line_jump(window, cx)
                         }),
                     )
+                    .on_action(cx.listener(|this, _: &crate::ShowNextChange, _, cx| {
+                        this.step_peek(true, cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &crate::ShowPreviousChange, _, cx| {
+                        this.step_peek(false, cx)
+                    }))
                     .map(|el| Self::on_line_actions(el, cx))
                     .child(EditorElement::new(cx.entity(), focused)),
             )
             .children(self.render_line_jump(cx))
             .children(self.render_hover(cx))
             .children(self.render_blame_hover(cx))
+            .children(self.render_peek(cx))
             .children(self.render_merge_actions(cx))
             .children(self.render_rename(cx))
             .children(focused.then(|| self.render_signature(cx)).flatten())

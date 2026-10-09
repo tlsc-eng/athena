@@ -439,6 +439,7 @@ impl Shell {
                 if let Err(err) = done {
                     this.transient_notice(failure, format!("{err:#}"), cx);
                 }
+                this.forget_gutter_marks(&path);
                 this.reload_diffs(&root, Some(&path), cx);
                 this.git_kick(cx);
             });
