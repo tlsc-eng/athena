@@ -35,8 +35,42 @@ pub(super) fn rename(from: &Path, to: &Path) -> Result<()> {
     fs::rename(from, to).with_context(|| describe("rename", from))
 }
 
+/// Moves `from` to `to`, first sending what is at `to` to the Trash when `replace` is set.
+pub(super) fn move_to(
+    from: &Path,
+    to: &Path,
+    replace: bool,
+    trash: impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
+    if replace && fs::symlink_metadata(to).is_ok() {
+        if encloses(to, from) {
+            bail!("cannot replace {} with something inside it", name(to));
+        }
+        trash(to)?;
+    }
+    rename(from, to)
+}
+
+/// Whether `outer` is `inner` or a folder holding it, however either path is spelled.
+fn encloses(outer: &Path, inner: &Path) -> bool {
+    let Ok(outer) = fs::symlink_metadata(outer) else {
+        return false;
+    };
+    let same = |m: fs::Metadata| (m.dev(), m.ino()) == (outer.dev(), outer.ino());
+    if fs::symlink_metadata(inner).is_ok_and(same) {
+        return true;
+    }
+    let Some(parent) = inner.parent() else {
+        return false;
+    };
+    let parent = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
+    parent.ancestors().any(|a| fs::metadata(a).is_ok_and(same))
+}
+
 /// Where `from` lands when dropped on folder `dir`: `None` when it is already there, an error
-/// when `dir` is `from` itself or inside it.
+/// when `dir` is `from` itself or inside it, or when it would land on a folder holding `from`.
 pub(super) fn drop_destination(from: &Path, dir: &Path) -> Result<Option<PathBuf>> {
     if dir.starts_with(from) {
         bail!("cannot move {} into itself", name(from));
@@ -47,7 +81,11 @@ pub(super) fn drop_destination(from: &Path, dir: &Path) -> Result<Option<PathBuf
     let Some(file_name) = from.file_name() else {
         bail!("{} has no name to move", from.display());
     };
-    Ok(Some(dir.join(file_name)))
+    let dest = dir.join(file_name);
+    if from.starts_with(&dest) {
+        bail!("cannot replace {} with something inside it", name(&dest));
+    }
+    Ok(Some(dest))
 }
 
 /// A name in `dir` for a copy of `name` that nothing has yet: "a copy.txt", "a copy 2.txt", …
@@ -202,6 +240,28 @@ mod tests {
             drop_destination(Path::new("/p/src/a.rs"), Path::new("/p")).unwrap(),
             Some(PathBuf::from("/p/a.rs"))
         );
+    }
+
+    #[test]
+    fn dropping_a_folder_where_its_namesake_parent_sits_never_trashes_that_parent() {
+        let dir = scratch("replace-parent");
+        let from = dir.join("pkg/pkg");
+        fs::create_dir_all(&from).unwrap();
+        fs::write(from.join("lib.rs"), "keep").unwrap();
+        let trashed = std::cell::RefCell::new(Vec::new());
+        let trash = |path: &Path| {
+            trashed.borrow_mut().push(path.to_path_buf());
+            Ok(())
+        };
+        let dropped = drop_destination(&from, &dir).and_then(|dest| match dest {
+            Some(dest) => move_to(&from, &dest, true, trash),
+            None => Ok(()),
+        });
+        assert!(dropped.is_err());
+        assert!(move_to(&from, &dir.join("pkg"), true, trash).is_err());
+        assert_eq!(trashed.borrow().as_slice(), &[] as &[PathBuf]);
+        assert_eq!(fs::read_to_string(from.join("lib.rs")).unwrap(), "keep");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -174,6 +174,7 @@ impl Shell {
                     _ => return,
                 }
             }
+            let mut replacing = false;
             if std::fs::symlink_metadata(&dest).is_ok() {
                 let Ok(replace) = this.update_in(cx, |_, window, cx| {
                     window.prompt(
@@ -189,15 +190,10 @@ impl Shell {
                 if !matches!(replace.await, Ok(0)) {
                     return;
                 }
-                if let Err(err) = fileops::trash(&dest) {
-                    let _ = this.update(cx, |this, cx| {
-                        this.transient_notice("Could not move that", format!("{err:#}"), cx)
-                    });
-                    return;
-                }
+                replacing = true;
             }
             let _ = this.update(cx, |this, cx| {
-                let result = fileops::rename(&from, &dest);
+                let result = fileops::move_to(&from, &dest, replacing, fileops::trash);
                 if result.is_ok() {
                     this.retarget_items(&from, &dest, cx);
                     this.reload_changed_files(cx);
@@ -237,6 +233,12 @@ mod tests {
         assert!(!drag.fits(Path::new("/p/src/inner"), true));
         assert!(!drag.fits(Path::new("/p"), false));
         assert!(drag.fits(Path::new("/p"), true));
+        let nested = TreeDrag {
+            path: PathBuf::from("/p/pkg/pkg"),
+            label: "pkg".into(),
+        };
+        assert!(!nested.fits(Path::new("/p"), false));
+        assert!(!nested.fits(Path::new("/p"), true));
     }
 
     #[test]
