@@ -852,6 +852,13 @@ impl EditorView {
         let Some(shared) = self.buffer.clone() else {
             return false;
         };
+        // Tidying first would add an undo step to a save that is about to be refused.
+        let state = shared.buffer.borrow().disk_state();
+        if state != DiskState::Unchanged {
+            self.conflict = Some(state);
+            cx.notify();
+            return false;
+        }
         self.tidy_for_save(auto, cx);
         let checked = shared.buffer.borrow_mut().save_checked();
         let result = match checked {

@@ -59,7 +59,7 @@ pub fn is_whole_word(text: &str, range: &Range<usize>) -> bool {
 }
 
 /// Byte ranges of the non-empty matches of `re` in `text`; with `word`, only whole words, a
-/// rejected match letting the search resume one char later.
+/// rejected match letting the search resume at the next place a whole word could start.
 pub fn find_matches(re: &Regex, text: &str, word: bool) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -73,9 +73,25 @@ pub fn find_matches(re: &Regex, text: &str, word: bool) -> Vec<Range<usize>> {
             out.push(range);
         } else {
             at = range.start + text[range.start..].chars().next().map_or(1, char::len_utf8);
+            if word && at < text.len() {
+                at = word_edge_from(text, at);
+            }
         }
     }
     out
+}
+
+/// The first place from `at` that is not between two word chars, where alone a whole word can
+/// start; skipping the rest keeps a long rejected word from costing a search per char.
+fn word_edge_from(text: &str, at: usize) -> usize {
+    let mut before = text[..at].chars().next_back();
+    for (i, c) in text[at..].char_indices() {
+        if !(before.is_some_and(is_word) && is_word(c)) {
+            return at + i;
+        }
+        before = Some(c);
+    }
+    text.len()
 }
 
 /// What the match of `re` at `range` becomes: `with` verbatim, or in regex mode with VS Code's
@@ -117,7 +133,8 @@ pub fn replace_lines(re: &Regex, text: &str, with: &str, opts: FindOptions) -> (
 }
 
 /// A VS Code replace string as the regex crate's expansion syntax: `$n` and `$nn` name groups
-/// only up to `groups`, `$&` is the match, any other `$` is literal, and `\n`, `\t`, `\\` escape.
+/// only up to `groups` (a `$n` past them stays as typed), `$&` is the match, any other `$` is
+/// literal, and `\n`, `\t`, `\\` escape.
 fn template(with: &str, groups: usize) -> String {
     let mut out = String::with_capacity(with.len());
     let mut chars = with.chars().peekable();
@@ -141,7 +158,11 @@ fn template(with: &str, groups: usize) -> String {
                         chars.next();
                         n = n * 10 + e as usize;
                     }
-                    out.push_str(&format!("${{{n}}}"));
+                    if n < groups {
+                        out.push_str(&format!("${{{n}}}"));
+                    } else {
+                        out.push_str(&format!("$${n}"));
+                    }
                 }
                 _ => out.push_str("$$"),
             },
@@ -230,6 +251,15 @@ mod tests {
     }
 
     #[test]
+    fn a_long_word_rejected_as_a_whole_word_is_skipped_in_one_step() {
+        let text = format!("x{} a", "a".repeat(200_000));
+        let started = std::time::Instant::now();
+        assert_eq!(found("a+", &text, opts(true, true, true)), ["a"]);
+        assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+        assert_eq!(found("a.b|b", "xa b", opts(true, true, true)), ["b"]);
+    }
+
+    #[test]
     fn whole_word_ignores_edges_that_are_not_word_chars() {
         assert_eq!(found("(x", "f(x)", opts(true, true, false)), ["(x"]);
         assert_eq!(found("x)", "f(x)y", opts(true, true, false)), ["x)"]);
@@ -272,6 +302,8 @@ mod tests {
         assert_eq!(replaced(r"(\w+)", "ab", "$$1", o), "$1");
         assert_eq!(replaced(r"(\w+)", "ab", "$name", o), "$name");
         assert_eq!(replaced(r"(\w+)", "ab", "$12", o), "ab2");
+        assert_eq!(replaced(r"(\w+)", "ab", "<$2>", o), "<$2>");
+        assert_eq!(replaced(r"\w+", "ab", "$1-$0", o), "$1-ab");
         assert_eq!(replaced(r"(\w),", "a,b", r"$1\n", o), "a\nb");
         assert_eq!(replaced(r"(\w),", "a,b", r"\\t", o), r"\tb");
     }
