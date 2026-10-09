@@ -7,6 +7,8 @@ use athena_editor::Lang;
 use athena_workspace::{Preferences, ThemeChoice};
 use serde_json::{Map, Value, json};
 
+pub mod schema;
+
 /// What a new settings.json holds: an empty object, with every setting shown commented out.
 const TEMPLATE: &str = include_str!("settings-template.jsonc");
 
@@ -730,12 +732,34 @@ pub fn write(keys: &[&str], value: &Value) -> Result<String> {
     write_at(&ensure_file()?, keys, value)
 }
 
-fn write_at(path: &Path, keys: &[&str], value: &Value) -> Result<String> {
+/// Sets `keys` to `value` in the settings file at `path`, as [`write`] does settings.json.
+pub fn write_at(path: &Path, keys: &[&str], value: &Value) -> Result<String> {
+    edit_at(path, |text| set_value(text, keys, value))
+}
+
+/// Removes every spelling of `keys` from the settings file at `path`, so it falls back.
+pub fn unset_at(path: &Path, keys: &[&str]) -> Result<String> {
+    edit_at(path, |text| unset_value(text, keys))
+}
+
+/// Creates a project's `.athena/settings.json` as an empty object unless it exists.
+pub fn ensure_project_file(root: &Path) -> Result<PathBuf> {
+    let path = root.join(PROJECT_FILE);
+    if !path.exists() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, "{\n}\n")?;
+    }
+    Ok(path)
+}
+
+fn edit_at(path: &Path, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<String> {
     // A settings.json linked from a dotfiles checkout is updated there, not replaced by a copy.
     let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let text =
         std::fs::read_to_string(&target).with_context(|| format!("read {}", target.display()))?;
-    let updated = set_value(&text, keys, value).map_err(|why| anyhow!("{why}"))?;
+    let updated = edit(&text).map_err(|why| anyhow!("{why}"))?;
     if updated != text {
         let tmp = target.with_file_name(format!(".settings.json.{}", std::process::id()));
         std::fs::write(&tmp, &updated)?;
@@ -755,6 +779,204 @@ pub fn set_value(text: &str, keys: &[&str], value: &Value) -> Result<String, Str
     let out = set_parsed(text, keys, value)?;
     parse(&out).map_err(|why| format!("settings.json would be left unreadable: {why}"))?;
     Ok(out)
+}
+
+/// `text` without the members that set `keys`, in any spelling, so the setting falls back; a
+/// block such as `"git": {}` left empty goes too. Refuses text [`parse`] cannot read.
+pub fn unset_value(text: &str, keys: &[&str]) -> Result<String, String> {
+    parse(text)?;
+    let mut out = text.to_string();
+    // Each pass removes the spelling parse reads, which may uncover an earlier one.
+    loop {
+        let Some(root) = root_object(&out)? else {
+            break;
+        };
+        let Some((object, member)) = read_from(&root, keys) else {
+            break;
+        };
+        let at = object
+            .members
+            .iter()
+            .position(|m| std::ptr::eq(m, member))
+            .expect("the member is in its object");
+        out = remove_member(&out, object, at);
+        let Some(root) = root_object(&out)? else {
+            break;
+        };
+        let read = root.members.iter().rposition(|m| keys.len() > 1 && m.key == keys[0]);
+        let emptied = read.filter(|&at| {
+            let m = &root.members[at];
+            m.object.as_ref().is_some_and(|o| {
+                o.members.is_empty()
+                    && (m.key != "editor" || out[o.open + 1..o.close].trim().is_empty())
+            })
+        });
+        if let Some(at) = emptied {
+            let key = root.members[at].key.clone();
+            out = remove_member(&out, &root, at);
+            // Earlier blocks of that name were shadowed by this one, and would apply without it.
+            while let Some(root) = root_object(&out)?
+                && let Some(i) = root.members.iter().position(|m| m.key == key)
+            {
+                out = remove_member(&out, &root, i);
+            }
+        }
+    }
+    parse(&out).map_err(|why| format!("settings.json would be left unreadable: {why}"))?;
+    Ok(out)
+}
+
+/// The file's top-level object, or `None` for a file with nothing but comments.
+fn root_object(text: &str) -> Result<Option<Object>, String> {
+    let mut scan = Scan {
+        s: text.as_bytes(),
+        i: 0,
+    };
+    scan.skip_blank();
+    if scan.i == text.len() {
+        return Ok(None);
+    }
+    scan.object().map(Some)
+}
+
+/// `text` without `object`'s member `at` and the comma that separated it from its neighbours;
+/// a member on a line of its own takes the line, and the comment ending it, with it.
+fn remove_member(text: &str, object: &Object, at: usize) -> String {
+    let m = &object.members[at];
+    remove_span(
+        text,
+        m.key_start..m.value.end,
+        at.checked_sub(1).map(|i| object.members[i].value.end),
+    )
+}
+
+/// `text` without the list entry at `span`; `prev_end` is where the entry before it ends.
+pub(crate) fn remove_span(text: &str, span: Range<usize>, prev_end: Option<usize>) -> String {
+    let line_start = text[..span.start].rfind('\n').map_or(0, |i| i + 1);
+    let own_line = text[line_start..span.start].trim().is_empty();
+    let start = if own_line { line_start } else { span.start };
+    let mut scan = Scan {
+        s: text.as_bytes(),
+        i: span.end,
+    };
+    scan.skip_blank();
+    if scan.peek() == Some(b',') {
+        let after = scan.i + 1;
+        let line_end = text[after..].find('\n').map_or(text.len(), |i| after + i);
+        let rest = text[after..line_end].trim_start();
+        let end = if own_line && (rest.is_empty() || rest.starts_with("//")) {
+            (line_end + 1).min(text.len())
+        } else {
+            after + (text[after..line_end].len() - text[after..line_end].trim_start().len())
+        };
+        return format!("{}{}", &text[..start], &text[end..]);
+    }
+    if let Some(prev_end) = prev_end {
+        return format!("{}{}", &text[..prev_end], &text[span.end..]);
+    }
+    let line_end = text[span.end..]
+        .find('\n')
+        .map_or(text.len(), |i| span.end + i);
+    let rest = &text[span.end..line_end];
+    let end = match own_line && rest.trim().is_empty() {
+        true => (line_end + 1).min(text.len()),
+        false => span.end + (rest.len() - rest.trim_start().len()),
+    };
+    format!("{}{}", &text[..start], &text[end..])
+}
+
+/// Where a top-level JSON array's entries sit: its brackets and each entry's bytes.
+pub(crate) struct ArrayLayout {
+    pub(crate) open: usize,
+    pub(crate) close: usize,
+    pub(crate) items: Vec<Range<usize>>,
+}
+
+/// Finds the entries of the JSONC array `text` holds; `None` for a file with only comments.
+pub(crate) fn array_layout(text: &str) -> Result<Option<ArrayLayout>, String> {
+    let mut scan = Scan {
+        s: text.as_bytes(),
+        i: 0,
+    };
+    scan.skip_blank();
+    if scan.i == text.len() {
+        return Ok(None);
+    }
+    let open = scan.i;
+    scan.expect(b'[')?;
+    let mut items = Vec::new();
+    loop {
+        scan.skip_blank();
+        match scan.peek() {
+            Some(b']') => break,
+            Some(b',') => scan.i += 1,
+            None => return Err("the list never ends".into()),
+            _ => items.push(scan.value()?.0),
+        }
+    }
+    Ok(Some(ArrayLayout {
+        open,
+        close: scan.i,
+        items,
+    }))
+}
+
+/// Each problem `text` has, at the bytes it is about: a setting's key, or the line JSON could
+/// not be read at, marked `true` as nothing in the file then applies.
+pub fn problems_at(text: &str, project: bool) -> Vec<(Range<usize>, String, bool)> {
+    let read = |t: &str| match project {
+        true => parse_project(t),
+        false => parse(t),
+    };
+    match read(text) {
+        Err(why) => {
+            let line = error_line(&why).unwrap_or(1);
+            return vec![(line_span(text, line), why, true)];
+        }
+        Ok((_, problems)) if problems.is_empty() => return Vec::new(),
+        Ok(_) => {}
+    }
+    let Ok(Some(root)) = root_object(text) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for m in &root.members {
+        let own = format!("{{{}}}", &text[m.key_start..m.value.end]);
+        let problems = read(&own).map(|(_, p)| p).unwrap_or_default();
+        let block = m.key == "editor" || m.key.starts_with('[') && m.key.ends_with(']');
+        match &m.object {
+            Some(inner) if block && !problems.is_empty() => {
+                for im in &inner.members {
+                    let one = format!("{{{}: {{{}}}}}", quote(&m.key), &text[im.key_start..im.value.end]);
+                    for why in read(&one).map(|(_, p)| p).unwrap_or_default() {
+                        out.push((im.key_start..im.key_end, why, false));
+                    }
+                }
+            }
+            _ => out.extend(problems.into_iter().map(|why| (m.key_start..m.key_end, why, false))),
+        }
+    }
+    out
+}
+
+/// The 1-based line serde_json names in an error such as "... at line 3 column 5".
+pub(crate) fn error_line(why: &str) -> Option<usize> {
+    let rest = &why[why.rfind(" at line ")? + " at line ".len()..];
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+/// The bytes of 1-based `line` without its indentation, or the whole text past its end.
+pub(crate) fn line_span(text: &str, line: usize) -> Range<usize> {
+    let mut start = 0;
+    for _ in 1..line {
+        match text[start..].find('\n') {
+            Some(i) => start += i + 1,
+            None => break,
+        }
+    }
+    let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+    let indent = text[start..end].len() - text[start..end].trim_start().len();
+    (start + indent).min(end)..end
 }
 
 fn set_parsed(text: &str, keys: &[&str], value: &Value) -> Result<String, String> {
@@ -788,7 +1010,7 @@ fn set_parsed(text: &str, keys: &[&str], value: &Value) -> Result<String, String
         .filter(|i| !i.is_empty())
         .unwrap_or("  ")
         .to_string();
-    if let Some(m) = read_from(&root, keys) {
+    if let Some((_, m)) = read_from(&root, keys) {
         return Ok(replace(text, m, value, &unit));
     }
     let mut object = &root;
@@ -808,8 +1030,9 @@ fn set_parsed(text: &str, keys: &[&str], value: &Value) -> Result<String, String
     unreachable!("keys is never empty")
 }
 
-/// The member whose value [`parse`] ends up with for `keys`, whichever spelling or place it has.
-fn read_from<'a>(root: &'a Object, keys: &[&str]) -> Option<&'a Member> {
+/// The member whose value [`parse`] ends up with for `keys`, whichever spelling or place it has,
+/// and the object holding it.
+fn read_from<'a>(root: &'a Object, keys: &[&str]) -> Option<(&'a Object, &'a Member)> {
     let target = match keys {
         [key] => setting_name(None, key),
         [block, rest @ ..] => setting_name(Some(block), &rest.join(".")),
@@ -818,7 +1041,7 @@ fn read_from<'a>(root: &'a Object, keys: &[&str]) -> Option<&'a Member> {
     let mut found = None;
     for m in as_read(root) {
         if setting_name(None, &m.key) == target {
-            found = Some(m);
+            found = Some((root, m));
         }
         if keys.len() > 1
             && m.key == keys[0]
@@ -826,7 +1049,7 @@ fn read_from<'a>(root: &'a Object, keys: &[&str]) -> Option<&'a Member> {
         {
             for im in as_read(inner) {
                 if setting_name(Some(keys[0]), &im.key) == target {
-                    found = Some(im);
+                    found = Some((inner, im));
                 }
             }
         }
@@ -931,6 +1154,7 @@ fn line_indent(text: &str, at: usize) -> &str {
 struct Member {
     key: String,
     key_start: usize,
+    key_end: usize,
     value: Range<usize>,
     object: Option<Object>,
 }
@@ -1049,7 +1273,7 @@ impl Scan<'_> {
                 _ => {}
             }
             let key = self.string()?;
-            let key_start = key.start;
+            let (key_start, key_end) = (key.start, key.end);
             let key: String = serde_json::from_slice(&self.s[key]).map_err(|e| e.to_string())?;
             self.skip_blank();
             self.expect(b':')?;
@@ -1058,6 +1282,7 @@ impl Scan<'_> {
             members.push(Member {
                 key,
                 key_start,
+                key_end,
                 value,
                 object,
             });
@@ -1494,6 +1719,129 @@ mod tests {
             assert!(problems.is_empty(), "{problems:?} in\n{out}");
             assert_eq!(after, want, "{keys:?} = {value} in\n{text}\nbecame\n{out}");
         }
+    }
+
+    #[test]
+    fn unsetting_removes_every_spelling_and_keeps_comments_and_neighbours() {
+        let text = "{\n  // mine\n  \"theme\": \"dark\", // why\n  \"editor.tabSize\": 2,\n  \"editor\": {\n    \"tab_size\": 3,\n    \"word_wrap\": true\n  },\n  \"git\": {\"autofetch\": true}\n}\n";
+        let out = unset_value(text, &["editor", "tab_size"]).unwrap();
+        assert_eq!(
+            out,
+            "{\n  // mine\n  \"theme\": \"dark\", // why\n  \"editor\": {\n    \"word_wrap\": true\n  },\n  \"git\": {\"autofetch\": true}\n}\n"
+        );
+        let out = unset_value(&out, &["theme"]).unwrap();
+        assert!(out.starts_with("{\n  // mine\n  \"editor\""), "{out}");
+        let out = unset_value(&out, &["git", "autofetch"]).unwrap();
+        assert!(!out.contains("git"), "an emptied block goes too:\n{out}");
+        let out = unset_value(&out, &["editor", "word_wrap"]).unwrap();
+        assert_eq!(out, "{\n  // mine\n}\n");
+        assert_eq!(parse(&out).unwrap().0, Settings::default());
+        assert_eq!(unset_value("{}", &["theme"]).unwrap(), "{}");
+        assert_eq!(
+            unset_value(
+                r#"{"a.b": 1, "theme": "dark", "editor.minimap.enabled": false}"#,
+                &["editor", "minimap"]
+            )
+            .unwrap(),
+            r#"{"a.b": 1, "theme": "dark"}"#,
+            "a file with problems is still written"
+        );
+    }
+
+    #[test]
+    fn unsetting_the_last_member_takes_the_comma_before_it() {
+        assert_eq!(
+            unset_value(r#"{"theme": "dark", "ide_integration": true}"#, &["ide_integration"]).unwrap(),
+            r#"{"theme": "dark"}"#
+        );
+        assert_eq!(
+            unset_value(r#"{"theme": "dark", "ide_integration": true, "git.autofetch": true}"#, &["ide_integration"]).unwrap(),
+            r#"{"theme": "dark", "git.autofetch": true}"#
+        );
+        assert_eq!(
+            unset_value("{\n  \"editor\": { /* keep */ \"word_wrap\": true }\n}", &["editor", "word_wrap"]).unwrap(),
+            "{\n  \"editor\": { /* keep */ }\n}",
+            "an editor block with a comment in it stays"
+        );
+    }
+
+    #[test]
+    fn unsets_land_where_parse_reads_across_many_shapes() {
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n.max(1) as u64) as usize
+        };
+        for _ in 0..3000 {
+            let text = random_settings(&mut next);
+            let (mut want, _) = parse(&text).unwrap();
+            let keys: &[&str] = match next(7) {
+                0 => {
+                    want.editor.word_wrap = None;
+                    &["editor", "word_wrap"]
+                }
+                1 => {
+                    want.editor.tab_size = None;
+                    &["editor", "tab_size"]
+                }
+                2 => {
+                    want.editor.format_on_save = None;
+                    &["editor", "format_on_save"]
+                }
+                3 => {
+                    want.editor.autosave_delay_ms = None;
+                    &["editor", "autosave_delay_ms"]
+                }
+                4 => {
+                    want.theme = None;
+                    &["theme"]
+                }
+                5 => {
+                    want.autofetch = None;
+                    &["git", "autofetch"]
+                }
+                _ => {
+                    want.ide_integration = None;
+                    &["ide_integration"]
+                }
+            };
+            let out = unset_value(&text, keys).unwrap();
+            let (after, problems) = parse(&out).unwrap();
+            assert!(problems.is_empty(), "{problems:?} in\n{out}");
+            assert_eq!(after, want, "{keys:?} unset in\n{text}\nbecame\n{out}");
+        }
+    }
+
+    #[test]
+    fn problems_point_at_the_key_they_are_about() {
+        let text = "{\n  \"theme\": \"purple\",\n  \"editor\": {\n    \"tab_size\": 2,\n    \"bogus\": 1\n  },\n  \"nope\": 1\n}";
+        let at: Vec<(&str, bool)> = problems_at(text, false)
+            .iter()
+            .map(|(r, _, fatal)| (&text[r.clone()], *fatal))
+            .collect();
+        assert_eq!(at, [("\"theme\"", false), ("\"bogus\"", false), ("\"nope\"", false)]);
+        let project = problems_at(r#"{"editor": {"font_size": 14, "tab_size": 2}, "theme": "dark"}"#, true);
+        assert_eq!(project.len(), 2, "{project:?}");
+        assert!(project[0].1.contains("only in the global"), "{project:?}");
+        let broken = "{\n  \"theme\": \"dark\"\n  \"x\": 1\n}";
+        let found = problems_at(broken, false);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].2);
+        assert_eq!(&broken[found[0].0.clone()], "\"x\": 1");
+        assert!(problems_at(TEMPLATE, false).is_empty());
+    }
+
+    #[test]
+    fn array_entries_are_found_around_comments() {
+        let text = "// head\n[\n  {\"a\": \"]\"}, // one\n  /* two */ [1, 2],\n  3\n]\n";
+        let layout = array_layout(text).unwrap().unwrap();
+        let items: Vec<&str> = layout.items.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(items, ["{\"a\": \"]\"}", "[1, 2]", "3"]);
+        assert_eq!(&text[layout.close..layout.close + 1], "]");
+        assert!(array_layout("// only\n").unwrap().is_none());
+        assert!(array_layout("{}").is_err());
     }
 
     #[test]

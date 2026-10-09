@@ -102,7 +102,7 @@ fn placeholder_hint(mode: Mode) -> &'static str {
 }
 
 /// Editor actions the palette offers while an editor is focused; Insert line above has no key.
-const EDITOR_COMMANDS: &[(&str, &str)] = &[
+pub(super) const EDITOR_COMMANDS: &[(&str, &str)] = &[
     ("Indent lines", "editor::IndentLines"),
     ("Outdent lines", "editor::OutdentLines"),
     ("Toggle replace", "editor::FindReplace"),
@@ -126,7 +126,7 @@ const EDITOR_COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Terminal actions the palette offers while a terminal is focused.
-const TERMINAL_COMMANDS: &[(&str, &str)] = &[
+pub(super) const TERMINAL_COMMANDS: &[(&str, &str)] = &[
     (
         "Copy last command output",
         "terminal::CopyLastCommandOutput",
@@ -171,7 +171,7 @@ pub(super) struct Palette {
 }
 
 /// Commands offered in the palette, in the order shown before any typing.
-fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
+pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
     vec![
         ("New terminal", Box::new(actions::NewTerminal)),
         ("Split right", Box::new(actions::SplitRight)),
@@ -1182,34 +1182,16 @@ impl Shell {
 }
 
 /// `⌘⇧P`-style label for a binding.
-fn keystrokes(binding: &gpui::KeyBinding) -> String {
+pub(super) fn keystrokes(binding: &gpui::KeyBinding) -> String {
     binding
         .keystrokes()
         .iter()
         .map(|k| {
-            let m = k.modifiers();
-            let mut s = String::new();
-            if m.control {
-                s.push('⌃');
-            }
-            if m.alt {
-                s.push('⌥');
-            }
-            if m.shift {
-                s.push('⇧');
-            }
-            if m.platform {
-                s.push('⌘');
-            }
-            let key = match k.key() {
-                "enter" => "↩".to_string(),
-                "left" => "←".into(),
-                "right" => "→".into(),
-                "up" => "↑".into(),
-                "down" => "↓".into(),
-                other => other.to_uppercase(),
-            };
-            s + &key
+            crate::keymap::symbols(&gpui::Keystroke {
+                key: k.key().to_string(),
+                modifiers: *k.modifiers(),
+                key_char: None,
+            })
         })
         .collect::<Vec<_>>()
         .join(" ")
