@@ -72,6 +72,7 @@ actions!(
         ThemeDark,
         OpenKeyboardShortcuts,
         OpenSettings,
+        ToggleInlayHints,
     ]
 );
 

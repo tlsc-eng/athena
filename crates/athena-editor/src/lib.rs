@@ -33,7 +33,7 @@ pub use diff_view::{DiffEvent, DiffView, HunkActions};
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
 pub use lsp_ui::{
-    ConfirmRename, GoToImplementation, GoToTypeDefinition, Occurrence, RenameSymbol,
+    ConfirmRename, GoToImplementation, GoToTypeDefinition, Inlay, Occurrence, RenameSymbol,
     ShowCodeActions,
 };
 pub use merge_conflicts::{

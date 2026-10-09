@@ -14,6 +14,10 @@ use crate::view::{EditorEvent, EditorView};
 
 /// The cursor rests this long before other uses of its symbol are asked for, as in VS Code.
 const HIGHLIGHT_DELAY: Duration = Duration::from_millis(250);
+/// Typing or scrolling pauses this long before inlay hints are asked for again.
+const INLAY_DELAY: Duration = Duration::from_millis(300);
+/// Hints are asked for this many lines above and below the screen, so short scrolls need none.
+const INLAY_MARGIN: usize = 100;
 
 // Handled by the shell, which talks to the language server, as they bubble up from the editor.
 actions!(
@@ -107,6 +111,29 @@ pub(crate) struct Occurrences {
     pub(crate) shown: Anchored<bool>,
     /// The cursor and buffer version last asked about, or waited on.
     asked: Option<(usize, u64)>,
+    /// The request in flight and the buffer version it was asked for.
+    pending: Option<(u64, u64)>,
+    requests: u64,
+    timer: Option<Task<()>>,
+}
+
+/// A note drawn inside the text, positioned as language servers count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inlay {
+    pub position: (u32, u32),
+    /// What is drawn, padding included.
+    pub text: String,
+    /// It names the type of what comes before it, so the caret stays on that side of it.
+    pub is_type: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct Inlays {
+    /// Each hint's text and whether it is a type.
+    pub(crate) shown: Anchored<(String, bool)>,
+    enabled: bool,
+    /// The buffer version and lines last asked about, or waited on.
+    asked: Option<(u64, Range<usize>)>,
     /// The request in flight and the buffer version it was asked for.
     pending: Option<(u64, u64)>,
     requests: u64,
@@ -335,6 +362,93 @@ impl EditorView {
             return;
         }
         self.occurrences.shown = Anchored::new(&b, items);
+        cx.notify();
+    }
+
+    /// Lets the editor ask for inlay hints, or hides them.
+    pub fn set_inlay_hints(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.inlays.enabled == enabled {
+            return;
+        }
+        self.inlays = Inlays {
+            enabled,
+            ..Inlays::default()
+        };
+        cx.notify();
+    }
+
+    /// Asks for inlay hints again, as after the server's settings changed.
+    pub fn refresh_inlay_hints(&mut self, cx: &mut Context<Self>) {
+        self.inlays.asked = None;
+        cx.notify();
+    }
+
+    /// Asks for the hints around the lines on screen once typing or scrolling pauses; called
+    /// every frame.
+    pub(crate) fn schedule_inlays(&mut self, cx: &mut Context<Self>) {
+        if !self.inlays.enabled || !self.completing_attached() {
+            return;
+        }
+        let (Some(version), Some(lines)) = (self.version(), self.buf().map(|b| b.len_lines()))
+        else {
+            return;
+        };
+        let Some((first, last)) = self.layout.as_ref().and_then(|l| {
+            let first = l.rows.first()?.line;
+            Some((first, l.rows.last()?.line))
+        }) else {
+            return;
+        };
+        if let Some((v, asked)) = &self.inlays.asked
+            && *v == version
+            && asked.start <= first
+            && last < asked.end
+        {
+            return;
+        }
+        let window = first.saturating_sub(INLAY_MARGIN)..(last + INLAY_MARGIN + 1).min(lines);
+        self.inlays.asked = Some((version, window.clone()));
+        self.inlays.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(INLAY_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                this.inlays.timer = None;
+                this.inlays.requests += 1;
+                let request = this.inlays.requests;
+                this.inlays.pending = Some((request, version));
+                cx.emit(EditorEvent::InlayHints {
+                    request,
+                    start_line: window.start as u32,
+                    end_line: window.end as u32,
+                });
+            });
+        }));
+    }
+
+    /// The answer to an [`EditorEvent::InlayHints`]; dropped if the text changed since.
+    pub fn show_inlay_hints(&mut self, request: u64, hints: Vec<Inlay>, cx: &mut Context<Self>) {
+        let Some((asked, version)) = self.inlays.pending else {
+            return;
+        };
+        let Some(shared) = self.buffer.clone() else {
+            return;
+        };
+        let b = shared.buffer.borrow();
+        if asked != request || b.version() != version || !self.inlays.enabled {
+            return;
+        }
+        self.inlays.pending = None;
+        let items: Vec<(Range<usize>, (String, bool))> = hints
+            .into_iter()
+            .map(|h| {
+                let at = b.char_at_utf16(h.position.0, h.position.1);
+                let text = h.text.replace(['\n', '\t'], " ");
+                (at..at, (text, h.is_type))
+            })
+            .collect();
+        if items.is_empty() && self.inlays.shown.is_empty() {
+            return;
+        }
+        self.inlays.shown = Anchored::new(&b, items);
         cx.notify();
     }
 

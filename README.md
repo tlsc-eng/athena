@@ -628,6 +628,15 @@ object), and is sent again with `workspace/didChangeConfiguration` when the file
 Problems (an unknown key, a wrong type) are listed in a toast and in `app.log` while the rest
 applies; a file that is not valid JSON leaves the settings in force as they were.
 
+Inlay hints (parameter names before arguments, inferred types after names) are drawn in muted
+text inside the line whenever the language server sends them. As with VS Code's Go extension,
+gopls sends none until its `hints` settings ask for some. **Toggle Inlay Hints** in the palette
+sets `editor.inlay_hints`: `true` also asks gopls for `assignVariableTypes`,
+`compositeLiteralFields`, `constantValues`, `functionTypeParameters`, `parameterNames` and
+`rangeVariableTypes`, and typescript-language-server for parameter names of literals, return
+types and enum values, unless your `lsp` entry already chooses its own; `false` hides every hint.
+Lines that wrap are drawn without hints.
+
 ## Command line
 
 ```text

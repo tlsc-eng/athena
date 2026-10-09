@@ -5,12 +5,12 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use athena_editor::{
-    Completion, EditorView, HoverBlock, Lang, Marker, MarkerSeverity, Occurrence, ServerEdit,
-    Signature,
+    Completion, EditorView, HoverBlock, Inlay, Lang, Marker, MarkerSeverity, Occurrence,
+    ServerEdit, Signature,
 };
 use athena_lsp::{
-    Client, CompletionItem, Config, Diagnostic, Event, Location, MarkupBlock, Position, ServerKind,
-    Severity,
+    Client, CompletionItem, Config, Diagnostic, Event, Location, MarkupBlock, Position, Range,
+    ServerKind, Severity,
 };
 use athena_proto::{DiagnosticInfo, NoticeKind};
 use athena_ui::ActiveTheme;
@@ -28,6 +28,9 @@ const CHANGE_DELAY: Duration = Duration::from_millis(300);
 
 /// A slow formatter never holds up Cmd+S longer than this; the file saves unformatted.
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// gopls reads its settings again a moment after being told they changed, and sends no refresh.
+const SETTINGS_SETTLE: Duration = Duration::from_millis(300);
 
 /// Longest line excerpt shown for a reference.
 const SNIPPET_CHARS: usize = 160;
@@ -380,6 +383,7 @@ impl Shell {
                 };
                 self.local_notice(NoticeKind::Message { title, body: why }, cx);
             }
+            Event::RefreshInlayHints => self.refresh_inlay_hints(&key, cx),
             Event::ApplyEdit { label, edit, reply } => {
                 tracing::debug!(
                     ?label,
@@ -396,20 +400,102 @@ impl Shell {
         }
     }
 
-    /// Sends each running server its settings again where settings.json changed them.
-    pub(super) fn lsp_settings_changed(&mut self) {
-        for ((_, kind), server) in &self.lsp.servers {
-            let config = self.settings.file.server_config(kind.program());
+    /// Sends each running server its settings again where settings.json changed them, then asks
+    /// its editors for inlay hints again.
+    pub(super) fn lsp_settings_changed(&mut self, cx: &mut Context<Self>) {
+        let mut changed = Vec::new();
+        for (key, server) in &self.lsp.servers {
+            let config = self.settings.file.server_config(key.1.program());
             let Ok(mut current) = server.config.write() else {
                 continue;
             };
             if *current != config {
                 *current = config.clone();
                 drop(current);
-                tracing::info!("{} settings changed", kind.program());
+                tracing::info!("{} settings changed", key.1.program());
                 server.client.did_change_configuration(config);
+                changed.push(key.clone());
             }
         }
+        if changed.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTINGS_SETTLE).await;
+            let _ = this.update(cx, |this, cx| {
+                for key in &changed {
+                    this.refresh_inlay_hints(key, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_inlay_hints(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        let docs: Vec<PathBuf> = self
+            .lsp
+            .documents
+            .iter()
+            .filter(|(_, k)| *k == key)
+            .map(|(doc, _)| doc.clone())
+            .collect();
+        for doc in docs {
+            for editor in self.editors_showing(&doc, cx) {
+                editor.update(cx, |e, cx| e.refresh_inlay_hints(cx));
+            }
+        }
+    }
+
+    /// Asks the server for the inlay hints on `lines` of the editor's file.
+    pub(super) fn lsp_inlay_hints(
+        &mut self,
+        editor: &Entity<EditorView>,
+        request: u64,
+        lines: std::ops::Range<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let doc = document_key(editor.read(cx).path());
+        self.flush_change(&doc, editor, cx);
+        let Some(client) = self
+            .document_client(&doc)
+            .filter(|c| c.supports("/inlayHintProvider"))
+        else {
+            editor.update(cx, |e, cx| e.show_inlay_hints(request, Vec::new(), cx));
+            return;
+        };
+        let range = Range {
+            start: Position {
+                line: lines.start,
+                character: 0,
+            },
+            end: Position {
+                line: lines.end,
+                character: 0,
+            },
+        };
+        let weak = editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let found = client.inlay_hints(&doc, range).await.unwrap_or_else(|why| {
+                tracing::debug!("inlay hints failed: {why}");
+                Vec::new()
+            });
+            tracing::debug!("inlay hints → {}", found.len());
+            let hints = found
+                .into_iter()
+                .map(|h| Inlay {
+                    position: (h.position.line, h.position.character),
+                    text: format!(
+                        "{}{}{}",
+                        if h.padding_left { " " } else { "" },
+                        h.label,
+                        if h.padding_right { " " } else { "" }
+                    ),
+                    is_type: h.is_type,
+                })
+                .collect();
+            let _ = weak.update(cx, |e, cx| e.show_inlay_hints(request, hints, cx));
+        })
+        .detach();
     }
 
     /// Drops what a stopped server reported; its replacement publishes afresh.

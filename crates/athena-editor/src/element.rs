@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 
 use athena_ui::{ActiveTheme, SyntaxColors};
@@ -14,12 +16,14 @@ use crate::display::{DisplayLine, Guides, wrap_breaks, wrap_indent};
 use crate::syntax::Token;
 use crate::view::{EditorLayout, EditorView, LayoutRow};
 
-/// How a token is drawn: colour, weight and whether it is underlined.
+/// How a token is drawn: colour, weight, whether it is underlined, and whether it is an inlay
+/// hint's text rather than the buffer's.
 #[derive(Clone, Copy, PartialEq)]
 struct TokenStyle {
     color: Hsla,
     weight: FontWeight,
     underline: bool,
+    inlay: bool,
 }
 
 impl TokenStyle {
@@ -28,8 +32,37 @@ impl TokenStyle {
             color,
             weight: FontWeight::NORMAL,
             underline: false,
+            inlay: false,
         }
     }
+}
+
+/// `line` as drawn with inlay hints `(column, text, is_type)` inside it, and the bytes each hint
+/// takes. The caret at a hint's column is drawn after it, except before a type, which belongs
+/// to the name before it; at the line's start and end the caret stays outside every hint.
+fn inlaid(line: &str, hints: &[(usize, String, bool)]) -> (DisplayLine, Vec<Range<usize>>) {
+    let plain = DisplayLine::new(line);
+    let n = plain.char_to_byte.len() - 1;
+    let mut text = String::with_capacity(plain.text.len());
+    let mut char_to_byte = Vec::with_capacity(n + 1);
+    let mut spans = Vec::new();
+    for i in 0..=n {
+        let start = text.len();
+        let hugs = |is_type: bool| i == 0 || (is_type && i < n);
+        let mut after = false;
+        for hugging in [true, false] {
+            for (_, hint, _) in hints.iter().filter(|h| h.0 == i && hugs(h.2) == hugging) {
+                spans.push(text.len()..text.len() + hint.len());
+                text.push_str(hint);
+                after |= !hugging;
+            }
+        }
+        char_to_byte.push(if after { text.len() } else { start });
+        if i < n {
+            text.push_str(&plain.text[plain.char_to_byte[i]..plain.char_to_byte[i + 1]]);
+        }
+    }
+    (DisplayLine { text, char_to_byte }, spans)
 }
 
 /// The style of each char of `line`, `n` chars long, from highlights covering it.
@@ -214,11 +247,13 @@ impl Element for EditorElement {
             underline: None,
             strikethrough: None,
         };
+        let inlay_background = theme.color.surface_active;
         let styled = |len: usize, style: TokenStyle| TextRun {
             font: Font {
                 weight: style.weight,
                 ..font.clone()
             },
+            background_color: style.inlay.then_some(inlay_background),
             underline: style.underline.then_some(UnderlineStyle {
                 thickness: px(1.),
                 color: Some(style.color),
@@ -317,6 +352,16 @@ impl Element for EditorElement {
         for run in shown.chunk_by(|a, b| a + 1 == *b) {
             tokens.extend(buffer.highlights(run[0]..run[run.len() - 1] + 1));
         }
+        let mut inlays: HashMap<usize, Vec<(usize, String, bool)>> = HashMap::new();
+        for (at, (text, is_type)) in view.inlays.shown.now(&buffer) {
+            let line = buffer.line_of(at.start);
+            let col = at.start - buffer.line_start(line);
+            inlays.entry(line).or_default().push((col, text, is_type));
+        }
+        let inlay_style = TokenStyle {
+            inlay: true,
+            ..TokenStyle::plain(syntax.comment)
+        };
         let rope = buffer.rope();
         let carets = view.cursor.all();
         let selection = view.cursor.selection().range();
@@ -329,7 +374,6 @@ impl Element for EditorElement {
         let mut rows: Vec<(usize, usize, LayoutRow)> = Vec::new();
         for &line in &shown {
             let raw = buffer.line(line);
-            let display = Rc::new(DisplayLine::new(&raw));
             let start_char = buffer.line_start(line);
             let n = raw.chars().count();
             let styles = line_styles(rope, &tokens, line, n, &syntax);
@@ -340,6 +384,12 @@ impl Element for EditorElement {
                 ),
                 None => (Vec::new(), px(0.)),
             };
+            // Wrapped lines break by the buffer's columns, which hint text would throw off.
+            let (display, inlay_spans) = match inlays.get(&line) {
+                Some(hints) if breaks.is_empty() && n > 0 => inlaid(&raw, hints),
+                _ => (DisplayLine::new(&raw), Vec::new()),
+            };
+            let display = Rc::new(display);
             let top = view.display.row_of(line);
             let starts = std::iter::once(0).chain(breaks.iter().copied());
             let ends = breaks.iter().copied().chain(std::iter::once(n));
@@ -349,12 +399,23 @@ impl Element for EditorElement {
                     continue;
                 }
                 let mut runs: Vec<(TextRun, TokenStyle)> = Vec::new();
+                let mut push = |len: usize, style: TokenStyle| match runs.last_mut() {
+                    _ if len == 0 => {}
+                    Some((r, s)) if *s == style => r.len += len,
+                    _ => runs.push((styled(len, style), style)),
+                };
                 for (i, style) in styles.iter().enumerate().take(b).skip(a) {
-                    let len = display.char_to_byte[i + 1] - display.char_to_byte[i];
-                    match runs.last_mut() {
-                        Some((r, s)) if s == style => r.len += len,
-                        _ => runs.push((styled(len, *style), *style)),
+                    let (from, end) = (display.char_to_byte[i], display.char_to_byte[i + 1]);
+                    let mut at = from;
+                    for hint in inlay_spans
+                        .iter()
+                        .filter(|h| h.start >= from && h.end <= end)
+                    {
+                        push(hint.start - at, *style);
+                        push(hint.len(), inlay_style);
+                        at = hint.end;
                     }
+                    push(end - at, *style);
                 }
                 let runs: Vec<TextRun> = runs.into_iter().map(|(r, _)| r).collect();
                 let text = &display.text[display.char_to_byte[a]..display.char_to_byte[b]];
@@ -896,6 +957,37 @@ fn reveal(scroll: f32, line: f32, lh: f32, height: f32, inset: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inlay_hints_sit_inside_the_text_without_moving_its_chars() {
+        // `x😀 := f(1)`: a type after `x😀`, a parameter name before `1`.
+        let hints = vec![
+            (2, ": int".to_string(), true),
+            (8, "n: ".to_string(), false),
+        ];
+        let (d, spans) = inlaid("x😀 := f(1)", &hints);
+        assert_eq!(d.text, "x😀: int := f(n: 1)");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&d.text[spans[0].clone()], ": int");
+        assert_eq!(&d.text[spans[1].clone()], "n: ");
+        let caret = |col: usize| &d.text[d.char_to_byte[col]..];
+        assert_eq!(
+            caret(2),
+            ": int := f(n: 1)",
+            "the caret after a name stays before its type"
+        );
+        assert_eq!(
+            caret(8),
+            "1)",
+            "the caret at an argument goes after its name"
+        );
+        assert_eq!(d.char_to_byte[10], d.text.len());
+        assert_eq!(d.char_for_byte(spans[1].start + 1), 7);
+
+        let (d, _) = inlaid("\tf(1)", &[(0, "x".into(), false), (5, ": y".into(), true)]);
+        assert_eq!(d.text, "x    f(1): y");
+        assert_eq!((d.char_to_byte[0], d.char_to_byte[5]), (0, d.text.len()));
+    }
 
     #[test]
     fn revealing_a_caret_keeps_it_out_from_under_sticky_headers() {

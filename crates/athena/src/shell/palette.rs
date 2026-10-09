@@ -272,6 +272,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::OpenKeyboardShortcuts),
         ),
         ("Open settings (JSON)", Box::new(actions::OpenSettings)),
+        ("Toggle inlay hints", Box::new(actions::ToggleInlayHints)),
     ]
 }
 

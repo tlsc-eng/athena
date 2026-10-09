@@ -297,6 +297,14 @@ impl Shell {
                             line,
                             character,
                         } => return this.lsp_highlight(&view, *request, (*line, *character), cx),
+                        EditorEvent::InlayHints {
+                            request,
+                            start_line,
+                            end_line,
+                        } => {
+                            let lines = *start_line..*end_line;
+                            return this.lsp_inlay_hints(&view, *request, lines, cx);
+                        }
                     }
                     cx.notify();
                 })

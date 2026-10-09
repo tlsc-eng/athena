@@ -61,6 +61,45 @@ pub(crate) fn parse_highlights(result: &serde_json::Value) -> Vec<Highlight> {
         .collect()
 }
 
+/// A note drawn inside the text, such as a parameter name before an argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlayHint {
+    pub position: Position,
+    pub label: String,
+    /// It names the type of what comes before it, rather than what follows.
+    pub is_type: bool,
+    pub padding_left: bool,
+    pub padding_right: bool,
+}
+
+pub(crate) fn parse_inlay_hints(result: &serde_json::Value) -> Vec<InlayHint> {
+    use serde_json::Value;
+    result
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(|h| {
+            let label = match h.get("label")? {
+                Value::String(s) => s.clone(),
+                Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(|p| p.get("value").and_then(Value::as_str))
+                    .collect(),
+                _ => return None,
+            };
+            let flag = |key: &str| h.get(key).and_then(Value::as_bool).unwrap_or(false);
+            Some(InlayHint {
+                position: serde_json::from_value(h.get("position")?.clone()).ok()?,
+                label,
+                is_type: h.get("kind").and_then(Value::as_u64) == Some(1),
+                padding_left: flag("paddingLeft"),
+                padding_right: flag("paddingRight"),
+            })
+        })
+        .filter(|h| !h.label.trim().is_empty())
+        .collect()
+}
+
 #[derive(Deserialize)]
 struct RawDiagnostic {
     range: Range,
@@ -192,6 +231,23 @@ mod tests {
         assert_eq!(highlights.len(), 2);
         assert!(highlights[0].write && !highlights[1].write);
         assert_eq!(highlights[1].range.end.character, 3);
+
+        let hints = parse_inlay_hints(&json!([
+            {"position": {"line": 3, "character": 7}, "label": "n:", "kind": 2, "paddingRight": true},
+            {"position": {"line": 2, "character": 2}, "label": [{"value": " "}, {"value": "int"}], "kind": 1},
+            {"position": {"line": 2, "character": 2}, "label": "  "},
+            {"label": "x"}
+        ]));
+        assert_eq!(hints.len(), 2);
+        assert_eq!(
+            (
+                hints[0].label.as_str(),
+                hints[0].is_type,
+                hints[0].padding_right
+            ),
+            ("n:", false, true)
+        );
+        assert_eq!((hints[1].label.as_str(), hints[1].is_type), (" int", true));
 
         let link = json!([{"targetUri": "file:///b.ts", "targetRange": {}, "targetSelectionRange":
             {"start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 3}}}]);

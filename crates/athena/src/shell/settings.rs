@@ -179,7 +179,7 @@ impl Shell {
         for editor in &editors {
             self.apply_editor_settings(editor, cx);
         }
-        self.lsp_settings_changed();
+        self.lsp_settings_changed(cx);
         self.schedule_save(cx);
         cx.notify();
     }
@@ -198,10 +198,12 @@ impl Shell {
             .autosave_delay_ms
             .unwrap_or(self.workspace.autosave_delay_ms);
         let autosave = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+        let inlays = e.inlay_hints != Some(false);
         editor.update(cx, |v, cx| {
             v.set_format_on_save(format);
             v.set_word_wrap_default(wrap, cx);
             v.set_autosave(autosave, cx);
+            v.set_inlay_hints(inlays, cx);
         });
     }
 
@@ -263,6 +265,21 @@ impl Shell {
             ),
             Err(e) => self.transient_notice("Could not create settings.json", format!("{e:#}"), cx),
         }
+    }
+
+    /// Shows inlay hints with a curated set turned on for each server, or hides them all.
+    pub(super) fn toggle_inlay_hints(&mut self, cx: &mut Context<Self>) {
+        let on = self.settings.file.editor.inlay_hints != Some(true);
+        self.write_setting(&["editor", "inlay_hints"], on.into(), cx);
+        let (title, body) = match on {
+            true => (
+                "Inlay hints are on",
+                "Parameter names and inferred types show in the code, as far as the language \
+                 server offers them; lsp.<server> in settings.json picks which.",
+            ),
+            false => ("Inlay hints are off", "Language servers' hints are hidden."),
+        };
+        self.transient_notice(title, body, cx);
     }
 
     /// Editors and terminals at `zoom` steps from the default size; written to settings.json

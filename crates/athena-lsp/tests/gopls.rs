@@ -385,11 +385,7 @@ fn gopls_renames_fixes_imports_lists_symbols_and_finds_implementations() {
 
 /// A minimal executor: the definition future only waits on a channel the reader thread fills.
 /// Opens `source` as main.go in a new module and waits for gopls to have read it.
-fn open_go(
-    name: &str,
-    source: &str,
-    config: serde_json::Value,
-) -> (Client, std::path::PathBuf, std::path::PathBuf) {
+fn open_go(name: &str, source: &str, config: serde_json::Value) -> Opened {
     let dir = std::env::temp_dir().join(format!("athena-lsp-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let dir = dir.canonicalize().unwrap();
@@ -397,7 +393,7 @@ fn open_go(
     let file = dir.join("main.go");
     std::fs::write(&file, source).unwrap();
     let config = std::sync::Arc::new(std::sync::RwLock::new(config));
-    let (client, events) = Client::start_with(ServerKind::Go, dir.clone(), config);
+    let (client, events) = Client::start_with(ServerKind::Go, dir.clone(), config.clone());
     client.did_open(&file, "go", 1, source.into());
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -407,7 +403,19 @@ fn open_go(
             _ => {}
         }
     }
-    (client, dir, file)
+    Opened {
+        client,
+        config,
+        dir,
+        file,
+    }
+}
+
+struct Opened {
+    client: Client,
+    config: athena_lsp::Config,
+    dir: std::path::PathBuf,
+    file: std::path::PathBuf,
 }
 
 #[test]
@@ -418,7 +426,9 @@ fn gopls_highlights_where_the_symbol_under_the_cursor_is_read_and_written() {
     }
     let source =
         "package main\n\nfunc main() {\n\tcount := 1\n\tcount = count + 1\n\t_ = count\n}\n";
-    let (client, dir, file) = open_go("highlight", source, serde_json::Value::Null);
+    let Opened {
+        client, dir, file, ..
+    } = open_go("highlight", source, serde_json::Value::Null);
     let on_count = Position {
         line: 4,
         character: 2,
@@ -443,6 +453,79 @@ fn gopls_highlights_where_the_symbol_under_the_cursor_is_read_and_written() {
         futures_lite_block_on(client.document_highlights(&file, nothing))
             .unwrap_or_default()
             .is_empty()
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gopls_sends_the_inlay_hints_its_settings_ask_for() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let source = "package main\n\nfunc helper(n int) int { return n }\n\nfunc main() {\n\tx := helper(1)\n\t_ = x\n}\n";
+    let hints = serde_json::json!({"hints": {"parameterNames": true, "assignVariableTypes": true}});
+    let Opened {
+        client, dir, file, ..
+    } = open_go("inlay", source, hints.clone());
+    let whole = Range {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: 8,
+            character: 0,
+        },
+    };
+    let mut found = futures_lite_block_on(client.inlay_hints(&file, whole)).unwrap();
+    found.sort_by_key(|h| h.position);
+    let shown: Vec<(u32, u32, &str, bool)> = found
+        .iter()
+        .map(|h| {
+            (
+                h.position.line,
+                h.position.character,
+                h.label.trim(),
+                h.is_type,
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [(5, 2, "int", true), (5, 13, "n:", false)],
+        "{found:?}"
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let Opened {
+        client,
+        config,
+        dir,
+        file,
+        ..
+    } = open_go("no-inlay", source, serde_json::Value::Null);
+    let found = futures_lite_block_on(client.inlay_hints(&file, whole)).unwrap();
+    assert!(
+        found.is_empty(),
+        "gopls shows no hints by default: {found:?}"
+    );
+
+    *config.write().unwrap() = hints.clone();
+    client.did_change_configuration(hints);
+    // gopls asks for its settings again and uses them from its next answer on.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut found = Vec::new();
+    while found.len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        found = futures_lite_block_on(client.inlay_hints(&file, whole)).unwrap();
+    }
+    assert_eq!(
+        found.len(),
+        2,
+        "settings changed while it runs apply: {found:?}"
     );
     drop(client);
     let _ = std::fs::remove_dir_all(&dir);

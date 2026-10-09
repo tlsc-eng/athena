@@ -919,6 +919,11 @@ impl Render for Shell {
                     this.open_settings_file(w, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ToggleInlayHints, _, cx| {
+                    this.toggle_inlay_hints(cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {
                 this.workspace.recent.clear();
                 this.schedule_save(cx);

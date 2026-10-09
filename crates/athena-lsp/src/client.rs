@@ -14,7 +14,7 @@ use crate::code_action::{self, CodeAction, parse_code_action, parse_code_actions
 use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
 use crate::edit::{WorkspaceEdit, parse_workspace_edit};
 use crate::markup::{Hover, parse_hover};
-use crate::protocol::{self, Diagnostic, Highlight, Location, Position, Range};
+use crate::protocol::{self, Diagnostic, Highlight, InlayHint, Location, Position, Range};
 use crate::signature::{SignatureHelp, parse_signature_help};
 use crate::symbol::{Symbol, parse_symbols};
 use crate::{ServerKind, env};
@@ -32,6 +32,8 @@ pub enum Event {
     },
     /// The server could not start, or stopped; the text says why.
     Stopped(String),
+    /// Inlay hints shown so far are out of date, as after its settings changed.
+    RefreshInlayHints,
     /// The server asks for an edit, usually while running a command; answer through `reply`.
     ApplyEdit {
         label: Option<String>,
@@ -310,6 +312,15 @@ impl Client {
             json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
         );
         Ok(protocol::parse_highlights(&answer(reply).await?))
+    }
+
+    /// The notes to draw inside `range` of the file, such as parameter names and inferred types.
+    pub async fn inlay_hints(&self, path: &Path, range: Range) -> Result<Vec<InlayHint>, String> {
+        let reply = self.request(
+            "textDocument/inlayHint",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "range": range}),
+        );
+        Ok(protocol::parse_inlay_hints(&answer(reply).await?))
     }
 
     /// Documentation for the symbol at `at`; `None` when the server has nothing to say.
@@ -639,6 +650,7 @@ impl Session {
                         "failureHandling": "abort"
                     },
                     "executeCommand": {},
+                    "inlayHint": {"refreshSupport": true},
                     "symbol": {},
                     "didChangeWatchedFiles": {}
                 },
@@ -650,6 +662,7 @@ impl Session {
                     "typeDefinition": {"linkSupport": true},
                     "references": {},
                     "documentHighlight": {},
+                    "inlayHint": {},
                     "rename": {"prepareSupport": true},
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                     "codeAction": {
@@ -757,6 +770,9 @@ impl Reader {
             }
             // Servers wait for these answers; gopls stalls without them.
             (Some(method), Some(id)) => {
+                if method == "workspace/inlayHint/refresh" {
+                    let _ = self.events.send_blocking(Event::RefreshInlayHints);
+                }
                 let result = match method {
                     "workspace/configuration" => {
                         let config = self.config.read().map_or(Value::Null, |c| c.clone());
