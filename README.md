@@ -169,6 +169,14 @@ its shells running.
   fixes first), go to implementation (`cmd-f12`) and go to type definition (editor menu and
   palette). A dot in the gutter marks the cursor's line when a diagnostic there has a quick fix;
   clicking it opens the same menu. Several implementations are listed in the References tab.
+- An **Outline** view: the Explorer / Outline switch at the top of the tree area (or the
+  palette's **Focus outline**) lists the active editor's symbols as a tree, highlights the one
+  holding the cursor and follows it, opens a symbol on click, folds with the chevrons, and filters
+  by name as you type (Up/Down pick, Enter opens, Escape clears).
+- Call hierarchy (`shift-alt-h`, the editor menu or the palette): the callers of the function at
+  the cursor in the References tab as a tree; Incoming / Outgoing in the tab's header switches to
+  the functions it calls, a chevron (or a double click) loads the next level, and a row opens the
+  call site.
 - Go to symbol in the file (`cmd-shift-o`, or `@` in Go to file), previewing each one as the
   selection moves and going back on Escape, and in the workspace (`cmd-alt-o`, or `#`). `>` in Go
   to file switches to commands.
@@ -281,7 +289,7 @@ information rather than triggering the install dialog).
   Copy Path, Copy Relative Path, Open to the Side. Tabs: Close, Close Others, Close to the Right,
   Close All, Reveal in Finder, Copy Path, Copy Relative Path, Reveal in File Tree, Split Right /
   Down with that tab. Editor: Go to Definition, Find References, Go to Implementations, Go to Type
-  Definition, Rename Symbol, Quick Fix…, Cut, Copy, Paste, Toggle Line Comment. Terminal: Copy,
+  Definition, Show Call Hierarchy, Rename Symbol, Quick Fix…, Cut, Copy, Paste, Toggle Line Comment. Terminal: Copy,
   Paste, Select All, Find, Clear.
 - Drag a tab onto another tab or strip to move it, onto the middle of a pane to join it, or onto
   an edge of a pane to split it there; the terminal or editor keeps running. Drop a folder from
@@ -350,15 +358,15 @@ information rather than triggering the install dialog).
 | Language | Files | Language server |
 |---|---|---|
 | Go | `.go` | `gopls` |
-| TypeScript, TSX | `.ts`, `.mts`, `.cts`, `.tsx` | `typescript-language-server` |
-| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | `typescript-language-server` |
+| TypeScript, TSX | `.ts`, `.mts`, `.cts`, `.tsx` | `typescript-language-server`, plus the project's ESLint / Biome |
+| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | `typescript-language-server`, plus the project's ESLint / Biome |
 | YAML | `.yaml`, `.yml` | |
-| JSON | `.json`, `.jsonc`, `.json5`, `.prettierrc`, `.eslintrc`, `.babelrc` | |
+| JSON | `.json`, `.jsonc`, `.json5`, `.prettierrc`, `.eslintrc`, `.babelrc` | the project's Biome |
 | TOML | `.toml`, `Cargo.lock`, `uv.lock`, `poetry.lock` | |
 | Shell | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.bashrc`, `.profile`, `.envrc` and similar, `#!` scripts | |
 | Rust | `.rs` | |
 | Python | `.py`, `.pyi` | |
-| CSS | `.css` | |
+| CSS | `.css` | the project's Biome |
 | HTML | `.html`, `.htm` | |
 | Markdown | `.md`, `.markdown` | |
 | Swift | `.swift` | |
@@ -368,11 +376,24 @@ information rather than triggering the install dialog).
 | Makefile | `Makefile`, `makefile`, `GNUmakefile`, `.mk`, `.make` | |
 | SQL | `.sql` | |
 | Protocol Buffers | `.proto` | |
+| Mermaid | `.mmd`, `.mermaid` | |
 
-Highlighting uses tree-sitter grammars, except Dockerfile and `.env`, which use a line scanner.
+Highlighting uses tree-sitter grammars, except Dockerfile, `.env` and Mermaid, which use a line
+scanner; Markdown's paragraphs, headings, lists and quotes are parsed again with the inline
+grammar, so emphasis is italic, strong text bold, code spans coloured and links underlined.
 Language servers are started only for Go and TypeScript/JavaScript, when `gopls` or
 `typescript-language-server` is on your login shell's `PATH`; other languages get highlighting,
 folding and bracket matching without one.
+
+Linters run beside them when the project installs them: `vscode-eslint-language-server` (from
+`vscode-langservers-extracted`) or `biome` (from `@biomejs/biome`). They are the project's own
+code, so Athena never installs them and never looks for them on `PATH`: it starts one only from
+`node_modules/.bin` directly under the project folder you opened, and only when that entry
+resolves, symlinks followed, to a file inside that same `node_modules` (a `.bin` entry or a
+`node_modules` linked in from elsewhere, or one in a parent folder, is ignored). Their diagnostics
+join the Problems tab labelled with their source and rule, as `eslint(no-unused-vars)`, and their
+fixes join the `cmd-.` menu. `"eslint": { "fixOnSave": true }` makes `cmd-s` apply ESLint's
+fix-all first (off by default).
 
 ## Claude Code integration
 
@@ -566,6 +587,7 @@ take them before Athena sees them; Quick Fix… in the editor's right-click menu
 | `f12`, `cmd-alt-g` | Go to definition |
 | `cmd`-click | Go to definition |
 | `shift-f12`, `cmd-alt-r` | Find references |
+| `shift-alt-h` | Show call hierarchy |
 | `alt-left` / `alt-right` | Move by word |
 | `cmd-left` / `cmd-right`, `home` / `end` | Line start / end |
 | `cmd-up` / `cmd-down` | Document start / end |
@@ -707,6 +729,7 @@ as soon as you save:
   "theme": "system",                 // "system", "light" or "dark"
   "ide_integration": false,
   "git": { "autofetch": true },      // fetch every three minutes; off by default, as in VS Code
+  "eslint": { "fixOnSave": true },   // cmd-s applies ESLint's fixes first; off by default
   "lsp": {
     "gopls": { "staticcheck": true, "hints": { "parameterNames": true } },
     "typescript-language-server": { "preferences": { "importModuleSpecifierPreference": "relative" } }
@@ -734,11 +757,14 @@ applies; a file that is not valid JSON leaves the settings in force as they were
 `"[lang]"` blocks take the editor settings for one language, by VS Code's language id: `go`,
 `typescript`, `typescriptreact`, `javascript`, `yaml`, `json`, `toml`, `shellscript`, `rust`,
 `python`, `css`, `html`, `markdown`, `swift`, `dockerfile`, `dotenv`, `go.mod`, `go.sum`,
-`makefile`, `sql` and `proto`. Unlike VS Code, Athena has no built-in per-language defaults for
-saving, so a global `"trim_trailing_whitespace": true` also trims Markdown unless a
-`"[markdown]"` block turns it off. Markdown tabs always wrap until the tab itself is toggled with
-`alt-z`; a `"[markdown]"` `word_wrap` of `false` does not stop that yet. `lsp` entries are keyed by the server's program name (`gopls`,
-`typescript-language-server`; `tsserver` is read as the latter).
+`makefile`, `sql`, `proto` and `mermaid`. As in VS Code, some languages have built-in defaults
+that beat the global `"editor"` settings and lose to your own `"[lang]"` block: Markdown wraps
+and keeps trailing whitespace, Go formats on save (and indents with tabs). So a global
+`"format_on_save": false` leaves gofmt on, and `"[go]": { "format_on_save": false }` turns it off.
+`lsp` entries are keyed by the server's program name (`gopls`, `typescript-language-server`,
+`vscode-eslint-language-server`, `biome`; `tsserver` is read as `typescript-language-server`); the
+ESLint entry is laid over the settings the server needs (`validate`, `run`, `workingDirectory`
+and the rest, as the VS Code extension sends them).
 
 Inlay hints (parameter names before arguments, inferred types after names) are drawn in muted
 text inside the line whenever the language server sends them. As with VS Code's Go extension,
