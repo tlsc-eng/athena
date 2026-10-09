@@ -511,6 +511,7 @@ pub struct EditorView {
     pub(crate) linked: crate::lsp_ui::Linked,
     /// The Format Selection request in flight and the buffer version it was asked for.
     pub(crate) range_format: Option<(u64, u64)>,
+    pub(crate) debug: crate::breakpoints::DebugMarks,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -612,6 +613,7 @@ impl EditorView {
             smart: Default::default(),
             linked: Default::default(),
             range_format: None,
+            debug: Default::default(),
         }
     }
 
@@ -719,6 +721,8 @@ impl EditorView {
                 for e in &edits {
                     self.display
                         .apply_edit(e.line, e.lines_removed, e.lines_inserted);
+                    let at_line_start = e.at == b.line_start(e.line);
+                    crate::breakpoints::follow_edit(&mut self.debug, e, at_line_start);
                 }
                 self.cursor.follow(&edits, b.len_chars());
             }
@@ -1002,10 +1006,10 @@ impl EditorView {
         if self.click_sticky(event.position, cx) {
             return;
         }
-        if self.click_lightbulb(event.position, window, cx) {
-            return;
-        }
-        if self.click_run_mark(event.position, window, cx) {
+        if self.click_breakpoint_margin(event.position, window, cx)
+            || self.click_lightbulb(event.position, window, cx)
+            || self.click_run_mark(event.position, window, cx)
+        {
             return;
         }
         if self.click_change_bar(event.position, cx)
@@ -1070,6 +1074,7 @@ impl EditorView {
             cx.notify();
         }
         self.hover_blame(event.position, cx);
+        self.hover_breakpoint_margin(Some(event.position), cx);
         if event.pressed_button.is_none() {
             self.hover_pointer(event.position, cx);
         }
@@ -1771,6 +1776,7 @@ impl Render for EditorView {
                         }
                         if !hovered {
                             this.hover_left(cx);
+                            this.hover_breakpoint_margin(None, cx);
                         }
                     }))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
@@ -1981,10 +1987,12 @@ impl Render for EditorView {
                         this.step_peek(false, cx)
                     }))
                     .map(|el| Self::on_line_actions(el, cx))
+                    .map(|el| Self::on_debug_actions(el, cx))
                     .child(EditorElement::new(cx.entity(), focused)),
             )
             .children(self.render_code_lens(focused, cx))
             .children(self.render_line_jump(cx))
+            .children(self.render_breakpoint_box(cx))
             .children(self.render_hover(cx))
             .children(self.render_blame_hover(cx))
             .children(self.render_peek(cx))
@@ -2539,6 +2547,9 @@ impl EditorView {
         window.focus(&self.focus);
         self.hide_hover(cx);
         self.dismiss_completion(cx);
+        if let Some(items) = self.gutter_menu(event.position, cx) {
+            return self.show_context_menu(event.position, items, window, cx);
+        }
         // As in VS Code, a right-click outside the selection moves the cursor there first.
         if let Some(at) = self.char_at_position(event.position)
             && let Some(buffer) = self.buffer.clone()
@@ -2590,7 +2601,17 @@ impl EditorView {
             MenuItem::separator(),
             item("Toggle Line Comment", "⌘/", Box::new(ToggleComment)),
         ];
-        let menu = ContextMenu::build(event.position, items, window, cx);
+        self.show_context_menu(event.position, items, window, cx);
+    }
+
+    pub(crate) fn show_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        items: Vec<MenuItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = ContextMenu::build(position, items, window, cx);
         let subscription = cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, _, cx| {
             if this.context_menu.as_ref().is_some_and(|(m, _)| m == menu) {
                 this.context_menu = None;

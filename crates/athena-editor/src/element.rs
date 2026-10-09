@@ -712,6 +712,10 @@ impl Element for EditorElement {
                 let row = Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh));
                 frame.backgrounds.push(fill(row, band));
             }
+            if let Some(band) = view.stopped_band(*line, &theme) {
+                let row = Bounds::new(point(bounds.left(), y), size(bounds.size.width, lh));
+                frame.backgrounds.push(fill(row, band));
+            }
             for guide in 0..guides.level(*line) {
                 let color = if guides.is_active(guide, *line) {
                     syntax.indent_guide_active
@@ -866,9 +870,11 @@ impl Element for EditorElement {
                 );
                 let x = numbers_right - label.width;
                 frame.gutter.push((point(x, y), label));
+                let debug_mark =
+                    view.breakpoint_look(*line).is_some() || view.stopped_arrow(*line).is_some();
                 if let Some(state) = view
                     .run_mark(*line)
-                    .filter(|_| view.lightbulb != Some(*line))
+                    .filter(|_| view.lightbulb != Some(*line) && !debug_mark)
                 {
                     run_mark(
                         &mut frame,
@@ -881,7 +887,7 @@ impl Element for EditorElement {
                         window,
                     );
                 }
-                if view.lightbulb == Some(*line) {
+                if view.lightbulb == Some(*line) && !debug_mark {
                     // A painted dot, because the editor font has no emoji fallback for 💡.
                     let d = px(6.);
                     let origin =
@@ -889,6 +895,19 @@ impl Element for EditorElement {
                     frame.gutter_marks.push(
                         fill(Bounds::new(origin, size(d, d)), theme.color.warning)
                             .corner_radii(d / 2.),
+                    );
+                }
+                if debug_mark {
+                    debug_margin(
+                        &mut frame,
+                        view,
+                        *line,
+                        bounds.left(),
+                        y,
+                        lh,
+                        font_size,
+                        &theme,
+                        window,
                     );
                 }
             }
@@ -1200,6 +1219,89 @@ fn run_mark(
     frame
         .gutter_marks
         .push(fill(Bounds::new(origin, size(d, d)), color).corner_radii(d / 2.));
+}
+
+/// A line's breakpoint in the gutter's left margin, and the arrow where a paused program is.
+#[allow(clippy::too_many_arguments)]
+fn debug_margin(
+    frame: &mut Frame,
+    view: &crate::view::EditorView,
+    line: usize,
+    left: Pixels,
+    y: Pixels,
+    lh: Pixels,
+    font_size: Pixels,
+    theme: &athena_ui::Theme,
+    window: &mut Window,
+) {
+    use crate::breakpoints::BreakpointLook;
+    let d = px(9.);
+    let origin = point(left + (px(GUTTER_PAD) - d) / 2., y + (lh - d) / 2.);
+    let dot = Bounds::new(origin, size(d, d));
+    let red = theme.color.danger;
+    let hollow = |color: Hsla| {
+        fill(dot, gpui::transparent_black())
+            .corner_radii(d / 2.)
+            .border_widths(px(1.5))
+            .border_color(color)
+    };
+    let look = view.breakpoint_look(line);
+    match look {
+        Some(BreakpointLook::Plain) => {
+            frame.gutter_marks.push(fill(dot, red).corner_radii(d / 2.));
+        }
+        Some(BreakpointLook::Conditional) => {
+            frame.gutter_marks.push(fill(dot, red).corner_radii(d / 2.));
+            for dy in [px(3.), px(5.)] {
+                let bar = Bounds::new(
+                    point(origin.x + px(2.5), origin.y + dy),
+                    size(px(4.), px(1.)),
+                );
+                frame
+                    .gutter_marks
+                    .push(fill(bar, theme.color.surface_sunken));
+            }
+        }
+        // Square, where VS Code draws a diamond, so a logpoint reads apart from a breakpoint.
+        Some(BreakpointLook::Log) => {
+            frame.gutter_marks.push(fill(dot, red).corner_radii(px(2.)));
+        }
+        Some(BreakpointLook::Disabled) => frame
+            .gutter_marks
+            .push(hollow(theme.color.content_disabled)),
+        Some(BreakpointLook::Unverified) if view.breakpoint_ghost(line) => {
+            frame
+                .gutter_marks
+                .push(fill(dot, red.opacity(0.35)).corner_radii(d / 2.));
+        }
+        Some(BreakpointLook::Unverified) => frame.gutter_marks.push(hollow(red.opacity(0.8))),
+        None => {}
+    }
+    let Some(top) = view.stopped_arrow(line) else {
+        return;
+    };
+    let color = match top {
+        true => theme.color.warning,
+        false => theme.color.success,
+    };
+    let size_px = font_size * 0.75;
+    let arrow = window.text_system().shape_line(
+        "▶".into(),
+        size_px,
+        &[TextRun {
+            len: "▶".len(),
+            font: gpui::font(theme.typography.mono.clone()),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let x = left + (px(GUTTER_PAD) - arrow.width) / 2.;
+    frame
+        .gutter
+        .push((point(x, y + (lh - size_px) / 2. - px(1.)), arrow));
 }
 
 /// A coverage run's tint behind a line's number: green where a statement ran, red where none did.

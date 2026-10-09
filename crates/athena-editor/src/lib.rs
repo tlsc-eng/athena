@@ -1,4 +1,5 @@
 mod blame;
+mod breakpoints;
 mod buffer;
 mod code_lens;
 mod completion;
@@ -34,6 +35,10 @@ mod view;
 mod wrap;
 
 pub use blame::{BlameCommit, GitGutterEvent, GutterBlame};
+pub use breakpoints::{
+    Breakpoint, DebugTestAt, EnableBreakpointAt, SetBreakpointAt, ToggleBreakpoint,
+    ToggleBreakpointAt,
+};
 pub use buffer::{
     Buffer, Cursor, Cursors, DiskState, Edit, Indent, LineEnding, SaveError, Selection,
 };
@@ -74,4 +79,5 @@ pub fn init(cx: &mut gpui::App) {
     lsp_ui::init(cx);
     smart_select::init(cx);
     peek::init(cx);
+    breakpoints::init(cx);
 }
