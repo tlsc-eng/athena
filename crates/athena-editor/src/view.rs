@@ -899,6 +899,7 @@ impl EditorView {
         let b = buffer.buffer.borrow();
         let m = event.modifiers;
         self.column_select = None;
+        let mut drag = true;
         if m.alt && m.shift {
             if let Some(col) = self.column_at(event.position) {
                 self.column_select = Some((b.line_of(at), col));
@@ -914,14 +915,7 @@ impl EditorView {
             match event.click_count {
                 2 => b.select_word_at(c.primary_mut(), at),
                 n if n >= 3 => b.select_line_at(c.primary_mut(), at),
-                _ if adding => match c
-                    .all()
-                    .iter()
-                    .position(|c| c.selection.range().contains(&at) || c.head() == at)
-                {
-                    Some(i) => c.remove(i),
-                    None => c.add(Cursor::at(at)),
-                },
+                _ if adding => drag = c.toggle(at),
                 _ => b.move_to(c.primary_mut(), at, m.shift),
             }
             c.normalize();
@@ -933,7 +927,8 @@ impl EditorView {
             cx.notify();
             return;
         }
-        self.selecting = true;
+        // Dragging after removing a caret would stretch the primary instead.
+        self.selecting = drag;
         cx.notify();
     }
 
@@ -989,23 +984,8 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Copies every caret's selection, one per line; carets without one copy their whole line.
     fn copy(&mut self, cx: &mut Context<Self>) {
-        let text = self.buf().map(|buffer| {
-            let all = self.cursor.all();
-            if all.iter().all(|c| c.selection.is_empty()) {
-                let mut lines: Vec<usize> = all.iter().map(|c| buffer.line_of(c.head())).collect();
-                lines.dedup();
-                lines
-                    .iter()
-                    .map(|&l| format!("{}\n", buffer.line(l)))
-                    .collect()
-            } else {
-                let parts: Vec<String> = all.iter().map(|c| buffer.selected_text(c)).collect();
-                parts.join("\n")
-            }
-        });
-        if let Some(text) = text {
+        if let Some(text) = self.buf().map(|b| copied_text(&b, &self.cursor)) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -1642,14 +1622,7 @@ impl Render for EditorView {
                     .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
                     .on_action(cx.listener(|this, _: &Cut, _, cx| {
                         this.copy(cx);
-                        this.with_buffer(cx, |b, c| {
-                            b.move_each(c, |b, c| {
-                                if c.selection.is_empty() {
-                                    b.select_line_at(c, c.head());
-                                }
-                            });
-                            b.edit_each(c, Buffer::backspace);
-                        })
+                        this.with_buffer(cx, cut);
                     }))
                     .on_action(cx.listener(|this, _: &Paste, _, cx| {
                         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
@@ -2406,9 +2379,71 @@ impl EditorView {
     }
 }
 
+/// Every caret's selection, one per line; with no selection anywhere, every caret's whole line.
+fn copied_text(b: &Buffer, cs: &Cursors) -> String {
+    let all = cs.all();
+    if all.iter().all(|c| c.selection.is_empty()) {
+        let mut lines: Vec<usize> = all.iter().map(|c| b.line_of(c.head())).collect();
+        lines.dedup();
+        lines.iter().map(|&l| format!("{}\n", b.line(l))).collect()
+    } else {
+        let parts: Vec<String> = all.iter().map(|c| b.selected_text(c)).collect();
+        parts.join("\n")
+    }
+}
+
+/// Deletes exactly what [`copied_text`] copies, so a cut never loses text.
+fn cut(b: &mut Buffer, cs: &mut Cursors) {
+    if cs.all().iter().all(|c| c.selection.is_empty()) {
+        b.move_each(cs, |b, c| b.select_line_at(c, c.head()));
+    }
+    b.edit_each(cs, |b, c| {
+        if !c.selection.is_empty() {
+            b.backspace(c);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cutting_with_mixed_carets_deletes_only_what_was_copied() {
+        let mut b = Buffer::new("keep one\nsel two\n", None);
+        let mut cs = Cursors::new(Cursor::at(2));
+        cs.add(Cursor {
+            selection: Selection {
+                anchor: 9,
+                head: 12,
+            },
+            ..Cursor::default()
+        });
+        assert_eq!(copied_text(&b, &cs), "\nsel");
+        cut(&mut b, &mut cs);
+        assert_eq!(
+            b.full_text(),
+            "keep one\n two\n",
+            "the empty caret's line stays"
+        );
+
+        let mut b = Buffer::new("a\nb\n", None);
+        let mut cs = Cursors::new(Cursor::at(0));
+        cs.add(Cursor::at(2));
+        assert_eq!(copied_text(&b, &cs), "a\nb\n");
+        cut(&mut b, &mut cs);
+        assert_eq!(b.full_text(), "", "with no selection whole lines go");
+    }
+
+    #[test]
+    fn alt_clicking_a_caret_removes_it_and_does_not_start_a_drag() {
+        let mut cs = Cursors::new(Cursor::at(0));
+        assert!(cs.toggle(4), "a new caret starts a drag");
+        assert!(!cs.toggle(4));
+        assert_eq!(cs.len(), 1);
+        assert!(!cs.toggle(0), "the last caret stays");
+        assert_eq!(cs.len(), 1);
+    }
 
     #[test]
     fn marked_text_ranges_are_clamped_and_ordered() {

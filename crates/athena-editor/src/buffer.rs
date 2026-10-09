@@ -185,6 +185,24 @@ impl Cursors {
         }
     }
 
+    /// Removes the caret at or around `at`, as Alt+click does, or adds one there; true if added.
+    pub fn toggle(&mut self, at: usize) -> bool {
+        let hit = self
+            .all
+            .iter()
+            .position(|c| c.selection.range().contains(&at) || c.head() == at);
+        match hit {
+            Some(i) => {
+                self.remove(i);
+                false
+            }
+            None => {
+                self.add(Cursor::at(at));
+                true
+            }
+        }
+    }
+
     /// Replaces every caret, `primary` indexing into `all`.
     pub fn set(&mut self, all: Vec<Cursor>, primary: usize) {
         if all.is_empty() {
