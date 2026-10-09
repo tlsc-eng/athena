@@ -105,7 +105,9 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         route_banner_clicks(cx),
     ];
     cx.global_mut::<Windows>()._tasks = tasks;
-    cx.on_action(|_: &crate::actions::NewWindow, cx| new_window(None, None, cx));
+    cx.on_action(|_: &crate::actions::NewWindow, cx| {
+        let _ = new_window(None, None, cx);
+    });
     cx.on_window_closed(|cx| {
         if cx.windows().is_empty() {
             cx.quit();
@@ -328,8 +330,14 @@ pub(super) fn other_roots(except: AnyWindowHandle, cx: &App) -> Vec<PathBuf> {
     open_roots(Some(except), cx)
 }
 
-/// Opens a window: empty, or showing `project` (taken from another window or picked).
-pub(super) fn new_window(project: Option<Project>, near: Option<AnyWindowHandle>, cx: &mut App) {
+/// Opens a window: empty, or showing `project` (taken from another window or picked), which is
+/// handed back if no window could open.
+#[must_use]
+pub(super) fn new_window(
+    project: Option<Project>,
+    near: Option<AnyWindowHandle>,
+    cx: &mut App,
+) -> Option<Project> {
     let windows = cx.global::<Windows>();
     let app = windows.app.clone();
     // Preferences come from a window's saved copy, as a new one would otherwise save defaults.
@@ -363,9 +371,9 @@ pub(super) fn new_window(project: Option<Project>, near: Option<AnyWindowHandle>
                 shell.save_now(cx);
                 window.activate_window();
             });
+            None
         }
-        // Parked rather than dropped, so its tabs and shells can still be reopened.
-        None => park_projects(None, projects, cx),
+        None => projects.into_iter().next(),
     }
 }
 
@@ -929,6 +937,9 @@ impl Shell {
             .into_iter()
             .filter(|v| matches!(v, ItemView::Editor(_)))
             .collect();
+        let proposals = super::claude_ide::proposal_ids(&self.workspace.projects[index]);
+        // Before the views go, so a tab's own release finds its proposal answered.
+        self.reject_proposals(&proposals, cx);
         self.history.forget_root(root);
         self.lsp_project_closed(root);
         self.git_project_closed(root);
@@ -949,7 +960,9 @@ impl Shell {
             self.focus_pending = true;
             self.switch_count += 1;
         }
+        // Now, since the window taking the project saves at once and a crash could list it twice.
         self.schedule_save(cx);
+        self.save_now(cx);
         cx.notify();
         Some((project, views))
     }
@@ -997,8 +1010,24 @@ impl Shell {
             return;
         };
         let near = self.window_handle;
+        let source = cx.entity().downgrade();
         cx.defer(move |cx| {
-            new_window(Some(project), Some(near), cx);
+            if let Some(project) = new_window(Some(project), Some(near), cx) {
+                // Back while its editors' views still hold their unsaved text.
+                let kept = project.clone();
+                let back = source.update(cx, |this, cx| {
+                    this.adopt_projects(vec![project], cx);
+                    this.open_views(cx);
+                    this.transient_notice(
+                        "Could not open a new window",
+                        "The project stays in this window.",
+                        cx,
+                    );
+                });
+                if back.is_err() {
+                    park_projects(None, vec![kept], cx);
+                }
+            }
             drop(views);
         });
     }
@@ -1079,7 +1108,10 @@ impl Shell {
                     return focus_project(holder, root, cx);
                 }
                 let project = take_parked(&root, cx).unwrap_or_else(|| Project::new(root));
-                new_window(Some(project), Some(near), cx);
+                // Parked rather than dropped, so its tabs and shells can still be reopened.
+                if let Some(project) = new_window(Some(project), Some(near), cx) {
+                    park_projects(None, vec![project], cx);
+                }
             });
         })
         .detach();

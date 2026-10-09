@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use athena_editor::{DiffEvent, DiffView, EditorView, HunkActions};
-use athena_workspace::{DiffBase, ItemId, ItemKind, Workspace};
+use athena_workspace::{DiffBase, ItemId, ItemKind, Project, Workspace};
 use gpui::{App, AppContext as _, Context, Entity, EntityId, Task, Window};
 use serde_json::{Value, json};
 
@@ -115,6 +115,20 @@ fn proposal_target(roots: &[&Path], path: &Path) -> Option<(usize, PathBuf)> {
         let inside = real.strip_prefix(resolve(root)).ok()?;
         Some((i, root.join(inside)))
     })
+}
+
+/// The ids of the proposals `project`'s tabs show.
+pub(super) fn proposal_ids(project: &Project) -> Vec<String> {
+    project
+        .items()
+        .filter_map(|i| match &i.kind {
+            ItemKind::Diff {
+                base: DiffBase::Proposal { id },
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A copy of `workspace` without proposal tabs, or `None` when it has none.
@@ -283,6 +297,17 @@ impl Shell {
         let ids: Vec<String> = self.ide.proposals.drain().map(|(id, _)| id).collect();
         for id in ids {
             self.close_proposal_tab(&id, window, cx);
+        }
+    }
+
+    /// Tells Claude Code the proposals `ids` were rejected, as their tabs go without an answer.
+    pub(super) fn reject_proposals(&mut self, ids: &[String], cx: &App) {
+        for id in ids {
+            if let Some(proposal) = self.ide.proposals.remove(id)
+                && let Some(server) = windows::ide(cx)
+            {
+                server.resolve(&proposal.key, Verdict::Rejected);
+            }
         }
     }
 
@@ -698,6 +723,25 @@ mod tests {
                 .layout
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_project_leaving_a_window_names_the_proposals_its_tabs_show() {
+        use athena_workspace::Layout;
+        let diff = |base| ItemKind::Diff {
+            path: PathBuf::from("/p/a.rs"),
+            base,
+        };
+        let mut project = Project::new(PathBuf::from("/p"));
+        let mut layout = Layout::new(diff(DiffBase::Proposal { id: "1:t".into() }));
+        let pane = layout.focused;
+        layout.add_item(pane, diff(DiffBase::Index)).unwrap();
+        layout
+            .add_item(pane, diff(DiffBase::Proposal { id: "2:u".into() }))
+            .unwrap();
+        project.layout = Some(layout);
+        assert_eq!(proposal_ids(&project), ["1:t", "2:u"]);
+        assert!(proposal_ids(&Project::new(PathBuf::from("/q"))).is_empty());
     }
 
     #[test]
