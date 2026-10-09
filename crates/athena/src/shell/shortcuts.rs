@@ -1,4 +1,6 @@
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use athena_workspace::watch::FolderWatcher;
 use gpui::{Context, Window};
@@ -10,23 +12,47 @@ use crate::keymap;
 /// Problems listed on the toast; the rest are in app.log.
 const SHOWN_PROBLEMS: usize = 3;
 
+/// Watches keymap.json's folder and, when the file is a symlink, its target's folder too.
+fn watch_keymap(path: PathBuf, changed: async_channel::Sender<()>) -> Vec<FolderWatcher> {
+    let mut folders: Vec<(PathBuf, Option<PathBuf>)> = path
+        .parent()
+        .map(|dir| (dir.to_path_buf(), None))
+        .into_iter()
+        .collect();
+    if let Some(target) = keymap::link_target(&path)
+        && let Some(dir) = target.parent()
+    {
+        folders.push((dir.to_path_buf(), Some(target.clone())));
+    }
+    let file = Arc::new(Mutex::new(keymap::FileChange::new(path)));
+    folders
+        .into_iter()
+        .filter_map(|(dir, only)| {
+            let (file, changed, root) = (file.clone(), changed.clone(), dir.clone());
+            FolderWatcher::new(&dir, move |paths| {
+                // The target's folder may be a whole dotfiles checkout, or the home folder.
+                let relevant = only
+                    .as_ref()
+                    .is_none_or(|target| paths.iter().any(|p| p == target || *p == root));
+                if relevant && file.lock().is_ok_and(|mut f| f.changed()) {
+                    let _ = changed.send_blocking(());
+                }
+            })
+            .inspect_err(|e| tracing::warn!("not watching {} for keymap.json: {e}", dir.display()))
+            .ok()
+        })
+        .collect()
+}
+
 impl Shell {
     /// Applies keymap.json now and whenever it changes, with a toast while it has problems.
     pub(super) fn start_keymap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (changed, changes) = async_channel::unbounded::<()>();
-        let watcher = keymap::path().ok().and_then(|path| {
-            let dir = path.parent()?.to_path_buf();
-            let file = std::sync::Mutex::new(keymap::FileChange::new(path));
-            FolderWatcher::new(&dir, move |_| {
-                if file.lock().is_ok_and(|mut f| f.changed()) {
-                    let _ = changed.send_blocking(());
-                }
-            })
-            .inspect_err(|e| tracing::warn!("not watching keymap.json for changes: {e}"))
-            .ok()
-        });
+        let watchers = keymap::path()
+            .map(|path| watch_keymap(path, changed))
+            .unwrap_or_default();
         cx.spawn_in(window, async move |this, cx| {
-            let _watcher = watcher;
+            let _watchers = watchers;
             let mut toast = None;
             loop {
                 let applied = this.update(cx, |this, cx| {

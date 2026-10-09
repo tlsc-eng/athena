@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
@@ -40,6 +40,13 @@ pub enum Rule {
 
 pub fn path() -> Result<PathBuf> {
     Ok(athena_proto::data_dir()?.join("keymap.json"))
+}
+
+/// The file keymap.json links to, when that is in another folder whose changes then matter too.
+pub fn link_target(path: &Path) -> Option<PathBuf> {
+    let real = path.canonicalize().ok()?;
+    let dir = path.parent()?.canonicalize().ok()?;
+    (real.parent() != Some(dir.as_path())).then_some(real)
 }
 
 /// Writes the commented template unless the file exists, and returns its path.
@@ -475,6 +482,26 @@ mod tests {
         let typed = [Keystroke::parse("cmd-d").unwrap()];
         let (found, _) = keymap.bindings_for_input(&typed, &shell);
         assert_eq!(found[0].action().name(), "athena::SplitRight");
+    }
+
+    #[test]
+    fn a_symlinked_keymap_names_its_target_folder_to_watch() {
+        let dir = std::env::temp_dir().join(format!("athena-keymap-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let (data, real) = (
+            dir.join("data/keymap.json"),
+            dir.join("dotfiles/keymap.json"),
+        );
+        std::fs::write(&real, "[]").unwrap();
+        assert_eq!(link_target(&data), None, "missing");
+        std::fs::write(&data, "[]").unwrap();
+        assert_eq!(link_target(&data), None, "a plain file");
+        std::fs::remove_file(&data).unwrap();
+        std::os::unix::fs::symlink(&real, &data).unwrap();
+        assert_eq!(link_target(&data), Some(real.canonicalize().unwrap()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
