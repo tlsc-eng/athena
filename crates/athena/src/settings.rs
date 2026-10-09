@@ -1172,6 +1172,26 @@ mod tests {
     }
 
     #[test]
+    fn toggling_the_minimap_rewrites_whichever_spelling_is_there() {
+        let keys = &["editor", "minimap", "enabled"];
+        let cases = [
+            (
+                r#"{"editor.minimap.enabled": true}"#,
+                r#"{"editor.minimap.enabled": false}"#,
+            ),
+            (
+                r#"{"editor": {"minimap": true}}"#,
+                r#"{"editor": {"minimap": false}}"#,
+            ),
+        ];
+        for (text, want) in cases {
+            assert_eq!(set_value(text, keys, &json!(false)).unwrap(), want);
+        }
+        let out = set_value("{}", keys, &json!(false)).unwrap();
+        assert_eq!(parse(&out).unwrap().0.editor.minimap, Some(false), "{out}");
+    }
+
+    #[test]
     fn bracket_pair_colorization_reads_vs_codes_key_and_athenas_and_by_language() {
         let (s, problems) = parse(
             r#"{"editor.bracketPairColorization.enabled": false,

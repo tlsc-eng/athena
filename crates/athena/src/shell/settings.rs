@@ -444,6 +444,12 @@ impl Shell {
         }
     }
 
+    /// Shows or hides every editor's minimap, as VS Code's View: Toggle Minimap.
+    pub(super) fn toggle_minimap(&mut self, cx: &mut Context<Self>) {
+        let on = self.settings.file.editor.minimap == Some(false);
+        self.write_setting(&["editor", "minimap", "enabled"], on.into(), cx);
+    }
+
     /// Shows inlay hints with a curated set turned on for each server, or hides them all.
     pub(super) fn toggle_inlay_hints(&mut self, cx: &mut Context<Self>) {
         let on = self.settings.file.editor.inlay_hints != Some(true);

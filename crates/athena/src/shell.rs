@@ -1034,6 +1034,11 @@ impl Render for Shell {
                     this.toggle_inlay_hints(cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ToggleMinimap, _, cx| {
+                    this.toggle_minimap(cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &crate::actions::ClearRecent, _, cx| {
                 this.workspace.recent.clear();
                 this.schedule_save(cx);

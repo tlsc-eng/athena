@@ -364,6 +364,7 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Open settings (JSON)", Box::new(actions::OpenSettings)),
         ("Toggle inlay hints", Box::new(actions::ToggleInlayHints)),
+        ("Toggle minimap", Box::new(actions::ToggleMinimap)),
     ]
 }
 
