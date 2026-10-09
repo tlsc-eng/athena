@@ -2,6 +2,7 @@ mod appearance;
 mod branches;
 mod breadcrumbs;
 mod bridge;
+mod calls;
 mod claude;
 mod claude_ide;
 mod code_actions;
@@ -908,6 +909,11 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &athena_editor::GoToTypeDefinition, _, cx| {
                     this.lsp_implementation(true, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &athena_editor::ShowCallHierarchy, _, cx| {
+                    this.show_call_hierarchy(cx)
                 }),
             )
             .on_action(

@@ -38,7 +38,7 @@ pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
 pub use lsp_ui::{
     ConfirmRename, GoToImplementation, GoToTypeDefinition, Inlay, Occurrence, RenameSymbol,
-    ShowCodeActions,
+    ShowCallHierarchy, ShowCodeActions,
 };
 pub use merge_conflicts::{
     CompareMergeConflicts, ConflictBlock, Resolution, count_merge_conflicts, find_merge_conflicts,

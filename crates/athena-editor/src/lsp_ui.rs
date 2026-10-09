@@ -26,7 +26,8 @@ actions!(
         RenameSymbol,
         ShowCodeActions,
         GoToImplementation,
-        GoToTypeDefinition
+        GoToTypeDefinition,
+        ShowCallHierarchy
     ]
 );
 
@@ -45,6 +46,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("f2", RenameSymbol, ctx),
         KeyBinding::new("cmd-.", ShowCodeActions, ctx),
         KeyBinding::new("cmd-f12", GoToImplementation, ctx),
+        KeyBinding::new("shift-alt-h", ShowCallHierarchy, ctx),
     ]);
 }
 

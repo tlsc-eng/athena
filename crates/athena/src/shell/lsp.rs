@@ -76,6 +76,10 @@ pub(super) struct LspState {
     reference_opened: Option<usize>,
     /// What the References tab lists: `reference` or `implementation`.
     references_noun: &'static str,
+    /// The References tab shows the call hierarchy rather than the last lookup.
+    pub(super) showing_calls: bool,
+    pub(super) calls: Option<super::calls::Calls>,
+    pub(super) calls_client: Option<Rc<Client>>,
 }
 
 #[derive(Default)]
@@ -713,6 +717,7 @@ impl Shell {
             let _ = this.update(cx, |this, cx| match found {
                 Ok(list) => {
                     this.lsp.references_asked += 1;
+                    this.lsp.showing_calls = false;
                     this.lsp.reference_opened = None;
                     this.lsp.references_noun = noun;
                     this.lsp.references_root = root;
@@ -976,6 +981,7 @@ impl Shell {
         let doc = document_key(editor.read(cx).path());
         self.flush_change(&doc, editor, cx);
         self.lsp.references_asked += 1;
+        self.lsp.showing_calls = false;
         self.lsp.reference_opened = None;
         self.lsp.references_noun = "reference";
         self.lsp.references_root = self.workspace.active_project().map(|p| p.root.clone());
@@ -1035,6 +1041,9 @@ impl Shell {
     }
 
     pub(super) fn render_references_count(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.lsp.showing_calls {
+            return self.render_calls_header(cx);
+        }
         let Some(References::Found(list)) = self.active_references() else {
             return None;
         };
@@ -1053,6 +1062,11 @@ impl Shell {
 
     /// The References tab: `path:line:col` and the line's text, one row per use.
     pub(super) fn render_references(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.lsp.showing_calls
+            && let Some(calls) = self.render_calls(cx)
+        {
+            return calls;
+        }
         let t = cx.theme().clone();
         let message = |text: String| {
             div()
@@ -1068,7 +1082,9 @@ impl Shell {
         let list = match self.active_references().unwrap_or(&References::Idle) {
             References::Idle => {
                 return message(
-                    "Press Shift+F12 or ⌘⌥R on a symbol to list where it is used.".into(),
+                    "Press Shift+F12 or ⌘⌥R on a symbol to list where it is used, or \
+                     Shift+Alt+H on a function for its calls."
+                        .into(),
                 );
             }
             References::Loading => return message("Finding references…".into()),
@@ -1235,6 +1251,10 @@ impl Shell {
     }
 
     pub(super) fn lsp_project_closed(&mut self, root: &Path) {
+        if self.lsp.calls.as_ref().is_some_and(|c| c.root == root) {
+            self.lsp.calls = None;
+            self.lsp.calls_client = None;
+        }
         self.lsp.servers.retain(|(r, _), _| r != root);
         self.lsp.failed.retain(|(r, _), _| r != root);
         self.lsp.documents.retain(|_, (r, _)| r != root);

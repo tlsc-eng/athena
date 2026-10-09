@@ -394,6 +394,7 @@ mod tests {
             ("cmd-shift-m", "m"),
             ("cmd-shift-o", "o"),
             ("cmd-alt-o", "o"),
+            ("shift-alt-h", "h"),
         ] {
             assert_eq!(Keystroke::parse(source).unwrap().key, key, "{source}");
         }

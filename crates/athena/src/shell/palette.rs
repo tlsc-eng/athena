@@ -100,6 +100,7 @@ const EDITOR_COMMANDS: &[(&str, &str)] = &[
     ("Quick fix", "editor::ShowCodeActions"),
     ("Go to implementations", "editor::GoToImplementation"),
     ("Go to type definition", "editor::GoToTypeDefinition"),
+    ("Show call hierarchy", "editor::ShowCallHierarchy"),
     ("Add next occurrence", "editor::AddNextOccurrence"),
     ("Skip to next occurrence", "editor::SkipOccurrence"),
     ("Select all occurrences", "editor::SelectAllOccurrences"),

@@ -1,5 +1,6 @@
 //! A small Language Server Protocol client on plain threads, for gopls and typescript-language-server.
 
+mod call;
 mod client;
 mod code_action;
 mod completion;
@@ -10,6 +11,7 @@ mod protocol;
 mod signature;
 mod symbol;
 
+pub use call::{Call, CallItem};
 pub use client::{Client, Config, EditReply, Event, FileEvent, RenameTarget};
 pub use code_action::{CodeAction, Command};
 pub use completion::{CompletionItem, CompletionList, TextEdit};

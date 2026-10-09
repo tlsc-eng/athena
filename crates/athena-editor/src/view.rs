@@ -2526,6 +2526,11 @@ impl EditorView {
                 "",
                 Box::new(crate::GoToTypeDefinition),
             ),
+            item(
+                "Show Call Hierarchy",
+                "⇧⌥H",
+                Box::new(crate::ShowCallHierarchy),
+            ),
             MenuItem::separator(),
             item("Rename Symbol", "F2", Box::new(crate::RenameSymbol)),
             item("Quick Fix…", "⌘.", Box::new(crate::ShowCodeActions)),

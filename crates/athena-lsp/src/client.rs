@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
 
+use crate::call::{Call, CallItem, parse_calls, parse_items};
 use crate::code_action::{self, CodeAction, parse_code_action, parse_code_actions};
 use crate::completion::{CompletionList, TextEdit, parse_completions, parse_text_edits};
 use crate::edit::{WorkspaceEdit, parse_workspace_edit};
@@ -451,6 +452,31 @@ impl Client {
         Ok(parse_symbols(&answer(reply).await?, Some(path)))
     }
 
+    /// The function or method at `at`, to ask for its callers and callees.
+    pub async fn prepare_call_hierarchy(
+        &self,
+        path: &Path,
+        at: Position,
+    ) -> Result<Vec<CallItem>, String> {
+        let reply = self.request(
+            "textDocument/prepareCallHierarchy",
+            json!({"textDocument": {"uri": protocol::uri_from_path(path)}, "position": at}),
+        );
+        Ok(parse_items(&answer(reply).await?))
+    }
+
+    /// The functions that call `item`, each with its calls to it.
+    pub async fn incoming_calls(&self, item: &CallItem) -> Result<Vec<Call>, String> {
+        let reply = self.request("callHierarchy/incomingCalls", json!({"item": item.raw}));
+        Ok(parse_calls(&answer(reply).await?, "from"))
+    }
+
+    /// The functions `item` calls, each with where `item` calls it.
+    pub async fn outgoing_calls(&self, item: &CallItem) -> Result<Vec<Call>, String> {
+        let reply = self.request("callHierarchy/outgoingCalls", json!({"item": item.raw}));
+        Ok(parse_calls(&answer(reply).await?, "to"))
+    }
+
     /// Symbols anywhere in the workspace whose names match `query`, as the server matches.
     pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<Symbol>, String> {
         let reply = self.request("workspace/symbol", json!({"query": query}));
@@ -665,6 +691,7 @@ impl Session {
                     "inlayHint": {},
                     "rename": {"prepareSupport": true},
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                    "callHierarchy": {},
                     "codeAction": {
                         "codeActionLiteralSupport": {
                             "codeActionKind": {"valueSet": [

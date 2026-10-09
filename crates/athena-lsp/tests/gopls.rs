@@ -383,6 +383,57 @@ fn gopls_renames_fixes_imports_lists_symbols_and_finds_implementations() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn gopls_lists_the_callers_and_callees_of_a_function() {
+    if athena_lsp::find_program("gopls").is_none() {
+        eprintln!("gopls not installed; skipping");
+        return;
+    }
+    let source = "package main\n\nfunc helper() int { return leaf() + leaf() }\n\nfunc leaf() int { return 1 }\n\nfunc main() { _ = helper() }\n";
+    let Opened {
+        client, dir, file, ..
+    } = open_go("calls", source, serde_json::Value::Null);
+    assert!(client.supports("/callHierarchyProvider"));
+    let on_helper = Position {
+        line: 2,
+        character: 6,
+    };
+    let items = futures_lite_block_on(client.prepare_call_hierarchy(&file, on_helper)).unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    let helper = &items[0];
+    assert_eq!(helper.name, "helper");
+    assert_eq!(helper.path, file);
+    assert_eq!(helper.selection.start.line, 2);
+
+    let callers = futures_lite_block_on(client.incoming_calls(helper)).unwrap();
+    assert_eq!(callers.len(), 1, "{callers:?}");
+    assert_eq!(callers[0].item.name, "main");
+    let sites: Vec<(u32, u32)> = callers[0]
+        .ranges
+        .iter()
+        .map(|r| (r.start.line, r.start.character))
+        .collect();
+    assert_eq!(sites, [(6, 18)], "the call in main");
+
+    let callees = futures_lite_block_on(client.outgoing_calls(helper)).unwrap();
+    assert_eq!(callees.len(), 1, "{callees:?}");
+    assert_eq!(callees[0].item.name, "leaf");
+    assert_eq!(callees[0].ranges.len(), 2, "both calls, in helper's file");
+    assert!(callees[0].ranges.iter().all(|r| r.start.line == 2));
+
+    let nothing = Position {
+        line: 1,
+        character: 0,
+    };
+    assert!(
+        futures_lite_block_on(client.prepare_call_hierarchy(&file, nothing))
+            .unwrap_or_default()
+            .is_empty()
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A minimal executor: the definition future only waits on a channel the reader thread fills.
 /// Opens `source` as main.go in a new module and waits for gopls to have read it.
 fn open_go(name: &str, source: &str, config: serde_json::Value) -> Opened {
