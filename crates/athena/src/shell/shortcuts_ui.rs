@@ -10,7 +10,7 @@ use gpui::{
     prelude::*, uniform_list,
 };
 
-use crate::keymap::{self, NewEntry, Recorder, Step};
+use crate::keymap::{self, EntryRef, NewEntry, Recorder, Step};
 
 /// The namespaces whose commands the table lists; the rest belong to text fields and menus.
 const NAMESPACES: &[&str] = &[
@@ -24,20 +24,30 @@ const NAMESPACES: &[&str] = &[
 
 const ROW: f32 = 28.;
 
-/// A change to keymap.json.
+/// A change to keymap.json, applied to the file as it is when written.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum KeymapEdit {
     Append(Vec<NewEntry>),
-    Remove(Vec<usize>),
-    Rebind { entry: usize, key: String },
+    Remove(EntryRef),
+    Rebind {
+        entry: EntryRef,
+        key: String,
+    },
+    /// Removes every entry about the command.
+    Reset(String),
 }
 
 impl KeymapEdit {
     pub(super) fn apply(&self, text: &str) -> Result<String, String> {
         match self {
             Self::Append(entries) => keymap::append_entries(text, entries),
-            Self::Remove(entries) => keymap::remove_entries(text, entries),
-            Self::Rebind { entry, key } => keymap::rebind_entry(text, *entry, key),
+            Self::Remove(entry) => keymap::remove_entries(text, &[keymap::locate(text, entry)?]),
+            Self::Rebind { entry, key } => {
+                keymap::rebind_entry(text, keymap::locate(text, entry)?, key)
+            }
+            Self::Reset(command) => {
+                keymap::remove_entries(text, &entries_about(command, &keymap::entry_commands(text)))
+            }
         }
     }
 }
@@ -69,6 +79,16 @@ pub(super) struct Row {
 }
 
 impl Bound {
+    /// The keymap.json entry this binding comes from, for `command`'s row.
+    fn entry_ref(&self, command: &str) -> Option<EntryRef> {
+        Some(EntryRef {
+            index: self.entry?,
+            key: self.key.clone(),
+            command: command.to_string(),
+            when: self.when.clone(),
+        })
+    }
+
     fn of(b: &KeyBinding) -> Self {
         Self {
             key: keymap::key_text(b),
@@ -154,10 +174,8 @@ pub(super) fn change(row: &Row, key: &str) -> Option<KeymapEdit> {
     match &row.binding {
         None => add(row, key),
         Some(b) if b.key == key => None,
-        Some(Bound {
-            entry: Some(entry), ..
-        }) => Some(KeymapEdit::Rebind {
-            entry: *entry,
+        Some(b) if b.entry.is_some() => Some(KeymapEdit::Rebind {
+            entry: b.entry_ref(&command)?,
             key: key.to_string(),
         }),
         Some(b) => Some(KeymapEdit::Append(vec![
@@ -187,9 +205,7 @@ pub(super) fn add(row: &Row, key: &str) -> Option<KeymapEdit> {
 /// Takes `row`'s binding away: a user one is deleted, a default one removed by a `-` entry.
 pub(super) fn remove(row: &Row) -> Option<KeymapEdit> {
     match row.binding.as_ref()? {
-        Bound {
-            entry: Some(entry), ..
-        } => Some(KeymapEdit::Remove(vec![*entry])),
+        b if b.entry.is_some() => b.entry_ref(row.command).map(KeymapEdit::Remove),
         b => Some(KeymapEdit::Append(vec![NewEntry {
             key: b.key.clone(),
             command: format!("-{}", row.command),
@@ -200,14 +216,18 @@ pub(super) fn remove(row: &Row) -> Option<KeymapEdit> {
 
 /// Deletes every keymap.json entry about `command`, so Athena's own bindings of it come back.
 pub(super) fn reset(command: &str, entries: &[Option<String>]) -> Option<KeymapEdit> {
+    (!entries_about(command, entries).is_empty()).then(|| KeymapEdit::Reset(command.to_string()))
+}
+
+/// The indices of the entries binding or removing `command`.
+fn entries_about(command: &str, entries: &[Option<String>]) -> Vec<usize> {
     let removal = format!("-{command}");
-    let found: Vec<usize> = entries
+    entries
         .iter()
         .enumerate()
         .filter(|(_, c)| c.as_deref() == Some(command) || c.as_deref() == Some(&removal))
         .map(|(i, _)| i)
-        .collect();
-    (!found.is_empty()).then_some(KeymapEdit::Remove(found))
+        .collect()
 }
 
 /// The edit the keys recorded for row `row` of `rows` make.
@@ -1210,6 +1230,68 @@ mod tests {
             None,
             "its binding is gone, so recording ends"
         );
+    }
+
+    #[test]
+    fn edits_find_their_entry_again_after_keymap_json_changed_under_them() {
+        let text = r#"[
+  {"key": "cmd+1", "command": "NewTerminal", "when": "Editor&&!Terminal"},
+  {"key": "f7", "command": "QuickOpen"}
+]"#;
+        let rows = table(text);
+        let row = |command: &str| {
+            let user = |r: &&Row| r.binding.as_ref().is_some_and(|b| b.entry.is_some());
+            rows.iter()
+                .filter(user)
+                .find(|r| r.command == command)
+                .unwrap()
+        };
+        let removal = remove(row("athena::QuickOpen")).unwrap();
+        let rebind = change(row("athena::NewTerminal"), "f9").unwrap();
+        let reset_all = reset("athena::NewTerminal", &keymap::entry_commands(text)).unwrap();
+        let moved = text.replacen(
+            '[',
+            "[\n  {\"key\": \"f8\", \"command\": \"SplitDown\"},",
+            1,
+        );
+        assert_eq!(
+            keys(&table(&removal.apply(&moved).unwrap()), "athena::QuickOpen"),
+            [],
+            "the entry that moved down is the one removed"
+        );
+        let rebound = table(&rebind.apply(&moved).unwrap());
+        assert_eq!(
+            keys(&rebound, "athena::NewTerminal"),
+            [
+                ("cmd-t".into(), Some("!Terminal".into()), false),
+                ("f9".into(), Some("(Editor && !Terminal)".into()), true)
+            ]
+        );
+        assert_eq!(
+            keys(&rebound, "athena::SplitDown"),
+            [
+                ("cmd-shift-d".into(), None, false),
+                ("f8".into(), None, true)
+            ]
+        );
+        let reset = table(&reset_all.apply(&moved).unwrap());
+        assert_eq!(
+            keys(&reset, "athena::NewTerminal"),
+            [("cmd-t".into(), Some("!Terminal".into()), false)]
+        );
+        assert_eq!(
+            keys(&reset, "athena::SplitDown"),
+            [
+                ("cmd-shift-d".into(), None, false),
+                ("f8".into(), None, true)
+            ]
+        );
+        let gone = r#"[{"key": "f7", "command": "SplitRight"}]"#;
+        assert!(
+            removal.apply(gone).is_err(),
+            "nothing else is removed in its place"
+        );
+        assert!(rebind.apply(gone).is_err());
     }
 
     #[test]

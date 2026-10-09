@@ -240,6 +240,54 @@ fn append_entry(text: &str, entry: &NewEntry) -> Result<String, String> {
     )
 }
 
+/// A keymap.json entry as last read: its index, and the binding it made, in the spelling a
+/// [`KeyBinding`] gives, to find it again once the file has changed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntryRef {
+    pub index: usize,
+    pub key: String,
+    pub command: String,
+    pub when: Option<String>,
+}
+
+/// The index `entry` has in `text` now: its old one if that still makes the same binding, else
+/// the first that does; an error once none does.
+pub fn locate(text: &str, entry: &EntryRef) -> Result<usize, String> {
+    let json = strip_jsonc(text);
+    let values: Vec<Value> = match json.trim().is_empty() {
+        true => Vec::new(),
+        false => serde_json::from_str(&json).map_err(|e| {
+            format!("keymap.json is not a list of bindings: {e}; fix it, then try again")
+        })?,
+    };
+    let same = |v: &Value| {
+        binds(v).is_some_and(|(key, command, when)| {
+            key == entry.key && command == entry.command && when == entry.when
+        })
+    };
+    if values.get(entry.index).is_some_and(same) {
+        return Ok(entry.index);
+    }
+    values.iter().position(same).ok_or_else(|| {
+        format!(
+            "keymap.json changed: no entry binds {} to {} any more",
+            entry.key, entry.command
+        )
+    })
+}
+
+/// The key, qualified command and `when` an entry binds, spelled as its [`KeyBinding`] has them.
+fn binds(entry: &Value) -> Option<(String, String, Option<String>)> {
+    let key = entry.get("key")?.as_str()?;
+    let key = key_text(&binding(key, gpui::NoAction.boxed_clone(), None).ok()?);
+    let command = qualified(entry.get("command")?.as_str()?);
+    let when = match entry.get("when").and_then(Value::as_str) {
+        Some(w) => Some(KeyBindingContextPredicate::parse(w).ok()?.to_string()),
+        None => None,
+    };
+    Some((key, command, when))
+}
+
 /// `text` without the entries at `indices`, each with the comma that separated it.
 pub fn remove_entries(text: &str, indices: &[usize]) -> Result<String, String> {
     let mut sorted = indices.to_vec();
