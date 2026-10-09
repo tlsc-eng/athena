@@ -1,17 +1,20 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use athena_dap::Variable;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Theme, Tooltip, motion};
+use std::ops::Range;
+
 use gpui::{
-    Action, Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, SharedString, Window,
-    div, prelude::*, px, svg,
+    Action, Animation, AnyElement, Context, FontWeight, Hsla, ListSizingBehavior, MouseButton,
+    SharedString, Window, div, prelude::*, px, svg, uniform_list,
 };
 
 use super::Shell;
-use super::debug::{LineKind, Phase, variable_key};
+use super::debug::{LineKind, Phase, first_frame, variable_key};
 use crate::actions;
 
 const ROW: f32 = 22.;
+const CONSOLE_ROW: f32 = 18.;
 const INDENT: f32 = 12.;
 
 /// A titled part of the Debug tab whose body scrolls on its own.
@@ -576,30 +579,39 @@ impl Shell {
 
     fn render_console(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
-        let color = |kind: LineKind| -> Hsla {
-            match kind {
-                LineKind::Output => t.color.content,
-                LineKind::Error => t.color.danger,
-                LineKind::Input => t.color.content_secondary,
-                LineKind::Result => t.color.accent,
-                LineKind::Info => t.color.content_muted,
-            }
-        };
-        let lines: Vec<AnyElement> = self
-            .debug
-            .console
-            .iter()
-            .map(|line| {
-                div()
-                    .px(px(10.))
-                    .text_color(color(line.kind))
-                    .child(line.text.clone())
-                    .into_any_element()
-            })
-            .collect();
-        if self.debug.console_follow.replace(false) {
-            self.debug.console_scroll.scroll_to_bottom();
-        }
+        // Only the rows in view are laid out, as the console holds thousands of lines.
+        let lines = uniform_list(
+            "debug-console",
+            self.debug.console.len(),
+            cx.processor(|this, range: Range<usize>, _window, cx| {
+                let t = cx.theme();
+                this.debug
+                    .console
+                    .iter()
+                    .skip(range.start)
+                    .take(range.len())
+                    .map(|line| {
+                        div()
+                            .h(px(CONSOLE_ROW))
+                            .px(px(10.))
+                            .whitespace_nowrap()
+                            .text_color(match line.kind {
+                                LineKind::Output => t.color.content,
+                                LineKind::Error => t.color.danger,
+                                LineKind::Input => t.color.content_secondary,
+                                LineKind::Result => t.color.accent,
+                                LineKind::Info => t.color.content_muted,
+                            })
+                            .child(line.text.clone())
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .with_sizing_behavior(ListSizingBehavior::Auto)
+        .track_scroll(self.debug.console_scroll.clone())
+        .flex_1()
+        .min_h_0()
+        .font_family(t.typography.mono.clone());
         div()
             .flex_1()
             .min_w_0()
@@ -617,16 +629,7 @@ impl Shell {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("DEBUG CONSOLE"),
             )
-            .child(
-                div()
-                    .id("debug-console")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.debug.console_scroll)
-                    .font_family(t.typography.mono.clone())
-                    .children(lines),
-            )
+            .child(lines)
             .children(self.debug.console_input.clone().map(|input| {
                 div()
                     .h(px(26.))
@@ -806,11 +809,8 @@ impl Shell {
                 if session.generation != generation || session.thread != Some(thread) {
                     return;
                 }
-                session.frame = frames
-                    .iter()
-                    .find(|f| f.path.as_ref().is_some_and(|p: &PathBuf| p.exists()))
-                    .or(frames.first())
-                    .map(|f| f.id);
+                session.frame =
+                    first_frame(&frames, session.stopped(), &session.root).map(|f| f.id);
                 session.frames = frames;
                 this.select_frame(None, true, cx);
             });

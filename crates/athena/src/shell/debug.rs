@@ -28,6 +28,8 @@ use crate::actions;
 /// Frames fetched for a stopped thread; deeper ones are rarely what anyone is after.
 const STACK_DEPTH: u32 = 50;
 const CONSOLE_LINES: usize = 5000;
+/// A program that rewrites one line with \r, as progress bars do, would otherwise grow it forever.
+const CONSOLE_LINE_BYTES: usize = 4096;
 /// Expanded variables are fetched again after each stop down to this depth.
 const EXPAND_DEPTH: usize = 6;
 /// What debug_state hands Claude, so a deep stack or a huge struct cannot flood it.
@@ -83,6 +85,7 @@ enum Target {
         path: PathBuf,
         line: usize,
     },
+    /// A launch already worked out: the session being restarted, or a test from the Tests tab.
     Again(Launch),
 }
 
@@ -136,7 +139,7 @@ impl Session {
         self.client.clone()
     }
 
-    fn stopped(&self) -> Option<&Stopped> {
+    pub(super) fn stopped(&self) -> Option<&Stopped> {
         match &self.phase {
             Phase::Stopped(s) => Some(s),
             _ => None,
@@ -159,9 +162,9 @@ pub(super) struct DebugState {
     pub(super) console: Vec<ConsoleLine>,
     /// The last console line has no newline yet, so the next output continues it.
     console_open: bool,
-    pub(super) console_scroll: gpui::ScrollHandle,
-    /// New lines arrived, so the console scrolls to them on its next frame.
-    pub(super) console_follow: std::cell::Cell<bool>,
+    pub(super) console_scroll: gpui::UniformListScrollHandle,
+    /// The last generation an ended session reached, so the next one's replies never match its.
+    generation: u64,
     pub(super) console_input: Option<Entity<TextInput>>,
     pub(super) watch_input: Option<Entity<TextInput>>,
     /// Variables shown expanded, by their scope and names, kept across stops as VS Code keeps them.
@@ -175,10 +178,18 @@ impl DebugState {
     /// Loads the breakpoints and watch expressions kept beside `workspace` (workspace.json).
     pub(super) fn load(workspace: &Path) -> Self {
         let path = workspace.with_file_name("breakpoints.json");
-        let saved: Saved = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let saved: Saved = match std::fs::read(&path).map(|b| serde_json::from_slice(&b)) {
+            Ok(Ok(saved)) => saved,
+            Ok(Err(e)) => {
+                // Kept aside, as the next save would otherwise overwrite every breakpoint in it.
+                match athena_workspace::set_aside(&path) {
+                    Ok(aside) => tracing::warn!("{e}: kept breakpoints in {}", aside.display()),
+                    Err(err) => tracing::warn!("{e}; could not keep it aside: {err:#}"),
+                }
+                Saved::default()
+            }
+            Err(_) => Saved::default(),
+        };
         let mut state = Self {
             saved_path: Some(path),
             ..Self::default()
@@ -238,15 +249,156 @@ impl DebugState {
         for (root, watch) in &self.watch {
             saved.projects.entry(root.clone()).or_default().watch = watch.clone();
         }
-        match serde_json::to_vec_pretty(&saved) {
-            Ok(bytes) => {
-                if let Err(e) = std::fs::write(path, bytes) {
-                    tracing::warn!("could not save breakpoints: {e}");
-                }
-            }
-            Err(e) => tracing::warn!("could not encode breakpoints: {e}"),
+        let tmp = path.with_extension("json.tmp");
+        let written = serde_json::to_vec_pretty(&saved)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| std::fs::write(&tmp, bytes))
+            .and_then(|()| std::fs::rename(&tmp, path));
+        if let Err(e) = written {
+            tracing::warn!("could not save breakpoints: {e}");
         }
     }
+
+    /// Whether `client` runs the current session, so a reply about an ended one is dropped.
+    fn is_current(&self, client: &Rc<Client>) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| Rc::ptr_eq(&s.client, client))
+    }
+
+    /// Ends the session, remembering how far its generation got.
+    fn take_session(&mut self) -> Option<Session> {
+        let session = self.session.take()?;
+        self.generation = session.generation;
+        Some(session)
+    }
+
+    fn console_line(&mut self, kind: LineKind, text: String) {
+        self.console_open = false;
+        for line in text.lines() {
+            let mut text = line.to_string();
+            cap_line(&mut text);
+            self.console.push(ConsoleLine { kind, text });
+        }
+        self.trim_console();
+    }
+
+    /// Program output, which may end mid-line and continue in the next event.
+    fn console_output(&mut self, kind: LineKind, text: &str) {
+        let mut pieces = text.split('\n').peekable();
+        while let Some(piece) = pieces.next() {
+            let last = pieces.peek().is_none();
+            if last && piece.is_empty() {
+                self.console_open = false;
+                break;
+            }
+            match self.console.last_mut() {
+                Some(line) if self.console_open && line.kind == kind => {
+                    if line.text.len() <= CONSOLE_LINE_BYTES {
+                        line.text.push_str(piece);
+                        cap_line(&mut line.text);
+                    }
+                }
+                _ => {
+                    let mut text = piece.to_string();
+                    cap_line(&mut text);
+                    self.console.push(ConsoleLine { kind, text });
+                }
+            }
+            self.console_open = last;
+        }
+        self.trim_console();
+    }
+
+    fn trim_console(&mut self) {
+        let over = self.console.len().saturating_sub(CONSOLE_LINES);
+        if over > 0 {
+            self.console.drain(..over);
+        }
+        self.console_scroll.scroll_to_item(
+            self.console.len().saturating_sub(1),
+            gpui::ScrollStrategy::Bottom,
+        );
+    }
+
+    /// The debugger's state for Claude's debug_state tool, for the project at `root`.
+    fn for_claude(&self, root: &Path) -> DebugStateInfo {
+        let mut info = DebugStateInfo {
+            project: root.to_path_buf(),
+            status: "not_debugging".into(),
+            ..DebugStateInfo::default()
+        };
+        let Some(session) = self.session.as_ref().filter(|s| s.root == root) else {
+            return info;
+        };
+        info.configuration = Some(shorten(&session.launch.name, CLAUDE_VALUE));
+        info.program = Some(session.launch.program.clone());
+        info.status = match session.phase {
+            Phase::Starting => "starting",
+            Phase::Running => "running",
+            Phase::Stopped(_) => "paused",
+        }
+        .into();
+        let Some(stopped) = session.stopped() else {
+            return info;
+        };
+        info.reason = Some(shorten(&stopped.reason, CLAUDE_VALUE));
+        info.description = stopped
+            .description
+            .as_ref()
+            .or(stopped.text.as_ref())
+            .map(|d| shorten(d, CLAUDE_VALUE));
+        info.thread = session
+            .threads
+            .iter()
+            .find(|t| Some(t.id) == session.thread)
+            .map(|t| shorten(&t.name, CLAUDE_VALUE));
+        let frame_info = |f: &StackFrame| DebugFrameInfo {
+            name: shorten(&f.name, CLAUDE_VALUE),
+            path: f.path.clone(),
+            line: f.line,
+            column: f.column,
+        };
+        info.stack = session
+            .frames
+            .iter()
+            .take(CLAUDE_FRAMES)
+            .map(frame_info)
+            .collect();
+        info.frames_total = session.frames.len() as u32;
+        info.location = session.top_frame().map(frame_info);
+        let locals: Vec<&Variable> = session
+            .scopes
+            .iter()
+            .filter(|s| !s.expensive)
+            .filter_map(|s| session.children.get(&s.variables_reference))
+            .flatten()
+            .collect();
+        info.locals_total = locals.len() as u32;
+        info.locals = locals
+            .into_iter()
+            .take(CLAUDE_LOCALS)
+            .map(|v| DebugVariableInfo {
+                name: shorten(&v.name, CLAUDE_VALUE),
+                value: shorten(&v.value, CLAUDE_VALUE),
+                type_name: v.type_name.as_deref().map(|t| shorten(t, CLAUDE_VALUE)),
+            })
+            .collect();
+        info
+    }
+}
+
+/// Cuts `text` to the console's longest line.
+fn cap_line(text: &mut String) {
+    if text.len() <= CONSOLE_LINE_BYTES {
+        return;
+    }
+    let mut at = CONSOLE_LINE_BYTES;
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    text.truncate(at);
+    text.push('…');
 }
 
 /// The source breakpoints of one file, as the adapter wants them.
@@ -263,12 +415,58 @@ fn source_breakpoints(list: &[Breakpoint]) -> Vec<SourceBreakpoint> {
 }
 
 /// The frame a stop shows first: the top one with source, as the program's own code is the
-/// interesting part when it stops inside the runtime.
-fn first_frame_with_source(frames: &[StackFrame]) -> Option<&StackFrame> {
+/// interesting part when it stops inside the runtime. A panic's top frames with source are the
+/// runtime's own, so it shows the first frame in `project` instead.
+pub(super) fn first_frame<'a>(
+    frames: &'a [StackFrame],
+    stopped: Option<&Stopped>,
+    project: &Path,
+) -> Option<&'a StackFrame> {
+    let project = document_key(project);
+    let panicked = stopped.is_some_and(|s| s.reason == "exception");
+    let in_project = |f: &&StackFrame| {
+        f.path
+            .as_ref()
+            .is_some_and(|p| p.exists() && document_key(p).starts_with(&project))
+    };
     frames
         .iter()
-        .find(|f| f.path.as_ref().is_some_and(|p| p.exists()))
+        .find(|f| panicked && in_project(f))
+        .or_else(|| {
+            frames
+                .iter()
+                .find(|f| f.path.as_ref().is_some_and(|p| p.exists()))
+        })
         .or(frames.first())
+}
+
+/// Where the adapter placed a breakpoint it accepted, zero-based.
+fn verified_line(status: &BreakpointStatus) -> Option<usize> {
+    let line = status.line.filter(|_| status.verified)?;
+    (line as usize).checked_sub(1)
+}
+
+/// `list` with each breakpoint the adapter moved, as Delve moves one off a line with no code,
+/// put where the adapter placed it; `None` when none moved.
+fn moved_breakpoints(
+    list: &[Breakpoint],
+    statuses: &[(usize, BreakpointStatus)],
+) -> Option<Vec<Breakpoint>> {
+    let mut list = list.to_vec();
+    let mut moved = false;
+    for (sent, status) in statuses {
+        let Some(at) = verified_line(status).filter(|at| at != sent) else {
+            continue;
+        };
+        if list.iter().any(|b| b.line == at) {
+            continue;
+        }
+        if let Some(b) = list.iter_mut().find(|b| b.line == *sent) {
+            b.line = at;
+            moved = true;
+        }
+    }
+    moved.then_some(list)
 }
 
 fn shorten(text: &str, max: usize) -> String {
@@ -561,12 +759,38 @@ impl Shell {
                     .verified
                     .insert(doc.to_path_buf(), lines.zip(statuses).collect());
             }
-            Err(why) => self.console_line(
+            Err(why) => self.debug.console_line(
                 LineKind::Error,
                 format!("Could not set breakpoints in {}: {why}", doc.display()),
             ),
         }
-        self.push_breakpoints(doc, cx);
+        self.follow_moved_breakpoints(doc, cx);
+    }
+
+    /// Moves a file's breakpoints to where the adapter placed them, as VS Code shows them, then
+    /// shows them; the adapter already has them there, so nothing is sent again.
+    fn follow_moved_breakpoints(&mut self, doc: &Path, cx: &mut Context<Self>) {
+        let statuses = self
+            .debug
+            .session
+            .as_ref()
+            .and_then(|s| s.verified.get(doc))
+            .cloned()
+            .unwrap_or_default();
+        let Some(list) = moved_breakpoints(&self.file_breakpoints(doc, cx), &statuses) else {
+            return self.push_breakpoints(doc, cx);
+        };
+        if let Some(entries) = self
+            .debug
+            .session
+            .as_mut()
+            .and_then(|s| s.verified.get_mut(doc))
+        {
+            for (line, status) in entries {
+                *line = verified_line(status).unwrap_or(*line);
+            }
+        }
+        self.set_file_breakpoints(doc, list, cx);
     }
 
     /// F5: continues a paused program, else starts debugging.
@@ -598,14 +822,19 @@ impl Shell {
                 cx,
             );
         }
-        let root = match &target {
-            Target::Test { path, .. } => self
+        let inside = match &target {
+            Target::Test { path, .. } => Some(path),
+            Target::Again(launch) => Some(&launch.cwd),
+            Target::Configured => None,
+        };
+        let root = match inside {
+            Some(path) => self
                 .workspace
                 .projects
                 .iter()
                 .map(|p| p.root.clone())
                 .find(|r| path.starts_with(r)),
-            _ => self.active_root(),
+            None => self.active_root(),
         };
         let Some(root) = root else {
             return;
@@ -695,6 +924,15 @@ impl Shell {
     }
 
     fn launch_debug(&mut self, root: PathBuf, target: Target, cx: &mut Context<Self>) {
+        // Restart comes here too, and the project may have been disallowed since it started.
+        if self.linter_trust(&root) != Some(LinterTrust::Allowed) {
+            return self.transient_notice(
+                "Debugging waits for this project to be allowed",
+                "Debugging builds and runs the project's code. To allow it, run \"Allow project \
+                 code\" from the command palette.",
+                cx,
+            );
+        }
         let launch = match self.resolve_target(&root, target, cx) {
             Ok(launch) => launch,
             Err(why) => return self.transient_notice("Can't start debugging", why, cx),
@@ -733,16 +971,23 @@ impl Shell {
         tracing::info!(program = %launch.program.display(), mode = ?launch.mode, "debugging");
         self.debug.console.clear();
         self.debug.console_open = false;
-        self.console_line(
+        self.debug.console_line(
             LineKind::Info,
             format!("Starting {} ({})", launch.name, launch.program.display()),
         );
         let events = cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
-                if this
-                    .update(cx, |this, cx| this.debug_event(event, cx))
-                    .is_err()
-                {
+                // A burst of output is handled in one update, so the Debug tab draws it once.
+                let mut batch = vec![event];
+                while let Ok(event) = events.try_recv() {
+                    batch.push(event);
+                }
+                let handled = this.update(cx, |this, cx| {
+                    for event in batch {
+                        this.debug_event(event, cx);
+                    }
+                });
+                if handled.is_err() {
                     return;
                 }
             }
@@ -761,7 +1006,7 @@ impl Shell {
             children: HashMap::new(),
             watches: Vec::new(),
             verified: HashMap::new(),
-            generation: 0,
+            generation: self.debug.generation + 1,
             stopping: false,
             stepping: false,
             opened: Opening::now(),
@@ -775,9 +1020,12 @@ impl Shell {
             };
             if let Err(why) = started.await {
                 let _ = this.update(cx, |this, cx| {
-                    this.console_line(LineKind::Error, why.clone());
+                    if !this.debug.is_current(&client) {
+                        return;
+                    }
+                    this.debug.console_line(LineKind::Error, why.clone());
                     if why.contains("debugserver") || why.contains("authoriz") {
-                        this.console_line(
+                        this.debug.console_line(
                             LineKind::Info,
                             "macOS asks for an administrator password before Delve may control \
                              a program; `DevToolsSecurity -enable` stops it asking."
@@ -807,17 +1055,18 @@ impl Shell {
                     "console" | "important" => LineKind::Info,
                     _ => LineKind::Output,
                 };
-                self.console_output(kind, &text);
+                self.debug.console_output(kind, &text);
             }
             Event::Breakpoint { breakpoint, .. } => self.on_breakpoint_changed(breakpoint, cx),
             Event::Thread { .. } => {}
             Event::Exited { code } => {
-                self.console_line(LineKind::Info, format!("Process exited with code {code}."));
+                self.debug
+                    .console_line(LineKind::Info, format!("Process exited with code {code}."));
             }
             Event::Terminated => self.end_session(cx),
             Event::Closed(why) => {
                 if !self.debug.session.as_ref().is_some_and(|s| s.stopping) {
-                    self.console_line(LineKind::Error, why);
+                    self.debug.console_line(LineKind::Error, why);
                 }
                 self.end_session(cx);
             }
@@ -853,7 +1102,7 @@ impl Shell {
             }
             if let Err(why) = client.configuration_done().await {
                 let _ = this.update(cx, |this, cx| {
-                    this.console_line(LineKind::Error, why);
+                    this.debug.console_line(LineKind::Error, why);
                     cx.notify();
                 });
             }
@@ -872,11 +1121,12 @@ impl Shell {
         for (doc, statuses) in &mut session.verified {
             for (_, status) in statuses.iter_mut().filter(|(_, s)| s.id == Some(id)) {
                 status.verified = changed.verified;
+                status.line = changed.line.or(status.line);
                 touched = Some(doc.clone());
             }
         }
         if let Some(doc) = touched {
-            self.push_breakpoints(&doc, cx);
+            self.follow_moved_breakpoints(&doc, cx);
         }
     }
 
@@ -907,10 +1157,11 @@ impl Shell {
                 session.thread = Some(thread);
                 match frames {
                     Ok(frames) => {
-                        session.frame = first_frame_with_source(&frames).map(|f| f.id);
+                        session.frame =
+                            first_frame(&frames, session.stopped(), &session.root).map(|f| f.id);
                         session.frames = frames;
                     }
-                    Err(why) => this.console_line(LineKind::Error, why),
+                    Err(why) => this.debug.console_line(LineKind::Error, why),
                 }
                 this.select_frame(None, true, cx);
             });
@@ -1087,7 +1338,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             if let Err(why) = request.await {
                 let _ = this.update(cx, |this, cx| {
-                    this.console_line(LineKind::Error, why);
+                    this.debug.console_line(LineKind::Error, why);
                     cx.notify();
                 });
             }
@@ -1120,8 +1371,12 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let _ = client.disconnect().await;
             let _ = this.update(cx, |this, cx| {
-                this.end_session(cx);
-                if let Some((root, target)) = then {
+                if this.debug.is_current(&client) {
+                    this.end_session(cx);
+                }
+                if let Some((root, target)) = then
+                    && this.debug.session.is_none()
+                {
                     this.launch_debug(root, target, cx);
                 }
             });
@@ -1131,11 +1386,12 @@ impl Shell {
     }
 
     fn end_session(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.debug.session.take() else {
+        let Some(session) = self.debug.take_session() else {
             return;
         };
         if !session.stopping {
-            self.console_line(LineKind::Info, "Debugging ended.".into());
+            self.debug
+                .console_line(LineKind::Info, "Debugging ended.".into());
         }
         let docs: Vec<PathBuf> = session.verified.keys().cloned().collect();
         drop(session);
@@ -1147,7 +1403,39 @@ impl Shell {
 
     /// Kills a running session's adapter and program as Athena quits.
     pub(super) fn debug_quit(&mut self) {
-        self.debug.session = None;
+        if let Some(session) = self.debug.take_session() {
+            session.client.kill_now();
+        }
+    }
+
+    /// Ends the session debugging `root` when that project closes.
+    pub(super) fn debug_project_closed(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(session) = self.debug.session.as_mut().filter(|s| s.root == root) else {
+            return;
+        };
+        session.stopping = true;
+        let client = session.client.clone();
+        self.end_session(cx);
+        // Pending requests may hold the client for minutes, so the adapter is killed outright.
+        cx.spawn(async move |_, _| {
+            let _ = client.disconnect().await;
+            client.kill_now();
+        })
+        .detach();
+    }
+
+    /// Stops debugging a project once its code may no longer run.
+    pub(super) fn debug_trust_changed(
+        &mut self,
+        root: &Path,
+        trust: LinterTrust,
+        cx: &mut Context<Self>,
+    ) {
+        if trust != LinterTrust::Allowed
+            && self.debug.session.as_ref().is_some_and(|s| s.root == root)
+        {
+            self.stop_debugging(cx);
+        }
     }
 
     /// While paused, a hover shows the value under the pointer; otherwise, or when the debugger
@@ -1310,13 +1598,15 @@ impl Shell {
     }
 
     fn evaluate_in_console(&mut self, expression: String, cx: &mut Context<Self>) {
-        self.console_line(LineKind::Input, format!("> {expression}"));
+        self.debug
+            .console_line(LineKind::Input, format!("> {expression}"));
         let Some(session) = self.debug.session.as_ref() else {
-            self.console_line(LineKind::Error, "Not debugging; start with F5.".into());
+            self.debug
+                .console_line(LineKind::Error, "Not debugging; start with F5.".into());
             return cx.notify();
         };
         if session.stopped().is_none() {
-            self.console_line(
+            self.debug.console_line(
                 LineKind::Error,
                 "The program is running; pause it to evaluate.".into(),
             );
@@ -1328,56 +1618,14 @@ impl Shell {
             let value = client.evaluate(&expression, frame, "repl").await;
             let _ = this.update(cx, |this, cx| {
                 match value {
-                    Ok(v) => this.console_line(LineKind::Result, v.result),
-                    Err(why) => this.console_line(LineKind::Error, why),
+                    Ok(v) => this.debug.console_line(LineKind::Result, v.result),
+                    Err(why) => this.debug.console_line(LineKind::Error, why),
                 }
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
-    }
-
-    fn console_line(&mut self, kind: LineKind, text: String) {
-        self.debug.console_open = false;
-        for line in text.lines() {
-            self.debug.console.push(ConsoleLine {
-                kind,
-                text: line.to_string(),
-            });
-        }
-        self.trim_console();
-    }
-
-    /// Program output, which may end mid-line and continue in the next event.
-    fn console_output(&mut self, kind: LineKind, text: &str) {
-        let mut pieces = text.split('\n').peekable();
-        while let Some(piece) = pieces.next() {
-            let last = pieces.peek().is_none();
-            if last && piece.is_empty() {
-                self.debug.console_open = false;
-                break;
-            }
-            match self.debug.console.last_mut() {
-                Some(line) if self.debug.console_open && line.kind == kind => {
-                    line.text.push_str(piece)
-                }
-                _ => self.debug.console.push(ConsoleLine {
-                    kind,
-                    text: piece.to_string(),
-                }),
-            }
-            self.debug.console_open = last;
-        }
-        self.trim_console();
-    }
-
-    fn trim_console(&mut self) {
-        self.debug.console_follow.set(true);
-        let over = self.debug.console.len().saturating_sub(CONSOLE_LINES);
-        if over > 0 {
-            self.debug.console.drain(..over);
-        }
     }
 
     /// Opens .vscode/launch.json, writing VS Code's Go starter first if the project has none.
@@ -1402,64 +1650,20 @@ impl Shell {
 
     /// The debugger's state for Claude's debug_state tool, for the project at `root`.
     pub(super) fn debug_state_for_claude(&self, root: &Path) -> DebugStateInfo {
-        let mut info = DebugStateInfo {
-            project: root.to_path_buf(),
-            status: "not_debugging".into(),
-            ..DebugStateInfo::default()
-        };
-        let Some(session) = self.debug.session.as_ref().filter(|s| s.root == root) else {
-            return info;
-        };
-        info.configuration = Some(session.launch.name.clone());
-        info.program = Some(session.launch.program.clone());
-        info.status = match session.phase {
-            Phase::Starting => "starting",
-            Phase::Running => "running",
-            Phase::Stopped(_) => "paused",
-        }
-        .into();
-        let Some(stopped) = session.stopped() else {
-            return info;
-        };
-        info.reason = Some(stopped.reason.clone());
-        info.description = stopped.description.clone().or(stopped.text.clone());
-        info.thread = session
-            .threads
-            .iter()
-            .find(|t| Some(t.id) == session.thread)
-            .map(|t| t.name.clone());
-        let frame_info = |f: &StackFrame| DebugFrameInfo {
-            name: f.name.clone(),
-            path: f.path.clone(),
-            line: f.line,
-            column: f.column,
-        };
-        info.stack = session
-            .frames
-            .iter()
-            .take(CLAUDE_FRAMES)
-            .map(frame_info)
-            .collect();
-        info.frames_total = session.frames.len() as u32;
-        info.location = session.top_frame().map(frame_info);
-        let locals: Vec<&Variable> = session
-            .scopes
-            .iter()
-            .filter(|s| !s.expensive)
-            .filter_map(|s| session.children.get(&s.variables_reference))
-            .flatten()
-            .collect();
-        info.locals_total = locals.len() as u32;
-        info.locals = locals
-            .into_iter()
-            .take(CLAUDE_LOCALS)
-            .map(|v| DebugVariableInfo {
-                name: v.name.clone(),
-                value: shorten(&v.value, CLAUDE_VALUE),
-                type_name: v.type_name.as_deref().map(|t| shorten(t, CLAUDE_VALUE)),
-            })
-            .collect();
-        info
+        self.debug.for_claude(root)
+    }
+
+    /// Debugs one Go test from the Tests tab, as the gutter's Debug Test does.
+    pub(super) fn debug_test_case(
+        &mut self,
+        dir: &Path,
+        titles: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pattern = athena_testing::go_subtest_pattern(titles);
+        let launch = Launch::test(titles.join("/"), dir, pattern);
+        self.start_debugging(Target::Again(launch), window, cx);
     }
 }
 
@@ -1568,6 +1772,247 @@ mod tests {
         assert_eq!(sent[0].log_message.as_deref(), Some("x={x}"));
     }
 
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("athena-debug-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A session on a fake adapter that never answers.
+    fn session(root: &Path, phase: Phase) -> Session {
+        let adapter = athena_dap::Adapter {
+            program: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            cwd: root.to_path_buf(),
+            login_shell: false,
+            transport: athena_dap::Transport::Stdio,
+        };
+        let (client, _events) = Client::start(adapter).unwrap();
+        Session {
+            client: Rc::new(client),
+            root: root.to_path_buf(),
+            launch: Launch::test("TestX".into(), root, "^TestX$".into()),
+            phase,
+            threads: Vec::new(),
+            frames: Vec::new(),
+            thread: None,
+            frame: None,
+            scopes: Vec::new(),
+            children: HashMap::new(),
+            watches: Vec::new(),
+            verified: HashMap::new(),
+            generation: 1,
+            stopping: false,
+            stepping: false,
+            opened: Opening::now(),
+            _events: Task::ready(()),
+        }
+    }
+
+    #[test]
+    fn replies_from_an_ended_session_never_match_the_next_one() {
+        let dir = temp("current");
+        let mut state = DebugState::default();
+        let first = session(&dir, Phase::Running);
+        let old = first.client();
+        state.session = Some(Session {
+            generation: 7,
+            ..first
+        });
+        assert!(state.is_current(&old));
+        state.take_session();
+        assert_eq!(state.generation, 7, "the next session counts on from here");
+        state.session = Some(session(&dir, Phase::Starting));
+        assert!(
+            !state.is_current(&old),
+            "an old launch failure would end it"
+        );
+        assert!(state.is_current(&state.session.as_ref().unwrap().client()));
+        old.kill_now();
+        state.take_session().unwrap().client().kill_now();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_breakpoints_file_is_kept_aside_and_saves_replace_it_whole() {
+        let dir = temp("corrupt");
+        let saved = dir.join("breakpoints.json");
+        std::fs::write(&saved, "{\"projects\": {\"/p\": {\"breakpoints\": [").unwrap();
+        let mut state = DebugState::load(&dir.join("workspace.json"));
+        assert!(state.breakpoints.is_empty());
+        let aside: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().contains("breakpoints.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "the broken file was not kept");
+        assert!(
+            std::fs::read_to_string(&aside[0])
+                .unwrap()
+                .contains("\"/p\"")
+        );
+        state
+            .breakpoints
+            .insert(dir.join("main.go"), vec![Breakpoint::at(2)]);
+        state.save(std::slice::from_ref(&dir));
+        assert!(!dir.join("breakpoints.json.tmp").exists());
+        let back = DebugState::load(&dir.join("workspace.json"));
+        assert_eq!(back.breakpoints.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_line_rewritten_with_carriage_returns_stops_growing_and_the_next_line_starts_fresh() {
+        let mut state = DebugState::default();
+        for i in 0..5000 {
+            state.console_output(LineKind::Output, &format!("\rprogress é {i}%"));
+        }
+        assert_eq!(state.console.len(), 1);
+        let line = &state.console[0].text;
+        assert!(
+            line.len() <= CONSOLE_LINE_BYTES + '…'.len_utf8(),
+            "{}",
+            line.len()
+        );
+        assert!(line.ends_with('…'));
+        state.console_output(LineKind::Output, " done\nnext\n");
+        assert_eq!(state.console.len(), 2);
+        assert_eq!(state.console[1].text, "next");
+        state.console_line(LineKind::Error, "e".repeat(10_000));
+        assert!(state.console[2].text.len() <= CONSOLE_LINE_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn delve_moving_a_breakpoint_moves_it_to_the_line_it_verified() {
+        let status = |line: u32, verified: bool| BreakpointStatus {
+            id: Some(1),
+            verified,
+            line: Some(line),
+            message: None,
+        };
+        let list = vec![
+            Breakpoint {
+                condition: Some("i > 2".into()),
+                ..Breakpoint::at(3)
+            },
+            Breakpoint::at(9),
+            Breakpoint::at(12),
+        ];
+        // Line 4 (zero-based 3) is a comment, so Delve put it on 6; the others stayed or failed.
+        let statuses = vec![
+            (3, status(6, true)),
+            (9, status(10, true)),
+            (12, status(20, false)),
+        ];
+        let moved = moved_breakpoints(&list, &statuses).unwrap();
+        assert_eq!(moved.iter().map(|b| b.line).collect::<Vec<_>>(), [5, 9, 12]);
+        assert_eq!(moved[0].condition.as_deref(), Some("i > 2"));
+        assert_eq!(moved_breakpoints(&list, &[(9, status(10, true))]), None);
+        // One already sitting on the verified line keeps the moved one where it was.
+        assert_eq!(moved_breakpoints(&list, &[(3, status(10, true))]), None);
+    }
+
+    #[test]
+    fn a_panic_shows_the_project_frame_that_panicked_rather_than_the_runtime() {
+        let dir = temp("panic");
+        let (goroot, project) = (dir.join("goroot"), dir.join("proj"));
+        std::fs::create_dir_all(&goroot).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let (panic_go, main_go) = (goroot.join("panic.go"), project.join("main.go"));
+        std::fs::write(&panic_go, "").unwrap();
+        std::fs::write(&main_go, "").unwrap();
+        let frame = |id: i64, path: Option<&Path>| StackFrame {
+            id,
+            name: format!("f{id}"),
+            path: path.map(Path::to_path_buf),
+            line: 1,
+            column: 1,
+            hint: None,
+        };
+        let frames = vec![
+            frame(1, None),
+            frame(2, Some(&panic_go)),
+            frame(3, Some(&main_go)),
+        ];
+        let stop = |reason: &str| Stopped {
+            reason: reason.into(),
+            ..Stopped::default()
+        };
+        let shown =
+            |stopped: Option<&Stopped>| first_frame(&frames, stopped, &project).map(|f| f.id);
+        assert_eq!(shown(Some(&stop("exception"))), Some(3));
+        assert_eq!(shown(Some(&stop("pause"))), Some(2));
+        assert_eq!(shown(None), Some(2));
+        let outside = &frames[..2];
+        assert_eq!(
+            first_frame(outside, Some(&stop("exception")), &project).map(|f| f.id),
+            Some(2)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_s_debug_state_shortens_every_name_the_program_controls() {
+        let dir = temp("claude");
+        let long = "n".repeat(5000);
+        let mut paused = session(
+            &dir,
+            Phase::Stopped(Stopped {
+                reason: "exception".into(),
+                thread_id: Some(1),
+                description: Some(long.clone()),
+                ..Stopped::default()
+            }),
+        );
+        paused.threads = vec![Thread {
+            id: 1,
+            name: long.clone(),
+        }];
+        paused.thread = Some(1);
+        paused.frames = (0..STACK_DEPTH as i64)
+            .map(|id| StackFrame {
+                id,
+                name: long.clone(),
+                path: Some(dir.join("main.go")),
+                line: 3,
+                column: 1,
+                hint: None,
+            })
+            .collect();
+        paused.frame = Some(0);
+        paused.scopes = vec![Scope {
+            name: "Locals".into(),
+            variables_reference: 9,
+            expensive: false,
+        }];
+        let var = Variable {
+            name: long.clone(),
+            value: long.clone(),
+            type_name: Some(long.clone()),
+            variables_reference: 0,
+        };
+        paused.children.insert(9, vec![var; 400]);
+        let state = DebugState {
+            session: Some(paused),
+            ..DebugState::default()
+        };
+        let info = state.for_claude(&dir);
+        assert_eq!(info.status, "paused");
+        assert!(info.description.as_ref().unwrap().chars().count() <= CLAUDE_VALUE + 1);
+        assert!(info.thread.as_ref().unwrap().chars().count() <= CLAUDE_VALUE + 1);
+        assert!(info.stack[0].name.chars().count() <= CLAUDE_VALUE + 1);
+        assert!(info.locals[0].name.chars().count() <= CLAUDE_VALUE + 1);
+        assert_eq!((info.frames_total, info.locals_total), (STACK_DEPTH, 400));
+        let reply = athena_proto::AppReply::Debug(Box::new(info));
+        let mut out = Vec::new();
+        athena_proto::write_frame(&mut out, &reply).unwrap();
+        assert!(out.len() < 64 * 1024, "{} bytes", out.len());
+        state.session.as_ref().unwrap().client().kill_now();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn claude_s_debug_state_fits_one_app_socket_frame_and_reads_back() {
         let long = "x".repeat(5000);
@@ -1619,8 +2064,9 @@ mod tests {
             frame(2, Some("/no/such/runtime/panic.go")),
             frame(3, Some(here.to_str().unwrap())),
         ];
-        assert_eq!(first_frame_with_source(&frames).map(|f| f.id), Some(3));
-        assert_eq!(first_frame_with_source(&frames[..2]).map(|f| f.id), Some(1));
+        let first = |frames| first_frame(frames, None, Path::new("/elsewhere")).map(|f| f.id);
+        assert_eq!(first(&frames), Some(3));
+        assert_eq!(first(&frames[..2]), Some(1));
         assert_eq!(shorten("abcdef", 3), "abc…");
         assert_eq!(shorten("ab", 3), "ab");
     }

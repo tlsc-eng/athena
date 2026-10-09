@@ -1013,6 +1013,8 @@ impl Shell {
         let key = (suite.name.clone(), test.titles.clone());
         let (open_suite, open_test) = (suite.clone(), test.clone());
         let (run_suite, run_titles) = (suite.clone(), test.titles.clone());
+        let debug =
+            (suite.framework == Framework::Go).then(|| (suite.dir.clone(), test.titles.clone()));
         let group = format!("tests-row-{id}");
         div()
             .id(("tests-case", id))
@@ -1058,13 +1060,25 @@ impl Shell {
             .child(row_link(
                 ("tests-run", id),
                 "Run",
-                group,
+                group.clone(),
                 &t,
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.rerun_case(&run_suite, Some(run_titles.clone()), cx)
                 }),
             ))
+            .children(debug.map(|(dir, titles)| {
+                row_link(
+                    ("tests-debug", id),
+                    "Debug",
+                    group,
+                    &t,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.debug_test_case(&dir, &titles, window, cx)
+                    }),
+                )
+            }))
             .child(
                 div()
                     .w(px(56.))

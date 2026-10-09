@@ -752,6 +752,7 @@ impl Shell {
             }
         }
         self.project_settings_changed(root, cx);
+        self.debug_trust_changed(root, trust, cx);
         if trust != LinterTrust::Allowed {
             return self.stop_project_linters(root, cx);
         }
