@@ -104,6 +104,15 @@ pub fn read(store: &Path, session: &str, path: &Path) -> Before {
     }
 }
 
+/// Whether `session` created `path`, known without reading the copy of an edited file.
+pub fn created(store: &Path, session: &str, path: &Path) -> bool {
+    if !valid_session(session) {
+        return false;
+    }
+    let base = store.join(session).join(key(path));
+    !base.with_extension("skip").exists() && base.with_extension("new").exists()
+}
+
 /// A session in the store and the files it kept a copy of before their first edit.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stored {
@@ -303,6 +312,8 @@ mod tests {
         fs::write(&created, "x").unwrap();
         take(&store, "s-1", &created).unwrap();
         assert_eq!(read(&store, "s-1", &created), Before::Absent);
+        assert!(super::created(&store, "s-1", &created));
+        assert!(!super::created(&store, "s-1", &file) && !super::created(&store, "s-2", &created));
         fs::remove_dir_all(dir).unwrap();
     }
 

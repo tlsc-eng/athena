@@ -305,17 +305,34 @@ impl Reader {
     }
 }
 
-/// Token usage of a subagent's transcript, which counts toward its session.
-fn subagent_tokens(path: &Path) -> BTreeMap<String, Tokens> {
-    let Ok(file) = fs::File::open(path) else {
-        return BTreeMap::new();
+/// A subagent's transcript, whose token usage counts toward its session, as far as it was read.
+#[derive(Default)]
+struct Subagent {
+    len: u64,
+    modified: Option<SystemTime>,
+    offset: u64,
+    reader: Reader,
+}
+
+/// Reads a subagent's transcript on from where `cached` stopped, or from the start if it shrank.
+fn read_subagent(path: &Path, cached: Option<Subagent>) -> Option<Subagent> {
+    let meta = fs::metadata(path).ok()?;
+    let (len, modified) = (meta.len(), meta.modified().ok());
+    let mut sub = match cached {
+        Some(s) if s.len == len && s.modified == modified => return Some(s),
+        Some(s) if s.offset <= len => s,
+        _ => Subagent::default(),
     };
-    let mut reader = Reader::default();
+    let mut file = fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(sub.offset)).ok()?;
     let (mut input, mut buf) = (BufReader::new(file), Vec::new());
-    while next_line(&mut input, &mut buf).is_some() {
-        reader.line(&String::from_utf8_lossy(&buf), false);
+    while let Some(n) = next_line(&mut input, &mut buf) {
+        sub.offset += n;
+        sub.reader.line(&String::from_utf8_lossy(&buf), false);
     }
-    reader.tokens()
+    sub.len = len;
+    sub.modified = modified;
+    Some(sub)
 }
 
 /// Reads the next whole line into `buf` and returns its length on disk, or `None` at the end or
@@ -362,7 +379,7 @@ struct Cached {
     /// Where the next unread line starts.
     offset: u64,
     reader: Reader,
-    subagents: BTreeMap<String, Tokens>,
+    subagents: HashMap<PathBuf, Subagent>,
 }
 
 static CACHE: Mutex<Option<HashMap<PathBuf, Cached>>> = Mutex::new(None);
@@ -383,7 +400,7 @@ fn read_cached(path: &Path, len: u64, modified: SystemTime) -> Summary {
             modified,
             offset: 0,
             reader: Reader::default(),
-            subagents: BTreeMap::new(),
+            subagents: HashMap::new(),
         },
     };
     drop(guard);
@@ -400,13 +417,14 @@ fn read_cached(path: &Path, len: u64, modified: SystemTime) -> Summary {
     }
     entry.len = len;
     entry.modified = modified;
-    entry.subagents = BTreeMap::new();
+    let mut read = std::mem::take(&mut entry.subagents);
     let dir = path.with_extension("").join("subagents");
     for file in fs::read_dir(dir).into_iter().flatten().flatten() {
-        if file.path().extension().is_some_and(|e| e == "jsonl") {
-            for (model, tokens) in subagent_tokens(&file.path()) {
-                entry.subagents.entry(model).or_default().add(&tokens);
-            }
+        let file = file.path();
+        if file.extension().is_some_and(|e| e == "jsonl")
+            && let Some(sub) = read_subagent(&file, read.remove(&file))
+        {
+            entry.subagents.insert(file, sub);
         }
     }
     let summary = summarize(&entry);
@@ -420,8 +438,10 @@ fn read_cached(path: &Path, len: u64, modified: SystemTime) -> Summary {
 fn summarize(cached: &Cached) -> Summary {
     let mut summary = cached.reader.summary.clone();
     summary.tokens = cached.reader.tokens();
-    for (model, tokens) in &cached.subagents {
-        summary.tokens.entry(model.clone()).or_default().add(tokens);
+    for sub in cached.subagents.values() {
+        for (model, tokens) in sub.reader.tokens() {
+            summary.tokens.entry(model).or_default().add(&tokens);
+        }
     }
     summary
 }
@@ -833,6 +853,30 @@ mod tests {
         let s = read_cached(&path, len, at);
         assert_eq!((s.messages, s.malformed), (2, 0));
         assert_eq!(s.tokens["claude-opus-5"].input, 7);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_subagent_transcript_is_read_on_from_where_it_stopped() {
+        let dir = temp("sub");
+        let path = dir.join("agent-1.jsonl");
+        let first = reply("a", "claude-opus-5", 10, 0).to_string() + "\n";
+        fs::write(&path, &first).unwrap();
+        let sub = read_subagent(&path, None).unwrap();
+        assert_eq!(sub.offset, first.len() as u64);
+        // The first line is overwritten, so only reading on from the offset still counts it.
+        let mut text = " ".repeat(first.len() - 1) + "\n";
+        text += &lines(&[reply("b", "claude-opus-5", 5, 0)]);
+        text += r#"{"type":"assist"#;
+        fs::write(&path, &text).unwrap();
+        let sub = read_subagent(&path, Some(sub)).unwrap();
+        assert_eq!(sub.reader.tokens()["claude-opus-5"].input, 15);
+        assert_eq!(
+            sub.offset,
+            text.rfind('\n').unwrap() as u64 + 1,
+            "a half line waits"
+        );
+        assert!(read_subagent(&dir.join("gone.jsonl"), Some(sub)).is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 

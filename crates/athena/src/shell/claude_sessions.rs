@@ -169,7 +169,7 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
             .iter()
             .map(|path| FileChange {
                 counts: line_counts(store, &stored.session, path),
-                created: snapshots::read(store, &stored.session, path) == Before::Absent,
+                created: snapshots::created(store, &stored.session, path),
                 path: path.clone(),
             })
             .collect();
