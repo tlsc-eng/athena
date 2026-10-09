@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use athena_editor::{EditorEvent, EditorView, Indent, Lang, SaveSettings};
 use athena_lsp::{Diagnostic, Position, Range, ServerKind, Severity};
 use athena_ui::{CODE_SIZE, CODE_ZOOM, Theme};
+use athena_workspace::watch::FolderWatcher;
 use athena_workspace::{ItemKind, LinterTrust, Preferences, ThemeChoice, Workspace};
 use gpui::{AppContext as _, Context, Entity, Window};
 use serde_json::{Value, json};
@@ -40,11 +41,39 @@ pub(super) struct SettingsState {
     file_problems: HashMap<PathBuf, Vec<Diagnostic>>,
     /// VS Code's JSON server was found, so JSON files open in it with Athena's schemas.
     json_server: bool,
+    config_changes: Option<ConfigChanges>,
+}
+
+/// Changes to settings.json and keymap.json from one watcher of their folders; the loop that
+/// applies each file takes its feed.
+struct ConfigChanges {
+    _watchers: Vec<FolderWatcher>,
+    settings: Option<async_channel::Receiver<()>>,
+    keymap: Option<async_channel::Receiver<()>>,
+}
+
+impl ConfigChanges {
+    fn watch() -> Self {
+        let (settings_changed, settings) = async_channel::unbounded();
+        let (keymap_changed, keymap) = async_channel::unbounded();
+        let files = [
+            (settings::path(), settings_changed),
+            (crate::keymap::path(), keymap_changed),
+        ]
+        .into_iter()
+        .filter_map(|(path, changed)| Some((path.ok()?, changed)))
+        .collect();
+        Self {
+            _watchers: super::shortcuts::watch_files(files),
+            settings: Some(settings),
+            keymap: Some(keymap),
+        }
+    }
 }
 
 /// Athena's own files, checked as they are edited.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ConfigFile {
+pub(super) enum ConfigFile {
     Settings,
     ProjectSettings,
     Keymap,
@@ -128,6 +157,7 @@ impl SettingsState {
             project_toast: None,
             file_problems: HashMap::new(),
             json_server: false,
+            config_changes: None,
         }
     }
 
@@ -147,17 +177,28 @@ fn zoom_for(font_size: f32) -> i32 {
 }
 
 impl Shell {
+    /// The changes to settings.json or keymap.json, for the one loop that applies the file.
+    pub(super) fn config_changes(&mut self, file: ConfigFile) -> async_channel::Receiver<()> {
+        let feeds = self
+            .settings
+            .config_changes
+            .get_or_insert_with(ConfigChanges::watch);
+        let feed = match file {
+            ConfigFile::Settings => feeds.settings.take(),
+            ConfigFile::Keymap => feeds.keymap.take(),
+            ConfigFile::ProjectSettings => None,
+        };
+        // A feed already taken is never fed again, so the asking loop ends after its first pass.
+        feed.unwrap_or_else(|| async_channel::unbounded().1)
+    }
+
     /// Applies settings.json whenever it changes, with a toast while it has problems.
     pub(super) fn start_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (changed, changes) = async_channel::unbounded::<()>();
-        let watchers = settings::path()
-            .map(|path| super::shortcuts::watch_keymap(path, changed))
-            .unwrap_or_default();
+        let changes = self.config_changes(ConfigFile::Settings);
         let problems = std::mem::replace(&mut self.settings.problems, Ok(Vec::new()));
         self.report_settings(problems, cx);
         self.find_json_server(cx);
         cx.spawn_in(window, async move |this, cx| {
-            let _watchers = watchers;
             while changes.recv().await.is_ok() {
                 let reloaded = this.update_in(cx, |this, window, cx| {
                     let result = settings::load();

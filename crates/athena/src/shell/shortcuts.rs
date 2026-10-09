@@ -9,42 +9,54 @@ use gpui::{AppContext as _, Context, Entity, Window};
 use super::Shell;
 use super::item::ItemView;
 use super::notices::ToastAction;
+use super::settings::ConfigFile;
 use super::shortcuts_ui::{KeymapEdit, ShortcutsEvent, ShortcutsView};
 use crate::keymap;
 
 /// Problems listed on the toast; the rest are in app.log.
 const SHOWN_PROBLEMS: usize = 3;
 
-/// Watches keymap.json's folder and, when the file is a symlink, its target's folder too.
-pub(super) fn watch_keymap(
-    path: PathBuf,
-    changed: async_channel::Sender<()>,
-) -> Vec<FolderWatcher> {
-    let mut folders: Vec<(PathBuf, Option<PathBuf>)> = path
-        .parent()
-        .map(|dir| (dir.to_path_buf(), None))
-        .into_iter()
-        .collect();
-    if let Some(target) = keymap::link_target(&path)
-        && let Some(dir) = target.parent()
-    {
-        folders.push((dir.to_path_buf(), Some(target.clone())));
+/// Watches the folders holding `files`, and for a symlinked one its target's folder too, with one
+/// watcher per folder; each file's sender hears when its bytes change.
+pub(super) fn watch_files(files: Vec<(PathBuf, async_channel::Sender<()>)>) -> Vec<FolderWatcher> {
+    type Watched = (
+        Option<PathBuf>,
+        Arc<Mutex<keymap::FileChange>>,
+        async_channel::Sender<()>,
+    );
+    let mut folders: Vec<(PathBuf, Vec<Watched>)> = Vec::new();
+    for (path, changed) in files {
+        let file = Arc::new(Mutex::new(keymap::FileChange::new(path.clone())));
+        let target = keymap::link_target(&path);
+        let watched = path
+            .parent()
+            .map(|dir| (dir.to_path_buf(), None))
+            .into_iter()
+            .chain(target.and_then(|t| Some((t.parent()?.to_path_buf(), Some(t)))));
+        for (dir, only) in watched {
+            let entry = (only, file.clone(), changed.clone());
+            match folders.iter_mut().find(|(d, _)| *d == dir) {
+                Some((_, on)) => on.push(entry),
+                None => folders.push((dir, vec![entry])),
+            }
+        }
     }
-    let file = Arc::new(Mutex::new(keymap::FileChange::new(path)));
     folders
         .into_iter()
-        .filter_map(|(dir, only)| {
-            let (file, changed, root) = (file.clone(), changed.clone(), dir.clone());
+        .filter_map(|(dir, watched)| {
+            let root = dir.clone();
             FolderWatcher::new(&dir, move |paths| {
-                // The target's folder may be a whole dotfiles checkout, or the home folder.
-                let relevant = only
-                    .as_ref()
-                    .is_none_or(|target| paths.iter().any(|p| p == target || *p == root));
-                if relevant && file.lock().is_ok_and(|mut f| f.changed()) {
-                    let _ = changed.send_blocking(());
+                for (only, file, changed) in &watched {
+                    // The target's folder may be a whole dotfiles checkout, or the home folder.
+                    let relevant = only
+                        .as_ref()
+                        .is_none_or(|target| paths.iter().any(|p| p == target || *p == root));
+                    if relevant && file.lock().is_ok_and(|mut f| f.changed()) {
+                        let _ = changed.send_blocking(());
+                    }
                 }
             })
-            .inspect_err(|e| tracing::warn!("not watching {} for keymap.json: {e}", dir.display()))
+            .inspect_err(|e| tracing::warn!("not watching {}: {e}", dir.display()))
             .ok()
         })
         .collect()
@@ -53,12 +65,8 @@ pub(super) fn watch_keymap(
 impl Shell {
     /// Applies keymap.json now and whenever it changes, with a toast while it has problems.
     pub(super) fn start_keymap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (changed, changes) = async_channel::unbounded::<()>();
-        let watchers = keymap::path()
-            .map(|path| watch_keymap(path, changed))
-            .unwrap_or_default();
+        let changes = self.config_changes(ConfigFile::Keymap);
         cx.spawn_in(window, async move |this, cx| {
-            let _watchers = watchers;
             let mut toast = None;
             loop {
                 let applied = this.update(cx, |this, cx| {
@@ -175,5 +183,43 @@ impl Shell {
         for view in views {
             view.update(cx, |v, cx| v.reload(cx));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn one_watcher_serves_settings_and_keymap_and_tells_their_changes_apart() {
+        let dir = std::env::temp_dir().join(format!("athena-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let (settings, keymap) = (dir.join("settings.json"), dir.join("keymap.json"));
+        std::fs::write(&settings, "{}").unwrap();
+        std::fs::write(&keymap, "[]").unwrap();
+        let (settings_changed, settings_changes) = async_channel::unbounded();
+        let (keymap_changed, keymap_changes) = async_channel::unbounded();
+        let watchers = watch_files(vec![
+            (settings.clone(), settings_changed),
+            (keymap.clone(), keymap_changed),
+        ]);
+        assert_eq!(watchers.len(), 1, "one folder, one watcher");
+        // FSEvents may report nothing for changes made right after the stream starts.
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(&keymap, "[ ]").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while keymap_changes.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Past the debounce, so a settings.json report would have arrived with it.
+        std::thread::sleep(Duration::from_millis(400));
+        let heard = (keymap_changes.len(), settings_changes.len());
+        drop(watchers);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(heard, (1, 0));
     }
 }
