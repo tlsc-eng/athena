@@ -442,7 +442,7 @@ p,ul,ol,table,pre,blockquote{{margin:0 0 1em}}
 a{{color:{accent};text-decoration:none}} a:hover{{text-decoration:underline}}
 code,pre{{font-family:'Geist Mono',ui-monospace,monospace;font-size:13px}}
 code{{background:{surface};border:1px solid {border};border-radius:2px;padding:.1em .35em}}
-pre{{background:{surface};border:1px solid {border};border-radius:4px;padding:12px 16px;overflow:auto;line-height:1.5}}
+pre{{background:{surface};border:1px solid {border};border-radius:4px;padding:12px 16px;overflow:auto;line-height:1.5;tab-size:4}}
 pre code{{background:none;border:0;padding:0}}
 pre.mermaid{{background:none;border:0;text-align:center;font-family:Geist,-apple-system,sans-serif}}
 blockquote{{margin-left:0;padding:0 1em;color:{muted};border-left:3px solid {border}}}
@@ -453,7 +453,7 @@ tr:nth-child(2n) td{{background:{stripe}}}
 hr{{border:0;border-top:1px solid {border};margin:24px 0}}
 img{{max-width:100%}}
 li+li{{margin-top:.25em}} li>input[type=checkbox]{{margin:0 .4em 0 -1.2em;accent-color:{accent}}}
-ul:has(>li>input[type=checkbox]){{list-style:none}}
+li:has(>input[type=checkbox]){{list-style:none}}
 del{{color:{faint}}}
 ::selection{{background:{selection}}}
 </style></head>
@@ -504,6 +504,22 @@ mod tests {
             &theme,
         );
         assert!(diagram.contains("mermaid.initialize"));
+    }
+
+    #[test]
+    fn only_task_items_lose_their_bullets_and_tabs_are_four_wide() {
+        let html = page(
+            &markdown::render(
+                "- plain\n- [ ] task\n\n```go\n\tx\n```",
+                Path::new("/"),
+                &mut ImageCache::default(),
+            ),
+            &Theme::dark(false),
+        );
+        assert!(html.contains("<li><input"), "{html}");
+        assert!(html.contains("li:has(>input[type=checkbox]){list-style:none}"));
+        assert!(!html.contains("ul:has("), "a plain item keeps its bullet");
+        assert!(html.contains("line-height:1.5;tab-size:4}"));
     }
 
     #[test]
