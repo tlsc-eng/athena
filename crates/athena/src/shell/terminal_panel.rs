@@ -150,13 +150,14 @@ impl Shell {
         let Some(panel) = self.panel_mut() else {
             return;
         };
-        if panel.take(id).is_none() {
+        let Some(item) = panel.take(id) else {
             return;
-        }
+        };
         let emptied = panel.is_empty();
         self.item_menus.remove(&(root.clone(), id));
-        if let Some(view) = self.items.remove(&(root, id)) {
-            view.close(cx);
+        match self.items.remove(&(root, id)) {
+            Some(view) => view.close(cx),
+            None => athena_term::kill_sessions(super::panes::unviewed_sessions([&item], |_| false)),
         }
         self.schedule_save(cx);
         self.after_panel_change(emptied, window, cx);

@@ -944,9 +944,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.item_menus.remove(&(root.to_path_buf(), item));
-        if let Some(view) = self.items.remove(&(root.to_path_buf(), item)) {
+        let view = self.items.remove(&(root.to_path_buf(), item));
+        if let Some(view) = &view {
             view.close(cx);
-            if let ItemView::Editor(editor) = &view {
+            if let ItemView::Editor(editor) = view {
                 let path = editor.read(cx).path().to_path_buf();
                 self.lsp_closed(&path, cx);
             }
@@ -954,6 +955,10 @@ impl Shell {
         let Some(project) = self.workspace.projects.iter_mut().find(|p| p.root == root) else {
             return;
         };
+        if view.is_none() {
+            let closing = project.layout.iter().flat_map(|l| l.items());
+            athena_term::kill_sessions(unviewed_sessions(closing, |id| id != item));
+        }
         let shown = project.layout.as_ref().and_then(|l| {
             let (pane, at) = l.find_item(item)?;
             (l.pane(pane)?.active == at).then_some(pane)
@@ -2222,6 +2227,18 @@ impl Shell {
 
     /// Hangs up every shell in a project that is being closed.
     pub(super) fn drop_project_items(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let orphans = self
+            .workspace
+            .projects
+            .iter()
+            .find(|p| p.root == root)
+            .map(|p| {
+                unviewed_sessions(p.items(), |id| {
+                    self.items.contains_key(&(root.to_path_buf(), id))
+                })
+            })
+            .unwrap_or_default();
+        athena_term::kill_sessions(orphans);
         self.tab_scroll.retain(|(r, _), _| r != root);
         self.content_switches.retain(|(r, _)| r != root);
         self.item_menus.retain(|(r, _)| r != root);
@@ -2237,6 +2254,21 @@ impl Shell {
             }
         }
     }
+}
+
+/// Daemon sessions of terminal tabs never shown, which closing a view cannot hang up.
+pub(super) fn unviewed_sessions<'a>(
+    items: impl IntoIterator<Item = &'a Item>,
+    viewed: impl Fn(ItemId) -> bool,
+) -> Vec<u64> {
+    items
+        .into_iter()
+        .filter(|i| !viewed(i.id))
+        .filter_map(|i| match i.kind {
+            ItemKind::Terminal { session } => session,
+            _ => None,
+        })
+        .collect()
 }
 
 /// Shows the tab next to `item` (as closing it would) if `item` is the one showing.
@@ -2357,6 +2389,28 @@ mod tests {
 
     fn term() -> ItemKind {
         ItemKind::Terminal { session: None }
+    }
+
+    #[test]
+    fn only_terminals_never_shown_need_their_session_hung_up_directly() {
+        let item = |id, kind| Item {
+            id: ItemId(id),
+            kind,
+            view: None,
+        };
+        let items = [
+            item(1, ItemKind::Terminal { session: Some(10) }),
+            item(2, ItemKind::Terminal { session: Some(20) }),
+            item(3, term()),
+            item(
+                4,
+                ItemKind::Editor {
+                    path: "/p/a.rs".into(),
+                },
+            ),
+        ];
+        assert_eq!(unviewed_sessions(&items, |id| id == ItemId(1)), [20]);
+        assert_eq!(unviewed_sessions(&items, |_| false), [10, 20]);
     }
 
     /// One pane holding four tabs, the second one showing.
