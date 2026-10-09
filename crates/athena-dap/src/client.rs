@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::net::UnixListener;
@@ -333,6 +334,16 @@ impl Client {
         let arguments = json!({"restart": false, "terminateDebuggee": true});
         self.call("disconnect", arguments, REQUEST_TIMEOUT).await
     }
+
+    /// Kills the adapter and what it runs, and removes the scratch folder, before returning.
+    pub fn kill_now(&self) {
+        // Closed first, so an adapter still starting is killed as soon as it is spawned.
+        self.shared.close("the debug adapter was stopped");
+        if let Some(mut child) = self.child.lock().expect("child lock").take() {
+            kill(&mut child);
+        }
+        let _ = std::fs::remove_dir_all(&self.scratch);
+    }
 }
 
 impl Drop for Client {
@@ -353,13 +364,39 @@ impl Drop for Client {
             .spawn(move || {
                 thread::sleep(SHUTDOWN_GRACE);
                 if let Some(mut c) = child.lock().expect("child lock").take() {
-                    // SAFETY: the unreaped child keeps its group id from being reused.
-                    unsafe { libc::killpg(c.id() as libc::pid_t, libc::SIGKILL) };
-                    let _ = c.wait();
+                    kill(&mut c);
                 }
                 let _ = std::fs::remove_dir_all(&scratch);
             });
     }
+}
+
+/// Kills the adapter's process group, then reaps the adapter.
+fn kill(child: &mut Child) {
+    // SAFETY: nothing reaps the child before this wait, so its group id cannot have been reused.
+    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+    let _ = child.wait();
+}
+
+/// How the child exited, if it has, leaving it unreaped so its group id stays ours.
+fn exit_code(child: &Child) -> Option<i32> {
+    // SAFETY: an all-zero siginfo_t is valid, and waitid only writes into it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    // SAFETY: `info` outlives the call.
+    let found = unsafe { libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info, flags) };
+    // SAFETY: waitid filled in `info` for a child that changed state.
+    (found == 0 && unsafe { info.si_pid() } != 0).then(|| unsafe { info.si_status() })
+}
+
+/// `shell` when it takes `-lc` with "$0" "$@" as sh does, else zsh, macOS's default shell.
+fn posix_shell(shell: Option<OsString>) -> PathBuf {
+    let shell = shell.map(PathBuf::from).filter(|s| {
+        s.is_absolute()
+            && s.file_name()
+                .is_some_and(|n| ["sh", "bash", "zsh", "ksh", "dash"].iter().any(|k| n == *k))
+    });
+    shell.unwrap_or_else(|| PathBuf::from("/bin/zsh"))
 }
 
 /// A new private folder under the temporary folder, short enough to hold a Unix socket.
@@ -433,8 +470,7 @@ fn run(
     };
     let mut cmd = match adapter.login_shell {
         true => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            let mut c = Command::new(shell);
+            let mut c = Command::new(posix_shell(std::env::var_os("SHELL")));
             c.args(["-lc", "exec \"$0\" \"$@\""]).arg(&adapter.program);
             c
         }
@@ -455,7 +491,14 @@ fn run(
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().context("no stdout")?;
     forward_lines(child.stderr.take(), "stderr", shared);
-    *slot.lock().expect("child lock") = Some(child);
+    {
+        let mut slot = slot.lock().expect("child lock");
+        if shared.closed.load(Ordering::SeqCst) {
+            kill(&mut child);
+            bail!("the debug adapter was stopped");
+        }
+        *slot = Some(child);
+    }
     match listener {
         Some(listener) => {
             forward_lines(Some(stdout), "stdout", shared);
@@ -483,10 +526,13 @@ fn accept(
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => return Err(e.into()),
         }
-        if let Some(child) = slot.lock().expect("child lock").as_mut()
-            && let Ok(Some(status)) = child.try_wait()
+        if let Some(code) = slot
+            .lock()
+            .expect("child lock")
+            .as_ref()
+            .and_then(exit_code)
         {
-            bail!("the debug adapter exited before connecting ({status})");
+            bail!("the debug adapter exited before connecting (exit status {code})");
         }
         if Instant::now() >= deadline {
             bail!(
@@ -508,11 +554,16 @@ fn forward_lines(pipe: Option<impl Read + Send + 'static>, category: &str, share
     let _ = thread::Builder::new()
         .name("dap-output".into())
         .spawn(move || {
-            for line in BufReader::new(pipe).lines() {
-                let Ok(line) = line else {
+            let mut pipe = BufReader::new(pipe);
+            let mut bytes = Vec::new();
+            loop {
+                bytes.clear();
+                if !matches!(pipe.read_until(b'\n', &mut bytes), Ok(1..)) {
                     return;
-                };
-                let text = format!("{line}\n");
+                }
+                let line = String::from_utf8_lossy(&bytes);
+                let line = line.strip_suffix('\n').unwrap_or(&line);
+                let text = format!("{}\n", line.strip_suffix('\r').unwrap_or(line));
                 let category = category.clone();
                 if events
                     .send_blocking(Event::Output { category, text })
@@ -920,8 +971,98 @@ mod tests {
         let Event::Closed(why) = closed else {
             panic!("{closed:?}");
         };
-        assert!(why.contains("exited before connecting"), "{why}");
+        assert!(
+            why.contains("exited before connecting (exit status 3)"),
+            "{why}"
+        );
         assert!(block_on(client.threads()).is_err());
+        // Still unreaped, so the group id the reaper kills cannot belong to anyone else yet.
+        let pid = client
+            .pid()
+            .expect("the adapter is kept until it is reaped") as i32;
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "reaped before the kill");
+        client.kill_now();
+        assert_eq!(client.pid(), None);
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "left a zombie");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kill_now_ends_the_adapter_and_its_children_and_removes_the_scratch_folder_at_once() {
+        let (dir, program) = script(
+            "kill-now",
+            "#!/bin/sh\nsleep 30 &\necho $! > '{dir}/helper.pid'\necho started >&2\nexec sleep 30\n",
+        );
+        let adapter = Adapter {
+            program,
+            args: Vec::new(),
+            cwd: dir.clone(),
+            login_shell: false,
+            transport: Transport::Stdio,
+        };
+        let (client, events) = Client::start(adapter).unwrap();
+        let scratch = client.scratch().to_path_buf();
+        // The helper's pid is written before the adapter says it started.
+        assert!(matches!(block_on(events.recv()), Ok(Event::Output { .. })));
+        let helper: i32 = std::fs::read_to_string(dir.join("helper.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let rc = std::rc::Rc::new(client);
+        let held = rc.clone();
+        let started = Instant::now();
+        rc.kill_now();
+        assert!(!scratch.exists(), "the scratch folder stayed");
+        assert_eq!(held.pid(), None);
+        while unsafe { libc::kill(helper, 0) } == 0 && started.elapsed() < SHUTDOWN_GRACE {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            started.elapsed() < SHUTDOWN_GRACE,
+            "the adapter's child outlived kill_now"
+        );
+        assert!(block_on(held.threads()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adapter_output_that_is_not_utf8_is_forwarded_and_later_lines_still_arrive() {
+        let (dir, program) = script(
+            "utf8",
+            "#!/bin/sh\nprintf 'ok\\n\\377bad\\r\\nafter\\n' >&2\nexec sleep 30\n",
+        );
+        let adapter = Adapter {
+            program,
+            args: Vec::new(),
+            cwd: dir.clone(),
+            login_shell: false,
+            transport: Transport::Stdio,
+        };
+        let (client, events) = Client::start(adapter).unwrap();
+        let mut lines = Vec::new();
+        while lines.len() < 3 {
+            match block_on(events.recv()).unwrap() {
+                Event::Output { text, .. } => lines.push(text),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(lines, ["ok\n", "\u{fffd}bad\n", "after\n"]);
+        client.kill_now();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adapters_start_through_a_shell_that_understands_the_exec_line() {
+        let shell = |s: &str| posix_shell(Some(s.into()));
+        assert_eq!(shell("/bin/bash"), Path::new("/bin/bash"));
+        assert_eq!(
+            shell("/opt/homebrew/bin/zsh"),
+            Path::new("/opt/homebrew/bin/zsh")
+        );
+        assert_eq!(shell("/opt/homebrew/bin/fish"), Path::new("/bin/zsh"));
+        assert_eq!(shell("/usr/local/bin/nu"), Path::new("/bin/zsh"));
+        assert_eq!(shell("bash"), Path::new("/bin/zsh"));
+        assert_eq!(posix_shell(None), Path::new("/bin/zsh"));
     }
 }
