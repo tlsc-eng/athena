@@ -240,6 +240,8 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Send selection to Claude", Box::new(actions::SendToClaude)),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
+        ("Focus outline", Box::new(super::outline::ShowOutline)),
+        ("Show explorer", Box::new(super::outline::ShowExplorer)),
         ("Problems", Box::new(actions::ShowProblems)),
         ("Go to next problem", Box::new(actions::NextProblem)),
         ("Go to previous problem", Box::new(actions::PrevProblem)),

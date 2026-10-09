@@ -417,6 +417,11 @@ impl Shell {
         .track_scroll(self.tree.scroll.clone())
         .flex_1();
         let w = clamp_tree_width(self.workspace.ui.tree_width);
+        let switch = self.render_tree_switch(cx);
+        let body = match self.outline.showing {
+            true => self.render_outline(cx),
+            false => list.into_any_element(),
+        };
         let panel = div()
             .w(px(w))
             .h_full()
@@ -433,16 +438,16 @@ impl Shell {
                 div()
                     .h(px(32.))
                     .flex_none()
-                    .px(px(12.))
+                    .px(px(8.))
                     .flex()
                     .items_center()
                     .border_b_1()
                     .border_color(t.color.border)
                     .text_size(t.typography.caption)
                     .text_color(t.color.content_muted)
-                    .child("Files"),
+                    .child(switch),
             )
-            .child(list)
+            .child(body)
             .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
                 this.drop_tree_entry(drag, drop_root.clone(), window, cx)
             }))

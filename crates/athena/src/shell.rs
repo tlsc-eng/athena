@@ -20,6 +20,7 @@ mod item;
 mod lsp;
 mod menus;
 mod notices;
+mod outline;
 mod palette;
 mod panes;
 mod playwright_view;
@@ -114,6 +115,7 @@ pub struct Shell {
     lsp: lsp::LspState,
     settings: settings::SettingsState,
     breadcrumbs: breadcrumbs::BreadcrumbState,
+    outline: outline::OutlineState,
     problems: problems::ProblemsState,
     code_actions: code_actions::CodeActionState,
     git: git_view::GitState,
@@ -266,6 +268,7 @@ impl Shell {
             lsp: lsp::LspState::default(),
             settings,
             breadcrumbs: breadcrumbs::BreadcrumbState::default(),
+            outline: outline::OutlineState::default(),
             problems: problems::ProblemsState::default(),
             code_actions: code_actions::CodeActionState::default(),
             git: git_view::GitState::default(),
@@ -872,6 +875,14 @@ impl Render for Shell {
                 this.set_playwright_mcp(false, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| this.toggle_tree(cx)))
+            .on_action(
+                cx.listener(|this, _: &outline::ShowOutline, w, cx| this.show_outline(true, w, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &outline::ShowExplorer, w, cx| {
+                    this.show_outline(false, w, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &FindInProject, w, cx| this.find_in_project(w, cx)))
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| {
                 this.toggle_drawer_tab(drawer::DrawerTab::Changes, cx)

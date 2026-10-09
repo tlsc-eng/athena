@@ -34,7 +34,7 @@ pub(super) struct BreadcrumbState {
 }
 
 /// Indexes of the symbols holding `at`, outermost first.
-fn symbol_chain(symbols: &[Symbol], at: Position) -> Vec<usize> {
+pub(super) fn symbol_chain(symbols: &[Symbol], at: Position) -> Vec<usize> {
     let holds = |s: &Symbol| s.scope.start <= at && at <= s.scope.end;
     let Some(deepest) = symbols.iter().rposition(holds) else {
         return Vec::new();
@@ -78,7 +78,7 @@ impl Shell {
     }
 
     /// The symbols of `editor`'s file, asking its language server again once edits pause.
-    fn breadcrumb_symbols(
+    pub(super) fn breadcrumb_symbols(
         &mut self,
         editor: &Entity<EditorView>,
         cx: &mut Context<Self>,
