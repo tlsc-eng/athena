@@ -179,7 +179,7 @@ pub(super) fn text_in(bytes: Option<Vec<u8>>, encoding: FileEncoding) -> Result<
 
 /// One side of a diff read as `forced`, or the encoding it looks like; `None` for a side that is
 /// not there.
-fn decoded(
+pub(super) fn decoded(
     bytes: Option<&[u8]>,
     forced: Option<FileEncoding>,
 ) -> Result<Option<athena_editor::Decoded>> {

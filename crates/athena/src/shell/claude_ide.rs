@@ -65,7 +65,8 @@ fn never_saved(kind: &ItemKind) -> bool {
     )
 }
 
-/// The file on disk as diff text; a FIFO or device is refused before opening it would block.
+/// The file on disk as diff text, in the encoding the editor would read it in; a FIFO or device
+/// is refused before opening it would block.
 fn read_text(path: &Path) -> Result<String, String> {
     match std::fs::metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
@@ -77,7 +78,8 @@ fn read_text(path: &Path) -> Result<String, String> {
         Ok(_) => {}
     }
     review::read_file(path)
-        .and_then(review::text)
+        .and_then(|bytes| review::decoded(bytes.as_deref(), None))
+        .map(|d| d.map(|d| d.text).unwrap_or_default())
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -767,6 +769,29 @@ mod tests {
         let big = std::fs::File::create(file("big.log")).unwrap();
         big.set_len(review::MAX_DIFF_BYTES as u64 + 1).unwrap();
         assert!(read_text(&file("big.log")).unwrap_err().contains("20 MB"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_file_on_disk_is_read_in_the_encoding_the_editor_would_use() {
+        let dir = std::env::temp_dir().join(format!("athena-ide-enc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("a = \"é\"\n".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        std::fs::write(dir.join("utf16.txt"), utf16).unwrap();
+        assert_eq!(
+            read_text(&dir.join("utf16.txt")).as_deref(),
+            Ok("a = \"é\"\n")
+        );
+        // こんにちは in Shift JIS.
+        let sjis = b"\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd\n";
+        std::fs::write(dir.join("sjis.txt"), sjis).unwrap();
+        assert_eq!(
+            read_text(&dir.join("sjis.txt")).as_deref(),
+            Ok("こんにちは\n")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
