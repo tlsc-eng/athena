@@ -513,3 +513,22 @@ fn stopping_rejects_pending_diffs_removes_the_lock_and_keeps_the_port_for_next_t
     again.turn_off();
     assert!(!f.dir.join("ide.env").exists());
 }
+
+#[test]
+fn file_uris_with_spaces_and_unicode_decode_whether_encoded_or_not() {
+    let path = Path::new("/p/my dir/日本#1.rs");
+    assert_eq!(
+        file_url(path),
+        "file:///p/my%20dir/%E6%97%A5%E6%9C%AC%231.rs"
+    );
+    assert_eq!(session::uri_path(&file_url(path)), path);
+    assert_eq!(session::uri_path("file:///p/my dir/日本#1.rs"), path);
+
+    let dir = std::env::temp_dir().join(format!("athena-ide-uri-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let literal = dir.join("100%20done.txt");
+    std::fs::write(&literal, "").unwrap();
+    let uri = format!("file://{}", literal.display());
+    assert_eq!(session::uri_path(&uri), literal, "only the raw name exists");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

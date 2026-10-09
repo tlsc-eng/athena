@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use percent_encoding::percent_decode_str;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, CustomNotification, Implementation, ServerCapabilities,
@@ -149,10 +150,7 @@ impl Session {
         &self,
         Parameters(args): Parameters<DiagnosticsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let path = args
-            .uri
-            .as_deref()
-            .map(|uri| PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri)));
+        let path = args.uri.as_deref().map(uri_path);
         let (reply, answer) = oneshot::channel();
         self.shared.send(Event::Diagnostics { path, reply });
         let files = tokio::time::timeout(DIAGNOSTICS_BUDGET, answer)
@@ -165,6 +163,17 @@ impl Session {
     }
 }
 
+/// The file a `file://` URI names. Claude Code writes the path as is, other clients
+/// percent-encode it; a raw path holding `%` is kept when only it exists.
+pub(super) fn uri_path(uri: &str) -> PathBuf {
+    let raw = uri.strip_prefix("file://").unwrap_or(uri);
+    let decoded = PathBuf::from(&*percent_decode_str(raw).decode_utf8_lossy());
+    if decoded.as_os_str() != raw && !decoded.exists() && Path::new(raw).exists() {
+        return PathBuf::from(raw);
+    }
+    decoded
+}
+
 fn rejected(key: &DiffKey) -> CallToolResult {
     CallToolResult::success(vec![
         ContentBlock::text("DIFF_REJECTED"),
@@ -173,6 +182,7 @@ fn rejected(key: &DiffKey) -> CallToolResult {
 }
 
 /// Claude Code drops an answer whose `uri` differs from the one it asked about, so that is echoed.
+/// Other URIs stay unencoded: Claude Code matches them to paths by stripping `file://` alone.
 pub(super) fn diagnostics_json(
     uri: Option<String>,
     files: Vec<FileDiagnostics>,

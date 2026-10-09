@@ -108,7 +108,7 @@ fn selection_json(path: &Path, start: (u32, u32), end: (u32, u32), text: String)
     json!({
         "text": text,
         "filePath": path,
-        "fileUrl": format!("file://{}", path.display()),
+        "fileUrl": ide::file_url(path),
         "selection": {"start": position(start), "end": position(end), "isEmpty": start == end},
     })
 }

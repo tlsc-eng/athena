@@ -58,6 +58,8 @@ imagesize = "0.13"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = "8"
+url = "2.5"
+percent-encoding = "2.3"
 
 athena-proto = { path = "crates/athena-proto" }
 athena-term = { path = "crates/athena-term" }

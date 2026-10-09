@@ -459,6 +459,12 @@ async fn serve(stream: tokio::net::TcpStream, shared: Arc<Shared>, permit: Owned
     shared.send(Event::Disconnected { client });
 }
 
+/// A percent-encoded `file://` URL for `path`, as VS Code writes one.
+pub fn file_url(path: &Path) -> String {
+    url::Url::from_file_path(path)
+        .map_or_else(|()| format!("file://{}", path.display()), String::from)
+}
+
 /// The env file athena-mux reads, or `None` when the data directory cannot be made.
 pub fn env_file() -> Option<PathBuf> {
     athena_proto::ide_env_path().ok()
