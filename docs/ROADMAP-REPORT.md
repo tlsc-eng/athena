@@ -120,18 +120,15 @@ the performance notes are fixed and two remain:
   landed mid-word with several carets, and carets are now capped (`7b19854`).
 - Performance: a live resize re-wraps only lines too wide for the new width (`f1aca3f`); sticky
   scroll measures indentation without copying lines (`5c03515`).
-- IDE integration: a panic on any thread stopped the IDE server for good, so later proposals were
-  rejected and Accept did nothing; it now reacts only to a main-thread panic (fix pending merge).
-  Connections get a handshake timeout and a cap before authentication, so a local process cannot
-  exhaust the window's file descriptors (fix pending merge). `file://` URIs are percent-decoded
-  and encoded (fix pending merge). A proposal for a file that is not a readable text file, or that
-  lies outside the open projects once the path is normalised, is no longer shown as one (fix
-  pending merge).
-- Keymap: an entry without `when` lost to Athena's contextual binding on the same key (Cmd+D in an
-  editor, say); it now takes the key in every context (fix pending merge).
-- Terminal: copying text stripped all of Unicode plane 15, which held Nerd Font icons, not just
-  Athena's prompt tags; mark offsets went off by one once the scrollback was full and were wrong
-  after a column reflow (fix pending merge).
+- IDE integration:
+  - A panic on any thread stopped the IDE server for good, so later proposals were rejected and Accept did nothing. It now reacts only to a main-thread panic (`ce5b538`).
+  - Connections get a 5 s handshake timeout and at most 16 may wait to authenticate, so a local process cannot exhaust the window's file descriptors (`8888c27`).
+  - Incoming `file://` URIs are percent-decoded and the file URL Athena sends is encoded. Diagnostics URIs stay unencoded, because Claude Code compares them as raw paths (`8c249bd`).
+  - A proposal for a file that is not a regular text file under 20 MB is refused (`3c7d0e6`). A file outside every open project, once symlinks and `..` are resolved, is refused too, so Claude Code asks in the terminal instead (`709c898`). Before, such a file opened in the active project.
+- Keymap: the review's premise did not reproduce, because a user binding already wins in gpui 0.2.2. The real bug was that a key whose user action did nothing fell through to Athena's default on the same key. User entries now replace every default on their key, as in VS Code (`f241bdf`). A symlinked `keymap.json` is watched through its target (`78c6c67`).
+- Terminal:
+  - Copying text stripped all of Unicode plane 15, which also holds Nerd Font icons, not just Athena's prompt tags. The tags moved to plane 16 (`5832a80`).
+  - Mark positions are kept correctly once the scrollback is full. Copy Last Output refuses after a column reflow instead of copying the wrong lines (`bc66006`).
 
 Before the review, within the lanes: the IDE server's shutdown now frees its port and the
 selection poll no longer copies a large selection every 150 ms (`293b4a4`); the selection getter
@@ -150,14 +147,12 @@ reports the primary caret (`d1f688c`); and a batch of caret, wrap and fold fixes
 - Synthetic-key runs in the app for multi-cursor (Cmd+D three times with no split, carets below,
   typing and undo), wrap (moving onto a wrapped row, End, toggling back) and restore (folds,
   cursor and top line surviving a launch and quit), checking the saved files each time.
-- The screen became unlocked near the end, so some v0.5 screenshots exist, under the session's
-  scratchpad
-(`/private/tmp/claude-501/-Users-json-code-hobby-athena/60cc5e42-8a82-4a22-a06a-39cd285d51a8/scratchpad/qa/x5-follow/`,
-a debug build with a seeded workspace): a restored tab wrapped with
-  four carets on wrapped rows and the status bar reading "4 selections" (`02-carets.png`), `(`
+- The screen became unlocked near the end, so some v0.5 screenshots exist in
+  `docs/screenshots/v0.5/` (a debug build with a seeded workspace): a restored tab wrapped with
+  four carets on wrapped rows and the status bar reading "4 selections" ([`02-carets.png`](screenshots/v0.5/02-carets.png)), `(`
   typed inside a string and inside a comment left unclosed, in the build with the off-thread
-  reparse (`03-typed.png`), the palette's two word wrap commands (`04-palette.png`) and the "Word wrap is
-  on" notice (`05-default-on.png`).
+  reparse ([`03-typed.png`](screenshots/v0.5/03-typed.png)), the palette's two word wrap commands ([`04-palette.png`](screenshots/v0.5/04-palette.png)) and the "Word wrap is
+  on" notice ([`05-default-on.png`](screenshots/v0.5/05-default-on.png)).
 - **Unverified on screen**: sticky scroll (the screenshots stop just above a closing brace, where
   nothing is pinned), the light theme, proposal tabs and their toolbar, the prompt dots, the
   Selection and Open Recent menus, the keymap toast and column selection.
