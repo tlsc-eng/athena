@@ -441,6 +441,19 @@ fn replace_allowed(s: &SearchState, query: &Query) -> bool {
     !s.files.is_empty() && !s.replacing && !s.running && s.results_for.as_ref() == Some(query)
 }
 
+/// Why Replace All must not run: with results cut short it would rewrite files never shown.
+fn replace_refusal(s: &SearchState) -> Option<(&'static str, String)> {
+    s.truncated.then(|| {
+        (
+            "Too many results to replace safely",
+            format!(
+                "Only the first {MAX_HITS} results are shown. Narrow the search, or limit it \
+                 with files to include, then replace."
+            ),
+        )
+    })
+}
+
 impl Shell {
     fn ensure_search_inputs(&mut self, cx: &mut Context<Self>) -> Entity<TextInput> {
         if let Some(find) = &self.search.find {
@@ -808,12 +821,11 @@ impl Shell {
         let (Ok(Some(m)), Some(root)) = (Matcher::new(&query), self.search.root.clone()) else {
             return;
         };
+        if let Some((title, body)) = replace_refusal(&self.search) {
+            return self.transient_notice(title, body, cx);
+        }
         let with = self.search.replacement(cx);
-        let count = if self.search.truncated {
-            format!("{}+", self.search.matches)
-        } else {
-            self.search.matches.to_string()
-        };
+        let count = self.search.matches;
         let files = self.search.files.len();
         let message = format!(
             "Replace {count} {} across {files} {} with “{with}”?",
@@ -1359,6 +1371,27 @@ mod tests {
             !replace_allowed(&s, &query("foo")),
             "results of no finished search"
         );
+    }
+
+    #[test]
+    fn replace_all_is_refused_while_results_are_cut_short() {
+        let mut s = SearchState {
+            files: Rc::new(vec![FileHits {
+                path: "/p/a.rs".into(),
+                hits: Vec::new(),
+            }]),
+            results_for: Some(query("foo")),
+            ..Default::default()
+        };
+        assert!(replace_refusal(&s).is_none());
+        s.truncated = true;
+        assert!(
+            replace_allowed(&s, &query("foo")),
+            "the button stays, to explain"
+        );
+        let (title, body) = replace_refusal(&s).unwrap();
+        assert!(title.contains("Too many results"));
+        assert!(body.contains("Narrow the search"), "{body}");
     }
 
     fn names(found: &[FileHits], root: &Path) -> Vec<String> {
