@@ -1075,10 +1075,10 @@ impl Shell {
                     }
                     entry.queued.take()
                 });
-                if let Some((_, _, spans)) = decoded {
-                    tracing::debug!("semantic tokens → {}", spans.len());
-                    let _ = weak.update(cx, |e, cx| e.show_semantic_tokens(request, spans, cx));
-                }
+                // A null or failed answer clears the colours, which no longer match the text.
+                let spans = decoded.map_or_else(Vec::new, |(_, _, spans)| spans);
+                tracing::debug!("semantic tokens → {}", spans.len());
+                let _ = weak.update(cx, |e, cx| e.show_semantic_tokens(request, spans, cx));
                 if let Some((editor, request)) = queued.and_then(|(e, r)| Some((e.upgrade()?, r))) {
                     this.lsp_semantic_tokens(&editor, request, cx);
                 }
