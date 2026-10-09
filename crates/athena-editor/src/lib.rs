@@ -1,3 +1,4 @@
+mod blame;
 mod buffer;
 mod completion;
 pub mod diff;
@@ -26,6 +27,7 @@ mod syntax;
 mod view;
 mod wrap;
 
+pub use blame::{BlameCommit, GitGutterEvent, GutterBlame};
 pub use buffer::{
     Buffer, Cursor, Cursors, DiskState, Edit, Indent, LineEnding, SaveError, Selection,
 };

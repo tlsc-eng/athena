@@ -12,6 +12,7 @@ mod drawer;
 mod edits;
 mod fileops;
 mod fuzzy;
+mod git_gutter;
 mod git_view;
 mod history;
 mod item;

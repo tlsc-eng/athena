@@ -75,6 +75,7 @@ pub(super) struct GitState {
     autofetch: Option<Task<()>>,
     /// Editors followed for saves that resolve a file's last conflict.
     pub(super) conflict_watch: HashMap<gpui::EntityId, Subscription>,
+    pub(super) gutters: super::git_gutter::GutterState,
 }
 
 impl GitState {
@@ -673,6 +674,7 @@ impl Shell {
             })
             .collect();
         self.git.marks.retain(|path, _| open.contains(path));
+        self.prune_git_gutters();
         let editors = self.editors_under(root);
         let mut stale = Vec::new();
         for editor in &editors {
@@ -737,6 +739,7 @@ impl Shell {
     /// A new editor shows known marks at once and fresh ones after a quick status run.
     pub(super) fn git_opened(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
         self.watch_conflicts(editor, cx);
+        self.watch_git_gutter(editor, cx);
         let path = editor.read(cx).path().to_path_buf();
         if let Some((_, marks)) = self.git.marks.get(&path) {
             let marks = marks.clone();
@@ -1504,6 +1507,11 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
     .on_action(cx.listener(|this, _: &GitPopStash, w, cx| this.open_stashes(w, cx)))
     .on_action(
         cx.listener(|this, _: &crate::actions::GitOpenTimeline, _, cx| this.open_timeline(cx)),
+    )
+    .on_action(
+        cx.listener(|this, _: &crate::actions::GitToggleFileBlame, _, cx| {
+            this.toggle_file_blame(cx)
+        }),
     )
 }
 

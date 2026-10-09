@@ -498,6 +498,7 @@ pub struct EditorView {
     pub(crate) wrap_language: Option<bool>,
     pub(crate) merge: crate::merge_conflicts::MergeCache,
     pub(crate) run_marks: Vec<crate::run_marks::RunMark>,
+    pub(crate) file_blame: crate::blame::FileBlame,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -590,6 +591,7 @@ impl EditorView {
             wrap_language: None,
             merge: Default::default(),
             run_marks: Vec::new(),
+            file_blame: Default::default(),
         }
     }
 
@@ -980,7 +982,7 @@ impl EditorView {
         if self.click_run_mark(event.position, window, cx) {
             return;
         }
-        if self.click_fold_column(event.position, cx) {
+        if self.click_fold_column(event.position, cx) || self.click_blame(event.position, cx) {
             return;
         }
         let Some(at) = self.char_at_position(event.position) else {
@@ -1035,6 +1037,7 @@ impl EditorView {
             self.gutter_hover = hover;
             cx.notify();
         }
+        self.hover_blame(event.position, cx);
         if event.pressed_button.is_none() {
             self.hover_pointer(event.position, cx);
         }
@@ -1926,6 +1929,7 @@ impl Render for EditorView {
             )
             .children(self.render_line_jump(cx))
             .children(self.render_hover(cx))
+            .children(self.render_blame_hover(cx))
             .children(self.render_merge_actions(cx))
             .children(self.render_rename(cx))
             .children(focused.then(|| self.render_signature(cx)).flatten())

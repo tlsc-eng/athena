@@ -405,11 +405,12 @@ impl Element for EditorElement {
             gutter_bg: theme.color.surface_sunken,
         };
 
+        let blame_w = blame_width(self.view.read(cx), cell);
         let gutter = |total: usize| {
             let digits = total.to_string().len().max(3);
             let numbers_right = bounds.left() + px(GUTTER_PAD) + cell * digits as f32;
             let fold_column = (numbers_right, numbers_right + px(FOLD_COLUMN));
-            let text_left = fold_column.1 + px(TEXT_PAD);
+            let text_left = fold_column.1 + blame_w + px(TEXT_PAD);
             (numbers_right, fold_column, text_left)
         };
 
@@ -457,7 +458,7 @@ impl Element for EditorElement {
         let buffer = shared.buffer.borrow();
         let total = buffer.len_lines();
         let (numbers_right, fold_column, text_left) = gutter(total);
-        let gutter_w = fold_column.1 - bounds.left();
+        let gutter_w = fold_column.1 + blame_w - bounds.left();
         frame.gutter_bounds = Bounds::new(bounds.origin, size(gutter_w, bounds.size.height));
         frame.text_bounds = Bounds::from_corners(
             point(bounds.left() + gutter_w, bounds.top()),
@@ -888,6 +889,17 @@ impl Element for EditorElement {
             }
         }
 
+        blame_gutter(
+            &mut frame,
+            view,
+            &rows,
+            point(fold_column.1, bounds.top() - px(view.scroll.y)),
+            cell,
+            &font,
+            &theme,
+            window,
+        );
+
         let max = sticky_max(visible);
         let row_count = view.display.row_count(total);
         let mut sticky = view.sticky_lines(view.display.line_of(first), max);
@@ -1073,6 +1085,96 @@ fn run_mark(
     frame
         .gutter_marks
         .push(fill(Bounds::new(origin, size(d, d)), color).corner_radii(d / 2.));
+}
+
+fn blame_width(view: &EditorView, cell: Pixels) -> Pixels {
+    match view.file_blame.blame {
+        Some(_) => cell * (crate::blame::BLAME_COLUMNS + 3) as f32,
+        None => px(0.),
+    }
+}
+
+/// The blame gutter right of the fold column: an age bar on every row, and the author and age
+/// where a commit's stretch of lines starts. `origin` is the column's left edge at row 0.
+#[allow(clippy::too_many_arguments)]
+fn blame_gutter(
+    frame: &mut Frame,
+    view: &EditorView,
+    rows: &[(usize, usize, LayoutRow)],
+    origin: Point<Pixels>,
+    cell: Pixels,
+    font: &Font,
+    theme: &athena_ui::Theme,
+    window: &mut Window,
+) {
+    let (Some(blame), chunks) = (&view.file_blame.blame, &view.file_blame.chunks) else {
+        return;
+    };
+    let lh = frame.line_height;
+    let font_size = theme.typography.code;
+    let hovered = view.blame_hovered();
+    let mut prev = None;
+    for (_, _, r) in rows {
+        let Some(i) = chunks
+            .binary_search_by(|(lines, _)| {
+                if lines.end <= r.line {
+                    std::cmp::Ordering::Less
+                } else if lines.start > r.line {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()
+        else {
+            continue;
+        };
+        let Some(commit) = blame.commits.get(chunks[i].1) else {
+            continue;
+        };
+        let y = origin.y + lh * r.row as f32;
+        let bar = theme
+            .color
+            .accent
+            .opacity(0.15 + 0.85 * commit.heat.clamp(0., 1.));
+        frame.gutter_marks.push(fill(
+            Bounds::new(point(origin.x + px(4.), y), size(px(3.), lh)),
+            bar,
+        ));
+        let starts = prev != Some(i);
+        prev = Some(i);
+        if !starts || r.chars.start != 0 {
+            continue;
+        }
+        if chunks[i].0.start == r.line && r.line > 0 {
+            frame.gutter_marks.push(fill(
+                Bounds::new(
+                    point(origin.x, y),
+                    size(cell * (crate::blame::BLAME_COLUMNS + 2) as f32, px(1.)),
+                ),
+                theme.color.border.opacity(0.6),
+            ));
+        }
+        let text = crate::blame::caption(commit, crate::blame::BLAME_COLUMNS);
+        let color = match hovered == Some(i) {
+            true => theme.color.content,
+            false => theme.color.content_muted,
+        };
+        let shaped = window.text_system().shape_line(
+            text.clone().into(),
+            font_size,
+            &[TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+        frame.gutter.push((point(origin.x + px(12.), y), shaped));
+    }
 }
 
 /// How many scope headers may stick: at most a third of the view, so they never crowd out the text.
