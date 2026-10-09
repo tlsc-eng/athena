@@ -108,6 +108,7 @@ pub struct Status {
 pub fn parse_status(out: &[u8]) -> Status {
     let mut status = Status::default();
     let mut oid = None;
+    let mut upstream = None;
     let mut records = out.split(|&b| b == 0).map(String::from_utf8_lossy);
     while let Some(record) = records.next() {
         let bytes = record.as_bytes();
@@ -121,7 +122,7 @@ pub fn parse_status(out: &[u8]) -> Status {
                 } else if let Some(o) = record.strip_prefix("# branch.oid ") {
                     oid = (o != "(initial)").then(|| o.chars().take(7).collect::<String>());
                 } else if let Some(up) = record.strip_prefix("# branch.upstream ") {
-                    status.tracking.get_or_insert_default().upstream = up.to_string();
+                    upstream = Some(up.to_string());
                 } else if let Some(ab) = record.strip_prefix("# branch.ab ") {
                     let tracking = status.tracking.get_or_insert_default();
                     for part in ab.split(' ') {
@@ -182,6 +183,11 @@ pub fn parse_status(out: &[u8]) -> Status {
     }
     if status.branch.is_none() {
         status.branch = oid;
+    }
+    // git leaves out branch.ab when the upstream is gone, and then there is nothing to sync.
+    match (upstream, &mut status.tracking) {
+        (Some(up), Some(tracking)) => tracking.upstream = up,
+        _ => status.tracking = None,
     }
     status
 }
@@ -1526,6 +1532,36 @@ mod tests {
         assert_eq!((tracking.ahead, tracking.behind), (2, 3));
         let none = nul(&["# branch.oid 0930e963", "# branch.head feat"]);
         assert_eq!(parse_status(&none).tracking, None);
+        let gone = nul(&[
+            "# branch.oid 0930e963",
+            "# branch.head feat",
+            "# branch.upstream origin/feat",
+        ]);
+        assert_eq!(
+            parse_status(&gone).tracking,
+            None,
+            "the upstream was deleted"
+        );
+    }
+
+    #[test]
+    fn a_branch_whose_upstream_was_deleted_has_nothing_to_sync() {
+        if !available() {
+            return;
+        }
+        let a = committed_repo("gone", "one\n");
+        let bare = a.with_extension("gone.git");
+        let _ = std::fs::remove_dir_all(&bare);
+        repo_git(&a, &["init", "--bare", "-q", bare.to_str().unwrap()]);
+        repo_git(&a, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        repo_git(&a, &["push", "-q", "-u", "origin", "main"]);
+        assert!(status(&a, "", true).unwrap().tracking.is_some());
+        repo_git(&bare, &["update-ref", "-d", "refs/heads/main"]);
+        repo_git(&a, &["fetch", "-q", "--prune"]);
+        assert_eq!(status(&a, "", true).unwrap().tracking, None);
+        for dir in [a, bare] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
