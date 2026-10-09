@@ -9,11 +9,14 @@ use super::lsp::LspStatus;
 
 const HEIGHT: f32 = 22.;
 
-/// "Ln 12, Col 5", with the selection's size when there is one, as VS Code words it.
-fn position_label(line: usize, column: usize, selected: usize) -> String {
-    match selected {
-        0 => format!("Ln {line}, Col {column}"),
-        n => format!("Ln {line}, Col {column} ({n} selected)"),
+/// "Ln 12, Col 5", with the selection's size when there is one, or the caret count when there are
+/// several, as VS Code words it.
+fn position_label(line: usize, column: usize, selected: usize, carets: usize) -> String {
+    match (carets, selected) {
+        (0 | 1, 0) => format!("Ln {line}, Col {column}"),
+        (0 | 1, n) => format!("Ln {line}, Col {column} ({n} selected)"),
+        (carets, 0) => format!("{carets} selections"),
+        (carets, n) => format!("{carets} selections ({n} characters selected)"),
     }
 }
 
@@ -97,7 +100,8 @@ impl Shell {
                 .on_click(cx.listener(|this, _, window, cx| this.open_branches(window, cx)))
         });
         let right = status.zip(editor).map(|(status, editor)| {
-            let position = position_label(status.line, status.column, status.selected);
+            let position =
+                position_label(status.line, status.column, status.selected, status.carets);
             let indent = status.indent;
             let lang = status.lang;
             let lsp_dot = lsp.map(|lsp| {
@@ -238,8 +242,17 @@ mod tests {
 
     #[test]
     fn position_shows_the_selection_size_only_when_there_is_one() {
-        assert_eq!(position_label(12, 5, 0), "Ln 12, Col 5");
-        assert_eq!(position_label(1, 1, 42), "Ln 1, Col 1 (42 selected)");
+        assert_eq!(position_label(12, 5, 0, 1), "Ln 12, Col 5");
+        assert_eq!(position_label(1, 1, 42, 1), "Ln 1, Col 1 (42 selected)");
+    }
+
+    #[test]
+    fn several_carets_show_their_count_instead_of_the_position() {
+        assert_eq!(position_label(12, 5, 0, 3), "3 selections");
+        assert_eq!(
+            position_label(12, 5, 15, 3),
+            "3 selections (15 characters selected)"
+        );
     }
 
     #[test]
