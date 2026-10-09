@@ -310,7 +310,11 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let base = cx
                 .background_executor()
-                .spawn(async move { super::review::text(git::show(&root, Rev::Index, &rel)?) })
+                .spawn(async move {
+                    // The peek's Revert writes this text into the buffer.
+                    git::refuse_filtered(&root, &rel)?;
+                    super::review::text(git::show(&root, Rev::Index, &rel)?)
+                })
                 .await;
             match base {
                 Ok(base) => {

@@ -347,8 +347,8 @@ fn filtering_git(root: &Path) -> Command {
 /// its config names; line-ending conversion is built in and still applies.
 fn git(root: &Path) -> Command {
     let mut probe = filtering_git(root);
-    probe.args(["config", "-z", "--get-regexp", r"^filter\."]);
-    // No match exits 1, and a config git cannot read fails the real run before any filter.
+    probe.args(["config", "--list", "-z"]);
+    // A config git cannot read also fails the real run, before any filter.
     let drivers = run(probe, None)
         .map(|out| filter_drivers(&out))
         .unwrap_or_default();
@@ -357,7 +357,7 @@ fn git(root: &Path) -> Command {
     cmd
 }
 
-/// Driver names in `git config -z --get-regexp` output for `filter.<name>.<key>`.
+/// Driver names in `git config --list -z` output, from its `filter.<name>.<key>` entries.
 fn filter_drivers(out: &[u8]) -> Vec<String> {
     let mut names: Vec<String> = out
         .split(|&b| b == 0)
@@ -2040,7 +2040,8 @@ mod tests {
     #[test]
     fn driver_names_come_whole_from_the_config_listing() {
         let out =
-            b"filter.lfs.clean\ngit-lfs clean -- %f\0filter.lfs.process\ngit-lfs filter-process\0\
+            b"core.bare\nfalse\0filter.lfs.clean\ngit-lfs clean -- %f\0diff.x.textconv\ncat\0\
+                    filter.lfs.process\ngit-lfs filter-process\0\
                     filter.a.b=c.smudge\ncat\0filter.x.required\0";
         assert_eq!(filter_drivers(out), ["a.b=c", "lfs", "x"]);
         let mut cmd = Command::new("/usr/bin/env");
