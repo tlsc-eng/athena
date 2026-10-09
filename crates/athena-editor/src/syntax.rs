@@ -26,6 +26,11 @@ pub enum Lang {
     Swift,
     Dockerfile,
     DotEnv,
+    GoMod,
+    GoSum,
+    Makefile,
+    Sql,
+    Protobuf,
 }
 
 /// Highlight classes; the theme gives each a colour, and headings a heavier weight.
@@ -92,6 +97,45 @@ const TOML_EXTRA: &str = r#"
 (pair (bare_key) @property)
 (pair (quoted_key) @property)
 (pair (dotted_key (bare_key) @property))
+"#;
+
+/// go.mod and go.work, which the grammar crate ships no query for.
+const GOMOD: &str = r#"
+["module" "go" "toolchain" "require" "replace" "exclude" "retract" "ignore" "godebug" "tool"] @keyword
+"=>" @operator
+(comment) @comment
+(module_path) @namespace
+[(version) (go_version) (toolchain_name)] @number
+[(interpreted_string_literal) (raw_string_literal) (file_path)] @string
+"#;
+
+/// go.sum: module paths, versions and hashes.
+const GOSUM: &str = r#"
+(module_path) @namespace
+(module_version) @number
+(hash_version) @attribute
+(hash) @constant
+"#;
+
+/// Protocol Buffers, which the grammar crate ships no query for.
+const PROTO: &str = r#"
+["syntax" "edition" "package" "import" "option" "message" "enum" "service" "rpc" "returns"
+ "stream" "oneof" "map" "extend" "extensions" "reserved" "to" "max" "optional" "repeated"
+ "required" "public" "weak" "group"] @keyword
+[(key_type) (type)] @type.builtin
+[(message_name) (enum_name) (service_name) (message_or_enum_type)] @type
+(rpc_name) @function
+(field (identifier) @property)
+(map_field (identifier) @property)
+(enum_field (identifier) @constant)
+[(string) (reserved_identifier)] @string
+(escape_sequence) @string.escape
+[(int_lit) (float_lit) (field_number)] @number
+[(true) (false)] @boolean
+(comment) @comment
+["(" ")" "[" "]" "{" "}" "<" ">"] @punctuation.bracket
+[";" "," "." ":"] @punctuation.delimiter
+"=" @operator
 "#;
 
 const fn grammar(language: fn() -> Language, query: fn() -> String) -> Engine {
@@ -263,10 +307,57 @@ const SPECS: [LangSpec; Lang::COUNT] = [
         comment: Some("# "),
         first_pattern_wins: false,
     },
+    LangSpec {
+        extensions: &[],
+        filenames: &["go.mod", "go.work"],
+        engine: grammar(
+            || tree_sitter_gomod_orchard::LANGUAGE.into(),
+            || GOMOD.into(),
+        ),
+        comment: Some("// "),
+        first_pattern_wins: false,
+    },
+    LangSpec {
+        extensions: &[],
+        filenames: &["go.sum", "go.work.sum"],
+        engine: grammar(
+            || tree_sitter_gosum_orchard::LANGUAGE.into(),
+            || GOSUM.into(),
+        ),
+        comment: None,
+        first_pattern_wins: false,
+    },
+    LangSpec {
+        extensions: &["mk", "make"],
+        filenames: &["Makefile", "makefile", "GNUmakefile"],
+        engine: grammar(
+            || tree_sitter_make::LANGUAGE.into(),
+            || tree_sitter_make::HIGHLIGHTS_QUERY.into(),
+        ),
+        comment: Some("# "),
+        first_pattern_wins: false,
+    },
+    LangSpec {
+        extensions: &["sql"],
+        filenames: &[],
+        engine: grammar(
+            || tree_sitter_sequel::LANGUAGE.into(),
+            || tree_sitter_sequel::HIGHLIGHTS_QUERY.into(),
+        ),
+        comment: Some("-- "),
+        first_pattern_wins: false,
+    },
+    LangSpec {
+        extensions: &["proto"],
+        filenames: &[],
+        engine: grammar(|| tree_sitter_proto::LANGUAGE.into(), || PROTO.into()),
+        comment: Some("// "),
+        first_pattern_wins: false,
+    },
 ];
 
 impl Lang {
-    const COUNT: usize = 16;
+    const COUNT: usize = 21;
 
     pub const ALL: [Lang; Self::COUNT] = [
         Self::Go,
@@ -285,6 +376,11 @@ impl Lang {
         Self::Swift,
         Self::Dockerfile,
         Self::DotEnv,
+        Self::GoMod,
+        Self::GoSum,
+        Self::Makefile,
+        Self::Sql,
+        Self::Protobuf,
     ];
 
     fn spec(self) -> &'static LangSpec {
@@ -828,6 +924,40 @@ mod tests {
     }
 
     #[test]
+    fn go_modules_makefiles_sql_and_protobuf_are_recognised_and_highlighted() {
+        for (name, lang) in [
+            ("go.mod", Lang::GoMod),
+            ("go.work", Lang::GoMod),
+            ("go.sum", Lang::GoSum),
+            ("go.work.sum", Lang::GoSum),
+            ("Makefile", Lang::Makefile),
+            ("GNUmakefile", Lang::Makefile),
+            ("rules.mk", Lang::Makefile),
+            ("schema.sql", Lang::Sql),
+            ("api.proto", Lang::Protobuf),
+        ] {
+            assert_eq!(Lang::for_path(Path::new(name)), Some(lang), "{name}");
+        }
+        let painted_in = |lang, needle| painted(lang, sample(lang), needle);
+        assert_eq!(painted_in(Lang::GoMod, "require"), Some(Token::Keyword));
+        assert_eq!(
+            painted_in(Lang::GoMod, "golang.org"),
+            Some(Token::Namespace)
+        );
+        assert_eq!(painted_in(Lang::GoMod, "// indirect"), Some(Token::Comment));
+        assert_eq!(painted_in(Lang::GoSum, "v0.20.0"), Some(Token::Number));
+        assert_eq!(painted_in(Lang::Makefile, "# build"), Some(Token::Comment));
+        assert_eq!(painted_in(Lang::Sql, "SELECT"), Some(Token::Keyword));
+        assert_eq!(painted_in(Lang::Sql, "'a'"), Some(Token::String));
+        assert_eq!(painted_in(Lang::Protobuf, "message"), Some(Token::Keyword));
+        assert_eq!(painted_in(Lang::Protobuf, "string"), Some(Token::Type));
+        assert_eq!(
+            painted_in(Lang::Protobuf, "\"proto3\""),
+            Some(Token::String)
+        );
+    }
+
+    #[test]
     fn typescript_uses_javascript_base_query() {
         let t = tokens(Lang::TypeScript, "const n: number = 1;\nfunction f() {}\n");
         assert!(t.contains(&("const".into(), Token::Keyword)));
@@ -897,6 +1027,13 @@ mod tests {
             Lang::Swift => "let x = 1\n",
             Lang::Dockerfile => "FROM alpine\n",
             Lang::DotEnv => "A=1\n",
+            Lang::GoMod => {
+                "module example.com/x\n\ngo 1.22\n\nrequire golang.org/x/mod v0.20.0 // indirect\n"
+            }
+            Lang::GoSum => "golang.org/x/mod v0.20.0 h1:abc=\n",
+            Lang::Makefile => "# build\nall: main.o\n\tcc -o $@ $^\n",
+            Lang::Sql => "SELECT id FROM users WHERE name = 'a';\n",
+            Lang::Protobuf => "syntax = \"proto3\";\nmessage A { string name = 1; }\n",
         }
     }
 

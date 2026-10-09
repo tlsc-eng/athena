@@ -277,6 +277,10 @@ information rather than triggering the install dialog).
 | Swift | `.swift` | |
 | Dockerfile | `Dockerfile*`, `Containerfile*`, `.dockerfile`, `.containerfile` | |
 | Environment files | `.env`, `.env.*` | |
+| Go modules | `go.mod`, `go.work`, `go.sum`, `go.work.sum` | |
+| Makefile | `Makefile`, `makefile`, `GNUmakefile`, `.mk`, `.make` | |
+| SQL | `.sql` | |
+| Protocol Buffers | `.proto` | |
 
 Highlighting uses tree-sitter grammars, except Dockerfile and `.env`, which use a line scanner.
 Language servers are started only for Go and TypeScript/JavaScript, when `gopls` or

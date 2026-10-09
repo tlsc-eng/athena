@@ -25,6 +25,9 @@ pub(crate) fn pairs_for(lang: Option<Lang>) -> Vec<(char, char)> {
                 | Lang::Toml
                 | Lang::Dockerfile
                 | Lang::DotEnv
+                | Lang::Makefile
+                | Lang::Sql
+                | Lang::Protobuf
         )
     );
     let backtick = matches!(

@@ -56,6 +56,11 @@ fn lang_name(lang: Option<Lang>) -> &'static str {
         Some(Lang::Swift) => "Swift",
         Some(Lang::Dockerfile) => "Dockerfile",
         Some(Lang::DotEnv) => "Environment Variables",
+        Some(Lang::GoMod) => "Go Module File",
+        Some(Lang::GoSum) => "Go Checksum File",
+        Some(Lang::Makefile) => "Makefile",
+        Some(Lang::Sql) => "SQL",
+        Some(Lang::Protobuf) => "Protocol Buffers",
     }
 }
 

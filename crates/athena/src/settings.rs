@@ -197,6 +197,11 @@ pub fn language_id(lang: Lang) -> &'static str {
         Lang::Swift => "swift",
         Lang::Dockerfile => "dockerfile",
         Lang::DotEnv => "dotenv",
+        Lang::GoMod => "go.mod",
+        Lang::GoSum => "go.sum",
+        Lang::Makefile => "makefile",
+        Lang::Sql => "sql",
+        Lang::Protobuf => "proto",
     }
 }
 
