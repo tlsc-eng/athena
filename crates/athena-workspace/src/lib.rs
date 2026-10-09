@@ -258,6 +258,9 @@ impl Workspace {
                     if project.layout.is_some() {
                         kept[j].layout = project.layout;
                     }
+                    if !project.panel.is_empty() {
+                        kept[j].panel = project.panel;
+                    }
                     kept_active = Some(j);
                 }
                 Some(_) => {}
@@ -340,6 +343,13 @@ mod tests {
         w.projects[0].layout = Some(Layout::new(ItemKind::Editor {
             path: link_file.clone(),
         }));
+        let terminal = |session| Item {
+            id: ItemId(0),
+            kind: ItemKind::Terminal { session },
+            view: None,
+        };
+        w.projects[0].panel.adopt(terminal(Some(6)));
+        w.projects[1].panel.adopt(terminal(Some(5)));
         w.prune_missing();
         assert_eq!(w.projects.len(), 1);
         assert_eq!(w.projects[0].root, real);
@@ -349,6 +359,17 @@ mod tests {
             kept.items().next().unwrap().kind.file(),
             Some(&real.join("main.rs")),
             "the active copy's tabs win"
+        );
+        let panel: Vec<_> = w.projects[0]
+            .panel
+            .terminals
+            .iter()
+            .map(|i| &i.kind)
+            .collect();
+        assert_eq!(
+            panel,
+            [&ItemKind::Terminal { session: Some(5) }],
+            "and so do its panel terminals"
         );
         std::fs::remove_dir_all(real.parent().unwrap()).unwrap();
     }
