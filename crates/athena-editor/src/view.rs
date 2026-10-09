@@ -2685,6 +2685,13 @@ impl EditorView {
         self.changed(cx);
     }
 
+    /// The unsaved text as the bytes saving it would write, for git to compare with the file's
+    /// history; `None` when nothing is unsaved or the text has a character the encoding lacks.
+    pub fn dirty_bytes(&self) -> Option<Vec<u8>> {
+        let b = self.buf().filter(|b| b.is_dirty())?;
+        crate::encoding::encode(b.rope(), b.encoding()).ok()
+    }
+
     /// Saves in `encoding` and keeps using it; a save that fails keeps the old one.
     pub fn save_with_encoding(
         &mut self,

@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
-use athena_editor::{DiffEvent, DiffView, HunkActions};
+use athena_editor::{DiffEvent, DiffView, FileEncoding, HunkActions};
 use athena_workspace::git::{self, Rev};
 use athena_workspace::{DiffBase, ItemKind};
 use gpui::{AppContext as _, Context, Entity, EntityId, Window};
@@ -28,6 +28,8 @@ pub(super) struct ReviewState {
     /// The file "Select for Compare" picked, the left side of the next Compare with Selected.
     pub(super) compare_with: Option<PathBuf>,
     pub(super) sessions: super::claude_sessions::SessionsState,
+    /// Each diff's encoding for writing a hunk back, or why hunks can't be written.
+    encodings: HashMap<EntityId, Result<FileEncoding, String>>,
 }
 
 /// One load per diff at a time; a reload asked for meanwhile runs once after it, so a late
@@ -159,6 +161,111 @@ pub(super) fn text(bytes: Option<Vec<u8>>) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("This file is not UTF-8 text."))
 }
 
+/// The index's version of a file read as the editor reads the file, refused unless it reads
+/// without loss, since the quick diff peek can stage or revert from it.
+pub(super) fn text_in(bytes: Option<Vec<u8>>, encoding: FileEncoding) -> Result<String> {
+    let bytes = bytes.unwrap_or_default();
+    if bytes.len() > MAX_DIFF_BYTES {
+        bail!("The file is larger than 20 MB.");
+    }
+    match athena_editor::decode_text(&bytes, Some(encoding)) {
+        Some(d) if d.round_trips => Ok(d.text),
+        _ => bail!(
+            "The index's version of this file isn't valid {}.",
+            encoding.name()
+        ),
+    }
+}
+
+/// One side of a diff read as `forced`, or the encoding it looks like; `None` for a side that is
+/// not there.
+fn decoded(
+    bytes: Option<&[u8]>,
+    forced: Option<FileEncoding>,
+) -> Result<Option<athena_editor::Decoded>> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    if bytes.len() > MAX_DIFF_BYTES {
+        bail!("The file is larger than 20 MB.");
+    }
+    athena_editor::decode_text(bytes, forced)
+        .map(Some)
+        .context("This is a binary file; Athena shows differences in text files only.")
+}
+
+/// Both sides of a diff as text. A side detection could only guess (Windows 1252, as for
+/// kanji without kana) is read in the other side's encoding when it fits that exactly.
+fn decoded_pair(
+    old: Option<Vec<u8>>,
+    new: Option<Vec<u8>>,
+) -> Result<(
+    Option<athena_editor::Decoded>,
+    Option<athena_editor::Decoded>,
+)> {
+    let (mut a, mut b) = (
+        decoded(old.as_deref(), None)?,
+        decoded(new.as_deref(), None)?,
+    );
+    let guessed = |d: &Option<athena_editor::Decoded>| d.as_ref().map(|d| d.encoding);
+    match (guessed(&a), guessed(&b)) {
+        (Some(x), Some(y)) if x.is_fallback() && !y.is_fallback() => {
+            if let Some(d) = decoded(old.as_deref(), Some(y))?.filter(|d| d.round_trips) {
+                a = Some(d);
+            }
+        }
+        (Some(x), Some(y)) if y.is_fallback() && !x.is_fallback() => {
+            if let Some(d) = decoded(new.as_deref(), Some(x))?.filter(|d| d.round_trips) {
+                b = Some(d);
+            }
+        }
+        _ => {}
+    }
+    Ok((a, b))
+}
+
+/// The encoding hunks are written back in: the one both sides were read in, as long as each
+/// reads without loss, so a staged or reverted hunk changes no other bytes.
+fn write_encoding(sides: &[&Option<athena_editor::Decoded>]) -> Result<FileEncoding, String> {
+    let mut found: Option<FileEncoding> = None;
+    for side in sides.iter().filter_map(|s| s.as_ref()) {
+        if !side.round_trips {
+            return Err(format!(
+                "A version of this file isn't valid {}, so hunks can't be written back without \
+                 changing other bytes.",
+                side.encoding.name()
+            ));
+        }
+        match found {
+            Some(e) if e != side.encoding => {
+                return Err(format!(
+                    "The two versions are in different encodings ({} and {}), so hunks can't \
+                     be staged or reverted here.",
+                    e.name(),
+                    side.encoding.name()
+                ));
+            }
+            _ => found = Some(side.encoding),
+        }
+    }
+    Ok(found.unwrap_or_else(FileEncoding::utf8))
+}
+
+/// A hunk's text as the file's bytes; empty text is an empty (or deleted) file, without a BOM.
+pub(super) fn encoded(text: &str, encoding: Result<FileEncoding, String>) -> Result<Vec<u8>> {
+    let encoding = encoding.map_err(anyhow::Error::msg)?;
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    encoding.encode_text(text).map_err(|c| {
+        anyhow::anyhow!(
+            "{} has no \"{c}\" (U+{:04X}), so the change can't be written in it.",
+            encoding.name(),
+            c as u32
+        )
+    })
+}
+
 pub(super) fn read_file(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(b) => Ok(Some(b)),
@@ -178,6 +285,7 @@ struct Sides {
     new: String,
     /// A review of Claude's edits whose baseline was skipped, compared with the index instead.
     against_index: bool,
+    encoding: Result<FileEncoding, String>,
 }
 
 fn load(root: &Path, path: &Path, orig: Option<PathBuf>, base: &DiffBase) -> Result<Sides> {
@@ -244,20 +352,25 @@ fn load_with(
                 old: athena_editor::resolve_all(&both, athena_editor::Resolution::Current),
                 new: athena_editor::resolve_all(&both, athena_editor::Resolution::Incoming),
                 against_index: false,
+                encoding: Ok(FileEncoding::utf8()),
             });
         }
     };
+    let (old, new) = decoded_pair(old, new)?;
+    let encoding = write_encoding(&[&old, &new]);
+    let text = |side: Option<athena_editor::Decoded>| side.map(|d| d.text).unwrap_or_default();
     Ok(Sides {
-        old: text(old)?,
-        new: text(new)?,
+        old: text(old),
+        new: text(new),
         against_index,
+        encoding,
     })
 }
 
 /// Stages one hunk; staging the last hunk of a deleted file stages the deletion.
-fn stage_hunk(root: &Path, rel: &Path, expected: &str, contents: &str) -> Result<()> {
+fn stage_hunk(root: &Path, rel: &Path, expected: &[u8], contents: &[u8]) -> Result<()> {
     let deleted = contents.is_empty() && std::fs::symlink_metadata(root.join(rel)).is_err();
-    git::write_index(root, rel, expected, (!deleted).then_some(contents))
+    git::write_index_bytes(root, rel, expected, (!deleted).then_some(contents))
 }
 
 /// Unstages one hunk; unstaging the last hunk of a newly added file takes it out of the index.
@@ -265,11 +378,11 @@ fn unstage_hunk(
     root: &Path,
     rel: &Path,
     head_rel: &Path,
-    expected: &str,
-    contents: &str,
+    expected: &[u8],
+    contents: &[u8],
 ) -> Result<()> {
     let added = contents.is_empty() && git::show(root, Rev::Head, head_rel)?.is_none();
-    git::write_index(root, rel, expected, (!added).then_some(contents))
+    git::write_index_bytes(root, rel, expected, (!added).then_some(contents))
 }
 
 /// Where revert and discard keep the version they replace, one folder per action.
@@ -355,6 +468,7 @@ impl Shell {
                 .background_executor()
                 .spawn(async move { load(&task_root, &path, orig, &task_base) })
                 .await;
+            let encoding = loaded.as_ref().ok().map(|s| s.encoding.clone());
             let view = weak.upgrade();
             if let Some(view) = &view {
                 let _ = view.update(cx, |v, cx| match loaded {
@@ -373,6 +487,18 @@ impl Shell {
                 });
             }
             let _ = this.update(cx, |this, cx| {
+                if let Some(encoding) = encoding {
+                    let live: Vec<EntityId> = this
+                        .items
+                        .values()
+                        .filter_map(|v| match v {
+                            ItemView::Diff(d) => Some(d.entity_id()),
+                            _ => None,
+                        })
+                        .collect();
+                    this.review.encodings.retain(|id, _| live.contains(id));
+                    this.review.encodings.insert(id, encoding);
+                }
                 if this.review.loads.finish(id)
                     && let Some(view) = view
                 {
@@ -439,14 +565,32 @@ impl Shell {
         let head_rel = self
             .git_orig_path(root, &path)
             .unwrap_or_else(|| rel.clone());
+        let encoding = self
+            .review
+            .encodings
+            .get(&view.entity_id())
+            .cloned()
+            .unwrap_or_else(|| Ok(FileEncoding::utf8()));
+        let bytes = move |expected: &str, contents: &str| -> Result<(Vec<u8>, Vec<u8>)> {
+            Ok((
+                encoded(expected, encoding.clone())?,
+                encoded(contents, encoding.clone())?,
+            ))
+        };
         let (failure, job): (&str, Box<dyn FnOnce() -> Result<()> + Send>) = match event {
             DiffEvent::Stage { contents, expected } => (
                 "Could not stage the change",
-                Box::new(move || stage_hunk(&dir, &rel, &expected, &contents)),
+                Box::new(move || {
+                    let (expected, contents) = bytes(&expected, &contents)?;
+                    stage_hunk(&dir, &rel, &expected, &contents)
+                }),
             ),
             DiffEvent::Unstage { contents, expected } => (
                 "Could not unstage the change",
-                Box::new(move || unstage_hunk(&dir, &rel, &head_rel, &expected, &contents)),
+                Box::new(move || {
+                    let (expected, contents) = bytes(&expected, &contents)?;
+                    unstage_hunk(&dir, &rel, &head_rel, &expected, &contents)
+                }),
             ),
             DiffEvent::Revert { contents, expected } => {
                 // The index side was read without the file's filter, so it is not what belongs on disk.
@@ -457,7 +601,8 @@ impl Shell {
                         if from_index {
                             git::refuse_filtered(&dir, &rel)?;
                         }
-                        git::revert_file(&dir, &rel, &expected, &contents, &backup_dir()?)
+                        let (expected, contents) = bytes(&expected, &contents)?;
+                        git::revert_file_bytes(&dir, &rel, &expected, &contents, &backup_dir()?)
                     }),
                 )
             }
@@ -618,7 +763,7 @@ mod tests {
         let Sides { old, new, .. } =
             load(&dir, &dir.join("gone.txt"), None, &DiffBase::Index).unwrap();
         assert_eq!((old.as_str(), new.as_str()), ("a\nb\n", ""));
-        stage_hunk(&dir, Path::new("gone.txt"), &old, &new).unwrap();
+        stage_hunk(&dir, Path::new("gone.txt"), old.as_bytes(), new.as_bytes()).unwrap();
         assert_eq!(git_out(&["ls-files", "--", "gone.txt"]), "");
         assert_eq!(
             git_out(&["status", "--porcelain", "--", "gone.txt"]),
@@ -627,7 +772,7 @@ mod tests {
 
         // A file emptied on disk stays tracked, as an empty file.
         std::fs::write(dir.join("empty.txt"), "").unwrap();
-        stage_hunk(&dir, Path::new("empty.txt"), "x\n", "").unwrap();
+        stage_hunk(&dir, Path::new("empty.txt"), b"x\n", b"").unwrap();
         assert_eq!(
             git_out(&["status", "--porcelain", "--", "empty.txt"]),
             "M  empty.txt\n"
@@ -639,12 +784,125 @@ mod tests {
         let Sides { old, new, .. } =
             load(&dir, &dir.join("new.txt"), None, &DiffBase::Head).unwrap();
         assert_eq!((old.as_str(), new.as_str()), ("", "n\n"));
-        unstage_hunk(&dir, rel, rel, &new, &old).unwrap();
+        unstage_hunk(&dir, rel, rel, new.as_bytes(), old.as_bytes()).unwrap();
         assert_eq!(
             git_out(&["status", "--porcelain", "--", "new.txt"]),
             "?? new.txt\n"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A repository holding `files`, committed, in a fresh temp folder named for `name`.
+    fn repo(
+        name: &str,
+        files: &[(&str, Vec<u8>)],
+    ) -> (PathBuf, impl Fn(&[&str]) -> Vec<u8> + use<>) {
+        let dir = std::env::temp_dir().join(format!("athena-review-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let at = dir.clone();
+        let git_out = move |args: &[&str]| {
+            let out = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&at)
+                .args(["-c", "user.name=T", "-c", "user.email=t@x"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            out.stdout
+        };
+        for (name, bytes) in files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        git_out(&["init", "-q"]);
+        git_out(&["add", "-A"]);
+        git_out(&["commit", "-qm", "init"]);
+        (dir, git_out)
+    }
+
+    fn utf16le(text: &str) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xFE];
+        out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        out
+    }
+
+    #[test]
+    fn diffs_read_shift_jis_and_utf16_files_and_stage_hunks_in_their_encoding() {
+        if !git::available() {
+            return;
+        }
+        let shift_jis = FileEncoding::all()
+            .into_iter()
+            .find(|e| e.name() == "Shift JIS")
+            .unwrap();
+        let sjis = |t: &str| shift_jis.encode_text(t).unwrap();
+        let (dir, git_out) = repo(
+            "encodings",
+            &[
+                ("ja.txt", sjis("一行目\r\n二行目\r\n三行目\r\n")),
+                ("wide.txt", utf16le("one\ntwo\nthree\n")),
+            ],
+        );
+        std::fs::write(
+            dir.join("ja.txt"),
+            sjis("一行目\r\n二行目を変更\r\n三行目\r\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("wide.txt"), utf16le("one\nTWO\nthree\n")).unwrap();
+        for (name, old, new, enc) in [
+            ("ja.txt", "二行目\r\n", "二行目を変更\r\n", "Shift JIS"),
+            ("wide.txt", "two\n", "TWO\n", "UTF-16 LE"),
+        ] {
+            let sides = load(&dir, &dir.join(name), None, &DiffBase::Index).unwrap();
+            assert!(
+                sides.old.contains(old) && sides.new.contains(new),
+                "{name}: {sides:?}"
+            );
+            let encoding = sides.encoding.clone().unwrap();
+            assert_eq!(encoding.name(), enc);
+            // Staging the only hunk makes the index hold exactly the bytes on disk.
+            let expected = encoded(&sides.old, Ok(encoding)).unwrap();
+            let contents = encoded(&sides.new, Ok(encoding)).unwrap();
+            stage_hunk(&dir, Path::new(name), &expected, &contents).unwrap();
+            assert_eq!(
+                git_out(&["show", &format!(":{name}")]),
+                std::fs::read(dir.join(name)).unwrap()
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hunks_are_not_written_across_two_encodings() {
+        if !git::available() {
+            return;
+        }
+        let (dir, _) = repo("mixed", &[("f.txt", b"caf\xE9\n".to_vec())]);
+        std::fs::write(dir.join("f.txt"), "café\n").unwrap();
+        let sides = load(&dir, &dir.join("f.txt"), None, &DiffBase::Index).unwrap();
+        assert_eq!(
+            (sides.old.as_str(), sides.new.as_str()),
+            ("café\n", "café\n")
+        );
+        let err = encoded(&sides.new, sides.encoding).unwrap_err();
+        assert!(err.to_string().contains("different encodings"), "{err:#}");
+        assert_eq!(
+            encoded("", Ok(FileEncoding::all()[2])).unwrap(),
+            b"",
+            "no BOM alone"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_peek_reads_the_index_as_the_editor_reads_the_file() {
+        let wide = FileEncoding::all()[2];
+        assert_eq!(text_in(Some(utf16le("a\nb\n")), wide).unwrap(), "a\nb\n");
+        let err = text_in(Some(b"caf\xE9".to_vec()), FileEncoding::utf8()).unwrap_err();
+        assert!(err.to_string().contains("isn't valid UTF-8"), "{err:#}");
     }
 
     #[test]
@@ -682,6 +940,7 @@ mod tests {
                 old: String::new(),
                 new: "now a file\n".into(),
                 against_index: true,
+                encoding: Ok(FileEncoding::utf8()),
             }
         );
         let other = DiffBase::Snapshot {

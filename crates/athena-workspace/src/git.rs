@@ -397,7 +397,7 @@ fn without_filters(cmd: &mut Command, drivers: &[String]) {
     cmd.env("GIT_CONFIG_COUNT", n.to_string());
 }
 
-fn run(cmd: Command, stdin: Option<&str>) -> Result<Vec<u8>> {
+fn run(cmd: Command, stdin: Option<&[u8]>) -> Result<Vec<u8>> {
     run_within(cmd, stdin, TIMEOUT)
 }
 
@@ -515,13 +515,13 @@ impl Drop for CancelOnDrop {
     }
 }
 
-fn run_within(cmd: Command, stdin: Option<&str>, limit: Duration) -> Result<Vec<u8>> {
+fn run_within(cmd: Command, stdin: Option<&[u8]>, limit: Duration) -> Result<Vec<u8>> {
     run_until(cmd, stdin, limit, &Cancel::default())
 }
 
 fn run_until(
     cmd: Command,
-    stdin: Option<&str>,
+    stdin: Option<&[u8]>,
     limit: Duration,
     cancel: &Cancel,
 ) -> Result<Vec<u8>> {
@@ -550,7 +550,7 @@ pub(crate) struct Output {
 /// Runs `cmd` to its end within `limit`, killing it and its session on time out or cancel.
 pub(crate) fn run_output(
     mut cmd: Command,
-    stdin: Option<&str>,
+    stdin: Option<&[u8]>,
     limit: Duration,
     cancel: &Cancel,
 ) -> Result<Output> {
@@ -569,7 +569,7 @@ pub(crate) fn run_output(
     if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
         let text = text.to_owned();
         // A failed write shows up as git's own error below; a git that never reads hits the limit.
-        std::thread::spawn(move || pipe.write_all(text.as_bytes()));
+        std::thread::spawn(move || pipe.write_all(&text));
     }
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         let (tx, rx) = mpsc::channel();
@@ -695,7 +695,7 @@ pub fn blame_line(
     root: &Path,
     path: &Path,
     line: usize,
-    contents: Option<&str>,
+    contents: Option<&[u8]>,
     cancel: &Cancel,
 ) -> Result<Option<Blame>> {
     let rel = path
@@ -803,7 +803,7 @@ pub fn parse_file_blame(out: &str) -> FileBlame {
 pub fn blame_file(
     root: &Path,
     path: &Path,
-    contents: Option<&str>,
+    contents: Option<&[u8]>,
     cancel: &Cancel,
 ) -> Result<FileBlame> {
     let rel = path
@@ -1023,9 +1023,19 @@ pub fn refuse_filtered(root: &Path, rel: &Path) -> Result<()> {
 /// Puts `contents` in the index as `rel`, or takes `rel` out of it for `None`, leaving the
 /// worktree alone; staging one hunk does this. Refuses when the index no longer holds `expected`.
 pub fn write_index(root: &Path, rel: &Path, expected: &str, contents: Option<&str>) -> Result<()> {
+    write_index_bytes(root, rel, expected.as_bytes(), contents.map(str::as_bytes))
+}
+
+/// [`write_index`] for text already encoded as the file's bytes.
+pub fn write_index_bytes(
+    root: &Path,
+    rel: &Path,
+    expected: &[u8],
+    contents: Option<&[u8]>,
+) -> Result<()> {
     refuse_filtered(root, rel)?;
     let now = show(root, Rev::Index, rel)?.unwrap_or_default();
-    if now != expected.as_bytes() {
+    if now != expected {
         bail!(
             "{} changed in the index since the diff was shown",
             rel.display()
@@ -1077,7 +1087,7 @@ pub fn commit(root: &Path, message: &str, amend: bool) -> Result<()> {
     if amend {
         cmd.arg("--amend");
     }
-    run_within(cmd, Some(message), COMMIT_TIMEOUT).map(drop)
+    run_within(cmd, Some(message.as_bytes()), COMMIT_TIMEOUT).map(drop)
 }
 
 /// The last commit's id and full message, for the amend box.
@@ -1117,9 +1127,20 @@ pub fn revert_file(
     contents: &str,
     backup: &Path,
 ) -> Result<()> {
+    revert_file_bytes(root, rel, expected.as_bytes(), contents.as_bytes(), backup)
+}
+
+/// [`revert_file`] for text already encoded as the file's bytes.
+pub fn revert_file_bytes(
+    root: &Path,
+    rel: &Path,
+    expected: &[u8],
+    contents: &[u8],
+    backup: &Path,
+) -> Result<()> {
     let path = root.join(rel);
     let now = std::fs::read(&path).unwrap_or_default();
-    if now != expected.as_bytes() {
+    if now != expected {
         bail!("{} changed since the diff was shown", rel.display());
     }
     keep_copy(root, rel, backup)?;
@@ -1916,7 +1937,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(changed.uncommitted);
-        let unsaved = blame_line(&sub, &sub.join("f.txt"), 0, Some("z\nB\n"), &none)
+        let unsaved = blame_line(&sub, &sub.join("f.txt"), 0, Some(b"z\nB\n"), &none)
             .unwrap()
             .unwrap();
         assert!(unsaved.uncommitted);
@@ -2195,7 +2216,7 @@ mod tests {
         assert!(!diff_hunks(&dir, &dir.join("g.dat")).unwrap().is_empty());
         blame_line(&dir, &f, 0, None, &none).unwrap().unwrap();
         blame_file(&dir, &f, None, &none).unwrap();
-        blame_file(&dir, &f, Some("a\nb\nc\n"), &none).unwrap();
+        blame_file(&dir, &f, Some(b"a\nb\nc\n"), &none).unwrap();
         let head = git_out(&dir, &["rev-parse", "HEAD"]).trim().to_string();
         assert_eq!(show_at(&dir, &head, "f.txt").unwrap().unwrap(), b"a\nb\n");
         assert_eq!(file_log(&dir, &f, &none).unwrap().len(), 1);
@@ -2748,7 +2769,7 @@ mod tests {
         );
         assert!(show_at(&sub, "--output=x", "sub/old.txt").is_err());
 
-        let blame = blame_file(&sub, &sub.join("new.txt"), Some("a\nB\nc\nd\n"), &none).unwrap();
+        let blame = blame_file(&sub, &sub.join("new.txt"), Some(b"a\nB\nc\nd\n"), &none).unwrap();
         assert_eq!(blame.lines.len(), 4);
         let at = |line: usize| &blame.commits[blame.lines[line]];
         assert_eq!(

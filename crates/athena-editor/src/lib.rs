@@ -38,7 +38,7 @@ pub use buffer::{
 };
 pub use completion::{Completion, Resolved, ServerEdit};
 pub use diff_view::{DiffEvent, DiffView, HunkActions};
-pub use encoding::FileEncoding;
+pub use encoding::{Decoded, FileEncoding, decode as decode_text};
 pub use hover::HoverBlock;
 pub use image::{ImageView, is_image_path};
 pub use large::{LargeFileView, is_large_file};

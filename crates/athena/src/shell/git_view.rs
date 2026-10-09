@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use athena_editor::{EditorView, GutterMark};
+use athena_editor::{EditorView, GutterMark, diff};
 use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput, Theme, Tooltip};
 use athena_workspace::DiffBase;
 use athena_workspace::git::{self, Decorations, Entry, FileStatus, Hunk};
@@ -188,6 +188,41 @@ pub(super) fn status_badge(
             .child(status.letter())
             .into_any_element(),
     )
+}
+
+/// Hunks for a UTF-16 file, which git diffs as binary, from its index and worktree texts;
+/// `None` for any other file, which git diffs line by line as it is.
+fn utf16_hunks(root: &Path, path: &Path) -> Option<Vec<Hunk>> {
+    let disk = std::fs::read(path).ok()?;
+    if disk.len() > super::review::MAX_DIFF_BYTES {
+        return None;
+    }
+    let now = athena_editor::decode_text(&disk, None).filter(|d| d.encoding.is_utf16())?;
+    let rel = path.strip_prefix(root).ok()?;
+    let index = git::show(root, git::Rev::Index, rel).ok()??;
+    let before = athena_editor::decode_text(&index, Some(now.encoding))?;
+    Some(line_hunks(&before.text, &now.text))
+}
+
+/// The gutter's hunks between two texts, numbered as `git diff -U0` numbers them.
+fn line_hunks(old: &str, new: &str) -> Vec<Hunk> {
+    let (old, new) = (diff::lines(old), diff::lines(new));
+    diff::diff_lines(&old, &new)
+        .into_iter()
+        .map(|c| match (c.old.is_empty(), c.new.is_empty()) {
+            (_, true) => Hunk::Removed {
+                before: c.new.start,
+            },
+            (true, false) => Hunk::Added {
+                start: c.new.start,
+                len: c.new.len(),
+            },
+            (false, false) => Hunk::Modified {
+                start: c.new.start,
+                len: c.new.len(),
+            },
+        })
+        .collect()
 }
 
 fn marks_from(hunks: Vec<Hunk>) -> Vec<GutterMark> {
@@ -742,9 +777,9 @@ impl Shell {
                     stale
                         .into_iter()
                         .map(|(path, git_path, sig)| {
-                            let marks = git::diff_hunks(&task_root, &git_path)
-                                .map(marks_from)
-                                .unwrap_or_default();
+                            let hunks = utf16_hunks(&task_root, &git_path)
+                                .map_or_else(|| git::diff_hunks(&task_root, &git_path), Ok);
+                            let marks = hunks.map(marks_from).unwrap_or_default();
                             (path, sig, marks)
                         })
                         .collect::<Vec<_>>()
@@ -845,10 +880,9 @@ impl Shell {
             let _stop = cancel.on_drop();
             cx.background_executor().timer(BLAME_DELAY).await;
             // Read after the pause, so typing does not copy the whole buffer per keystroke.
-            let Ok((path, contents)) = weak.read_with(cx, |e, _| {
-                let contents = if e.is_dirty() { e.text() } else { None };
-                (under_root(&root, e.path()), contents)
-            }) else {
+            let Ok((path, contents)) =
+                weak.read_with(cx, |e, _| (under_root(&root, e.path()), e.dirty_bytes()))
+            else {
                 return;
             };
             let found =
@@ -1636,6 +1670,78 @@ pub(super) fn row_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_process_hunks_number_lines_as_git_does() {
+        let old = "a\nb\nc\nd\n";
+        let new = "a\nc\nD\nd\ne\n";
+        assert_eq!(
+            line_hunks(old, new),
+            parse_hunks_of(old, new),
+            "matches git diff -U0"
+        );
+    }
+
+    /// What `git diff -U0` reports for two texts, through the parser the gutter uses.
+    fn parse_hunks_of(old: &str, new: &str) -> Vec<Hunk> {
+        let dir = std::env::temp_dir().join(format!("athena-hunks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), old).unwrap();
+        std::fs::write(dir.join("b"), new).unwrap();
+        let out = std::process::Command::new("/usr/bin/git")
+            .current_dir(&dir)
+            .args(["diff", "--no-index", "-U0", "a", "b"])
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        git::parse_hunks(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    #[test]
+    fn a_utf16_file_gets_gutter_marks_though_git_calls_it_binary() {
+        if !git::available() {
+            return;
+        }
+        let utf16 = |t: &str| {
+            let mut out = vec![0xFF, 0xFE];
+            out.extend(t.encode_utf16().flat_map(u16::to_le_bytes));
+            out
+        };
+        let dir = std::env::temp_dir().join(format!("athena-utf16-gutter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let file = dir.join("w.txt");
+        std::fs::write(&file, utf16("one\ntwo\nthree\n")).unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "w.txt"]);
+        std::fs::write(&file, utf16("one\nTWO\nthree\nfour\n")).unwrap();
+        assert_eq!(
+            utf16_hunks(&dir, &file).unwrap(),
+            [
+                Hunk::Modified { start: 1, len: 1 },
+                Hunk::Added { start: 3, len: 1 }
+            ]
+        );
+        std::fs::write(dir.join("plain.txt"), "x\n").unwrap();
+        assert_eq!(
+            utf16_hunks(&dir, &dir.join("plain.txt")),
+            None,
+            "git diffs it"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_second_sync_or_stash_is_refused_while_one_runs() {

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use athena_editor::{BlameCommit, EditorEvent, EditorView, GitGutterEvent, GutterBlame};
+use athena_editor::{
+    BlameCommit, EditorEvent, EditorView, FileEncoding, GitGutterEvent, GutterBlame,
+};
 use athena_workspace::DiffBase;
 use athena_workspace::git::{self, FileBlame, Rev};
 use gpui::{Context, Entity, EntityId, Subscription, Task};
@@ -110,6 +112,14 @@ fn commit_diff(blame: &FileBlame, sha: &str) -> Option<DiffBase> {
     })
 }
 
+/// The encoding the editor reads and writes its file in, which the index's copy shares.
+fn editor_encoding(editor: &Entity<EditorView>, cx: &gpui::App) -> FileEncoding {
+    editor
+        .read(cx)
+        .status()
+        .map_or_else(FileEncoding::utf8, |s| s.encoding)
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -211,10 +221,9 @@ impl Shell {
             if !matches!(started, Ok(Some(()))) {
                 return;
             }
-            let Ok((path, contents)) = weak.read_with(cx, |e, _| {
-                let contents = if e.is_dirty() { e.text() } else { None };
-                (under_root(&root, e.path()), contents)
-            }) else {
+            let Ok((path, contents)) =
+                weak.read_with(cx, |e, _| (under_root(&root, e.path()), e.dirty_bytes()))
+            else {
                 return;
             };
             let name = file_label(&path);
@@ -307,13 +316,14 @@ impl Shell {
             return;
         };
         let weak = editor.downgrade();
+        let encoding = editor_encoding(editor, cx);
         cx.spawn(async move |this, cx| {
             let base = cx
                 .background_executor()
                 .spawn(async move {
                     // The peek's Revert writes this text into the buffer.
                     git::refuse_filtered(&root, &rel)?;
-                    super::review::text(git::show(&root, Rev::Index, &rel)?)
+                    super::review::text_in(git::show(&root, Rev::Index, &rel)?, encoding)
                 })
                 .await;
             match base {
@@ -359,10 +369,15 @@ impl Shell {
         let Ok(rel) = path.strip_prefix(&root).map(Path::to_path_buf) else {
             return;
         };
+        let encoding = editor_encoding(editor, cx);
         cx.spawn(async move |this, cx| {
             let done = cx
                 .background_executor()
-                .spawn(async move { git::write_index(&root, &rel, &expected, Some(&contents)) })
+                .spawn(async move {
+                    let expected = super::review::encoded(&expected, Ok(encoding))?;
+                    let contents = super::review::encoded(&contents, Ok(encoding))?;
+                    git::write_index_bytes(&root, &rel, &expected, Some(&contents))
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Err(err) = done {

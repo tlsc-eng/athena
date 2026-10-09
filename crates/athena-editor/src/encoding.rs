@@ -89,7 +89,18 @@ impl FileEncoding {
         }
     }
 
-    fn is_utf16(&self) -> bool {
+    /// `text` in this encoding, or the first character it has no bytes for.
+    pub fn encode_text(&self, text: &str) -> Result<Vec<u8>, char> {
+        encode_chunks(std::iter::once(text), *self)
+    }
+
+    /// Whether detection settles on this encoding only because nothing else fits.
+    pub fn is_fallback(&self) -> bool {
+        self.codec == encoding_rs::WINDOWS_1252
+    }
+
+    /// Whether files in this encoding are UTF-16, whose bytes git takes for binary data.
+    pub fn is_utf16(&self) -> bool {
         self.codec == encoding_rs::UTF_16LE || self.codec == encoding_rs::UTF_16BE
     }
 
@@ -104,7 +115,7 @@ impl FileEncoding {
 }
 
 /// A file's text and the encoding it was read in.
-pub(crate) struct Decoded {
+pub struct Decoded {
     pub text: String,
     pub encoding: FileEncoding,
     /// Whether writing the text back in `encoding` gives exactly the bytes it was read from.
@@ -112,7 +123,7 @@ pub(crate) struct Decoded {
 }
 
 /// Reads `bytes` as `forced`, or else as the encoding they look like; `None` for binary data.
-pub(crate) fn decode(bytes: &[u8], forced: Option<FileEncoding>) -> Option<Decoded> {
+pub fn decode(bytes: &[u8], forced: Option<FileEncoding>) -> Option<Decoded> {
     let bom = Encoding::for_bom(bytes);
     let encoding = match forced {
         Some(f) => FileEncoding {
