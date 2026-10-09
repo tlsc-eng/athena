@@ -70,6 +70,17 @@ pub enum DiffBase {
     SearchReplace,
     /// A conflicted file's current changes against its incoming ones, from its conflict markers.
     Conflict,
+    /// The file as commit `rev` changed it: `old` in its first parent against `new` at `rev`,
+    /// both named from the repository's top; `old` is `None` when the commit added the file.
+    Commit {
+        rev: String,
+        old: Option<String>,
+        new: String,
+    },
+    /// The file as commit `rev` left it (`at`, from the repository's top) against the file on disk.
+    Revision { rev: String, at: String },
+    /// Another file against this one, as Compare with Selected opens them.
+    Files { other: PathBuf },
 }
 
 impl ItemKind {
@@ -881,6 +892,28 @@ mod tests {
                 path: "/x/README.md".into(),
             },
         );
+        for base in [
+            DiffBase::Commit {
+                rev: "abc1234".into(),
+                old: Some("src/old.go".into()),
+                new: "src/main.go".into(),
+            },
+            DiffBase::Revision {
+                rev: "abc1234".into(),
+                at: "src/main.go".into(),
+            },
+            DiffBase::Files {
+                other: "/x/other.go".into(),
+            },
+        ] {
+            l.add_item(
+                l.focused,
+                ItemKind::Diff {
+                    path: "/x/main.go".into(),
+                    base,
+                },
+            );
+        }
         let json = serde_json::to_string(&l).unwrap();
         assert_eq!(serde_json::from_str::<Layout>(&json).unwrap(), l);
     }

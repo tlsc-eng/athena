@@ -558,6 +558,210 @@ pub fn blame_line(
     Ok(parse_blame(&String::from_utf8_lossy(&run(cmd, contents)?)))
 }
 
+/// A commit that last changed some lines of a blamed file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlameCommit {
+    pub sha: String,
+    pub author: String,
+    /// Seconds since the epoch.
+    pub time: i64,
+    pub summary: String,
+    pub uncommitted: bool,
+    /// The file's path at this commit, from the repository's top.
+    pub path: String,
+    /// The file's path in the parent the lines came from; `None` for a root or boundary commit.
+    pub previous: Option<String>,
+}
+
+/// Whole-file blame: the commits, and which of them each zero-based line came from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FileBlame {
+    pub commits: Vec<BlameCommit>,
+    pub lines: Vec<usize>,
+}
+
+/// Parses `git blame --porcelain` for a whole file; a repeated commit carries only its header.
+pub fn parse_file_blame(out: &str) -> FileBlame {
+    let mut blame = FileBlame::default();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut current: Option<usize> = None;
+    for line in out.lines() {
+        if line.starts_with('\t') {
+            if let Some(c) = current.take() {
+                blame.lines.push(c);
+            }
+            continue;
+        }
+        if current.is_none() {
+            let mut fields = line.split(' ');
+            let sha = fields.next().unwrap_or_default();
+            let numbered = fields.nth(1).is_some_and(|n| n.parse::<usize>().is_ok());
+            if sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) || !numbered {
+                continue;
+            }
+            let next = blame.commits.len();
+            let i = *index.entry(sha.to_string()).or_insert(next);
+            if i == next {
+                blame.commits.push(BlameCommit {
+                    sha: sha.to_string(),
+                    author: String::new(),
+                    time: 0,
+                    summary: String::new(),
+                    uncommitted: sha.bytes().all(|b| b == b'0'),
+                    path: String::new(),
+                    previous: None,
+                });
+            }
+            current = Some(i);
+            continue;
+        }
+        let Some(c) = current.and_then(|i| blame.commits.get_mut(i)) else {
+            continue;
+        };
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        match key {
+            "author" => c.author = value.to_string(),
+            "author-time" => c.time = value.parse().unwrap_or(0),
+            "summary" => c.summary = value.to_string(),
+            "filename" => c.path = value.to_string(),
+            "previous" => c.previous = value.split_once(' ').map(|(_, p)| p.to_string()),
+            _ => {}
+        }
+    }
+    blame
+}
+
+/// Blames every line of a file; `contents` blames unsaved text instead of the file on disk.
+pub fn blame_file(root: &Path, path: &Path, contents: Option<&str>) -> Result<FileBlame> {
+    let rel = path
+        .strip_prefix(root)
+        .context("file is outside the project")?;
+    let mut cmd = git(root);
+    cmd.args(["blame", "--porcelain"]);
+    if contents.is_some() {
+        cmd.args(["--contents", "-"]);
+    }
+    cmd.arg("--").arg(rel);
+    Ok(parse_file_blame(&String::from_utf8_lossy(&run(
+        cmd, contents,
+    )?)))
+}
+
+/// One commit in a file's history, newest first in [`file_log`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogEntry {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    /// Seconds since the epoch.
+    pub time: i64,
+    pub subject: String,
+    /// The file's path at this commit, from the repository's top.
+    pub path: String,
+    /// The file's path in the first parent; `None` when this commit added it.
+    pub old_path: Option<String>,
+}
+
+/// The most commits the timeline lists.
+pub const LOG_LIMIT: usize = 500;
+const LOG_FORMAT: &str = "--format=%x1e%H%x00%P%x00%an%x00%at%x00%s";
+
+/// Parses `git log -z --name-status` written with `LOG_FORMAT`; `path` is the file's current
+/// path from the repository's top, followed back through renames.
+pub fn parse_log(out: &[u8], path: &str) -> Vec<LogEntry> {
+    let text = String::from_utf8_lossy(out);
+    let mut tracking = path.to_string();
+    let mut entries = Vec::new();
+    for record in text.split('\x1e').filter(|r| !r.trim().is_empty()) {
+        let mut fields = record.split('\0');
+        let (Some(sha), Some(parents), Some(author), Some(time), Some(subject)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        if sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let mut status = fields.map(|f| f.trim_start_matches('\n'));
+        let mut name = || status.next().unwrap_or_default().to_string();
+        // A merge has no name-status of its own; the file keeps the name it has after it.
+        let (now, before) = match name().as_str() {
+            s if s.starts_with('R') || s.starts_with('C') => {
+                let old = name();
+                (name(), Some(old))
+            }
+            "A" => (name(), None),
+            "" => (tracking.clone(), Some(tracking.clone())),
+            _ => {
+                let p = name();
+                (p.clone(), Some(p))
+            }
+        };
+        let parents: Vec<String> = parents
+            .split(' ')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
+        let old_path = before.filter(|_| !parents.is_empty());
+        if let Some(old) = &old_path {
+            tracking = old.clone();
+        }
+        entries.push(LogEntry {
+            sha: sha.to_string(),
+            parents,
+            author: author.to_string(),
+            time: time.parse().unwrap_or(0),
+            subject: subject.to_string(),
+            path: now,
+            old_path,
+        });
+    }
+    entries
+}
+
+/// The commits that changed a file, newest first, following it through renames.
+pub fn file_log(root: &Path, path: &Path) -> Result<Vec<LogEntry>> {
+    let rel = path
+        .strip_prefix(root)
+        .context("file is outside the project")?;
+    let top = format!("{}{}", prefix(root)?, rel.display());
+    let mut cmd = git(root);
+    cmd.args(["log", "--follow", "-z", "--name-status", "-M", LOG_FORMAT])
+        .arg(format!("--max-count={LOG_LIMIT}"))
+        .arg("--")
+        .arg(rel);
+    Ok(parse_log(&run(cmd, None)?, &top))
+}
+
+/// Whether `rev` is a commit id, optionally naming its first parent with a trailing `^`.
+fn is_commit_id(rev: &str) -> bool {
+    let id = rev.strip_suffix('^').unwrap_or(rev);
+    (4..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A file's contents at commit `rev` (`<sha>` or `<sha>^`) with `top` named from the
+/// repository's top, as checkout would write them; `None` when the commit has no such file.
+pub fn show_at(root: &Path, rev: &str, top: &str) -> Result<Option<Vec<u8>>> {
+    if !is_commit_id(rev) {
+        bail!("{rev} is not a commit id");
+    }
+    let spec = format!("{rev}:{top}");
+    let mut exists = git(root);
+    exists.args(["cat-file", "-e", &spec]);
+    match run(exists, None) {
+        Ok(_) => {}
+        Err(e) if e.is::<TimedOut>() => return Err(e),
+        Err(_) => return Ok(None),
+    }
+    let mut cmd = git(root);
+    cmd.args(["cat-file", "--filters", &spec]);
+    run(cmd, None).map(Some)
+}
+
 /// Commands that rewrite the index or worktree can take minutes on a big tree, and a kill
 /// halfway leaves `index.lock` behind.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -1873,5 +2077,104 @@ mod tests {
         assert_eq!(list[1].name, "origin/dev");
         assert!(list[1].remote);
         assert_eq!(list[1].subject, "Dev work");
+    }
+
+    #[test]
+    fn log_records_follow_renames_back_and_keep_non_ascii_authors() {
+        let out = "\x1eaaaaaaa1\0bbbbbbb2 ccccccc3\0Zoë\x001700000000\0Merge branch 'x'\0\
+                   \x1ebbbbbbb2\0ddddddd4\0Ann\x001600000000\0Edit\0\nM\0src/new.rs\0\
+                   \x1eddddddd4\0eeeeeee5\0Ann\x001500000000\0Move\0\nR097\0src/old.rs\0src/new.rs\0\
+                   \x1eeeeeeee5\0\0李\x001400000000\0Start\0\nA\0src/old.rs\0";
+        let log = parse_log(out.as_bytes(), "src/new.rs");
+        assert_eq!(log.len(), 4);
+        assert_eq!(log[0].author, "Zoë");
+        assert_eq!(log[0].parents.len(), 2);
+        assert_eq!(
+            (log[0].path.as_str(), log[0].old_path.as_deref()),
+            ("src/new.rs", Some("src/new.rs")),
+            "a merge keeps the name the file has after it"
+        );
+        assert_eq!(log[1].subject, "Edit");
+        assert_eq!(
+            (log[2].path.as_str(), log[2].old_path.as_deref()),
+            ("src/new.rs", Some("src/old.rs"))
+        );
+        assert_eq!(
+            (log[3].path.as_str(), log[3].old_path.as_deref()),
+            ("src/old.rs", None)
+        );
+        assert_eq!((log[3].author.as_str(), log[3].time), ("李", 1_400_000_000));
+        assert!(parse_log(b"\x1enot-a-sha\0\0a\x001\0s\0", "f").is_empty());
+    }
+
+    #[test]
+    fn whole_file_blame_shares_commits_between_their_lines() {
+        let out = "1111111111111111111111111111111111111111 1 1 2\n\
+                   author Zoë Ünal\nauthor-time 1700000000\nsummary Fix\n\
+                   previous 2222222222222222222222222222222222222222 old.rs\nfilename new.rs\n\ta\n\
+                   1111111111111111111111111111111111111111 2 2\n\tb\n\
+                   3333333333333333333333333333333333333333 1 3 1\n\
+                   author Ann\nauthor-time 1600000000\nsummary Start\nboundary\nfilename old.rs\n\tc\n\
+                   0000000000000000000000000000000000000000 4 4 1\n\
+                   author Not Committed Yet\nauthor-time 1800000000\nsummary Version\nfilename new.rs\n\td\n\
+                   1111111111111111111111111111111111111111 3 5 1\nfilename new.rs\n\te\n";
+        let blame = parse_file_blame(out);
+        assert_eq!(blame.lines, vec![0, 0, 1, 2, 0]);
+        let fix = &blame.commits[0];
+        assert_eq!(fix.author, "Zoë Ünal");
+        assert_eq!(
+            (fix.path.as_str(), fix.previous.as_deref()),
+            ("new.rs", Some("old.rs"))
+        );
+        assert_eq!(blame.commits[1].previous, None);
+        assert!(blame.commits[2].uncommitted && !fix.uncommitted);
+    }
+
+    #[test]
+    fn history_blame_and_old_versions_come_from_the_repository_top() {
+        if !available() {
+            eprintln!("git is not installed; skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("athena-git-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let sub = dir.join("sub");
+        std::fs::write(sub.join("old.txt"), "a\nb\n").unwrap();
+        repo_git(&dir, &["init", "-q"]);
+        repo_git(&dir, &["add", "-A"]);
+        repo_git(&dir, &["commit", "-qm", "first"]);
+        repo_git(&dir, &["mv", "sub/old.txt", "sub/new.txt"]);
+        repo_git(&dir, &["commit", "-qm", "rename"]);
+        std::fs::write(sub.join("new.txt"), "a\nB\nc\n").unwrap();
+        repo_git(&dir, &["commit", "-qam", "edit"]);
+
+        let log = file_log(&sub, &sub.join("new.txt")).unwrap();
+        let subjects: Vec<_> = log.iter().map(|e| e.subject.as_str()).collect();
+        assert_eq!(subjects, ["edit", "rename", "first"]);
+        assert_eq!(log[1].old_path.as_deref(), Some("sub/old.txt"));
+        assert_eq!(log[2].path, "sub/old.txt");
+        let parent = format!("{}^", log[0].sha);
+        assert_eq!(
+            show_at(&sub, &parent, &log[0].old_path.clone().unwrap()).unwrap(),
+            Some(b"a\nb\n".to_vec())
+        );
+        assert_eq!(
+            show_at(&sub, &format!("{}^", log[2].sha), "sub/old.txt").unwrap(),
+            None
+        );
+        assert!(show_at(&sub, "--output=x", "sub/old.txt").is_err());
+
+        let blame = blame_file(&sub, &sub.join("new.txt"), Some("a\nB\nc\nd\n")).unwrap();
+        assert_eq!(blame.lines.len(), 4);
+        let at = |line: usize| &blame.commits[blame.lines[line]];
+        assert_eq!(
+            (at(0).summary.as_str(), at(0).path.as_str()),
+            ("first", "sub/old.txt")
+        );
+        assert_eq!(at(1).summary, "edit");
+        assert!(at(3).uncommitted);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
