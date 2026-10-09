@@ -498,6 +498,7 @@ pub struct EditorView {
     pub(crate) wrap_language: Option<bool>,
     pub(crate) merge: crate::merge_conflicts::MergeCache,
     pub(crate) run_marks: Vec<crate::run_marks::RunMark>,
+    pub(crate) coverage: Option<std::sync::Arc<crate::run_marks::Coverage>>,
     pub(crate) file_blame: crate::blame::FileBlame,
     pub(crate) peek: Option<crate::peek::Peek>,
 }
@@ -592,6 +593,7 @@ impl EditorView {
             wrap_language: None,
             merge: Default::default(),
             run_marks: Vec::new(),
+            coverage: None,
             file_blame: Default::default(),
             peek: None,
         }

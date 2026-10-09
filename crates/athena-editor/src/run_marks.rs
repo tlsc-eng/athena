@@ -1,6 +1,7 @@
 //! Tests found in a file, and the gutter marks that run them and show how they did.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::{Action, Context, Pixels, Point, Window, px};
 use tree_sitter::{Node, Parser};
@@ -37,6 +38,9 @@ pub enum RunState {
     Failed,
     Skipped,
 }
+
+/// Zero-based lines a coverage run measured, and whether each one ran.
+pub type Coverage = std::collections::BTreeMap<usize, bool>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunMark {
@@ -389,6 +393,22 @@ impl EditorView {
             self.run_marks = marks;
             cx.notify();
         }
+    }
+
+    /// Covered and uncovered line tints for the gutter; `None` clears them.
+    pub fn set_coverage(&mut self, coverage: Option<Arc<Coverage>>, cx: &mut Context<Self>) {
+        let same = match (&self.coverage, &coverage) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        if !same {
+            self.coverage = coverage;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn coverage_at(&self, line: usize) -> Option<bool> {
+        self.coverage.as_ref()?.get(&line).copied()
     }
 
     pub(crate) fn run_mark(&self, line: usize) -> Option<RunState> {

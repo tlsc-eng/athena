@@ -45,7 +45,7 @@ pub use merge_conflicts::{
     resolve_all,
 };
 pub use peek::{ShowNextChange, ShowPreviousChange};
-pub use run_marks::{RunMark, RunState, RunTestAt, TestSymbol, find_tests, is_test_file};
+pub use run_marks::{Coverage, RunMark, RunState, RunTestAt, TestSymbol, find_tests, is_test_file};
 pub use save::{SaveSettings, Tidy, resolve_tidy};
 pub use signature::Signature;
 pub use syntax::{Lang, Token};

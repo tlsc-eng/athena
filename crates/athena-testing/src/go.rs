@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -19,6 +19,15 @@ impl GoModule {
             Some(rest) => self.root.join(rest.trim_start_matches('/')),
             None => self.root.clone(),
         }
+    }
+
+    /// The folder of the package `import` when it belongs to this module.
+    pub fn package_dir(&self, import: &str) -> Option<PathBuf> {
+        let rest = import.strip_prefix(&self.path)?;
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return None;
+        }
+        Some(self.root.join(rest.trim_start_matches('/')))
     }
 
     /// The `./sub/dir` that names the package in `dir` to `go test`, run from the module root.
@@ -85,6 +94,55 @@ pub fn go_job(module: &GoModule, packages: &[String], run: Option<String>) -> Jo
         args,
         report: None,
     }
+}
+
+/// Also has `go test` write a coverage profile to `profile`.
+pub fn with_coverage(mut job: Job, profile: &Path) -> Job {
+    let at = job.args.len().min(2);
+    job.args
+        .insert(at, format!("-coverprofile={}", profile.display()));
+    job
+}
+
+/// A file's measured lines, zero-based, and whether any statement on each one ran.
+pub type FileCoverage = BTreeMap<usize, bool>;
+
+/// Reads a `-coverprofile` file into per-file line coverage; files outside `module` are dropped.
+pub fn parse_coverprofile(text: &str, module: &GoModule) -> HashMap<PathBuf, FileCoverage> {
+    let mut out: HashMap<PathBuf, FileCoverage> = HashMap::new();
+    for line in text.lines().filter(|l| !l.starts_with("mode:")) {
+        let Some((file, lines, covered)) = cover_block(line) else {
+            continue;
+        };
+        let path = if file.starts_with('/') {
+            PathBuf::from(file)
+        } else {
+            let Some((dir, name)) = file
+                .rsplit_once('/')
+                .and_then(|(pkg, name)| Some((module.package_dir(pkg)?, name)))
+            else {
+                continue;
+            };
+            dir.join(name)
+        };
+        let file = out.entry(path).or_default();
+        for line in lines {
+            *file.entry(line).or_default() |= covered;
+        }
+    }
+    out
+}
+
+/// `example.com/m/a.go:3.24,5.2 1 1`: the file, its zero-based lines and whether it ran.
+fn cover_block(line: &str) -> Option<(&str, std::ops::RangeInclusive<usize>, bool)> {
+    let (file, rest) = line.rsplit_once(':')?;
+    let mut fields = rest.split(' ');
+    let (span, _statements, count) = (fields.next()?, fields.next()?, fields.next()?);
+    let (start, end) = span.split_once(',')?;
+    let line_of = |at: &str| at.split_once('.')?.0.parse::<usize>().ok()?.checked_sub(1);
+    let (start, end) = (line_of(start)?, line_of(end)?);
+    let count: u64 = count.trim().parse().ok()?;
+    (start <= end).then_some((file, start..=end, count > 0))
 }
 
 /// `=== RUN` and `--- PASS:` lines say what the tree already shows.
@@ -350,6 +408,38 @@ mod tests {
             None
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn coverage_profiles_mark_lines_that_ran_and_lines_that_did_not() {
+        let profile = "mode: set\n\
+                       example.com/m/sub/a.go:3.24,4.11 1 1\n\
+                       example.com/m/sub/a.go:4.11,6.3 1 0\n\
+                       example.com/m/sub/a.go:7.2,7.14 1 1\n\
+                       example.com/m/b.go:1.1,1.9 2 0\n\
+                       example.com/mx/c.go:1.1,2.1 1 1\n\
+                       golang.org/x/y/d.go:1.1,2.1 1 1\n\
+                       /abs/e.go:2.1,2.5 1 3\n\
+                       garbage line\n";
+        let cov = parse_coverprofile(profile, &module());
+        let a = &cov[&PathBuf::from("/work/m/sub/a.go")];
+        let lines: Vec<(usize, bool)> = a.iter().map(|(l, c)| (*l, *c)).collect();
+        // Line 4 holds the end of a block that ran, so it counts as run.
+        assert_eq!(
+            lines,
+            [(2, true), (3, true), (4, false), (5, false), (6, true)]
+        );
+        assert!(!cov[&PathBuf::from("/work/m/b.go")][&0]);
+        assert!(cov[&PathBuf::from("/abs/e.go")][&1]);
+        assert_eq!(cov.len(), 3);
+        let job = with_coverage(
+            go_job(&module(), &["./...".into()], None),
+            Path::new("/t/c.out"),
+        );
+        assert_eq!(
+            job.args,
+            ["test", "-json", "-coverprofile=/t/c.out", "./..."]
+        );
     }
 
     #[test]

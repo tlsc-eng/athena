@@ -3,21 +3,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use athena_editor::{EditorEvent, EditorView, RunMark, RunState, RunTestAt, TestSymbol};
+use athena_editor::{Coverage, EditorEvent, EditorView, RunMark, RunState, RunTestAt, TestSymbol};
 use athena_lsp::Position;
 use athena_testing::{
     Ended, Framework, GoModule, Job, Outcome, Report, Stop, Suite, TestCase, find_go_module,
     find_js_package, go_job, go_run_pattern, go_subtest_pattern, js_job, js_name_pattern,
+    parse_coverprofile, with_coverage,
 };
 use athena_ui::{ActiveTheme, ButtonKind, Theme, empty_state};
 use gpui::{
     AnyElement, Context, Entity, EntityId, FontWeight, Hsla, Subscription, Task, WeakEntity,
-    Window, div, prelude::*, px,
+    Window, actions, div, prelude::*, px,
 };
 
 use super::Shell;
 use super::drawer::DrawerTab;
 use crate::actions;
+
+actions!(athena, [RunTestsWithCoverage, ToggleCoverage]);
 
 /// `go test` stops a package after ten minutes; a whole run gets a little longer than that.
 const RUN_LIMIT: Duration = Duration::from_secs(15 * 60);
@@ -57,6 +60,8 @@ struct Planned {
     job: Job,
     module: Option<GoModule>,
     scope: Scope,
+    /// Where `go test` writes its coverage profile, for a run with coverage.
+    coverage: Option<PathBuf>,
 }
 
 struct ActiveRun {
@@ -86,6 +91,11 @@ pub(super) struct TestsState {
     /// The suite and test whose output is open; no titles for the suite's own output.
     expanded: Option<(String, Vec<String>)>,
     watched: HashMap<EntityId, Watched>,
+    /// Line coverage from the last run with coverage, by file, until that file is edited.
+    coverage: HashMap<PathBuf, Arc<Coverage>>,
+    coverage_hidden: bool,
+    /// Editors showing coverage, followed so an edit clears it.
+    coverage_watch: HashMap<EntityId, Subscription>,
 }
 
 /// How the tests under a mark did: failed if any failed, passed if any passed.
@@ -137,12 +147,28 @@ fn symbol_at(symbols: &[TestSymbol], line: usize) -> Option<&TestSymbol> {
 }
 
 fn report_file() -> Option<PathBuf> {
+    run_file("tests", "json")
+}
+
+fn run_file(kind: &str, extension: &str) -> Option<PathBuf> {
     let runs = athena_proto::data_dir().ok()?.join("runs");
     std::fs::create_dir_all(&runs).ok()?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    Some(runs.join(format!("tests-{stamp}.json")))
+    Some(runs.join(format!("{kind}-{stamp}.{extension}")))
+}
+
+/// Every Go package of the module at the project root, writing a coverage profile.
+fn plan_coverage(root: &Path) -> Option<Planned> {
+    let module = find_go_module(root, root)?;
+    let profile = run_file("coverage", "out")?;
+    Some(Planned {
+        job: with_coverage(go_job(&module, &["./...".into()], None), &profile),
+        module: Some(module),
+        scope: Scope::All,
+        coverage: Some(profile),
+    })
 }
 
 /// `go test` for the package in `dir`, limited to the tests or subtests `wanted` (all when empty).
@@ -167,6 +193,7 @@ fn plan_go(root: &Path, dir: &Path, mut wanted: Vec<Vec<String>>) -> Option<Plan
         job: go_job(&module, &[module.package_arg(dir)], pattern),
         module: Some(module),
         scope: Scope::Dir(dir.to_path_buf(), wanted),
+        coverage: None,
     })
 }
 
@@ -185,6 +212,7 @@ fn plan_js(root: &Path, file: &Path, titles: Option<(&[String], bool)>) -> Optio
         job,
         module: None,
         scope: Scope::File(file.to_path_buf(), titles.map(|(t, _)| vec![t.to_vec()])),
+        coverage: None,
     })
 }
 
@@ -218,6 +246,7 @@ fn plan_all(root: &Path) -> Vec<Planned> {
             job: go_job(&module, &["./...".into()], None),
             module: Some(module),
             scope: Scope::All,
+            coverage: None,
         });
     }
     if let (Some((package, framework)), Some(report)) = (find_js_package(root, root), report_file())
@@ -226,6 +255,7 @@ fn plan_all(root: &Path) -> Vec<Planned> {
             job: js_job(framework, &package, &[], None, report),
             module: None,
             scope: Scope::All,
+            coverage: None,
         });
     }
     out
@@ -290,6 +320,7 @@ fn outcome_color(outcome: Outcome, t: &Theme) -> Hsla {
 impl Shell {
     /// Follows a test file's editor: finds its tests as it changes and keeps its marks current.
     pub(super) fn watch_tests(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        self.show_coverage_in(editor, cx);
         let id = editor.entity_id();
         self.tests
             .watched
@@ -482,6 +513,91 @@ impl Shell {
         self.start_tests(root, planned, cx);
     }
 
+    /// VS Code's "Run Tests with Coverage", for the Go module at the project root.
+    fn run_tests_with_coverage(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        match plan_coverage(&root) {
+            Some(planned) => self.start_tests(root, vec![planned], cx),
+            None => self.transient_notice(
+                "No Go module",
+                "Coverage runs go test -coverprofile where go.mod is, at the project root.",
+                cx,
+            ),
+        }
+    }
+
+    /// Replaces the project's coverage with a run's and shows it.
+    fn coverage_arrived(
+        &mut self,
+        root: &Path,
+        coverage: HashMap<PathBuf, Coverage>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tests
+            .coverage
+            .retain(|path, _| !path.starts_with(root));
+        self.tests.coverage.extend(
+            coverage
+                .into_iter()
+                .map(|(path, lines)| (path, Arc::new(lines))),
+        );
+        self.tests.coverage_hidden = false;
+        // Watches of closed editors go; open ones are watched again as coverage is pushed.
+        self.tests.coverage_watch.clear();
+        self.push_coverage(cx);
+    }
+
+    fn toggle_coverage(&mut self, cx: &mut Context<Self>) {
+        if self.tests.coverage.is_empty() {
+            return self.transient_notice(
+                "No coverage to show",
+                "Run Tests: run all tests with coverage first.",
+                cx,
+            );
+        }
+        self.tests.coverage_hidden = !self.tests.coverage_hidden;
+        self.push_coverage(cx);
+    }
+
+    fn push_coverage(&mut self, cx: &mut Context<Self>) {
+        let editors: Vec<Entity<EditorView>> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                super::item::ItemView::Editor(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        for editor in editors {
+            self.show_coverage_in(&editor, cx);
+        }
+    }
+
+    /// Gives an editor its file's coverage, and clears it at the file's first edit.
+    fn show_coverage_in(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let path = editor.read(cx).path().to_path_buf();
+        let coverage = self
+            .tests
+            .coverage
+            .get(&path)
+            .filter(|_| !self.tests.coverage_hidden)
+            .cloned();
+        let id = editor.entity_id();
+        if coverage.is_some() && !self.tests.coverage_watch.contains_key(&id) {
+            let subscription = cx.subscribe(editor, move |this, editor, event, cx| {
+                if let EditorEvent::Edited { .. } = event {
+                    let path = editor.read(cx).path().to_path_buf();
+                    this.tests.coverage.remove(&path);
+                    editor.update(cx, |e, cx| e.set_coverage(None, cx));
+                }
+            });
+            self.tests.coverage_watch.insert(id, subscription);
+        }
+        editor.update(cx, |e, cx| e.set_coverage(coverage, cx));
+    }
+
     fn rerun_failed_tests(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else {
             return;
@@ -561,7 +677,12 @@ impl Shell {
                         if let Some(file) = &p.job.report {
                             let _ = std::fs::remove_file(file);
                         }
-                        anyhow::Ok((finished.ended, report, p.job.framework))
+                        let coverage = p.coverage.as_ref().and_then(|file| {
+                            let text = std::fs::read_to_string(file).ok();
+                            let _ = std::fs::remove_file(file);
+                            Some(parse_coverprofile(&text?, p.module.as_ref()?))
+                        });
+                        anyhow::Ok((finished.ended, report, p.job.framework, coverage))
                     })
                     .await;
                 match done {
@@ -569,7 +690,12 @@ impl Shell {
                         cancelled = true;
                         break;
                     }
-                    Ok((ended, report, framework)) => {
+                    Ok((ended, report, framework, coverage)) => {
+                        if let Some(coverage) = coverage {
+                            let root = root.clone();
+                            let _ = this
+                                .update(cx, |this, cx| this.coverage_arrived(&root, coverage, cx));
+                        }
                         if ended == Ended::TimedOut {
                             errors.push(format!(
                                 "{} did not finish within {} minutes.",
@@ -1040,6 +1166,10 @@ pub(super) fn bind_test_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui:
         cx.listener(|this, _: &actions::RerunFailedTests, _, cx| this.rerun_failed_tests(cx)),
     )
     .on_action(cx.listener(|this, _: &actions::StopTests, _, cx| this.stop_tests(cx)))
+    .on_action(
+        cx.listener(|this, _: &RunTestsWithCoverage, _, cx| this.run_tests_with_coverage(cx)),
+    )
+    .on_action(cx.listener(|this, _: &ToggleCoverage, _, cx| this.toggle_coverage(cx)))
 }
 
 impl Shell {

@@ -761,6 +761,17 @@ impl Element for EditorElement {
                 ));
             }
 
+            if let Some(covered) = view.coverage_at(*line) {
+                coverage_tint(
+                    &mut frame,
+                    covered,
+                    bounds.left() + px(GUTTER_PAD),
+                    numbers_right,
+                    y,
+                    lh,
+                    &theme,
+                );
+            }
             if first_row {
                 let number = (line + 1).to_string();
                 let color = match worst {
@@ -1093,6 +1104,28 @@ fn run_mark(
     frame
         .gutter_marks
         .push(fill(Bounds::new(origin, size(d, d)), color).corner_radii(d / 2.));
+}
+
+/// A coverage run's tint behind a line's number: green where a statement ran, red where none did.
+fn coverage_tint(
+    frame: &mut Frame,
+    covered: bool,
+    left: Pixels,
+    numbers_right: Pixels,
+    y: Pixels,
+    lh: Pixels,
+    theme: &athena_ui::Theme,
+) {
+    let color = if covered {
+        theme.color.success
+    } else {
+        theme.color.danger
+    };
+    let left = left - px(2.);
+    frame.gutter_marks.push(fill(
+        Bounds::new(point(left, y), size(numbers_right + px(3.) - left, lh)),
+        color.opacity(0.22),
+    ));
 }
 
 fn blame_width(view: &EditorView, cell: Pixels) -> Pixels {

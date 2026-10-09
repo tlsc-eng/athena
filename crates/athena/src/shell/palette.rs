@@ -202,6 +202,14 @@ fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Tests: re-run failed tests",
             Box::new(actions::RerunFailedTests),
         ),
+        (
+            "Tests: run all tests with coverage",
+            Box::new(super::tests_view::RunTestsWithCoverage),
+        ),
+        (
+            "Tests: toggle coverage",
+            Box::new(super::tests_view::ToggleCoverage),
+        ),
         ("Tests: stop", Box::new(actions::StopTests)),
         ("Source control changes", Box::new(actions::ShowChanges)),
         ("Toggle inline blame", Box::new(actions::ToggleBlame)),
