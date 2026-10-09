@@ -1,4 +1,4 @@
-# Roadmap report: v0.2.0 to v0.7.0
+# Roadmap report: v0.2.0 to v0.8.0
 
 What happened while you were away, for the roadmap in `piped-orbiting-stearns.md` (Phases A–E).
 
@@ -10,13 +10,213 @@ What happened while you were away, for the roadmap in `piped-orbiting-stearns.md
 - Release: v0.5.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.5.0 (tap `b75ca95`, installed here)
 - Release: v0.6.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.6.0 (tap `f79bd1b`, installed here)
 - Release: v0.7.0 — https://github.com/tlsc-eng/athena/releases/tag/v0.7.0 (tap `e001a6b`, installed here)
+- Release: v0.8.0 — <link added at release>
 
 The screen was locked for most of the work after v0.2.0; it became unlocked only near the end of
 v0.5. For v0.6 the lanes ran GUI QA with synthetic keys only, while you were idle, so anything
 that needs a mouse click is unverified. v0.7 was the same, except that the git and code lanes and
 the fix sweep could take screenshots with the screen unlocked; the workbench lane ran locked
-until its last two captures. Everything below marked **unverified on screen** is
+until its last two captures. v0.8's lanes and fix sweep ran their QA apps in isolated `HOME`s
+with synthetic keys while you were idle and captured them on screen, and the installed v0.7.0 got
+a visual QA sweep of its own. Everything below marked **unverified on screen** is
 covered by unit tests, logs or synthetic-key runs, but nobody has looked at it. Start with [What to check when you're back](#what-to-check-when-youre-back).
+
+## v0.8.0
+
+Plan: [plans/v0.8.md](plans/v0.8.md), three file-disjoint lanes (Claude workspace, worktrees and
+GitHub and tests, language features), `v0.7.0..main`, then a review pass, a visual QA sweep of the
+installed v0.7.0 and one fix sweep for both. The v0.7.0 section follows this one.
+
+### What shipped
+
+**Claude workspace** (`f5a9b08`, `eb589cb`, `592d45a`, `6c3224a`, `23b510f`, docs `6677482`)
+- A **Claude** drawer tab (palette: **Claude: Show sessions**) listing the active project's recent
+  Claude Code sessions from `~/.claude` and every `~/.claude-*` profile, newest first: title, todo
+  progress, message count, tokens and an estimated cost. A session expands to its todos and plan
+  and to every file it changed with +/− counts; a file opens its "Claude's Edits" diff, **Review
+  All** steps through them (palette: **Claude: Review next / previous changed file**, which also
+  starts a review of the newest session), and **Revert** puts one file back as it was before the
+  session after a confirm, keeping a copy in `discarded/`.
+- A new `PostToolUse` hook on `TodoWrite|ExitPlanMode` (`athena notify --event claude-plan`)
+  feeds the todos and plan, and the terminal tab's badge shows "3/7" with the list as its
+  tooltip. The installer merges it beside the existing hooks and keeps the user's own; **existing
+  installs must run Enable Claude Code hooks for this project again** to get it.
+- **Resume** opens a terminal tab in the project running `claude --resume <id>`, with
+  `CLAUDE_CONFIG_DIR` set for a profile other than `~/.claude`.
+- Token use comes from the transcripts (each streamed reply counted once, subagents included,
+  read on incrementally); cost is an estimate from a built-in list-price table, which
+  `"claude": {"prices": …}` in settings.json overrides per model id. Unknown models show "cost n/a".
+- Eight MCP tools, additive: `lsp_definition`, `lsp_references`, `document_symbols` (from the live
+  server, unsaved edits flushed first, for files open in Athena only), `get_open_editors`,
+  `read_buffer` (256 KiB by default, 512 KiB at most), `run_tests` / `get_test_results` (a Tests
+  panel run, `TestX/sub` names a subtest) and `git_status` (at most 2000 files). Every list is
+  capped below the 1 MiB frame.
+
+**Worktrees, GitHub and tests** (`7a0b99c`, `a458544`, `83d512f`, `e0f65d9`, `f554b59`)
+- Worktrees: **Git: Open / Create / Delete worktree…** and **Create worktree…** in the branch
+  picker. A new one goes beside the main worktree as `<repo>-<branch>` and opens as a project;
+  the rail groups linked worktrees right after their main repository with a connector line.
+  Deleting refuses a worktree open as a project or holding a terminal, asks **Delete Anyway** for
+  one with changes, and keeps the branch.
+- GitHub through `gh`, only when installed and signed in: a status-bar CI dot for the current
+  branch's latest run (click opens it), **GitHub: Create pull request** (`gh pr create --web`, so
+  the browser opens and nothing is written; unpushed branches are stopped first) and **GitHub:
+  View pull request checks** in the palette. gh never prompts.
+- Go subtests: `t.Run("name", …)` with a literal name gets its own ▶, nested ones too, run with an
+  escaped `-run '^TestX$/^name$'` pattern per level.
+- Go coverage: **Tests: run all tests with coverage** tints line numbers green or red from
+  `-coverprofile`; **Tests: toggle coverage** hides them, and an edit drops a file's tints.
+
+**Language features** (`665dd02`, `32a074b`, `2c2a6e1`, `7fa5f84`, `73d873b`, `55d93d8`)
+- Tree renames and drag moves send `workspace/willRenameFiles` and apply the import updates the
+  server answers with (asking when they reach more than one file), then `didRenameFiles`.
+- Completion documentation beside the list, asked for with `completionItem/resolve` when the
+  server leaves it out, and resolved `additionalTextEdits` (TypeScript auto-imports) applied on
+  accept.
+- Project settings: `.athena/settings.json` laid over the global file, and the keys Athena knows
+  from `.vscode/settings.json` (`.athena` wins). Server settings from a project (`lsp`, `gopls`,
+  `go.toolsEnvVars`, `typescript.*`) wait for the project's trust answer.
+- One trust answer now covers all project code: its ESLint and Biome, its own TypeScript, and
+  project server settings. Until allowed, typescript-language-server is pinned to a global
+  TypeScript; gopls runs with `GOTOOLCHAIN=local` unless its settings say otherwise.
+- **Show type hierarchy** (palette), expand / shrink selection (Ctrl+Shift+Cmd+Right / Left),
+  **Format selection** (Cmd+K Cmd+F) and linked editing for JSX/TSX tags (`editor.linked_editing`,
+  off by default).
+- `editor.lightbulb` (`quickfix` by default, `all`, `off`) and `editor.codeActionsOnSave`
+  (`source.organizeImports`, now for TypeScript too, and `source.fixAll.eslint`).
+
+Screenshots from the QA builds: [the Claude tab with a session's file, tokens and cost](screenshots/v0.8/01-claude.png),
+[Go subtest marks, coverage tints and a worktree in the rail](screenshots/v0.8/02-tests.png), and
+[completion documentation beside the list over a type hierarchy](screenshots/v0.8/03-lsp.png).
+
+### Decisions made without you
+
+- **Risky prompts list Cancel first.** In gpui 0.2.2's macOS alert the first button takes Return
+  unless it is a Cancel button, which takes Escape instead. With the action first (as the lanes
+  had it), Return allowed project code, deleted a dirty worktree, updated imports or reverted a
+  Claude edit. Now the trust prompt, Delete Anyway, Update Imports and Revert list the cancel
+  button first and the action second: Escape cancels, Return answers neither, only a click or
+  Space on the focused action confirms. Save prompts keep their order (`1e9c329`).
+- **One "project code" answer.** The v0.7 linter answer (`"linters"` in `workspace.json`) now also
+  covers the project's TypeScript and its server settings, since all three run or choose code
+  from the repository. The question names only what the project brings, and a settings-only
+  project is asked "Use proj's language server settings?" (`fba1e34`). The palette commands are
+  now **Allow / Disallow project code (linters, TypeScript, project settings)** (`aa8922c`), and
+  any answer restarts every language server of the project (`ddebe6d`, `ce7afe1`).
+- `claude.prices` is app-wide like the theme: a project's `.athena/settings.json` cannot set it
+  (`cc97129`).
+- Resume types the plain `claude --resume <id>`; `--resume=<id>` could not be checked against the
+  installed claude. Instead an id must start with an ASCII letter or digit (`5425283`).
+- gh asks about github.com only, so another host's expired token does not hide the features; a
+  pull request is created only through the browser form, never by a silent `gh pr create`.
+- Transcripts are read up to 8 MiB a line; TodoWrite lists keep 200 items and plans 64 KiB.
+- Worktree delete keeps the branch; the main worktree is never offered.
+- Linked editing is off and the lightbulb shows only for quick fixes by default, as in VS Code.
+- A Go-and-JavaScript `run_tests` from Claude in a project that is not allowed still runs go test
+  and says what it skipped, rather than refusing the whole run.
+
+### Review fixes
+
+A review of `v0.7.0..main` before the fixes found 15 issues (no critical or high: 10 medium,
+5 low) plus four minor ones. All are fixed on main:
+- typescript-language-server ran unpinned for an untrusted project whose `node_modules/typescript`
+  was linked outside it (pnpm) or sat in a parent folder (`e276286`).
+- Claude's `run_tests` resolved a path against every open project, climbed to `/` looking for
+  `go.mod` or `package.json`, and ran Vitest or Jest in a denied project (`bc09b57`).
+- Return picked the risky action in the trust, worktree delete, update imports and revert prompts
+  (`1e9c329`).
+- Reverting a Claude edit replaced a symlink with a plain file, used a fixed temp name and failed
+  when the folder was gone (`200014d`).
+- A tree rename onto a taken name rewrote imports and then failed, and a second Enter applied the
+  edits twice (`8198f56`).
+- A resolved auto-import was applied twice, and a late one was dropped once the user typed into
+  the snippet (`5cfa069`).
+- A transcript named `--dangerously-skip-permissions.jsonl` made Resume type that flag
+  (`5425283`).
+- A worktree whose folder was deleted could never be removed (`df3eb94`).
+- The Claude tab's 10 s refresh reread every snapshot and every subagent transcript from the start
+  (`b38bb5c`).
+- gopls kept the settings a project chose while trusted after trust was withdrawn (`ce7afe1`).
+- Lows: looped subtests (`x`, `x#01`) ran only the first, a false pass (`20fcc85`); deleting a
+  worktree with a project or terminal inside it (`9d9ab97`); `document_symbols` and locations
+  could exceed a frame (`4364935`); transcript lines, token sums, profile folder names, todos and
+  plans were unbounded (`4437244`); revert ignored a dirty buffer, which the next Cmd+S wrote back
+  (`427533e`).
+- Minor: a reversed linked editing range panicked (`b098222`); `gh auth status` failed on another
+  host's token, gh's git could run a repository's fsmonitor, and a signed-out gh was never checked
+  again (`32296f8`); a coverprofile block with a huge line range was expanded line by line
+  (`4926b66`).
+
+Within the lanes, before the review fixes: worktrees grouped only when opened, not at launch,
+the branch picker offered the current branch's remote as "in worktree", and the gh notices were
+cut off (`f554b59`); `run_tests` could not name a Go subtest after the rebase (`23b510f`); the
+completion documentation panel was cut to the list's height (`cc97129`); the trust question
+talked about TypeScript for projects without one (`fba1e34`).
+
+### Visual QA sweep of v0.7.0
+
+The installed v0.7.0 was walked through on screen in an isolated `HOME`, dark and light, from
+launch to relaunch (screenshots kept with the QA notes, not in the repository); seven findings,
+all fixed on main:
+- V1 a toast's long body was clipped instead of wrapping (`cae4a46`).
+- V2 a Markdown list mixing plain and task items lost the plain items' bullets, and V3 code
+  blocks had no tab size (`fcacdf0`, tab size 4).
+- V4 Cmd+Shift+F seeded the query from the selection but left the caret at its end, so typing
+  appended (`d96f828`).
+- V5 after a relaunch, terminal tabs not yet shown read "Terminal", and an open drawer came back
+  closed (`fcb0b08`).
+- V6 the terminal's prompt dot sat 1 px from the first character and against the pane edge; the
+  left padding is now 14 px with the dot centred (`38dc12a`).
+- V7 the outline and completion list marked variables and constants with bare `x` and `c`; they
+  now show 𝑥 and ≡ in their theme tints (`70adc00`).
+
+### Verification
+
+- Unit tests throughout, with fixture transcripts and snapshot stores, fake `gh` scripts on a
+  `PATH` (not installed, signed out, success, failure, the github.com host argument, fsmonitor off
+  inside gh), temp-repository worktree tests (including a deleted folder), coverprofile and
+  subtest pattern tests checked against go 1.27, scripted language servers for every new request,
+  gopls 0.23 integration tests (selection ranges, type hierarchy, no rename participation or range
+  formatting), and a model of gpui's alert key mapping for the button order. Most fix commits
+  report the full gate passing.
+- The Claude lane's QA app, driven by the `notify` CLI in an isolated `HOME`: the Claude tab, the
+  review stepping through files from the palette (screenshot above). The MCP tools were run end to
+  end through `athena mcp-stdio` against that window with gopls.
+- The git lane's QA app with a fake gh on the login `PATH`, by screenshot: the palette's GitHub
+  rows, the checks list, coverage tints, the branch picker, creating and deleting worktrees (and
+  the refusal), the signed-out palette rows and the "Publish the branch first" notice.
+- The language lane's QA app with gopls: expand and shrink selection, Format selection's notice,
+  the type hierarchy, completion documentation and the trust prompt answered with Don't Allow,
+  Escape and Space (before the button order changed).
+- After the fix sweep, seen on screen in an isolated QA build: V1 (a long push error wraps in the
+  toast), V4 (typing replaced the seeded query), V5 (restored tabs named after their folder and
+  the drawer reopened on the panel) and V6 (the dot's gaps). V2 and V3 are covered by a page test
+  and V7 by a unit test; neither was looked at on screen.
+- Unverified: Return and Escape on the reordered trust prompt with a real keyboard (see the
+  incident below); typescript-language-server was not installed here, so completion resolve,
+  auto-imports, willRenameFiles import updates, linked editing, TypeScript organize imports on save
+  and the held-back TypeScript are covered by scripted-server tests only; `gh pr create --web` and
+  `gh pr checks` against real GitHub (only fake scripts were run).
+
+### Known gaps
+
+- Return on the trust dialog is not yet confirmed with a real keyboard: the synthetic-key run is
+  in doubt (see the incident).
+- The 𝑥 variable glyph (U+1D465) is drawn through a font fallback that has not been checked on
+  screen; if no fallback font has it, it shows as a box.
+- **GitHub: Create pull request** has never run against real GitHub.
+- typescript-language-server features are untested against a real server (see Verification).
+- Cost shows "cost n/a" for model ids missing from the built-in table (seen for a session in the
+  QA screenshot); `claude.prices` fills them in.
+- A completion detail longer than its column is cut at its left edge rather than its right
+  (visible for `Printf` in the third screenshot above).
+
+### Incident
+
+- During the f8-trust QA run, which pressed Return and then Escape on the trust prompt with
+  synthetic keys while you were idle, the dialog may have been answered by a click of yours while
+  you were active at the machine. The run's result therefore says nothing reliable about Return;
+  it needs repeating by hand (check list item 42).
 
 ## v0.7.0
 
@@ -1016,3 +1216,37 @@ For v0.7.0:
     Cmd+. offers its fixes; run Disallow project linters and watch them go.
 41. Open a Markdown file with emphasis, code spans and links, and a `.mmd` file: both
     highlighted. A global `"word_wrap": false` still leaves Markdown wrapped.
+
+For v0.8.0:
+
+42. Open a project with ESLint, Biome or its own TypeScript in `node_modules` on a fresh answer:
+    when the trust prompt shows, press Return with a real keyboard (nothing should happen), then
+    Escape (Don't Allow; nothing starts). Run **Allow project code** from the palette and check
+    the linters start; **Disallow project code** stops them.
+43. Run **Enable Claude Code hooks for this project** again, start Claude and have it make a todo
+    list: the tab badge shows "1/3" and the list as its tooltip. Open the Claude tab: the session
+    with its files, tokens and cost (a model without a price says "cost n/a"; add it under
+    `claude.prices`). Review All, then Revert one file with unsaved edits in its editor (refused),
+    save, and Revert again. Resume a session from another profile and check `CLAUDE_CONFIG_DIR`.
+44. From Claude: `lsp_definition` on a file open in Athena and on one that is not (asks to
+    `open_file` it), `read_buffer` on a dirty file, `run_tests` with a `TestX/sub` name, and
+    `git_status`.
+45. In a GitHub repository with `gh` signed in: the CI dot and its click, **GitHub: View pull
+    request checks**, and **GitHub: Create pull request** on a pushed branch (the browser form
+    should open; finish or close it there). Sign out of gh: the dot goes and the palette rows say
+    "Needs gh auth login".
+46. **Git: Create worktree…** with a new branch: it opens as a project grouped under its repo in
+    the rail. Make a change there and **Git: Delete worktree…** from the main project: Escape
+    cancels, Delete Anyway deletes, the branch remains. Try with a terminal `cd`'d into it.
+47. In a Go test with `t.Run("adds two", …)` click its ▶; run **Tests: run all tests with
+    coverage**, look at the tints, edit the file and see them go.
+48. With typescript-language-server installed: completion documentation beside the list, an
+    auto-import on accept, renaming a `.ts` file in the tree (Update Imports when it reaches
+    several files), `"editor": {"linked_editing": true}` on a TSX tag, and organize imports on
+    save with `"codeActionsOnSave": {"source.organizeImports": "explicit"}`.
+49. Ctrl+Shift+Cmd+Right three times and Left once in a Go file; Cmd+K Cmd+F on a selection;
+    **Show type hierarchy** on an interface. Open the Outline on a file with variables and
+    constants: 𝑥 and ≡ draw as glyphs, not boxes.
+50. Quit with the terminal panel open and two terminal tabs, relaunch: both tabs have their
+    folder or program as title and the panel is open. A Markdown list mixing `- [ ]` items and
+    plain ones keeps the plain bullets.
