@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use athena_lsp::{Call, CallItem, Position};
 use athena_ui::{ActiveTheme, Theme, Tooltip};
@@ -15,6 +16,12 @@ use super::lsp::{NO_SERVER, document_key};
 const ROW_HEIGHT: f32 = 24.;
 const INDENT: f32 = 16.;
 
+/// Never repeats, so an answer about any earlier tree, even one since replaced, is dropped.
+fn next_generation() -> u64 {
+    static GENERATIONS: AtomicU64 = AtomicU64::new(0);
+    GENERATIONS.fetch_add(1, Ordering::Relaxed)
+}
+
 /// The call hierarchy the References tab shows after Shift+Alt+H, as VS Code's Call Hierarchy view.
 pub(super) struct Calls {
     /// The project it was asked from; other projects show the tab empty.
@@ -24,7 +31,7 @@ pub(super) struct Calls {
     nodes: Vec<Node>,
     expanded: HashSet<usize>,
     selected: Option<usize>,
-    /// Bumped when the direction flips, so answers about the old tree are dropped.
+    /// Changes when the direction flips or a new hierarchy replaces this one.
     generation: u64,
 }
 
@@ -60,7 +67,7 @@ impl Calls {
             }],
             expanded: HashSet::new(),
             selected: Some(0),
-            generation: 0,
+            generation: next_generation(),
         }
     }
 
@@ -80,17 +87,20 @@ impl Calls {
     }
 
     /// Where a row opens: a call site, or the function itself when it has none.
-    fn target(&self, i: usize) -> (PathBuf, Position) {
-        let node = &self.nodes[i];
-        match node.call.ranges.first() {
+    fn target(&self, i: usize) -> Option<(PathBuf, Position)> {
+        let node = self.nodes.get(i)?;
+        Some(match node.call.ranges.first() {
             Some(site) => (node.sites_in.clone(), site.start),
             None => (node.call.item.path.clone(), node.call.item.selection.start),
-        }
+        })
     }
 
     fn add_children(&mut self, parent: usize, calls: Vec<Call>) {
-        let depth = self.nodes[parent].depth + 1;
-        let parent_file = self.nodes[parent].call.item.path.clone();
+        let Some(node) = self.nodes.get(parent) else {
+            return;
+        };
+        let depth = node.depth + 1;
+        let parent_file = node.call.item.path.clone();
         let mut children = Vec::with_capacity(calls.len());
         for call in calls {
             let sites_in = match self.incoming {
@@ -106,6 +116,21 @@ impl Calls {
             });
         }
         self.nodes[parent].children = Children::Found(children);
+    }
+
+    fn answer(&mut self, generation: u64, index: usize, found: Result<Vec<Call>, String>) {
+        if generation != self.generation {
+            return;
+        }
+        match found {
+            Ok(list) => self.add_children(index, list),
+            Err(why) => {
+                tracing::debug!("call hierarchy failed: {why}");
+                if let Some(node) = self.nodes.get_mut(index) {
+                    node.children = Children::Failed(why);
+                }
+            }
+        }
     }
 }
 
@@ -164,24 +189,21 @@ impl Shell {
         else {
             return;
         };
+        let Some(node) = calls.nodes.get_mut(index) else {
+            return;
+        };
         if !calls.expanded.insert(index) {
             calls.expanded.remove(&index);
             cx.notify();
             return;
         }
-        if !matches!(
-            calls.nodes[index].children,
-            Children::Unasked | Children::Failed(_)
-        ) {
+        if !matches!(node.children, Children::Unasked | Children::Failed(_)) {
             cx.notify();
             return;
         }
-        calls.nodes[index].children = Children::Loading;
-        let (item, incoming, generation) = (
-            calls.nodes[index].call.item.clone(),
-            calls.incoming,
-            calls.generation,
-        );
+        node.children = Children::Loading;
+        let (item, incoming, generation) =
+            (node.call.item.clone(), calls.incoming, calls.generation);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let found = match incoming {
@@ -189,22 +211,10 @@ impl Shell {
                 false => client.outgoing_calls(&item).await,
             };
             let _ = this.update(cx, |this, cx| {
-                let Some(calls) = this
-                    .lsp
-                    .calls
-                    .as_mut()
-                    .filter(|c| c.generation == generation)
-                else {
-                    return;
-                };
-                match found {
-                    Ok(list) => calls.add_children(index, list),
-                    Err(why) => {
-                        tracing::debug!("call hierarchy failed: {why}");
-                        calls.nodes[index].children = Children::Failed(why);
-                    }
+                if let Some(calls) = this.lsp.calls.as_mut() {
+                    calls.answer(generation, index, found);
+                    cx.notify();
                 }
-                cx.notify();
             });
         })
         .detach();
@@ -219,7 +229,7 @@ impl Shell {
             return;
         }
         calls.incoming = incoming;
-        calls.generation += 1;
+        calls.generation = next_generation();
         calls.nodes.truncate(1);
         calls.nodes[0].children = Children::Unasked;
         calls.expanded.clear();
@@ -321,12 +331,14 @@ impl Shell {
                                 let Some(calls) = this.lsp.calls.as_mut() else {
                                     return;
                                 };
+                                let Some(target) = calls.target(index) else {
+                                    return;
+                                };
                                 calls.selected = Some(index);
                                 if e.click_count() == 2 {
                                     return this.toggle_call(index, cx);
                                 }
-                                let (path, at) = calls.target(index);
-                                this.lsp.jump = Some((path, at));
+                                this.lsp.jump = Some(target);
                                 cx.notify();
                             }))
                             .child(
@@ -444,7 +456,7 @@ impl RowView {
         let place = format!(
             "{}:{}",
             shown(&node.call.item.path, roots),
-            node.call.item.selection.start.line + 1
+            node.call.item.selection.start.line.saturating_add(1)
         );
         let detail = match &node.call.item.detail {
             Some(d) => format!("{d}  {place}"),
@@ -510,6 +522,32 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_about_a_replaced_tree_is_dropped() {
+        let mut c = calls(true);
+        c.add_children(0, vec![call("main", "/p/main.go", &[7])]);
+        c.add_children(1, vec![call("run", "/p/run.go", &[2])]);
+        c.add_children(2, vec![call("init", "/p/init.go", &[4])]);
+        let asked = c.generation;
+        let mut c = Calls::new(PathBuf::from("/p"), item("other", "/p/o.go", 1));
+        c.answer(asked, 3, Ok(vec![call("late", "/p/late.go", &[1])]));
+        c.answer(asked, 3, Err("gone".into()));
+        assert_eq!(c.nodes.len(), 1);
+        assert!(matches!(c.nodes[0].children, Children::Unasked));
+        assert_eq!(c.target(3), None, "a row drawn before the tree changed");
+    }
+
+    #[test]
+    fn a_function_on_the_last_possible_line_still_draws() {
+        let mut c = calls(true);
+        c.nodes[0].call.item.selection.start.line = u32::MAX;
+        assert!(
+            RowView::of(&c, 0, &[])
+                .detail
+                .ends_with(&u32::MAX.to_string())
+        );
+    }
+
+    #[test]
     fn rows_follow_expanded_nodes_in_tree_order() {
         let mut c = calls(true);
         assert_eq!(c.rows(), [0]);
@@ -537,36 +575,36 @@ mod tests {
         c.add_children(0, vec![call("main", "/p/main.go", &[7])]);
         assert_eq!(
             c.target(1),
-            (
+            Some((
                 PathBuf::from("/p/main.go"),
                 Position {
                     line: 7,
                     character: 2
                 }
-            )
+            ))
         );
         assert_eq!(
             c.target(0),
-            (
+            Some((
                 PathBuf::from("/p/h.go"),
                 Position {
                     line: 3,
                     character: 5
                 }
-            ),
+            )),
             "the function itself"
         );
         let mut c = calls(false);
         c.add_children(0, vec![call("leaf", "/p/leaf.go", &[4, 4])]);
         assert_eq!(
             c.target(1),
-            (
+            Some((
                 PathBuf::from("/p/h.go"),
                 Position {
                     line: 4,
                     character: 2
                 }
-            )
+            ))
         );
         assert_eq!(
             RowView::of(&c, 1, &[PathBuf::from("/p")]).status.as_deref(),
