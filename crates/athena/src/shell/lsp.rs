@@ -552,10 +552,10 @@ impl Shell {
     }
 
     /// Whether typescript-language-server may start for the project at `root`: always once the
-    /// project is trusted, else only when a global TypeScript can stand in for the project's own.
+    /// project is trusted, else only when a global TypeScript can stand in for any it could reach.
     fn typescript_may_start(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
         let trust = self.linter_trust(root);
-        if trust == Some(LinterTrust::Allowed) || athena_lsp::project_typescript(root).is_none() {
+        if trust == Some(LinterTrust::Allowed) || athena_lsp::reachable_typescript(root).is_none() {
             return true;
         }
         if trust == Some(LinterTrust::NotAsked) {
@@ -590,7 +590,7 @@ impl Shell {
             .filter(|&kind| athena_lsp::project_server(root, kind).is_some())
             .map(linter_name)
             .collect();
-        if athena_lsp::project_typescript(root).is_some() {
+        if athena_lsp::reachable_typescript(root).is_some() {
             found.push("TypeScript");
         }
         let settings = self.project_changes_programs(root);

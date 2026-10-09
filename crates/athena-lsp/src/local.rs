@@ -43,6 +43,16 @@ pub fn project_typescript(root: &Path) -> Option<PathBuf> {
     (real.starts_with(&real_modules) && real.is_file()).then_some(real)
 }
 
+/// The `node_modules/typescript` typescript-language-server could load for `root` unpinned: the
+/// project's own, linked in from anywhere, or one in a folder above it.
+pub fn reachable_typescript(root: &Path) -> Option<PathBuf> {
+    let real = root.canonicalize().ok();
+    root.ancestors()
+        .chain(real.iter().flat_map(|r| r.ancestors()))
+        .map(|dir| dir.join("node_modules/typescript"))
+        .find(|ts| ts.symlink_metadata().is_ok())
+}
+
 /// The TypeScript installed beside typescript-language-server, or with `tsc`, outside the
 /// project at `root`: what tsserver runs on while the project's own copy is not trusted.
 pub fn global_typescript(root: &Path) -> Option<PathBuf> {
@@ -223,6 +233,29 @@ mod tests {
         let child = root.join("packages/web");
         std::fs::create_dir_all(&child).unwrap();
         assert_eq!(project_typescript(&child), None, "the parent's");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn typescript_linked_in_or_in_a_parent_folder_is_within_reach() {
+        let root = project("ts-reach");
+        assert_eq!(reachable_typescript(&root), None);
+        let outside = project("ts-reach-outside");
+        std::fs::create_dir_all(outside.join("typescript/lib")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        symlink(
+            outside.join("typescript"),
+            root.join("node_modules/typescript"),
+        )
+        .unwrap();
+        assert_eq!(project_typescript(&root), None, "linked out of the project");
+        let linked = Some(root.join("node_modules/typescript"));
+        assert_eq!(reachable_typescript(&root), linked);
+        let child = root.join("packages/web");
+        std::fs::create_dir_all(&child).unwrap();
+        assert_eq!(reachable_typescript(&child), linked, "the parent's");
+        std::fs::remove_dir_all(&outside).unwrap();
+        assert_eq!(reachable_typescript(&root), linked, "even a dangling link");
         let _ = std::fs::remove_dir_all(&root);
     }
 
