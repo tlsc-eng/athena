@@ -16,6 +16,7 @@ pub use project::{LinterTrust, PANEL_IDS, Panel, Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
 pub use windows::{WindowEntry, list_parked, park, parked_sessions, retain_parked, take_parked};
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -229,6 +230,27 @@ impl Workspace {
             other => other,
         };
         Some(project)
+    }
+
+    /// Moves the projects in `from` to just before the one at `before`, or last at `len`, keeping
+    /// the same project active; false when that changes nothing.
+    pub fn move_projects(&mut self, from: Range<usize>, before: usize) -> bool {
+        let len = self.projects.len();
+        if from.is_empty()
+            || from.end > len
+            || before > len
+            || (from.start..=from.end).contains(&before)
+        {
+            return false;
+        }
+        let active = self.active_project().map(|p| p.root.clone());
+        if before < from.start {
+            self.projects[before..from.end].rotate_right(from.len());
+        } else {
+            self.projects[from.start..before].rotate_left(from.len());
+        }
+        self.active = active.and_then(|root| self.projects.iter().position(|p| p.root == root));
+        true
     }
 
     pub fn activate(&mut self, index: usize) {
@@ -483,6 +505,40 @@ mod tests {
         w.activate(2);
         w.close_project(0);
         assert_eq!(w.active_project().unwrap().root, PathBuf::from("/n/c"));
+    }
+
+    fn roots(w: &Workspace) -> Vec<&str> {
+        w.projects
+            .iter()
+            .map(|p| p.root.to_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn moving_projects_keeps_the_same_one_active() {
+        let mut w = ws(&["/n/a", "/n/b", "/n/c", "/n/d", "/n/e"]);
+        w.activate(1);
+        assert!(w.move_projects(0..2, 4), "a block moves down");
+        assert_eq!(roots(&w), ["/n/c", "/n/d", "/n/a", "/n/b", "/n/e"]);
+        assert_eq!(w.active_project().unwrap().root, PathBuf::from("/n/b"));
+        assert!(w.move_projects(4..5, 0), "and up");
+        assert_eq!(roots(&w), ["/n/e", "/n/c", "/n/d", "/n/a", "/n/b"]);
+        assert_eq!(w.active, Some(4));
+        assert!(w.move_projects(0..1, 5), "and last");
+        assert_eq!(roots(&w), ["/n/c", "/n/d", "/n/a", "/n/b", "/n/e"]);
+    }
+
+    #[test]
+    fn moving_projects_onto_themselves_changes_nothing() {
+        let mut w = ws(&["/n/a", "/n/b", "/n/c"]);
+        let before = w.clone();
+        assert!(!w.move_projects(1..2, 1));
+        assert!(!w.move_projects(1..2, 2));
+        assert!(!w.move_projects(0..3, 3));
+        assert!(!w.move_projects(1..1, 0));
+        assert!(!w.move_projects(2..4, 0));
+        assert!(!w.move_projects(0..1, 4));
+        assert_eq!(w, before);
     }
 
     #[test]

@@ -286,6 +286,21 @@ mod tests {
     }
 
     #[test]
+    fn a_reordered_window_keeps_its_order_across_a_restart() {
+        let first = window(&["/n/a", "/n/b"], 0, 10.);
+        let mut second = window(&["/n/c", "/n/d", "/n/e"], 2, 500.);
+        assert!(second.move_projects(2..3, 0));
+        let saved = Workspace::join(&first, &[first.clone(), second.clone()], &[]);
+        let text = serde_json::to_string(&saved).unwrap();
+        let (windows, _) = serde_json::from_str::<Workspace>(&text)
+            .unwrap()
+            .into_windows();
+        assert_eq!(roots(&windows[0]), ["/n/a", "/n/b"]);
+        assert_eq!(roots(&windows[1]), ["/n/e", "/n/c", "/n/d"]);
+        assert_eq!(windows[1].active_project().unwrap().root, Path::new("/n/e"));
+    }
+
+    #[test]
     fn projects_no_window_names_go_to_the_first_and_stale_roots_are_ignored() {
         let mut w = window(&["/n/a", "/n/b", "/n/c"], 0, 10.);
         w.windows = vec![

@@ -83,6 +83,7 @@ use crate::actions::{
     NavigateBack, NavigateForward, NextProblem, PrevProblem, RevealInTree, SendToClaude,
     ShowChanges, ShowProblems, SwitchBranch, ToggleBlame, ToggleIdeIntegration,
 };
+use dnd::{ProjectDrag, TabGhost};
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
 const RAIL_WIDTH: f32 = 48.;
@@ -523,6 +524,8 @@ impl Shell {
         let t = cx.theme().clone();
         let active = self.workspace.active;
         let monograms = self.workspace.monograms();
+        let groups = Rc::new(self.rail_groups());
+        let drop_tint = t.color.surface_accent;
         let items = self
             .workspace
             .projects
@@ -542,8 +545,32 @@ impl Shell {
                     ),
                     None => project.root.display().to_string(),
                 };
+                let group = format!("rail-item-{i}");
+                let drag = ProjectDrag {
+                    root: project.root.clone(),
+                    label: project.name().into(),
+                };
+                let fits = groups.clone();
+                let insertion = div()
+                    .absolute()
+                    .left_0()
+                    .top(-t.ui(RAIL_GAP / 2.) - px(1.))
+                    .w(t.ui(RAIL_ITEM))
+                    .h(px(2.))
+                    .bg(t.color.accent)
+                    .invisible()
+                    .group_drag_over::<ProjectDrag>(group.clone(), |s| s.visible())
+                    .can_drop(move |drag, _, _| {
+                        drag.downcast_ref::<ProjectDrag>()
+                            .is_some_and(|d| fits.landing(&d.root, Some(i)).is_some())
+                    })
+                    // The drop listener gives the bar the hitbox its drag-over style is gated on.
+                    .on_drop(cx.listener(move |this, drag: &ProjectDrag, _, cx| {
+                        this.drop_project(drag, Some(i), cx)
+                    }));
                 div()
                     .id(("rail-item", i))
+                    .group(group)
                     .size(t.ui(RAIL_ITEM))
                     .flex()
                     .items_center()
@@ -562,6 +589,13 @@ impl Shell {
                     })
                     .tooltip(move |_, cx| Tooltip::view(root.clone(), cx))
                     .on_click(cx.listener(move |this, _, _, cx| this.switch_to(i, cx)))
+                    .on_drag(drag, |drag: &ProjectDrag, _, _, cx| {
+                        let label = drag.label.clone();
+                        cx.new(|_| TabGhost { label })
+                    })
+                    .on_drop(cx.listener(move |this, drag: &ProjectDrag, _, cx| {
+                        this.drop_project(drag, Some(i), cx)
+                    }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
@@ -569,6 +603,7 @@ impl Shell {
                         }),
                     )
                     .relative()
+                    .child(insertion)
                     .child(monogram)
                     .children(main.map(|_| {
                         // Joins a worktree to the repository above it, as one group.
@@ -617,7 +652,6 @@ impl Shell {
             )
         });
 
-        let drop_tint = t.color.surface_accent;
         div()
             .relative()
             .w(t.ui(RAIL_WIDTH))
@@ -645,6 +679,15 @@ impl Shell {
                     .cursor_pointer()
                     .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
                     .tooltip(|_, cx| Tooltip::view("Open project  ⌘O", cx))
+                    .drag_over::<ProjectDrag>(move |s, drag, _, _| {
+                        match groups.landing(&drag.root, None) {
+                            Some(_) => s.bg(drop_tint),
+                            None => s,
+                        }
+                    })
+                    .on_drop(cx.listener(|this, drag: &ProjectDrag, _, cx| {
+                        this.drop_project(drag, None, cx)
+                    }))
                     .on_click(
                         cx.listener(|this, _, window, cx| {
                             this.add_project(&AddProject, window, cx)

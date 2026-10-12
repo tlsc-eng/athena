@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use athena_workspace::git::{self, Branch, NewWorktree, Worktree};
@@ -354,6 +355,60 @@ impl Shell {
         self.workspace.projects = order.iter().filter_map(|&i| projects[i].take()).collect();
         self.workspace.active = active.and_then(|a| roots_index(&self.workspace.projects, &a));
     }
+
+    /// The rail's worktree groups as they stand, to check project drops against.
+    pub(super) fn rail_groups(&self) -> RailGroups {
+        let roots = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .collect();
+        RailGroups::new(roots, |root| self.worktree_main(root))
+    }
+}
+
+/// Rail projects that move together: a main repository and the linked worktrees following it.
+pub(super) struct RailGroups {
+    roots: Vec<PathBuf>,
+    /// The group of each project, by index.
+    groups: Vec<Range<usize>>,
+}
+
+impl RailGroups {
+    fn new(roots: Vec<PathBuf>, main_of: impl Fn(&Path) -> Option<PathBuf>) -> Self {
+        let mut groups = Vec::with_capacity(roots.len());
+        let mut start = 0;
+        while start < roots.len() {
+            let end = (start + 1..roots.len())
+                .find(|&i| main_of(&roots[i]).as_ref() != Some(&roots[start]))
+                .unwrap_or(roots.len());
+            groups.extend(std::iter::repeat_n(start..end, end - start));
+            start = end;
+        }
+        Self { roots, groups }
+    }
+
+    /// What moves when the project at `root` is dropped before the one at `before`, or last, and
+    /// where it goes; None when that changes nothing or would part a worktree from its repository.
+    pub fn landing(&self, root: &Path, before: Option<usize>) -> Option<(Range<usize>, usize)> {
+        let from = self.roots.iter().position(|r| r == root)?;
+        let group = &self.groups[from];
+        let before = before.unwrap_or(self.roots.len());
+        let (block, fits) = if from == group.start {
+            let fits = match self.groups.get(before) {
+                Some(target) => target.start == before,
+                None => before == self.roots.len(),
+            };
+            (group.clone(), fits)
+        } else {
+            (
+                from..from + 1,
+                (group.start + 1..=group.end).contains(&before),
+            )
+        };
+        (fits && !(block.start..=block.end).contains(&before)).then_some((block, before))
+    }
 }
 
 /// Project indices in rail order: each linked worktree right after its main repository when
@@ -460,6 +515,70 @@ mod tests {
             _ => None,
         };
         assert_eq!(rail_order(&roots, main_of), [1, 2, 0, 4, 3]);
+    }
+
+    fn rail(roots: &[&str]) -> (Vec<PathBuf>, RailGroups) {
+        let roots: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+        let groups = RailGroups::new(roots.clone(), rail_main);
+        (roots, groups)
+    }
+
+    fn rail_main(root: &Path) -> Option<PathBuf> {
+        match root.to_str()? {
+            "/a-feat" | "/a-fix" => Some(PathBuf::from("/a")),
+            "/c-x" => Some(PathBuf::from("/c")),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_dragged_repository_takes_its_worktrees_along() {
+        let (_, rail) = rail(&["/b", "/a", "/a-feat", "/a-fix", "/c-x"]);
+        let a = Path::new("/a");
+        assert_eq!(rail.landing(a, Some(0)), Some((1..4, 0)));
+        assert_eq!(rail.landing(a, None), Some((1..4, 5)));
+        assert_eq!(rail.landing(Path::new("/b"), Some(4)), Some((0..1, 4)));
+        assert_eq!(rail.landing(Path::new("/c-x"), Some(0)), Some((4..5, 0)));
+        assert_eq!(rail.landing(a, Some(1)), None, "onto itself");
+        assert_eq!(rail.landing(a, Some(4)), None, "just after itself");
+        assert_eq!(rail.landing(Path::new("/b"), Some(2)), None, "into a group");
+        assert_eq!(rail.landing(Path::new("/gone"), Some(0)), None);
+    }
+
+    #[test]
+    fn a_dragged_worktree_moves_only_among_its_siblings() {
+        let (_, rail) = rail(&["/b", "/a", "/a-feat", "/a-fix", "/c-x"]);
+        let fix = Path::new("/a-fix");
+        assert_eq!(rail.landing(fix, Some(2)), Some((3..4, 2)));
+        assert_eq!(rail.landing(Path::new("/a-feat"), Some(4)), Some((2..3, 4)));
+        assert_eq!(rail.landing(fix, Some(1)), None, "above its repository");
+        assert_eq!(rail.landing(fix, Some(0)), None);
+        assert_eq!(rail.landing(fix, None), None);
+        assert_eq!(rail.landing(fix, Some(4)), None, "where it already is");
+    }
+
+    #[test]
+    fn every_allowed_drop_keeps_the_rail_grouped() {
+        let (roots, rail) = rail(&["/b", "/a", "/a-feat", "/a-fix", "/c", "/c-x"]);
+        let mut moves = 0;
+        for root in &roots {
+            let targets = (0..=roots.len()).map(Some).chain([None]);
+            for (block, before) in targets.filter_map(|t| rail.landing(root, t)) {
+                let mut w = athena_workspace::Workspace {
+                    projects: roots
+                        .iter()
+                        .map(|r| athena_workspace::Project::new(r.clone()))
+                        .collect(),
+                    ..Default::default()
+                };
+                assert!(w.move_projects(block, before));
+                let moved: Vec<PathBuf> = w.projects.into_iter().map(|p| p.root).collect();
+                let order = rail_order(&moved, rail_main);
+                assert!(order.iter().copied().eq(0..moved.len()), "{moved:?}");
+                moves += 1;
+            }
+        }
+        assert!(moves > 0);
     }
 
     #[test]

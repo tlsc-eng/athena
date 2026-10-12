@@ -42,6 +42,13 @@ impl TreeDrag {
     }
 }
 
+/// A project being dragged along the rail.
+#[derive(Clone, Debug)]
+pub(super) struct ProjectDrag {
+    pub root: PathBuf,
+    pub label: SharedString,
+}
+
 /// The caption that follows the cursor while a tab is dragged.
 pub(super) struct TabGhost {
     pub label: SharedString,
@@ -107,6 +114,23 @@ pub(super) fn strip_drop_index(here: Option<usize>, before: Option<usize>, len: 
 }
 
 impl Shell {
+    /// A rail project dropped before the one at `before`, or last; its worktrees move with it.
+    pub(super) fn drop_project(
+        &mut self,
+        drag: &ProjectDrag,
+        before: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((block, before)) = self.rail_groups().landing(&drag.root, before) else {
+            return;
+        };
+        if self.workspace.move_projects(block, before) {
+            self.rail_from = self.workspace.active.unwrap_or(0);
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
     /// A tree entry dropped on folder `dir`: moved after VS Code's confirmation, or copied with ⌥.
     pub(super) fn drop_tree_entry(
         &mut self,
