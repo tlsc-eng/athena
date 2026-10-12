@@ -1501,6 +1501,10 @@ and the keymap file in v0.5.0.
 
 ## What to check when you're back
 
+After 0.10.0 the **Enable Claude Code hooks for this project** command is gone: Athena now puts
+its hooks into every Claude Code config folder on launch (see the README's Hooks section). Skip
+the steps below that run it, and restart Claude sessions instead.
+
 1. `brew upgrade --cask athena`, launch from the Dock: terminals attach, no "unavailable".
 2. Cmd+B, Cmd+J, Cmd+Shift+P, Cmd+F: each fades in and out without a jump.
 3. Right-click a tree row, a tab, the editor and a terminal; Escape and click-away close them.
