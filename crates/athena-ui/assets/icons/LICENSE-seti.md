@@ -1,5 +1,6 @@
 The SVG icons in this folder come from seti-ui (https://github.com/jesseweed/seti-ui),
-commit 2d6c5e68b4ded73c92dac291845ee44e1182d511, icons/*.svg, unmodified.
+commit 2d6c5e68b4ded73c92dac291845ee44e1182d511, icons/*.svg, unmodified, except go.svg,
+which is Athena's own.
 
 Copyright (c) 2014 Jesse Weed
 
