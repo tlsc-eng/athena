@@ -1026,62 +1026,6 @@ impl TerminalView {
         }
     }
 
-    fn allow_clipboard(&mut self, cx: &mut Context<Self>) {
-        if let Some(terminal) = self.terminal.as_mut() {
-            terminal.allow_clipboard = true;
-            if let Some(text) = terminal.blocked_clipboard.take() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-            cx.notify();
-        }
-    }
-
-    fn render_clipboard_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        self.terminal.as_ref()?.blocked_clipboard.as_ref()?;
-        let t = cx.theme();
-        Some(
-            div()
-                .flex_none()
-                .h(px(32.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .border_t_1()
-                .border_color(t.color.border)
-                .bg(t.color.surface)
-                .text_size(t.typography.caption)
-                .text_color(t.color.content_muted)
-                .child("A program in this terminal tried to set the clipboard.")
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(4.))
-                        .child(
-                            athena_ui::Button::new(
-                                "clipboard-allow",
-                                "Allow for this terminal",
-                                ButtonKind::Secondary,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.allow_clipboard(cx))),
-                        )
-                        .child(
-                            athena_ui::Button::new(
-                                "clipboard-dismiss",
-                                "Dismiss",
-                                ButtonKind::Ghost,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(terminal) = this.terminal.as_mut() {
-                                    terminal.blocked_clipboard = None;
-                                }
-                                cx.notify();
-                            })),
-                        ),
-                ),
-        )
-    }
-
     fn scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.terminal.is_none() {
             return;
@@ -1660,7 +1604,6 @@ impl Render for TerminalView {
                 .pl(px(PROMPT_GUTTER))
                 .child(TerminalElement::new(cx.entity(), focused)),
         )
-        .children(self.render_clipboard_notice(cx))
         .children(self.render_status(cx))
         .children(self.render_find(cx))
         .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))

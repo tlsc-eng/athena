@@ -76,10 +76,7 @@ pub struct Terminal {
     /// Last live output that was not the echo of the user's own typing.
     pub last_activity: Instant,
     pub last_input: Option<Instant>,
-    /// OSC 52 copy requests are applied only after the user allows them for this terminal.
-    pub allow_clipboard: bool,
     pub clipboard_write: Option<String>,
-    pub blocked_clipboard: Option<String>,
     marks: Scanner,
     commands: Commands,
     /// Where the last `A` mark put the prompt, from [`Self::cursor_abs`], until it is tagged.
@@ -138,9 +135,7 @@ impl Terminal {
             bell: false,
             last_activity: Instant::now(),
             last_input: None,
-            allow_clipboard: false,
             clipboard_write: None,
-            blocked_clipboard: None,
             marks: Scanner::default(),
             commands: Commands::default(),
             prompt_start: None,
@@ -477,10 +472,7 @@ impl Terminal {
                         .write(format(self.window_size()).into_bytes());
                 }
                 Event::Bell => self.bell = true,
-                Event::ClipboardStore(_, text) if self.allow_clipboard => {
-                    self.clipboard_write = Some(text)
-                }
-                Event::ClipboardStore(_, text) => self.blocked_clipboard = Some(text),
+                Event::ClipboardStore(_, text) => self.clipboard_write = Some(text),
                 _ => {}
             }
         }
@@ -800,20 +792,15 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_writes_wait_for_permission() {
+    fn clipboard_writes_go_through() {
         let (mut t, _) = terminal();
         feed(&mut t, b"\x1b]52;c;aGk=\x07");
-        assert_eq!(t.blocked_clipboard.as_deref(), Some("hi"));
-        assert_eq!(t.clipboard_write, None);
-        t.allow_clipboard = true;
-        feed(&mut t, b"\x1b]52;c;eW8=\x07");
-        assert_eq!(t.clipboard_write.as_deref(), Some("yo"));
+        assert_eq!(t.clipboard_write.as_deref(), Some("hi"));
     }
 
     #[test]
     fn clipboard_reads_are_never_answered() {
         let (mut t, sent) = terminal();
-        t.allow_clipboard = true;
         feed(&mut t, b"\x1b]52;c;?\x07");
         assert!(sent.0.borrow().is_empty());
     }
