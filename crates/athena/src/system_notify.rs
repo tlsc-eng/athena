@@ -79,7 +79,11 @@ mod mac {
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         // The center holds its delegate weakly; this one lives for the whole process.
         std::mem::forget(delegate);
-        let done = RcBlock::new(|_granted: Bool, _error: *mut NSError| {});
+        let done = RcBlock::new(|granted: Bool, error: *mut NSError| {
+            if !granted.as_bool() {
+                tracing::warn!("notifications not allowed: {}", describe(error));
+            }
+        });
         center.requestAuthorizationWithOptions_completionHandler(
             UNAuthorizationOptions::Alert
                 | UNAuthorizationOptions::Sound
@@ -101,8 +105,21 @@ mod mac {
             &content,
             None,
         );
+        let done = RcBlock::new(|error: *mut NSError| {
+            if !error.is_null() {
+                tracing::warn!("notification not posted: {}", describe(error));
+            }
+        });
         UNUserNotificationCenter::currentNotificationCenter()
-            .addNotificationRequest_withCompletionHandler(&request, None);
+            .addNotificationRequest_withCompletionHandler(&request, Some(&done));
+    }
+
+    fn describe(error: *mut NSError) -> String {
+        // SAFETY: the completion handlers pass a valid NSError or null.
+        match unsafe { error.as_ref() } {
+            Some(error) => error.localizedDescription().to_string(),
+            None => "no error given".into(),
+        }
     }
 
     pub fn set_badge(count: usize) {
