@@ -38,7 +38,7 @@ const PLAN_TOOLS: &str = "TodoWrite|ExitPlanMode";
 /// Notifications that wait on the user; `idle_prompt` is only a reminder after Claude finished.
 const ASKS: &str = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|worker_permission_prompt";
 
-fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 9] {
+fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 10] {
     let athena = athena.display();
     // Settings are shared with Claude sessions outside Athena, where the hook must stay silent.
     let cmd = |event: &str| {
@@ -49,6 +49,8 @@ fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 9] {
     [
         ("UserPromptSubmit", None, cmd("claude-running")),
         ("Stop", None, cmd("claude-stop")),
+        // As the permission dialog opens; its Notification comes some seconds later.
+        ("PermissionRequest", None, cmd("claude-needs-input")),
         ("Notification", Some(ASKS), cmd("claude-needs-input")),
         // Every tool call, so a question or plan reads as waiting and the rest as working.
         ("PreToolUse", None, cmd("claude-tool")),
@@ -286,6 +288,10 @@ mod tests {
         assert!(
             !asks.contains("idle_prompt"),
             "a reminder after finishing is not a question"
+        );
+        assert_eq!(
+            out["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
+            command("claude-needs-input")
         );
     }
 

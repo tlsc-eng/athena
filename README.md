@@ -786,8 +786,9 @@ points at). They go after any of your own on the same events:
 
 - `UserPromptSubmit`, `PostToolUse` and `PostToolUseFailure` mark the tab **running**; `Stop`
   marks it **done**;
-- `Notification` for permission prompts, dialogs and agents waiting on you marks it **needs
-  input**. Claude's `idle_prompt` reminder does not;
+- `PermissionRequest`, as a permission dialog opens, and `Notification` for permission prompts,
+  dialogs and agents waiting on you mark it **needs input**. Claude's `idle_prompt` reminder
+  does not;
 - `PreToolUse` on every tool marks `AskUserQuestion` and `ExitPlanMode` as **needs input** and any
   other tool as **running**;
 - `PreToolUse` and `PostToolUse` on `Edit|MultiEdit|Write`, for reviewing Claude's edits (below);

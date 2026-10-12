@@ -177,7 +177,12 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
             read_hook_input(std::io::stdin().lock())
         }
     };
-    let hook_message = || hook_input().message;
+    let hook_message = || {
+        let input = hook_input();
+        input
+            .message
+            .or_else(|| Some(format!("Claude wants to use {}", input.tool_name?)))
+    };
     let event = flag("--event");
     if event.as_deref() == Some("claude-will-edit") {
         // A failing PreToolUse hook would get in Claude's way; a missed snapshot only costs the diff.
