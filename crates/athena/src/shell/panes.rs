@@ -460,10 +460,11 @@ impl Shell {
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.items.get(&(root.to_path_buf(), item.id))?;
-        let (color, word) = match view.claude_state(cx) {
+        let (color, word) = match view.shown_claude_state(cx) {
             _ if view.is_stale(cx) => (t.color.content_muted, Some("stale")),
-            Some(ClaudeState::Waiting) => (t.color.warning, Some("needs input")),
+            Some(ClaudeState::NeedsInput) => (t.color.warning, Some("needs input")),
             Some(ClaudeState::Running) => (t.color.success, Some("running")),
+            Some(ClaudeState::Finished) => (t.color.content_muted, Some("done")),
             None if view.has_bell(cx) => (t.color.warning, None),
             None => return None,
         };
@@ -494,8 +495,12 @@ impl Shell {
             .items
             .iter()
             .filter(|((r, _), _)| r == root)
-            .filter_map(|(_, v)| v.claude_state(cx));
-        states.max_by_key(|s| matches!(s, ClaudeState::Waiting))
+            .filter_map(|(_, v)| v.shown_claude_state(cx));
+        states.max_by_key(|s| match s {
+            ClaudeState::NeedsInput => 2,
+            ClaudeState::Running => 1,
+            ClaudeState::Finished => 0,
+        })
     }
 
     /// Moves keyboard focus to the focused pane's active item.

@@ -137,6 +137,7 @@ impl Setting {
             ["explorer", "confirmDragAndDrop"] => flag(s.confirm_drag_and_drop),
             ["window", "zoom_level"] => s.zoom_level.map(Value::from),
             ["eslint", "fixOnSave"] => flag(s.eslint_fix_on_save),
+            ["claude", "hooks"] => flag(s.claude_hooks),
             ["claude", "prices"] => (!s.claude_prices.is_empty()).then(|| {
                 let prices: Map<String, Value> = s
                     .claude_prices
@@ -482,6 +483,17 @@ pub static SETTINGS: &[Setting] = &[
         also: None,
     },
     Setting {
+        keys: &["claude", "hooks"],
+        aliases: &[],
+        title: "Claude Code Hooks",
+        description: "Keeps Athena's hooks in each Claude Code config folder, so tabs show \
+                      whether Claude is running, needs input or is done, and notify you.",
+        group: Group::Claude,
+        kind: TOGGLE_ON,
+        user_only: true,
+        also: None,
+    },
+    Setting {
         keys: &["claude", "prices"],
         aliases: &[],
         title: "Prices",
@@ -769,6 +781,7 @@ mod tests {
             format!("fetch {}", s.git_autofetch()),
             format!("ide {}", prefs.ide_integration),
             format!("eslint {}", s.eslint_fix_on_save()),
+            format!("hooks {}", s.claude_hooks()),
         ]
     }
 

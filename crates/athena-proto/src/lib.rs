@@ -275,7 +275,7 @@ pub struct TerminalInfo {
     pub title: String,
     pub cwd: Option<PathBuf>,
     pub program: Option<String>,
-    /// `running` or `waiting_input` for a Claude Code session.
+    /// `running`, `waiting_input` or `finished` for a Claude Code session.
     pub claude: Option<String>,
 }
 

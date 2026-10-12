@@ -6,7 +6,7 @@ use std::process::Command;
 
 use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
 
-const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited|claude-plan> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
+const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
 
 /// Hook input past this is cut off; a Write of a file up to the snapshot limit fits easily.
 const MAX_HOOK_INPUT: u64 = 256 * 1024 * 1024;
@@ -69,6 +69,18 @@ fn plan_message(input: HookInput) -> Option<AppMsg> {
             Some(AppMsg::ClaudePlan { session, plan })
         }
         _ => None,
+    }
+}
+
+/// What a tool about to run says about the session: these two wait on the user, the rest work.
+fn tool_notice(tool: Option<&str>) -> NoticeKind {
+    let message = match tool {
+        Some("AskUserQuestion") => "Claude has a question",
+        Some("ExitPlanMode") => "Claude's plan is ready for review",
+        _ => return NoticeKind::ClaudeRunning,
+    };
+    NoticeKind::ClaudeNeedsInput {
+        message: message.into(),
     }
 }
 
@@ -198,6 +210,7 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
     let kind = match (event.as_deref(), flag("--title")) {
         (Some("claude-stop"), _) => NoticeKind::ClaudeStopped,
         (Some("claude-running"), _) => NoticeKind::ClaudeRunning,
+        (Some("claude-tool"), _) => tool_notice(hook_input().tool_name.as_deref()),
         (Some("claude-needs-input"), _) => NoticeKind::ClaudeNeedsInput {
             message: flag("--message").or_else(hook_message).unwrap_or_default(),
         },
@@ -358,6 +371,27 @@ mod tests {
         let (path, _) = edited_file(&input, Some("/x/y.go".into())).unwrap();
         assert_eq!(path, PathBuf::from("/x/y.go"));
         assert!(edited_file(&hook_input(serde_json::json!({})), None).is_none());
+    }
+
+    #[test]
+    fn questions_and_plans_wait_on_the_user_and_other_tools_work() {
+        let tool = |name: &str| {
+            tool_notice(
+                hook_input(serde_json::json!({ "tool_name": name }))
+                    .tool_name
+                    .as_deref(),
+            )
+        };
+        assert!(matches!(
+            tool("AskUserQuestion"),
+            NoticeKind::ClaudeNeedsInput { .. }
+        ));
+        assert!(matches!(
+            tool("ExitPlanMode"),
+            NoticeKind::ClaudeNeedsInput { .. }
+        ));
+        assert_eq!(tool("Bash"), NoticeKind::ClaudeRunning);
+        assert_eq!(tool_notice(None), NoticeKind::ClaudeRunning);
     }
 
     #[test]

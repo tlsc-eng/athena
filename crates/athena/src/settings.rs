@@ -42,6 +42,8 @@ pub struct Settings {
     pub eslint_fix_on_save: Option<bool>,
     /// `claude.prices`: USD per million tokens by model id, over the built-in estimates.
     pub claude_prices: HashMap<String, crate::transcripts::Price>,
+    /// `claude.hooks`: Athena's hooks in every Claude Code config folder; on unless turned off.
+    pub claude_hooks: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -220,6 +222,10 @@ fn code_actions_on_save(value: &Value) -> Result<(bool, bool), String> {
 }
 
 impl Settings {
+    pub fn claude_hooks(&self) -> bool {
+        self.claude_hooks.unwrap_or(true)
+    }
+
     pub fn git_autofetch(&self) -> bool {
         self.autofetch.unwrap_or(false)
     }
@@ -387,6 +393,7 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
             "claude.prices",
             !std::mem::take(&mut s.claude_prices).is_empty(),
         ),
+        ("claude.hooks", s.claude_hooks.take().is_some()),
     ];
     for (key, set) in app_wide {
         if set {
@@ -623,9 +630,19 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 }
                 None => Err("must be an object of language server settings".into()),
             },
-            "claude" => match value.get("prices") {
-                Some(prices) => claude_prices(&mut settings, prices),
-                None => Err("must be {\"prices\": {model id: prices}}".into()),
+            "claude" => match value.as_object() {
+                Some(block) if !block.is_empty() => {
+                    block
+                        .iter()
+                        .try_for_each(|(name, value)| match name.as_str() {
+                            "prices" => claude_prices(&mut settings, value),
+                            "hooks" => claude_hooks(&mut settings, value),
+                            _ => Err(format!("has no setting \"{name}\"")),
+                        })
+                }
+                _ => {
+                    Err("must be {\"prices\": {model id: prices}, \"hooks\": true or false}".into())
+                }
             },
             k if k.len() > 2 && k.starts_with('[') && k.ends_with(']') => {
                 let lang = settings
@@ -656,6 +673,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                     Ok(())
                 }
                 Some(("claude", "prices")) => claude_prices(&mut settings, value),
+                Some(("claude", "hooks")) => claude_hooks(&mut settings, value),
                 _ => Err("is not a setting".into()),
             },
         };
@@ -664,6 +682,13 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
         }
     }
     Ok((settings, problems))
+}
+
+fn claude_hooks(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    value
+        .as_bool()
+        .map(|on| settings.claude_hooks = Some(on))
+        .ok_or_else(|| "must be true or false".to_string())
 }
 
 /// Reads `{"claude-opus-5": {"input": 5, "output": 25}}`; cache prices default to the usual

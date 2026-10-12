@@ -91,6 +91,14 @@ impl ItemView {
         matches!(self, Self::Terminal(v) if v.read(cx).is_stale())
     }
 
+    /// Claude's state as the tab and rail show it: a finished session only until it is seen.
+    pub fn shown_claude_state(&self, cx: &App) -> Option<ClaudeState> {
+        match self.claude_state(cx) {
+            Some(ClaudeState::Finished) if !self.has_bell(cx) => None,
+            state => state,
+        }
+    }
+
     pub fn has_bell(&self, cx: &App) -> bool {
         matches!(self, Self::Terminal(v) if v.read(cx).has_bell())
     }

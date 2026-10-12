@@ -298,11 +298,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::ChangeClaudeCommand),
         ),
         (
-            "Enable Claude Code hooks for this project",
-            Box::new(actions::EnableClaudeHooks),
-        ),
-        (
-            "Disable Claude Code hooks for this project",
+            "Remove Athena's old Claude Code hooks from this project",
             Box::new(actions::DisableClaudeHooks),
         ),
         (
@@ -517,8 +513,9 @@ impl Shell {
     /// Commands, with their key bindings, minus those that mean nothing here.
     fn command_entries(&self, window: &Window, cx: &mut Context<Self>) -> Vec<Entry> {
         let root = self.workspace.active_project().map(|p| p.root.as_path());
-        let hooks_on = root.is_some_and(crate::claude_hooks::enabled);
-        let hooks_any = root.is_some_and(crate::claude_hooks::installed);
+        let hooks_any = root.is_some_and(|r| {
+            crate::claude_hooks::installed(&crate::claude_hooks::settings_path(r))
+        });
         let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
         let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
         let mut commands = commands();
@@ -544,8 +541,7 @@ impl Shell {
         commands
             .into_iter()
             .filter(|(label, _)| {
-                !(label.starts_with("Enable Claude Code hooks") && hooks_on
-                    || label.starts_with("Disable Claude Code hooks") && !hooks_any
+                !(label.starts_with("Remove Athena's old Claude Code hooks") && !hooks_any
                     || label.starts_with("Enable Playwright MCP") && (mcp_on || !playwright)
                     || label.starts_with("Disable Playwright MCP") && !mcp_on
                     || *label == "Run Playwright tests" && !playwright)

@@ -337,7 +337,7 @@ impl Shell {
             session == id
                 && self.items.values().any(|v| match v {
                     ItemView::Terminal(t) => {
-                        t.read(cx).session() == Some(*pane) && v.claude_state(cx).is_some()
+                        t.read(cx).session() == Some(*pane) && t.read(cx).is_claude()
                     }
                     _ => false,
                 })
@@ -361,7 +361,8 @@ impl Shell {
                 .background_executor()
                 .spawn(async move {
                     let rows = load(&home, &store, &task_root);
-                    (rows, crate::claude_hooks::enabled(&task_root))
+                    let hooks = crate::claude_hooks::global_settings(&home);
+                    (rows, hooks.iter().any(|p| crate::claude_hooks::enabled(p)))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -663,17 +664,11 @@ impl Shell {
                         .child("Reading sessions…"),
                 );
             }
-            let enable = (!state.hooks_on).then(|| {
-                athena_ui::Button::new("claude-enable-hooks", "Enable Hooks", ButtonKind::Primary)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.set_claude_hooks(true, window, cx)),
-                    )
-            });
             return centered(empty_state(
                 "No Claude sessions yet",
                 "Sessions run in this project are listed here with their token use. With Claude \
                  Code hooks on, each also lists the files it changed.",
-                enable,
+                None::<athena_ui::Button>,
                 cx,
             ));
         }
@@ -694,7 +689,7 @@ impl Shell {
                 let hint = match self.review.sessions.hooks_on {
                     true => "No edits recorded for this session.",
                     false => {
-                        "No edits recorded. Enable Claude Code hooks to record the next session's."
+                        "No edits recorded. Turn on Claude Code Hooks in Settings to record the next session's."
                     }
                 };
                 out.push(detail_line(("claude-nofiles", i), hint, &t).into_any_element());

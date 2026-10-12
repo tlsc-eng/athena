@@ -288,6 +288,7 @@ impl Shell {
             }
             self.set_autofetch(self.settings.file.git_autofetch(), window, cx);
         }
+        self.sync_claude_hooks(cx);
         let font_size = self.settings.file.editor.font_size;
         if font_size != old.editor.font_size
             && let Some(size) = font_size

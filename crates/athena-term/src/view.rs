@@ -111,8 +111,12 @@ pub enum TerminalEvent {
     },
 }
 
-/// How long a Claude Code session may stay silent before it counts as waiting for the user.
+/// Without hooks, how long a Claude Code session may stay silent and still count as running.
 const CLAUDE_IDLE: Duration = Duration::from_secs(3);
+/// Claude redraws its spinner while it works, so a running session this silent was interrupted.
+const CLAUDE_STALL: Duration = Duration::from_secs(10);
+/// Output that keeps coming this long after the user answers a prompt means Claude went on.
+const CLAUDE_ANSWERED: Duration = Duration::from_millis(1500);
 
 /// An older daemon still runs this terminal's shell after an upgrade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,7 +129,8 @@ enum Stale {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaudeState {
     Running,
-    Waiting,
+    NeedsInput,
+    Finished,
 }
 
 /// The find bar: its input and the search it drives.
@@ -184,8 +189,8 @@ pub struct TerminalView {
     foreground: Option<Process>,
     selecting: bool,
     claude_state: Option<ClaudeState>,
-    /// What Claude Code's own hooks last reported; trusted over the output-silence guess.
-    claude_hook: Option<ClaudeState>,
+    /// What Claude Code's own hooks last reported, and when; trusted over the output guess.
+    claude_hook: Option<(ClaudeState, Instant)>,
     /// Typed into the shell once it is ready, for tabs opened to run a command.
     pending_input: Option<Vec<u8>>,
     grid: GridSize,
@@ -331,11 +336,21 @@ impl TerminalView {
         self.pending_input = Some(text.into().into_bytes());
     }
 
-    /// Records Claude Code's state as reported by its hooks.
-    pub fn set_claude_hook(&mut self, state: ClaudeState, cx: &mut Context<Self>) {
-        self.claude_hook = Some(state);
+    /// Records Claude Code's state as reported by its hooks; false when it repeats the last report
+    /// with no typing in between, as a question raised by two hooks does.
+    pub fn set_claude_hook(&mut self, state: ClaudeState, cx: &mut Context<Self>) -> bool {
+        let typed_since = |at| {
+            self.terminal
+                .as_ref()
+                .and_then(|t| t.last_input)
+                .is_some_and(|key| key > at)
+        };
+        let news =
+            !matches!(self.claude_hook, Some((last, at)) if last == state && !typed_since(at));
+        self.claude_hook = Some((state, Instant::now()));
         self.refresh_claude(cx);
         cx.notify();
+        news
     }
 
     /// Marks the tab until the user looks at it, as a bell does.
@@ -347,7 +362,7 @@ impl TerminalView {
         }
     }
 
-    fn is_claude(&self) -> bool {
+    pub fn is_claude(&self) -> bool {
         self.foreground.as_ref().is_some_and(|p| {
             p.name == "claude"
                 || p.path.ends_with("claude")
@@ -359,18 +374,16 @@ impl TerminalView {
         if !self.is_claude() {
             return None;
         }
-        if let Some(state) = self.claude_hook {
-            return Some(state);
-        }
         let terminal = self.terminal.as_ref()?;
-        if terminal.bell || terminal.last_output.elapsed() >= CLAUDE_IDLE {
-            Some(ClaudeState::Waiting)
-        } else {
-            Some(ClaudeState::Running)
-        }
+        claude_state(
+            self.claude_hook,
+            terminal.last_input,
+            terminal.last_activity,
+            Instant::now(),
+        )
     }
 
-    /// Recomputes Claude state now and again once the idle window passes, emitting on change.
+    /// Recomputes Claude state now, and while it is running again later so it can lapse.
     fn refresh_claude(&mut self, cx: &mut Context<Self>) {
         let state = self.current_claude_state();
         if state != self.claude_state {
@@ -1654,6 +1667,29 @@ impl Render for TerminalView {
     }
 }
 
+/// What a Claude Code tab shows, from its last hook report and when the user last typed and the
+/// program last drew something other than that typing's echo.
+fn claude_state(
+    hook: Option<(ClaudeState, Instant)>,
+    last_input: Option<Instant>,
+    last_activity: Instant,
+    now: Instant,
+) -> Option<ClaudeState> {
+    let quiet = now.saturating_duration_since(last_activity);
+    let lapsed = |limit| (quiet < limit).then_some(ClaudeState::Running);
+    match hook {
+        // Approving a prompt fires no hook until the tool finishes; the spinner coming back does.
+        Some((ClaudeState::NeedsInput, at))
+            if last_input.is_some_and(|key| key > at && last_activity > key + CLAUDE_ANSWERED) =>
+        {
+            lapsed(CLAUDE_STALL)
+        }
+        Some((ClaudeState::Running, _)) => lapsed(CLAUDE_STALL),
+        Some((state, _)) => Some(state),
+        None => lapsed(CLAUDE_IDLE),
+    }
+}
+
 /// The file a `file://` hyperlink names, if it is a regular file the editor can open; a
 /// device or FIFO would block the UI thread reading it.
 fn file_link_target(uri: &str) -> Option<PathBuf> {
@@ -1903,6 +1939,72 @@ mod tests {
             let m = binding.keystrokes()[0].modifiers();
             assert!(m.platform && m.alt, "{:?}", binding.keystrokes());
         }
+    }
+
+    fn secs(s: f32) -> Duration {
+        Duration::from_secs_f32(s)
+    }
+
+    #[test]
+    fn without_hooks_claude_runs_only_while_it_draws() {
+        let t0 = Instant::now();
+        let state =
+            |active: f32, now: f32| claude_state(None, None, t0 + secs(active), t0 + secs(now));
+        assert_eq!(state(0., 1.), Some(ClaudeState::Running));
+        assert_eq!(state(0., 4.), None, "silence is not a question");
+    }
+
+    #[test]
+    fn hooks_decide_needs_input_and_finished() {
+        let t0 = Instant::now();
+        let hook = |s| Some((s, t0));
+        let later = t0 + secs(60.);
+        assert_eq!(
+            claude_state(hook(ClaudeState::NeedsInput), None, t0, later),
+            Some(ClaudeState::NeedsInput)
+        );
+        assert_eq!(
+            claude_state(hook(ClaudeState::Finished), None, t0, later),
+            Some(ClaudeState::Finished)
+        );
+        assert_eq!(
+            claude_state(hook(ClaudeState::Running), None, t0 + secs(55.), later),
+            Some(ClaudeState::Running)
+        );
+    }
+
+    #[test]
+    fn a_running_session_that_falls_silent_was_interrupted() {
+        let t0 = Instant::now();
+        let running = Some((ClaudeState::Running, t0));
+        assert_eq!(claude_state(running, None, t0, t0 + secs(11.)), None);
+    }
+
+    #[test]
+    fn an_answered_prompt_runs_again_once_claude_keeps_drawing() {
+        let t0 = Instant::now();
+        let asked = Some((ClaudeState::NeedsInput, t0));
+        let key = Some(t0 + secs(5.));
+        assert_eq!(
+            claude_state(asked, key, t0 + secs(5.5), t0 + secs(6.)),
+            Some(ClaudeState::NeedsInput),
+            "moving through the dialog only redraws it"
+        );
+        assert_eq!(
+            claude_state(asked, key, t0 + secs(7.), t0 + secs(7.)),
+            Some(ClaudeState::Running)
+        );
+    }
+
+    #[test]
+    fn a_new_prompt_is_not_hidden_by_the_last_answer() {
+        let t0 = Instant::now();
+        let asked = Some((ClaudeState::NeedsInput, t0 + secs(10.)));
+        let key = Some(t0 + secs(1.));
+        assert_eq!(
+            claude_state(asked, key, t0 + secs(10.), t0 + secs(10.)),
+            Some(ClaudeState::NeedsInput)
+        );
     }
 
     #[test]

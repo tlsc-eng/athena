@@ -257,13 +257,14 @@ impl Shell {
         if let Some(ItemView::Terminal(view)) = &view {
             let state = match notice.kind {
                 NoticeKind::ClaudeRunning => Some(ClaudeState::Running),
-                NoticeKind::ClaudeStopped | NoticeKind::ClaudeNeedsInput { .. } => {
-                    Some(ClaudeState::Waiting)
-                }
+                NoticeKind::ClaudeStopped => Some(ClaudeState::Finished),
+                NoticeKind::ClaudeNeedsInput { .. } => Some(ClaudeState::NeedsInput),
                 _ => None,
             };
-            if let Some(state) = state {
-                view.update(cx, |v, cx| v.set_claude_hook(state, cx));
+            if let Some(state) = state
+                && !view.update(cx, |v, cx| v.set_claude_hook(state, cx))
+            {
+                return;
             }
         }
         if notice.kind == NoticeKind::ClaudeRunning {

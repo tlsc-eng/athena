@@ -22,6 +22,8 @@ pub(crate) const SCROLLBACK_LINES: usize = 10_000;
 const MAX_TITLE: usize = 256;
 /// The daemon notices a new foreground program up to two 500 ms ticks after it starts.
 const TITLE_GRACE: Duration = Duration::from_secs(1);
+/// Output this soon after a keystroke is taken as its echo, not as the program working.
+const ECHO: Duration = Duration::from_millis(300);
 
 /// Collects events the parser raises so they are handled after each `advance`, outside the borrow.
 #[derive(Clone, Default)]
@@ -71,7 +73,9 @@ pub struct Terminal {
     title_at: Option<Instant>,
     pub exit: Option<Option<i32>>,
     pub bell: bool,
-    pub last_output: Instant,
+    /// Last live output that was not the echo of the user's own typing.
+    pub last_activity: Instant,
+    pub last_input: Option<Instant>,
     /// OSC 52 copy requests are applied only after the user allows them for this terminal.
     pub allow_clipboard: bool,
     pub clipboard_write: Option<String>,
@@ -132,7 +136,8 @@ impl Terminal {
             title_at: None,
             exit: None,
             bell: false,
-            last_output: Instant::now(),
+            last_activity: Instant::now(),
+            last_input: None,
             allow_clipboard: false,
             clipboard_write: None,
             blocked_clipboard: None,
@@ -178,8 +183,8 @@ impl Terminal {
     pub fn handle(&mut self, event: PaneEvent, palette: &TerminalColors) {
         match event {
             PaneEvent::Output(bytes) => {
-                if !self.replaying {
-                    self.last_output = Instant::now();
+                if !self.replaying && self.last_input.is_none_or(|at| at.elapsed() > ECHO) {
+                    self.last_activity = Instant::now();
                 }
                 // Each mark is recorded where the cursor is once the bytes before it are parsed.
                 let mut from = 0;
@@ -487,6 +492,7 @@ impl Terminal {
             return;
         }
         self.term.scroll_display(Scroll::Bottom);
+        self.last_input = Some(Instant::now());
         self.transport.write(bytes);
     }
 
@@ -778,6 +784,19 @@ mod tests {
             PaneEvent::Output(bytes.to_vec()),
             &Theme::dark(false).terminal,
         );
+    }
+
+    #[test]
+    fn the_echo_of_typing_is_not_activity() {
+        let (mut t, _) = terminal();
+        t.last_activity -= Duration::from_secs(10);
+        let quiet_since = t.last_activity;
+        t.input(b"h".to_vec());
+        feed(&mut t, b"h");
+        assert_eq!(t.last_activity, quiet_since);
+        t.last_input = t.last_input.map(|at| at - ECHO * 2);
+        feed(&mut t, b"working");
+        assert!(t.last_activity > quiet_since);
     }
 
     #[test]

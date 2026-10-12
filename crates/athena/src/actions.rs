@@ -36,7 +36,6 @@ actions!(
         ShowContainers,
         NewClaudeSession,
         ChangeClaudeCommand,
-        EnableClaudeHooks,
         DisableClaudeHooks,
         ShowPlaywright,
         RunPlaywright,

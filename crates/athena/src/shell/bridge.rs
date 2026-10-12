@@ -309,7 +309,8 @@ impl Shell {
                     program: foreground.map(|(name, _)| name),
                     claude: view.and_then(|v| v.claude_state()).map(|s| match s {
                         ClaudeState::Running => "running".into(),
-                        ClaudeState::Waiting => "waiting_input".into(),
+                        ClaudeState::NeedsInput => "waiting_input".into(),
+                        ClaudeState::Finished => "finished".into(),
                     }),
                 });
             }

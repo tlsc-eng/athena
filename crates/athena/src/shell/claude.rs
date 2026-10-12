@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
+
 use athena_proto::NoticeKind;
 use athena_workspace::ItemKind;
 use gpui::{Context, PromptLevel, Window};
@@ -63,10 +66,52 @@ impl Shell {
         }
     }
 
-    /// Adds or removes Athena's Claude Code hooks after the user confirms the file it touches.
-    pub(super) fn set_claude_hooks(
+    /// Puts Athena's hooks into every Claude Code config folder, or takes them out, once per
+    /// change of `claude.hooks`; the projects open now lose the per-project hooks of old Athenas.
+    pub(super) fn sync_claude_hooks(&mut self, cx: &mut Context<Self>) {
+        static SYNCED: Mutex<Option<bool>> = Mutex::new(None);
+        let on = self.settings.file.claude_hooks();
+        if SYNCED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(on)
+            == Some(on)
+        {
+            return;
+        }
+        let Some(home) = std::env::home_dir() else {
+            return;
+        };
+        let projects: Vec<PathBuf> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .collect();
+        let task = cx.background_executor().spawn(async move {
+            claude_hooks::sync(&home, &claude_hooks::athena_command(), on, &projects)
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = task.await {
+                tracing::warn!("Claude Code hooks: {e:#}");
+                let _ = this.update(cx, |this, cx| {
+                    let title = "Could not update Claude Code hooks".to_string();
+                    this.local_notice(
+                        NoticeKind::Message {
+                            title,
+                            body: format!("{e:#}"),
+                        },
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Takes the hooks an older Athena wrote into this project out, after the user confirms.
+    pub(super) fn remove_project_claude_hooks(
         &mut self,
-        enable: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -74,40 +119,26 @@ impl Shell {
             return;
         };
         let file = claude_hooks::settings_path(&root);
-        let (message, button) = if enable {
-            ("Add Claude Code hooks to this project?", "Add hooks")
-        } else {
-            (
-                "Remove Athena's Claude Code hooks from this project?",
-                "Remove hooks",
-            )
-        };
         let detail = format!(
-            "Athena will edit {}, adding entries that run `athena notify` when Claude starts working, \
-             finishes, needs your input, edits a file, or updates its todo list or plan. Before Claude's first edit to a file in a \
-             session, a copy is kept in Application Support/athena/snapshots (pruned after 7 days) so \
-             you can review the session's changes as one diff. Your other settings are kept. Claude \
-             Code keeps this file out of version control.",
+            "Athena will remove its entries from {}. Your other settings are kept. Athena's hooks \
+             now live in each Claude Code config folder instead; turn them off with \
+             \"claude.hooks\" in Settings.",
             file.display()
         );
         let answer = window.prompt(
             PromptLevel::Info,
-            message,
+            "Remove Athena's Claude Code hooks from this project?",
             Some(&detail),
-            &[button, "Cancel"],
+            &["Remove hooks", "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
             }
-            let result = claude_hooks::write(&root, &claude_hooks::athena_command(), enable);
+            let result = claude_hooks::write(&file, &claude_hooks::athena_command(), false, false);
             let _ = this.update(cx, |this, cx| {
                 let (title, body) = match result {
-                    Ok(()) if enable => (
-                        "Claude Code hooks added".to_string(),
-                        file.display().to_string(),
-                    ),
                     Ok(()) => (
                         "Claude Code hooks removed".to_string(),
                         file.display().to_string(),

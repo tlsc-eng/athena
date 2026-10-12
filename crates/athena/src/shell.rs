@@ -71,12 +71,12 @@ use gpui::{
 
 use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
-    DisablePlaywrightMcp, EnableClaudeHooks, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft,
-    FocusPaneRight, FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject,
-    NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SaveAs,
-    SelectProject, SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight,
-    ToggleAutoSave, ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen, ToggleNotifications,
-    TogglePaneZoom, TogglePreview, ToggleWordWrapDefault, Zoom,
+    DisablePlaywrightMcp, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
+    FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject, NextTab,
+    PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SaveAs, SelectProject,
+    SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight, ToggleAutoSave,
+    ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen, ToggleNotifications, TogglePaneZoom,
+    TogglePreview, ToggleWordWrapDefault, Zoom,
 };
 use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, GoToSymbol, GoToWorkspaceSymbol,
@@ -284,6 +284,7 @@ impl Shell {
         shell.start_ide(window, cx);
         shell.start_keymap(window, cx);
         shell.start_settings(window, cx);
+        shell.sync_claude_hooks(cx);
         crate::system_notify::set_badge(shell.unread());
         shell
     }
@@ -581,8 +582,9 @@ impl Shell {
                     }))
                     .children(self.project_claude_state(&project.root, cx).map(|state| {
                         let color = match state {
-                            ClaudeState::Waiting => t.color.warning,
+                            ClaudeState::NeedsInput => t.color.warning,
                             ClaudeState::Running => t.color.success,
+                            ClaudeState::Finished => t.color.content_muted,
                         };
                         div()
                             .absolute()
@@ -873,13 +875,8 @@ impl Render for Shell {
                     this.change_claude_command(w, cx)
                 }),
             )
-            .on_action(
-                cx.listener(|this, _: &EnableClaudeHooks, w, cx| {
-                    this.set_claude_hooks(true, w, cx)
-                }),
-            )
             .on_action(cx.listener(|this, _: &DisableClaudeHooks, w, cx| {
-                this.set_claude_hooks(false, w, cx)
+                this.remove_project_claude_hooks(w, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowPlaywright, _, cx| {
                 this.toggle_drawer_tab(drawer::DrawerTab::Playwright, cx)

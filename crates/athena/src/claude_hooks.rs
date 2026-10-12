@@ -1,7 +1,7 @@
 //! Claude Code hooks that tell Athena when a session starts working, stops, needs input, or
 //! edits a file.
-//! Written only on request, into the project's `.claude/settings.local.json`, which Claude Code
-//! keeps out of version control.
+//! Kept in each Claude Code config folder's `settings.json` unless `claude.hooks` is off; they do
+//! nothing in a terminal Athena did not start.
 
 use std::fs;
 use std::io::Write;
@@ -13,25 +13,47 @@ use serde_json::{Map, Value, json};
 /// Every Athena hook command contains this, which is how they are found again.
 const MARKER: &str = "athena\" notify --event";
 
+/// Where Athena 0.10 and earlier put its hooks, one project at a time.
 pub fn settings_path(root: &Path) -> PathBuf {
     root.join(".claude/settings.local.json")
+}
+
+/// The `settings.json` of `~/.claude` and of every `~/.claude-*` folder Claude Code has run from.
+pub fn global_settings(home: &Path) -> Vec<PathBuf> {
+    let default = home.join(".claude");
+    let mut dirs: Vec<PathBuf> = default.is_dir().then_some(default).into_iter().collect();
+    dirs.extend(
+        crate::transcripts::profiles(home)
+            .into_iter()
+            .filter_map(|p| p.config_dir),
+    );
+    dirs.dedup();
+    dirs.into_iter().map(|d| d.join("settings.json")).collect()
 }
 
 /// Claude's file-writing tools; their hook input names the file in `tool_input.file_path`.
 const EDIT_TOOLS: &str = "Edit|MultiEdit|Write";
 /// Tools whose input is the session's todo list or its plan.
 const PLAN_TOOLS: &str = "TodoWrite|ExitPlanMode";
+/// Notifications that wait on the user; `idle_prompt` is only a reminder after Claude finished.
+const ASKS: &str = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|worker_permission_prompt";
 
-fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 6] {
-    let cmd = |event: &str| format!("\"{}\" notify --event {event}", athena.display());
+fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 9] {
+    let athena = athena.display();
+    // Settings are shared with Claude sessions outside Athena, where the hook must stay silent.
+    let cmd = |event: &str| {
+        format!(
+            "[ -n \"$ATHENA_PANE_ID\" ] && [ -x \"{athena}\" ] && \"{athena}\" notify --event {event} || true"
+        )
+    };
     [
         ("UserPromptSubmit", None, cmd("claude-running")),
         ("Stop", None, cmd("claude-stop")),
-        (
-            "Notification",
-            Some("permission_prompt|idle_prompt"),
-            cmd("claude-needs-input"),
-        ),
+        ("Notification", Some(ASKS), cmd("claude-needs-input")),
+        // Every tool call, so a question or plan reads as waiting and the rest as working.
+        ("PreToolUse", None, cmd("claude-tool")),
+        ("PostToolUse", None, cmd("claude-running")),
+        ("PostToolUseFailure", None, cmd("claude-running")),
         // Before the first edit, to keep the file as it was; after each, to offer the diff.
         ("PreToolUse", Some(EDIT_TOOLS), cmd("claude-will-edit")),
         ("PostToolUse", Some(EDIT_TOOLS), cmd("claude-edited")),
@@ -102,9 +124,9 @@ pub fn merge(mut settings: Value, athena: &Path, enable: bool) -> Result<Value> 
     Ok(settings)
 }
 
-/// Whether any Athena hook is installed, so there is something to remove.
-pub fn installed(root: &Path) -> bool {
-    let Some(settings) = fs::read_to_string(settings_path(root))
+/// Whether the settings at `path` hold any Athena hook, so there is something to remove.
+pub fn installed(path: &Path) -> bool {
+    let Some(settings) = fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
     else {
@@ -119,10 +141,10 @@ pub fn installed(root: &Path) -> bool {
     })
 }
 
-/// Whether every current Athena hook is installed; an install from an older Athena is not, so
-/// enabling again adds the hooks it lacks.
-pub fn enabled(root: &Path) -> bool {
-    let Some(settings) = fs::read_to_string(settings_path(root))
+/// Whether the settings at `path` hold every current Athena hook; an install from an older Athena
+/// does not, so enabling again brings it up to date.
+pub fn enabled(path: &Path) -> bool {
+    let Some(settings) = fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
     else {
@@ -131,15 +153,21 @@ pub fn enabled(root: &Path) -> bool {
     hooks(Path::new("athena"))
         .iter()
         .all(|(event, _, command)| {
-            let event_flag = command.rsplit(' ').next().unwrap_or_default();
+            let event_flag = command
+                .split("--event ")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').next())
+                .unwrap_or_default();
             settings["hooks"][event].as_array().is_some_and(|entries| {
                 entries.iter().any(|e| {
                     is_ours(e)
                         && e["hooks"].as_array().is_some_and(|hs| {
                             hs.iter().any(|h| {
-                                h["command"]
-                                    .as_str()
-                                    .is_some_and(|c| c.ends_with(&format!(" {event_flag}")))
+                                h["command"].as_str().is_some_and(|c| {
+                                    // Hooks from before the guard ran in every Claude session.
+                                    c.contains("$ATHENA_PANE_ID")
+                                        && c.contains(&format!("--event {event_flag} "))
+                                })
                             })
                         })
                 })
@@ -147,9 +175,10 @@ pub fn enabled(root: &Path) -> bool {
         })
 }
 
-/// Adds or removes Athena's hooks in the project's local Claude settings.
-pub fn write(root: &Path, athena: &Path, enable: bool) -> Result<()> {
-    let path = settings_path(root);
+/// Adds or removes Athena's hooks in the Claude settings at `path`, keeping a copy of the
+/// file as it was before Athena first changed it when `backup` is set.
+pub fn write(path: &Path, athena: &Path, enable: bool, backup: bool) -> Result<()> {
+    let path = path.to_path_buf();
     // Write through a symlinked settings file to its target instead of replacing the link.
     let path = match fs::canonicalize(&path) {
         Ok(real) => real,
@@ -171,6 +200,15 @@ pub fn write(root: &Path, athena: &Path, enable: bool) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(path.parent().expect("settings path has a parent"))?;
+    let mut saved = path
+        .file_name()
+        .expect("settings path has a name")
+        .to_owned();
+    saved.push(".athena-backup");
+    let saved = path.with_file_name(saved);
+    if backup && perms.is_some() && !saved.exists() {
+        fs::copy(&path, &saved)?;
+    }
     let mut name = path
         .file_name()
         .expect("settings path has a name")
@@ -184,6 +222,28 @@ pub fn write(root: &Path, athena: &Path, enable: bool) -> Result<()> {
     out.write_all((serde_json::to_string_pretty(&updated)? + "\n").as_bytes())?;
     out.sync_all()?;
     fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Brings Athena's hooks in every Claude Code config folder under `home` in line with `enable`,
+/// and takes the per-project hooks of older Athenas out of `projects`.
+pub fn sync(home: &Path, athena: &Path, enable: bool, projects: &[PathBuf]) -> Result<()> {
+    let mut failed = Vec::new();
+    for path in global_settings(home) {
+        if let Err(e) = write(&path, athena, enable, true) {
+            failed.push(format!("{}: {e:#}", path.display()));
+        }
+    }
+    for path in projects.iter().map(|root| settings_path(root)) {
+        if installed(&path)
+            && let Err(e) = write(&path, athena, false, false)
+        {
+            failed.push(format!("{}: {e:#}", path.display()));
+        }
+    }
+    if !failed.is_empty() {
+        bail!("{}", failed.join("; "));
+    }
     Ok(())
 }
 
@@ -204,6 +264,12 @@ mod tests {
 
     const ATHENA: &str = "/opt/homebrew/bin/athena";
 
+    fn command(event: &str) -> String {
+        format!(
+            "[ -n \"$ATHENA_PANE_ID\" ] && [ -x \"{ATHENA}\" ] && \"{ATHENA}\" notify --event {event} || true"
+        )
+    }
+
     #[test]
     fn adds_hooks_alongside_existing_settings() {
         let existing = json!({
@@ -214,13 +280,12 @@ mod tests {
         assert_eq!(out["permissions"]["allow"][0], "Bash(ls)");
         let stop = out["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "the user's own Stop hook is kept");
-        assert_eq!(
-            stop[1]["hooks"][0]["command"],
-            "\"/opt/homebrew/bin/athena\" notify --event claude-stop"
-        );
-        assert_eq!(
-            out["hooks"]["Notification"][0]["matcher"],
-            "permission_prompt|idle_prompt"
+        assert_eq!(stop[1]["hooks"][0]["command"], command("claude-stop"));
+        let asks = out["hooks"]["Notification"][0]["matcher"].as_str().unwrap();
+        assert!(asks.contains("permission_prompt") && asks.contains("elicitation_dialog"));
+        assert!(
+            !asks.contains("idle_prompt"),
+            "a reminder after finishing is not a question"
         );
     }
 
@@ -238,14 +303,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("athena-hooks-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        assert!(!enabled(&dir));
-        write(&dir, Path::new(ATHENA), true).unwrap();
-        assert!(enabled(&dir));
-        write(&dir, Path::new(ATHENA), false).unwrap();
-        assert!(!enabled(&dir) && !installed(&dir));
+        assert!(!enabled(&settings_path(&dir)));
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        assert!(enabled(&settings_path(&dir)));
+        write(&settings_path(&dir), Path::new(ATHENA), false, false).unwrap();
+        assert!(!enabled(&settings_path(&dir)) && !installed(&settings_path(&dir)));
         fs::write(settings_path(&dir), "{ not json").unwrap();
         assert!(
-            write(&dir, Path::new(ATHENA), true).is_err(),
+            write(&settings_path(&dir), Path::new(ATHENA), true, false).is_err(),
             "never overwrite a file we can't parse"
         );
         fs::remove_dir_all(dir).unwrap();
@@ -271,19 +336,20 @@ mod tests {
     fn edit_hooks_are_appended_after_the_users_own_and_removed_cleanly() {
         let out = merge(user_settings(), Path::new(ATHENA), true).unwrap();
         let pre = out["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 2);
+        assert_eq!(pre.len(), 3);
         assert_eq!(pre[0]["hooks"][0]["command"], "guard.sh");
-        assert_eq!(pre[1]["matcher"], "Edit|MultiEdit|Write");
         assert_eq!(
-            pre[1]["hooks"][0]["command"],
-            "\"/opt/homebrew/bin/athena\" notify --event claude-will-edit"
+            pre[1].get("matcher"),
+            None,
+            "every tool reports the session busy"
         );
+        assert_eq!(pre[1]["hooks"][0]["command"], command("claude-tool"));
+        assert_eq!(pre[2]["matcher"], "Edit|MultiEdit|Write");
+        assert_eq!(pre[2]["hooks"][0]["command"], command("claude-will-edit"));
         let post = out["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post[0]["hooks"][0]["command"], "prettier --write");
-        assert_eq!(
-            post[1]["hooks"][0]["command"],
-            "\"/opt/homebrew/bin/athena\" notify --event claude-edited"
-        );
+        assert_eq!(post[1]["hooks"][0]["command"], command("claude-running"));
+        assert_eq!(post[2]["hooks"][0]["command"], command("claude-edited"));
         assert_eq!(
             out["hooks"]["SessionStart"],
             user_settings()["hooks"]["SessionStart"]
@@ -304,20 +370,18 @@ mod tests {
         let post = out["hooks"]["PostToolUse"].as_array().unwrap();
         let matchers: Vec<&str> = post
             .iter()
-            .map(|e| e["matcher"].as_str().unwrap())
+            .map(|e| e["matcher"].as_str().unwrap_or("*"))
             .collect();
         assert_eq!(
             matchers,
             [
                 "Edit|Write",
+                "*",
                 "Edit|MultiEdit|Write",
                 "TodoWrite|ExitPlanMode"
             ]
         );
-        assert_eq!(
-            post[2]["hooks"][0]["command"],
-            "\"/opt/homebrew/bin/athena\" notify --event claude-plan"
-        );
+        assert_eq!(post[3]["hooks"][0]["command"], command("claude-plan"));
         assert_eq!(merge(out.clone(), Path::new(ATHENA), true).unwrap(), out);
         assert_eq!(
             merge(out, Path::new(ATHENA), false).unwrap(),
@@ -334,14 +398,14 @@ mod tests {
             .unwrap()
             .retain(|e| e["matcher"] != PLAN_TOOLS);
         fs::write(settings_path(&dir), old.to_string()).unwrap();
-        assert!(!enabled(&dir) && installed(&dir));
-        write(&dir, Path::new(ATHENA), true).unwrap();
-        assert!(enabled(&dir));
+        assert!(!enabled(&settings_path(&dir)) && installed(&settings_path(&dir)));
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        assert!(enabled(&settings_path(&dir)));
         let written: Value =
             serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
         let post = written["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(post.len(), 3, "{post:?}");
-        assert_eq!(post.iter().filter(|e| is_ours(e)).count(), 2);
+        assert_eq!(post.len(), 4, "{post:?}");
+        assert_eq!(post.iter().filter(|e| is_ours(e)).count(), 3);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -363,10 +427,13 @@ mod tests {
             hooks.insert(event.into(), Value::Array(kept));
         }
         fs::write(settings_path(&dir), old.to_string()).unwrap();
-        assert!(!enabled(&dir));
-        assert!(installed(&dir), "an older install can still be removed");
-        write(&dir, Path::new(ATHENA), true).unwrap();
-        assert!(enabled(&dir));
+        assert!(!enabled(&settings_path(&dir)));
+        assert!(
+            installed(&settings_path(&dir)),
+            "an older install can still be removed"
+        );
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        assert!(enabled(&settings_path(&dir)));
         let written: Value =
             serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
         assert_eq!(
@@ -386,7 +453,7 @@ mod tests {
 
     #[test]
     fn a_users_command_sharing_an_entry_with_ours_survives_uninstall_and_reinstall() {
-        let ours = "\"/opt/homebrew/bin/athena\" notify --event claude-stop";
+        let ours = command("claude-stop");
         let shared = json!({
             "hooks": { "Stop": [{ "hooks": [
                 { "type": "command", "command": ours },
@@ -419,8 +486,14 @@ mod tests {
             "{\"hooks\": {\"PreToolUse\": 3}}",
         ] {
             fs::write(settings_path(&dir), text).unwrap();
-            assert!(write(&dir, Path::new(ATHENA), true).is_err(), "{text}");
-            assert!(write(&dir, Path::new(ATHENA), false).is_err(), "{text}");
+            assert!(
+                write(&settings_path(&dir), Path::new(ATHENA), true, false).is_err(),
+                "{text}"
+            );
+            assert!(
+                write(&settings_path(&dir), Path::new(ATHENA), false, false).is_err(),
+                "{text}"
+            );
             assert_eq!(fs::read_to_string(settings_path(&dir)).unwrap(), text);
         }
         fs::remove_dir_all(dir).unwrap();
@@ -439,14 +512,14 @@ mod tests {
         });
         let text = serde_json::to_string_pretty(&settings).unwrap() + "\n";
         fs::write(settings_path(&dir), &text).unwrap();
-        write(&dir, Path::new(ATHENA), true).unwrap();
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
         let on = fs::read_to_string(settings_path(&dir)).unwrap();
         let order = |t: &str| {
             ["zeta", "hooks", "SessionStart", "Stop", "alpha"]
                 .map(|k| t.find(&format!("\"{k}\"")).unwrap())
         };
         assert!(order(&on).is_sorted(), "{on}");
-        write(&dir, Path::new(ATHENA), false).unwrap();
+        write(&settings_path(&dir), Path::new(ATHENA), false, false).unwrap();
         assert_eq!(fs::read_to_string(settings_path(&dir)).unwrap(), text);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -459,16 +532,16 @@ mod tests {
         fs::write(&real, "{\"model\": \"opus\"}").unwrap();
         fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
         std::os::unix::fs::symlink(&real, settings_path(&dir)).unwrap();
-        write(&dir, Path::new(ATHENA), true).unwrap();
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
         assert!(settings_path(&dir).is_symlink(), "the link is kept");
-        assert!(enabled(&dir));
+        assert!(enabled(&settings_path(&dir)));
         let written: Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
         assert_eq!(written["model"], "opus");
         assert_eq!(
             fs::metadata(&real).unwrap().permissions().mode() & 0o7777,
             0o600
         );
-        write(&dir, Path::new(ATHENA), false).unwrap();
+        write(&settings_path(&dir), Path::new(ATHENA), false, false).unwrap();
         assert!(settings_path(&dir).is_symlink());
         assert_eq!(
             fs::metadata(&real).unwrap().permissions().mode() & 0o7777,
@@ -481,5 +554,66 @@ mod tests {
                 .ends_with("athena-tmp")
         }));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hooks_from_before_the_guard_are_replaced() {
+        let dir = temp("unguarded");
+        let old = merge(json!({}), Path::new(ATHENA), true)
+            .unwrap()
+            .to_string()
+            .replace(
+                "[ -n \\\"$ATHENA_PANE_ID\\\" ] && [ -x \\\"/opt/homebrew/bin/athena\\\" ] && ",
+                "",
+            );
+        assert!(!old.contains("ATHENA_PANE_ID"), "{old}");
+        fs::write(settings_path(&dir), &old).unwrap();
+        assert!(!enabled(&settings_path(&dir)));
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        assert!(enabled(&settings_path(&dir)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn global_install_covers_every_config_folder_keeps_a_backup_and_cleans_projects() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp("home");
+        for dir in [".claude", ".claude-work/projects", ".claude-mem"] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        let user = home.join(".claude/settings.json");
+        fs::write(&user, user_settings().to_string()).unwrap();
+        fs::set_permissions(&user, fs::Permissions::from_mode(0o600)).unwrap();
+        let project = temp("project");
+        write(&settings_path(&project), Path::new(ATHENA), true, false).unwrap();
+
+        sync(
+            &home,
+            Path::new(ATHENA),
+            true,
+            std::slice::from_ref(&project),
+        )
+        .unwrap();
+        let work = home.join(".claude-work/settings.json");
+        assert!(enabled(&user) && enabled(&work));
+        assert!(
+            !home.join(".claude-mem/settings.json").exists(),
+            "not a config folder"
+        );
+        assert_eq!(
+            fs::metadata(&user).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        let backup = home.join(".claude/settings.json.athena-backup");
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&backup).unwrap()).unwrap();
+        assert_eq!(saved, user_settings());
+        assert!(!installed(&settings_path(&project)));
+
+        sync(&home, Path::new(ATHENA), false, &[]).unwrap();
+        let off: Value = serde_json::from_str(&fs::read_to_string(&user).unwrap()).unwrap();
+        assert_eq!(off, user_settings());
+        assert!(!installed(&work));
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(project).unwrap();
     }
 }
