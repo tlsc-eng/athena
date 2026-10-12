@@ -599,10 +599,13 @@ information rather than triggering the install dialog).
 
 - A new Claude session opens in its own terminal tab; the command that starts Claude is asked
   once per project.
-- Tabs show whether Claude is working or waiting for input. With the project's hooks enabled,
-  Athena also posts a notification when a session finishes or needs you.
+- Tabs show **running** while Claude works, **needs input** while it waits on a permission, a
+  question or a plan, and **done** when it finishes, until you look at the tab. Athena also posts
+  a notification (a toast, or a macOS banner when Athena is in the background) when a session
+  needs you or finishes. This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
+  them a tab shows only **running** while Claude draws, and nothing once it stops.
 - An MCP server, `athena mcp-stdio`, answers from the running app (see below).
-- With the project's hooks enabled, each file Claude edits posts a toast ("Claude edited main.go")
+- Each file Claude edits in an Athena terminal posts a toast ("Claude edited main.go")
   whose **Review diff** opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
 - The **Claude** drawer tab (palette: **Claude: Show sessions**) lists the project's recent
@@ -631,6 +634,8 @@ information rather than triggering the install dialog).
   list, stats and logs. Athena never starts, stops or removes containers.
 - Workspace layout, open projects and tabs are restored on launch, each editor with its cursor,
   scroll position, folds and word wrap choice as they were left.
+- Drag a project in the rail to reorder it; drop it on "+" to move it to the end. A repository
+  carries its linked worktrees along, and a worktree moves only among its siblings.
 - Open Recent (`ctrl-r` outside a terminal, or File > Open Recent) lists the last 20 project
   folders you closed, and every project of a window you closed, however many there are.
 - Several windows: New Window (`cmd-shift-n`), Open Project in New Window… (File), Move Project
@@ -759,7 +764,7 @@ that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB
 | `list_projects` | Projects open in Athena; `current` marks the one this session runs in. |
 | `get_active_file` | Focused editor's path, cursor, selection and unsaved state. |
 | `open_file` | Opens a project file in the editor, optionally at a line. |
-| `list_terminals` | Terminals (tabs and the bottom panel) with session id, title, cwd, running program and Claude state. |
+| `list_terminals` | Terminals (tabs and the bottom panel) with session id, title, cwd, running program and Claude state (`running`, `waiting_input` or `finished`). |
 | `read_terminal` | Recent output of a terminal as plain text. |
 | `run_in_terminal` | Types a command into a terminal; runs only if you approve it within 60 seconds. |
 | `list_project_files` | A project's files, honouring `.gitignore`; secrets such as `.env` and keys are left out. |
@@ -775,24 +780,34 @@ that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB
 
 ### Hooks
 
-The command palette entry **Enable Claude Code hooks for this project** adds these hooks to the
-project's `.claude/settings.local.json` (which Claude Code keeps out of version control), after
-any of your own on the same events:
+On launch Athena adds these hooks to the `settings.json` of every Claude Code config folder:
+`~/.claude` and each `~/.claude-*` folder Claude Code has run from (the ones `CLAUDE_CONFIG_DIR`
+points at). They go after any of your own on the same events:
 
-- `UserPromptSubmit`, `Stop`, and `Notification` for permission and idle prompts, which make the
-  tab state exact;
+- `UserPromptSubmit`, `PostToolUse` and `PostToolUseFailure` mark the tab **running**; `Stop`
+  marks it **done**;
+- `Notification` for permission prompts, dialogs and agents waiting on you marks it **needs
+  input**. Claude's `idle_prompt` reminder does not;
+- `PreToolUse` on every tool marks `AskUserQuestion` and `ExitPlanMode` as **needs input** and any
+  other tool as **running**;
 - `PreToolUse` and `PostToolUse` on `Edit|MultiEdit|Write`, for reviewing Claude's edits (below);
 - `PostToolUse` on `TodoWrite|ExitPlanMode`, which shows the session's todo progress ("3/7") on
   its terminal tab and its todos and plan in the Claude tab.
 
-Each calls `athena notify --event …`. **Disable Claude Code hooks for this project** removes only
-Athena's commands, keeping your own even when they share an entry with ours. A settings file whose
-shape is not what Claude Code expects is left untouched and the command reports an error; a
-symlinked settings file stays a symlink and keeps its permissions.
+Each runs `athena notify --event …` only inside a terminal Athena started (one with
+`ATHENA_PANE_ID` set) and only while Athena is installed, so Claude sessions elsewhere are not
+affected; their edits are not offered for review either. Before Athena first changes a settings
+file it keeps a copy beside it as `settings.json.athena-backup`. Your own hooks are kept, even
+when they share an entry with ours. A settings file whose shape is not what Claude Code expects is
+left untouched and Athena reports an error; a symlinked settings file stays a symlink and keeps
+its permissions. Claude Code reads hooks when a session starts, so restart sessions that were
+already running.
 
-Projects whose hooks were enabled by Athena 0.3 or earlier have only the first three. The palette
-offers **Enable Claude Code hooks for this project** again for them; run it once to add the edit
-hooks. The same goes for the todo and plan hook added in 0.8.
+Set `"claude": { "hooks": false }` in Settings to remove Athena's hooks from every config folder.
+
+Athena 0.10 and earlier wrote hooks into each project's `.claude/settings.local.json` instead.
+Athena removes them from the projects open at launch, and **Remove Athena's old Claude Code hooks
+from this project** in the command palette removes them from any other.
 
 ### Reviewing Claude's edits
 
@@ -1288,7 +1303,7 @@ athena [<folder>]             open a folder in Athena (the window that has it, e
 athena --version
 athena mux status             list the daemon's sessions
 athena mux stop               stop the daemon; its shells are hung up
-athena notify --event <claude-stop|claude-needs-input|claude-running|claude-will-edit|claude-edited|claude-plan>
+athena notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan>
 athena notify --edited <file> [--session <id>]
 athena notify --title <t> [--body <b>]
 athena mcp-stdio              MCP server for Claude Code
