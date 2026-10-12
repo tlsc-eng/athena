@@ -114,22 +114,37 @@ pub fn profiles(fresh: bool) -> Vec<Profile> {
 /// The profiles found, and whether every probe answered found or not found.
 fn probe_profiles() -> (Vec<Profile>, bool) {
     let mut definite = true;
-    let list = candidates()
+    let signed_in = candidates()
         .into_iter()
-        .map(|(name, dir)| Profile {
-            name,
-            service: service_for(dir.as_deref()),
-        })
-        .filter(|p| match security(&p.service, false) {
-            Ok(o) if o.status.success() => true,
-            Ok(o) if o.status.code() == Some(NOT_FOUND) => false,
-            _ => {
-                definite = false;
-                false
+        .filter(|(_, dir)| {
+            let service = service_for(dir.as_deref());
+            match security(&service, false) {
+                Ok(o) if o.status.success() => true,
+                Ok(o) if o.status.code() == Some(NOT_FOUND) => false,
+                _ => {
+                    definite = false;
+                    false
+                }
             }
         })
         .collect();
+    let list = without_default(signed_in)
+        .into_iter()
+        .map(|(name, dir)| Profile {
+            service: service_for(dir.as_deref()),
+            name,
+        })
+        .collect();
     (list, definite)
+}
+
+/// Drops the default profile once a named one is signed in, as plain `claude` then usually
+/// dispatches to one of those.
+fn without_default(mut list: Vec<(String, Option<PathBuf>)>) -> Vec<(String, Option<PathBuf>)> {
+    if list.iter().any(|(_, dir)| dir.is_some()) {
+        list.retain(|(_, dir)| dir.is_some());
+    }
+    list
 }
 
 fn now_ms() -> u64 {
@@ -354,6 +369,20 @@ mod tests {
             service_for(Some(Path::new("/Users/json/.claude-tlsc"))),
             "Claude Code-credentials-99dd0ebe"
         );
+    }
+
+    #[test]
+    fn default_profile_hides_behind_named_ones() {
+        let default = ("claude".to_string(), None);
+        let tlsc = (
+            "claude-tlsc".to_string(),
+            Some(PathBuf::from("/Users/json/.claude-tlsc")),
+        );
+        assert_eq!(
+            without_default(vec![default.clone(), tlsc.clone()]),
+            vec![tlsc]
+        );
+        assert_eq!(without_default(vec![default.clone()]), vec![default]);
     }
 
     /// `/api/oauth/usage?at_wall=1&skip_spend=1` as it answered on 2026-10-08, trimmed.
