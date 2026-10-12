@@ -409,7 +409,15 @@ impl Shell {
                     .as_ref()
                     .and_then(|l| l.focused_pane())
                     .and_then(|p| p.active_item())
-                    .map(|item| self.item_label(&project.root, item, cx));
+                    .map(
+                        |item| match self.items.get(&(project.root.clone(), item.id)) {
+                            // Claude animates its title as it works; each retitle resets the cursor.
+                            Some(item::ItemView::Terminal(v)) if v.read(cx).is_claude() => {
+                                "Claude".into()
+                            }
+                            _ => self.item_label(&project.root, item, cx),
+                        },
+                    );
                 let dirty = if self.items.values().any(|v| v.is_dirty(cx)) {
                     "• "
                 } else {
