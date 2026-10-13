@@ -24,6 +24,15 @@ struct HookInput {
     message: Option<String>,
     tool_name: Option<String>,
     tool_input: Option<ToolInput>,
+    /// On Stop: the session's background tasks still running.
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BackgroundTask {
+    #[serde(rename = "type", default)]
+    kind: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -81,6 +90,20 @@ fn tool_notice(tool: Option<&str>) -> NoticeKind {
     };
     NoticeKind::ClaudeNeedsInput {
         message: message.into(),
+    }
+}
+
+/// Claude stops between turns while its background agents work; it resumes when they report.
+/// Shells and monitors are left out, as a dev server or watcher may never end.
+fn stop_notice(input: &HookInput) -> NoticeKind {
+    if input
+        .background_tasks
+        .iter()
+        .any(|t| matches!(t.kind.as_str(), "subagent" | "workflow"))
+    {
+        NoticeKind::ClaudeRunning
+    } else {
+        NoticeKind::ClaudeStopped
     }
 }
 
@@ -213,7 +236,7 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
         return Ok(());
     }
     let kind = match (event.as_deref(), flag("--title")) {
-        (Some("claude-stop"), _) => NoticeKind::ClaudeStopped,
+        (Some("claude-stop"), _) => stop_notice(&hook_input()),
         (Some("claude-running"), _) => NoticeKind::ClaudeRunning,
         (Some("claude-tool"), _) => tool_notice(hook_input().tool_name.as_deref()),
         (Some("claude-needs-input"), _) => NoticeKind::ClaudeNeedsInput {
@@ -397,6 +420,27 @@ mod tests {
         ));
         assert_eq!(tool("Bash"), NoticeKind::ClaudeRunning);
         assert_eq!(tool_notice(None), NoticeKind::ClaudeRunning);
+    }
+
+    #[test]
+    fn claude_finishes_only_once_its_background_agents_are_done() {
+        let stop = |tasks: serde_json::Value| {
+            stop_notice(&hook_input(serde_json::json!({
+                "session_id": "s",
+                "background_tasks": tasks,
+            })))
+        };
+        let task =
+            |kind: &str| serde_json::json!([{ "id": "t1", "type": kind, "status": "running" }]);
+        assert_eq!(stop(task("subagent")), NoticeKind::ClaudeRunning);
+        assert_eq!(stop(task("workflow")), NoticeKind::ClaudeRunning);
+        assert_eq!(stop(task("shell")), NoticeKind::ClaudeStopped);
+        assert_eq!(stop(task("monitor")), NoticeKind::ClaudeStopped);
+        assert_eq!(stop(serde_json::json!([])), NoticeKind::ClaudeStopped);
+        assert_eq!(
+            stop_notice(&hook_input(serde_json::json!({ "session_id": "s" }))),
+            NoticeKind::ClaudeStopped
+        );
     }
 
     #[test]
