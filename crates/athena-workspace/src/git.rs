@@ -1512,6 +1512,168 @@ pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
+/// A merge or rebase that stopped part way, waiting on conflicts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Underway {
+    Merge,
+    Rebase,
+}
+
+impl Underway {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+        }
+    }
+}
+
+/// The merge or rebase under way in the work tree holding `root`, read from its git folder.
+pub fn underway(root: &Path) -> Option<Underway> {
+    let dir = git_dirs(root)?.git_dir;
+    // `git am` uses rebase-apply too, without the `rebasing` marker.
+    if dir.join("rebase-merge").exists() || dir.join("rebase-apply/rebasing").exists() {
+        Some(Underway::Rebase)
+    } else if dir.join("MERGE_HEAD").exists() {
+        Some(Underway::Merge)
+    } else {
+        None
+    }
+}
+
+/// A command that may want a commit message, which takes git's own instead of opening an editor.
+fn no_editor(root: &Path) -> Command {
+    let mut cmd = filtering_git(root);
+    cmd.env("GIT_EDITOR", "true");
+    cmd
+}
+
+/// `git merge --no-edit`; conflicts leave the merge [`underway`] and come back as an error.
+pub fn merge(root: &Path, branch: &str) -> Result<()> {
+    refuse_dash(branch)?;
+    let mut cmd = no_editor(root);
+    cmd.args(["merge", "--no-edit", branch]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// `git rebase` of the current branch onto `onto`; conflicts leave it [`underway`].
+pub fn rebase(root: &Path, onto: &str) -> Result<()> {
+    refuse_dash(onto)?;
+    let mut cmd = no_editor(root);
+    cmd.args(["rebase", onto]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+pub fn abort(root: &Path, what: Underway) -> Result<()> {
+    let mut cmd = filtering_git(root);
+    cmd.args([what.name(), "--abort"]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+pub fn skip_rebase_step(root: &Path) -> Result<()> {
+    let mut cmd = no_editor(root);
+    cmd.args(["rebase", "--skip"]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// `git rebase --continue` once the conflicts are resolved and staged.
+pub fn continue_rebase(root: &Path) -> Result<()> {
+    let mut cmd = no_editor(root);
+    cmd.args(["rebase", "--continue"]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+pub fn rename_branch(root: &Path, from: &str, to: &str) -> Result<()> {
+    refuse_dash(from)?;
+    refuse_dash(to)?;
+    let mut cmd = git(root);
+    cmd.args(["branch", "-m", from, to]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// A lightweight tag at HEAD.
+pub fn create_tag(root: &Path, name: &str) -> Result<()> {
+    refuse_dash(name)?;
+    let mut cmd = git(root);
+    cmd.args(["tag", name]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+pub fn push_tags(root: &Path) -> Result<()> {
+    let mut cmd = remote_git(root);
+    cmd.args(["push", "--tags"]);
+    run_within(cmd, None, REMOTE_TIMEOUT).map(drop)
+}
+
+/// One commit of the repository's history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commit {
+    pub sha: String,
+    pub author: String,
+    /// Seconds since the epoch.
+    pub time: i64,
+    /// Branches and tags pointing at it, as `git log --decorate` words them.
+    pub refs: String,
+    pub subject: String,
+}
+
+/// Parses `log -z --format=%H%x00%an%x00%ct%x00%D%x00%s`.
+pub fn parse_commits(out: &[u8]) -> Vec<Commit> {
+    let text = String::from_utf8_lossy(out);
+    let fields: Vec<&str> = text
+        .split('\0')
+        .map(|f| f.trim_start_matches('\n'))
+        .collect();
+    fields
+        .as_chunks::<5>()
+        .0
+        .iter()
+        .filter(|[sha, ..]| sha.len() >= 7 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|[sha, author, time, refs, subject]| Commit {
+            sha: sha.to_string(),
+            author: author.to_string(),
+            time: time.parse().unwrap_or(0),
+            refs: refs.to_string(),
+            subject: subject.to_string(),
+        })
+        .collect()
+}
+
+/// The newest `limit` commits reachable from HEAD.
+pub fn repo_log(root: &Path, limit: usize) -> Result<Vec<Commit>> {
+    let mut cmd = git(root);
+    cmd.args(["log", "-z", "--format=%H%x00%an%x00%ct%x00%D%x00%s"])
+        .arg(format!("--max-count={limit}"));
+    Ok(parse_commits(&run(cmd, None)?))
+}
+
+/// `git worktree prune`: forgets worktrees whose folders are gone.
+pub fn prune_worktrees(root: &Path) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.args(["worktree", "prune"]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// Commits on `branch` that no other local branch and no remote branch has, which deleting it loses.
+pub fn unique_commits(root: &Path, branch: &str) -> Result<u32> {
+    refuse_dash(branch)?;
+    let head = format!("refs/heads/{branch}");
+    let mut cmd = git(root);
+    cmd.args(["rev-list", "--count", &head, "--not"])
+        .arg(format!("--exclude={branch}"))
+        .args(["--branches", "--remotes"]);
+    let out = run(cmd, None)?;
+    Ok(String::from_utf8_lossy(&out).trim().parse()?)
+}
+
+/// `git branch -d`, or `-D` with `force` for a branch whose commits are merged nowhere.
+pub fn delete_branch(root: &Path, branch: &str, force: bool) -> Result<()> {
+    refuse_dash(branch)?;
+    let mut cmd = git(root);
+    cmd.args(["branch", if force { "-D" } else { "-d" }, "--", branch]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
 /// The main worktree of the linked worktree at `root`, read from its `.git` file without git.
 pub fn main_worktree(root: &Path) -> Option<PathBuf> {
     let pointer = std::fs::read_to_string(root.join(".git")).ok()?;
@@ -1546,6 +1708,13 @@ impl GitDirs {
         path == self.common_dir.join("worktrees")
             || path.parent() == Some(&self.common_dir.join("worktrees"))
     }
+}
+
+/// The top of the work tree holding `path`: the nearest folder at or above it with a `.git`.
+pub fn work_tree(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 /// The git folders of the repository holding `root`, read from disk without running git.
@@ -2101,6 +2270,42 @@ mod tests {
     }
 
     /// A repository with one commit of `f.txt`, set up so our own git runs can commit in it.
+    #[test]
+    fn a_conflicting_merge_or_rebase_stays_underway_until_aborted() {
+        if !available() {
+            return;
+        }
+        let dir = committed_repo("underway", "a\n");
+        let head = current_branch(&dir).unwrap().unwrap();
+        repo_git(&dir, &["switch", "-q", "-c", "other"]);
+        std::fs::write(dir.join("f.txt"), "theirs\n").unwrap();
+        repo_git(&dir, &["commit", "-q", "-am", "theirs"]);
+        repo_git(&dir, &["switch", "-q", &head]);
+        std::fs::write(dir.join("f.txt"), "ours\n").unwrap();
+        repo_git(&dir, &["commit", "-q", "-am", "ours"]);
+        assert_eq!(underway(&dir), None);
+
+        assert!(merge(&dir, "other").is_err());
+        assert_eq!(underway(&dir), Some(Underway::Merge));
+        abort(&dir, Underway::Merge).unwrap();
+        assert_eq!(underway(&dir), None);
+
+        assert!(rebase(&dir, "other").is_err());
+        assert_eq!(underway(&dir), Some(Underway::Rebase));
+        abort(&dir, Underway::Rebase).unwrap();
+        assert_eq!(underway(&dir), None);
+        assert!(merge(&dir, "-x").is_err());
+
+        repo_git(&dir, &["switch", "-q", "-c", "clean", "other"]);
+        std::fs::write(dir.join("g.txt"), "g\n").unwrap();
+        repo_git(&dir, &["add", "g.txt"]);
+        repo_git(&dir, &["commit", "-q", "-m", "g"]);
+        repo_git(&dir, &["switch", "-q", "other"]);
+        merge(&dir, "clean").unwrap();
+        assert!(dir.join("g.txt").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn committed_repo(name: &str, contents: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("athena-git-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2645,6 +2850,13 @@ mod tests {
         assert!(new_dirs.moves_worktrees(&new_dirs.git_dir));
         std::fs::create_dir_all(new.join("sub")).unwrap();
         assert_eq!(git_dirs(&new.join("sub")), Some(new_dirs));
+        assert_eq!(work_tree(&new.join("sub")), Some(new.clone()));
+        assert_eq!(unique_commits(&dir, "feat").unwrap(), 0);
+        repo_git(
+            &new,
+            &["commit", "-q", "--allow-empty", "-m", "only on feat"],
+        );
+        assert_eq!(unique_commits(&dir, "feat").unwrap(), 1);
         let clean = summary(&new, true).unwrap();
         assert_eq!(clean.branch.as_deref(), Some("feat"));
         assert!(!clean.dirty);
@@ -2676,6 +2888,20 @@ mod tests {
         remove_worktree(&dir, &gone, false).unwrap();
         assert_eq!(worktrees(&dir).unwrap().len(), 1);
         assert!(branches(&dir).unwrap().iter().any(|b| b.name == "feat"));
+        assert!(
+            delete_branch(&dir, "feat", false).is_err(),
+            "feat has an unmerged commit"
+        );
+        delete_branch(&dir, "feat", true).unwrap();
+        repo_git(&dir, &["branch", "side"]);
+        rename_branch(&dir, "side", "renamed").unwrap();
+        assert!(branches(&dir).unwrap().iter().any(|b| b.name == "renamed"));
+        create_tag(&dir, "v1").unwrap();
+        let log = repo_log(&dir, 5).unwrap();
+        assert!(log[0].refs.contains("tag: v1"), "{:?}", log[0]);
+        assert_eq!(log[0].sha.len(), 40);
+        assert!(!branches(&dir).unwrap().iter().any(|b| b.name == "feat"));
+        prune_worktrees(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

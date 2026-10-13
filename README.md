@@ -404,6 +404,18 @@ information rather than triggering the install dialog).
   forced, so git's refusal over local changes is shown as is. After the branches it lists
   **Stash changes**, **Stash changes (include untracked)** and one **Pop stash@{n}** row per
   stash; the stash that was picked is the one popped even if the list renumbered meanwhile.
+- More branch work in the palette: **Git: Merge branch into current…** and **Git: Rebase current
+  branch onto…** list the other branches; a merge or rebase that stops on conflicts says so, and
+  the conflicts show in Changes as usual. Commit to finish a merge, or stage the resolved files and
+  run **Git: Continue rebase** (**Git: Skip rebase step** for a step with nothing left to
+  commit); **Git: Abort merge or rebase** gives up either. Neither starts while another is under
+  way. **Git: Delete
+  branch…** lists local branches no worktree has checked out, and asks first when the branch has
+  commits no other branch or remote has. **Git: Rename branch…** renames the current branch.
+  **Git: Create tag…** tags the current commit and **Git: Push tags** pushes every tag, after
+  asking.
+  **Git: Show log** lists the last 500 commits with author, age and branches; type to search, and
+  pick one to copy its id.
 - Fetch, pull and push: the status bar's sync cell beside the branch shows "↓2 ↑1" against the
   upstream, **Publish** when the branch has none, or "Pulling…" while one runs. Clicking it offers
   Pull and Push (or Publish Branch), Fetch, Stash Changes, Stash Changes (Include Untracked) and
@@ -444,6 +456,18 @@ information rather than triggering the install dialog).
   while a project is open in the worktree or a folder inside it, or a terminal (Claude's included)
   sits in it; one with uncommitted or untracked changes is deleted only after **Delete Anyway**,
   and one whose folder is already gone can still be removed. The worktree's branch is kept.
+- Worktrees for Claude: **Git: New worktree with Claude…** (palette, or right-click a repository
+  in the rail) creates the worktree as above, opens it and starts a Claude session in it. When
+  the work is done, **Git: Finish worktree…** (palette, or right-click the worktree) closes its
+  project and deletes the worktree; **Delete Worktree and Branch** deletes its branch too. The
+  prompt says first what would be lost: uncommitted changes, and commits no other branch or
+  remote has. In the wide sidebar, a repository lists its worktrees that are not open, dimmed;
+  click one to open it. **Git: Prune worktrees** forgets worktrees whose folders are gone.
+  `"git": {"worktree_dir": "~/worktrees"}` in [settings.json](#settings) puts new worktrees in
+  that folder instead of beside the repository.
+- When the focused terminal (Claude's included) has moved into another work tree, such as a
+  worktree it made, the status bar shows "terminal: <branch> in <folder>" beside the project's
+  branch; click it to open that work tree as a project.
 - GitHub, through the [GitHub CLI](https://cli.github.com) (`gh`) when it is installed and signed
   in to github.com: a dot in the status bar for the latest workflow run on the current branch
   (amber while it runs, green or red when it passed or failed, grey when cancelled or skipped;
@@ -642,8 +666,18 @@ information rather than triggering the install dialog).
   list, stats and logs. Athena never starts, stops or removes containers.
 - Workspace layout, open projects and tabs are restored on launch, each editor with its cursor,
   scroll position, folds and word wrap choice as they were left.
-- Drag a project in the rail to reorder it; drop it on "+" to move it to the end. A repository
-  carries its linked worktrees along, and a worktree moves only among its siblings.
+- The project rail widens into a sidebar with names, branches and folders: **Toggle Project
+  Sidebar** (`cmd-alt-b`, View menu, palette, or the ⇥ button under "+"). Folders group projects
+  and can nest: right-click a project and pick **Move to Folder…**, then pick a folder or type a
+  new name (`Work/Clients` nests one folder in another). Click a folder to collapse it; in the
+  narrow rail it shows as a square with its initials and, when collapsed, how many projects it
+  holds. Right-click a folder to rename, move or remove it (its projects stay, moving up a level).
+  A linked worktree always sits in its repository's folder. Folders and which ones are collapsed
+  are saved per window; a build older than 0.12 shows the projects as one flat list.
+- Drag a project in the rail to reorder it: dropped between two projects it joins their folder,
+  dropped on a folder it goes last in it, and dropped on "+" it leaves every folder and goes to
+  the end. Folders drag the same way. A repository carries its linked worktrees along, and a
+  worktree moves only among its siblings.
 - Open Recent (`ctrl-r` outside a terminal, or File > Open Recent) lists the last 20 project
   folders you closed, and every project of a window you closed, however many there are.
 - Several windows: New Window (`cmd-shift-n`), Open Project in New Window… (File), Move Project
@@ -908,6 +942,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | ``ctrl-` `` | Show and focus the terminal panel, or hide it when it has focus |
 | ``ctrl-shift-` `` | New terminal in the panel (bound as `ctrl-~` too, which is what macOS reports for it) |
 | `cmd-b` | Toggle file tree |
+| `cmd-alt-b` | Toggle project sidebar |
 | `cmd-shift-s` | Save as |
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |
 | `cmd-shift-f` | Find in project |

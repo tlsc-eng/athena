@@ -134,6 +134,7 @@ impl Setting {
             }),
             ["ide_integration"] => flag(s.ide_integration),
             ["git", "autofetch"] => flag(s.autofetch),
+            ["git", "worktree_dir"] => s.worktree_dir.clone().map(Value::from),
             ["explorer", "confirmDragAndDrop"] => flag(s.confirm_drag_and_drop),
             ["window", "zoom_level"] => s.zoom_level.map(Value::from),
             ["eslint", "fixOnSave"] => flag(s.eslint_fix_on_save),
@@ -468,6 +469,20 @@ pub static SETTINGS: &[Setting] = &[
         description: "Fetches the active project's remotes every three minutes.",
         group: Group::Git,
         kind: TOGGLE_OFF,
+        user_only: true,
+        also: None,
+    },
+    Setting {
+        keys: &["git", "worktree_dir"],
+        aliases: &[],
+        title: "Worktree Folder",
+        description: "Where new worktrees go, as <repo>-<branch>; left unset, beside their \
+                      repository.",
+        group: Group::Git,
+        kind: Kind::Json {
+            schema: r#"{"type": "string", "pattern": "^(/|~/)"}"#,
+            example: r#""~/worktrees""#,
+        },
         user_only: true,
         also: None,
     },

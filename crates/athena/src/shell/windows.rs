@@ -1052,14 +1052,54 @@ impl Shell {
         let Some(root) = self.workspace.projects.get(index).map(|p| p.root.clone()) else {
             return;
         };
-        let mut items = vec![super::menus::shell_item(
+        let in_folder = self.workspace.projects[index].folder.len();
+        let main = self.worktree_main(&root);
+        let worktree = main.is_some();
+        let grouped = main.is_some_and(|m| self.workspace.projects.iter().any(|p| p.root == m));
+        let mut items = Vec::new();
+        // A linked worktree always sits in its repository's folder.
+        if !grouped {
+            items.push(super::menus::shell_item("Move to Folder…", cx, {
+                let root = root.clone();
+                move |this, w, cx| {
+                    this.pick_folder_for(super::sidebar::Subject::Project(root.clone()), w, cx)
+                }
+            }));
+        }
+        if in_folder > 0 && !grouped {
+            items.push(super::menus::shell_item("Move Out of Folder", cx, {
+                let root = root.clone();
+                move |this, _, cx| {
+                    let pick = super::sidebar::FolderPick::Move(
+                        super::sidebar::Subject::Project(root.clone()),
+                        Vec::new(),
+                    );
+                    this.run_folder_pick(pick, cx)
+                }
+            }));
+        }
+        items.push(athena_ui::MenuItem::separator());
+        items.push(match worktree {
+            true => super::menus::shell_item("Finish Worktree…", cx, move |this, w, cx| {
+                this.switch_to(index, cx);
+                this.finish_worktree(w, cx)
+            }),
+            false => {
+                super::menus::shell_item("New Worktree with Claude…", cx, move |this, w, cx| {
+                    this.switch_to(index, cx);
+                    this.open_worktrees(super::palette::Mode::NewWorktree, true, w, cx)
+                })
+            }
+        });
+        items.push(athena_ui::MenuItem::separator());
+        items.push(super::menus::shell_item(
             "Move Project to New Window",
             cx,
             {
                 let root = root.clone();
                 move |this, _, cx| this.move_to_new_window(root.clone(), cx)
             },
-        )];
+        ));
         if !is_last(cx) {
             items.push(super::menus::shell_item(
                 "Merge All Windows",

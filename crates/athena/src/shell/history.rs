@@ -144,7 +144,7 @@ impl Shell {
         self.history.navigating = false;
     }
 
-    fn focused_item_view(&self) -> Option<ItemView> {
+    pub(super) fn focused_item_view(&self) -> Option<ItemView> {
         let project = self.workspace.active_project()?;
         let item = project.layout.as_ref()?.focused_pane()?.active_item()?;
         self.items.get(&(project.root.clone(), item.id)).cloned()

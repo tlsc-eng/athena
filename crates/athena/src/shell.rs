@@ -39,6 +39,7 @@ mod settings;
 mod settings_ui;
 mod shortcuts;
 mod shortcuts_ui;
+mod sidebar;
 mod snippets;
 mod status_bar;
 mod tasks;
@@ -60,7 +61,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_term::ClaudeState;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
 use gpui::{
@@ -72,24 +72,19 @@ use gpui::{
 use crate::actions::{
     AddProject, ChangeClaudeCommand, CloseProject, CloseTab, CommandPalette, DisableClaudeHooks,
     DisablePlaywrightMcp, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
-    FocusPaneUp, Minimize, NewClaudeSession, NewPreview, NewTerminal, NextProject, NextTab,
-    PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright, SaveAs, SelectProject,
-    SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight, ToggleAutoSave,
-    ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen, ToggleNotifications, TogglePaneZoom,
-    TogglePreview, ToggleWordWrapDefault, Zoom,
+    FocusPaneUp, Minimize, MoveProjectToFolder, NewClaudeSession, NewPreview, NewTerminal,
+    NextProject, NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright,
+    SaveAs, SelectProject, SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight,
+    ToggleAutoSave, ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen, ToggleNotifications,
+    TogglePaneZoom, TogglePreview, ToggleSidebar, ToggleWordWrapDefault, Zoom,
 };
 use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, GoToSymbol, GoToWorkspaceSymbol,
     NavigateBack, NavigateForward, NextProblem, PrevProblem, RevealInTree, SendToClaude,
     ShowChanges, ShowProblems, SwitchBranch, ToggleBlame, ToggleIdeIntegration,
 };
-use dnd::{ProjectDrag, TabGhost};
 
 const TITLE_BAR_HEIGHT: f32 = 36.;
-const RAIL_WIDTH: f32 = 48.;
-const RAIL_ITEM: f32 = 32.;
-const RAIL_GAP: f32 = 8.;
-const RAIL_TOP: f32 = 8.;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub struct Shell {
@@ -164,6 +159,8 @@ pub struct Shell {
     quit_settled: bool,
     redraw_pending: Option<Task<()>>,
     rail_from: usize,
+    /// The project or folder the open folder picker moves or renames.
+    sidebar_subject: Option<sidebar::Subject>,
     switch_count: u64,
     focus_pending: bool,
     _subscriptions: Vec<Subscription>,
@@ -212,6 +209,7 @@ impl Shell {
         let debug = debug::DebugState::load(&windows::workspace_path(cx), &roots);
         let mut shell = Self {
             rail_from: workspace.active.unwrap_or(0),
+            sidebar_subject: None,
             workspace,
             window_handle: window.window_handle(),
             focus,
@@ -326,6 +324,7 @@ impl Shell {
         self.rail_from = self.workspace.active.unwrap_or(index);
         self.switch_count += 1;
         self.workspace.activate(index);
+        self.workspace.reveal(index);
         self.zoomed = None;
         self.focus_pending = true;
         self.schedule_save(cx);
@@ -367,6 +366,7 @@ impl Shell {
         self.debug.reload_project(&root);
         self.workspace.active = previous;
         self.group_worktrees();
+        self.refresh_worktree_lists(cx);
         if let Some(index) = self.workspace.projects.iter().position(|p| p.root == root) {
             self.switch_to(index, cx);
         }
@@ -528,187 +528,6 @@ impl Shell {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_drawer_tab(tab, cx)))
     }
 
-    fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme().clone();
-        let active = self.workspace.active;
-        let monograms = self.workspace.monograms();
-        let groups = Rc::new(self.rail_groups());
-        let drop_tint = t.color.surface_accent;
-        let items = self
-            .workspace
-            .projects
-            .iter()
-            .zip(monograms)
-            .enumerate()
-            .map(|(i, (project, monogram))| {
-                let selected = Some(i) == active;
-                let main = self
-                    .worktree_main(&project.root)
-                    .filter(|m| self.workspace.projects.iter().any(|p| p.root == *m));
-                let mut root = match &main {
-                    Some(main) => format!(
-                        "{} — worktree of {}",
-                        project.root.display(),
-                        main.display()
-                    ),
-                    None => project.root.display().to_string(),
-                };
-                if let Some(caption) = self.git_caption(&project.root) {
-                    root = format!("{root}\n{caption}");
-                }
-                let group = format!("rail-item-{i}");
-                let drag = ProjectDrag {
-                    root: project.root.clone(),
-                    label: project.name().into(),
-                };
-                let fits = groups.clone();
-                let insertion = div()
-                    .absolute()
-                    .left_0()
-                    .top(-t.ui(RAIL_GAP / 2.) - px(1.))
-                    .w(t.ui(RAIL_ITEM))
-                    .h(px(2.))
-                    .bg(t.color.accent)
-                    .invisible()
-                    .group_drag_over::<ProjectDrag>(group.clone(), |s| s.visible())
-                    .can_drop(move |drag, _, _| {
-                        drag.downcast_ref::<ProjectDrag>()
-                            .is_some_and(|d| fits.landing(&d.root, Some(i)).is_some())
-                    })
-                    // The drop listener gives the bar the hitbox its drag-over style is gated on.
-                    .on_drop(cx.listener(move |this, drag: &ProjectDrag, _, cx| {
-                        this.drop_project(drag, Some(i), cx)
-                    }));
-                div()
-                    .id(("rail-item", i))
-                    .group(group)
-                    .size(t.ui(RAIL_ITEM))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(t.shape.radius_control)
-                    .text_size(t.typography.caption)
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .text_color(if selected {
-                        t.color.accent
-                    } else {
-                        t.color.content_muted
-                    })
-                    .when(!selected, |el| {
-                        el.hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-                    })
-                    .tooltip(move |_, cx| Tooltip::view(root.clone(), cx))
-                    .on_click(cx.listener(move |this, _, _, cx| this.switch_to(i, cx)))
-                    .on_drag(drag, |drag: &ProjectDrag, _, _, cx| {
-                        let label = drag.label.clone();
-                        cx.new(|_| TabGhost { label })
-                    })
-                    .on_drop(cx.listener(move |this, drag: &ProjectDrag, _, cx| {
-                        this.drop_project(drag, Some(i), cx)
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
-                            this.open_rail_menu(i, e.position, window, cx)
-                        }),
-                    )
-                    .relative()
-                    .child(insertion)
-                    .child(monogram)
-                    .children(main.map(|_| {
-                        // Joins a worktree to the repository above it, as one group.
-                        div()
-                            .absolute()
-                            .top(-t.ui(RAIL_GAP))
-                            .left(t.ui(RAIL_ITEM / 2.) - px(0.5))
-                            .w(px(1.))
-                            .h(t.ui(RAIL_GAP))
-                            .bg(t.color.border_strong)
-                    }))
-                    .children(self.project_claude_state(&project.root, cx).map(|state| {
-                        let color = match state {
-                            ClaudeState::NeedsInput => t.color.warning,
-                            ClaudeState::Running => t.color.success,
-                            ClaudeState::Finished => t.color.content_muted,
-                        };
-                        div()
-                            .absolute()
-                            .right(px(2.))
-                            .bottom(px(2.))
-                            .size(px(6.))
-                            .bg(color)
-                    }))
-            });
-
-        let indicator = active.map(|to| {
-            let s = t.ui_scale;
-            let y = |i: usize| {
-                s * (RAIL_TOP + i as f32 * (RAIL_ITEM + RAIL_GAP) + (RAIL_ITEM - 20.) / 2.)
-            };
-            let (from_y, to_y) = (y(self.rail_from), y(to));
-            let bar = div()
-                .absolute()
-                .left_0()
-                .top(px(to_y))
-                .w(px(2.))
-                .h(t.ui(20.))
-                .bg(t.color.accent);
-            motion::animate_if(
-                t.motion.reduced || from_y == to_y,
-                bar,
-                ("rail-indicator", self.switch_count),
-                Animation::new(t.motion.base).with_easing(motion::ease_standard()),
-                move |el, d| el.top(px(from_y + (to_y - from_y) * d)),
-            )
-        });
-
-        div()
-            .relative()
-            .w(t.ui(RAIL_WIDTH))
-            .flex_none()
-            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_tint))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_between()
-            .py(t.ui(RAIL_TOP))
-            .bg(t.color.surface)
-            .border_r_1()
-            .border_color(t.color.border)
-            .child(div().flex().flex_col().gap(t.ui(RAIL_GAP)).children(items))
-            .child(
-                div()
-                    .id("rail-add")
-                    .size(t.ui(RAIL_ITEM))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(t.shape.radius_control)
-                    .text_size(t.typography.body)
-                    .text_color(t.color.content_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-                    .tooltip(|_, cx| Tooltip::view("Open project  ⌘O", cx))
-                    .drag_over::<ProjectDrag>(move |s, drag, _, _| {
-                        match groups.landing(&drag.root, None) {
-                            Some(_) => s.bg(drop_tint),
-                            None => s,
-                        }
-                    })
-                    .on_drop(cx.listener(|this, drag: &ProjectDrag, _, cx| {
-                        this.drop_project(drag, None, cx)
-                    }))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.add_project(&AddProject, window, cx)
-                        }),
-                    )
-                    .child("+"),
-            )
-            .children(indicator)
-    }
-
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let body = match self.workspace.active {
@@ -790,7 +609,7 @@ impl Render for Shell {
             .flex_1()
             .min_h_0()
             .flex()
-            .child(self.render_rail(cx))
+            .child(self.render_sidebar(cx))
             .child(
                 div()
                     .flex_1()
@@ -943,6 +762,10 @@ impl Render for Shell {
                 this.set_playwright_mcp(false, w, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleFileTree, _, cx| this.toggle_tree(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &MoveProjectToFolder, window, cx| {
+                this.move_project_to_folder(window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &outline::ShowOutline, w, cx| this.show_outline(true, w, cx)),
             )

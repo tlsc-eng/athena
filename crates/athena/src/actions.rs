@@ -32,6 +32,8 @@ actions!(
         QuickOpenBeside,
         CommandPalette,
         ToggleFileTree,
+        ToggleSidebar,
+        MoveProjectToFolder,
         ToggleNotifications,
         ShowContainers,
         NewClaudeSession,
@@ -186,6 +188,7 @@ pub fn init(cx: &mut App) {
         // VS Code's chord; a terminal keeps ⌘K for clearing its scrollback at once.
         KeyBinding::new("cmd-k cmd-s", OpenKeyboardShortcuts, Some("!Terminal")),
         KeyBinding::new("cmd-b", ToggleFileTree, None),
+        KeyBinding::new("cmd-alt-b", ToggleSidebar, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
         KeyBinding::new("ctrl-`", ToggleTerminalPanel, None),
         // macOS reports ⌃⇧` as ⌃~, so that is the binding that matches; the other is for the menu.
@@ -355,6 +358,7 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Forward", NavigateForward),
                 MenuItem::action("Find in Project…", FindInProject),
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
+                MenuItem::action("Toggle Project Sidebar", ToggleSidebar),
                 MenuItem::action("Reveal Active File in Tree", RevealInTree),
                 MenuItem::action("Problems", ShowProblems),
                 MenuItem::action("Terminal", ToggleTerminalPanel),

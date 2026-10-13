@@ -109,6 +109,27 @@ impl Shell {
         let busy = self.git.remote_busy;
         let checked = root.as_deref().is_some_and(|r| self.git_checked(r));
         let ci = root.as_deref().and_then(|r| self.ci_run(r)).cloned();
+        let elsewhere = self.git.terminal_repo.clone().map(|(top, branch)| {
+            let name = top
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let label = match branch {
+                Some(branch) => format!("terminal: {branch} in {name}"),
+                None => format!("terminal: {name}"),
+            };
+            item("status-terminal-repo", label.into())
+                .text_color(t.color.content_muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                .tooltip(move |_, cx| {
+                    Tooltip::view(
+                        "The focused terminal is in another work tree; click to open it as a project",
+                        cx,
+                    )
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.open_folder(top.clone(), cx)))
+        });
         let left = branch.map(|branch| {
             let sync = sync_label(tracking.as_ref(), busy);
             div()
@@ -264,7 +285,7 @@ impl Shell {
             .border_color(t.color.border)
             .text_size(t.typography.caption)
             .text_color(t.color.content_muted)
-            .child(div().flex().h_full().children(left))
+            .child(div().flex().h_full().children(left).children(elsewhere))
             .child(div().flex().h_full().children(right))
     }
 }

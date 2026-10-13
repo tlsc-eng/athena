@@ -1,10 +1,27 @@
 use std::path::PathBuf;
 
-use athena_workspace::git::{self, Branch, NewWorktree, Stash, Switch, Worktree};
-use gpui::{Context, Window};
+use athena_workspace::git::{self, Branch, Commit, NewWorktree, Stash, Switch, Underway, Worktree};
+use gpui::{ClipboardItem, Context, PromptLevel, Window, actions};
 
 use super::Shell;
+use super::lsp::{CONFIRMED, confirm_buttons};
 use super::palette::Mode;
+
+actions!(
+    athena,
+    [
+        GitMergeBranch,
+        GitRebaseOnto,
+        GitDeleteBranch,
+        GitRenameBranch,
+        GitAbortMergeOrRebase,
+        GitContinueRebase,
+        GitSkipRebaseStep,
+        GitCreateTag,
+        GitPushTags,
+        GitShowLog
+    ]
+);
 
 /// What choosing a row of the branch picker does.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +41,17 @@ pub(super) enum BranchPick {
     PickWorktreeBranch,
     AddWorktree(NewWorktree),
     RemoveWorktree(PathBuf),
+    Merge(String),
+    Rebase(String),
+    Delete(String),
+    /// The current branch, as the picker listed it, and its new name.
+    Rename {
+        from: String,
+        to: String,
+    },
+    Tag(String),
+    /// Copies a commit's id.
+    CopyCommit(String),
 }
 
 /// One picker row: label, detail, the text the query is matched against, and what it does.
@@ -140,7 +168,324 @@ pub(super) fn stash_entries(stashes: &[Stash]) -> Vec<BranchEntry> {
         .collect()
 }
 
+/// Rows for merging into, rebasing onto or deleting: every branch the mode can use but the current.
+pub(super) fn other_branch_entries(
+    branches: &[Branch],
+    worktrees: &[Worktree],
+    mode: Mode,
+) -> Vec<BranchEntry> {
+    let checked_out = |name: &str| worktrees.iter().any(|w| w.branch.as_deref() == Some(name));
+    branches
+        .iter()
+        .filter(|b| !b.current)
+        .filter(|b| mode != Mode::DeleteBranch || (!b.remote && !checked_out(&b.name)))
+        .map(|b| {
+            let pick = match mode {
+                Mode::MergeBranch => BranchPick::Merge(b.name.clone()),
+                Mode::RebaseOnto => BranchPick::Rebase(b.name.clone()),
+                _ => BranchPick::Delete(b.name.clone()),
+            };
+            let detail: Vec<&str> = [b.when.as_str(), b.subject.as_str()]
+                .into_iter()
+                .filter(|d| !d.is_empty())
+                .collect();
+            BranchEntry {
+                label: b.name.clone(),
+                detail: Some(detail.join(" · ")),
+                key: b.name.clone(),
+                pick,
+            }
+        })
+        .collect()
+}
+
+/// The one row a typed name makes: renaming the current branch, or tagging HEAD.
+pub(super) fn named_entries(mode: Mode, current: Option<&str>, query: &str) -> Vec<BranchEntry> {
+    let name = query.trim();
+    if name.is_empty() || name.starts_with('-') || name.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let (label, pick) = match (mode, current) {
+        (Mode::RenameBranch, Some(current)) if current != name => (
+            format!("Rename “{current}” to “{name}”"),
+            BranchPick::Rename {
+                from: current.to_string(),
+                to: name.to_string(),
+            },
+        ),
+        (Mode::NewTag, _) => (
+            format!("Create tag “{name}” at the current commit"),
+            BranchPick::Tag(name.to_string()),
+        ),
+        _ => return Vec::new(),
+    };
+    vec![BranchEntry {
+        key: label.clone(),
+        label,
+        detail: None,
+        pick,
+    }]
+}
+
+pub(super) fn log_entries(commits: &[Commit], now: i64) -> Vec<BranchEntry> {
+    commits
+        .iter()
+        .map(|c| {
+            let short: String = c.sha.chars().take(7).collect();
+            let mut detail = vec![
+                short.clone(),
+                c.author.clone(),
+                git::relative_time(now - c.time),
+            ];
+            if !c.refs.is_empty() {
+                detail.push(c.refs.clone());
+            }
+            BranchEntry {
+                label: c.subject.clone(),
+                detail: Some(detail.join(" · ")),
+                key: format!("{} {short} {} {}", c.subject, c.author, c.refs),
+                pick: BranchPick::CopyCommit(c.sha.clone()),
+            }
+        })
+        .collect()
+}
+
 impl Shell {
+    /// Lists branches or history in the background, then opens the palette in `mode` on them.
+    pub(super) fn open_branch_mode(
+        &mut self,
+        mode: Mode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        if !git::available() {
+            return;
+        }
+        let repo = root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let root = repo.clone();
+            let listed = cx
+                .background_executor()
+                .spawn(async move {
+                    let root = repo;
+                    let commits = match mode {
+                        Mode::Log => git::repo_log(&root, 500)?,
+                        _ => Vec::new(),
+                    };
+                    let worktrees = git::worktrees(&root).unwrap_or_default();
+                    anyhow::Ok((git::branches(&root)?, worktrees, commits))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match listed {
+                // The user moved to another project while this one was read.
+                _ if this.active_root().as_ref() != Some(&root) => {}
+                Ok((branches, worktrees, commits)) => {
+                    this.git.branches = branches;
+                    this.git.worktrees = worktrees;
+                    this.git.commits = commits;
+                    this.open_palette(mode, window, cx);
+                }
+                Err(err) => {
+                    this.transient_notice("Could not read the repository", format!("{err:#}"), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Abort Merge or Abort Rebase, whichever is under way.
+    pub(super) fn abort_underway(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let Some(what) = git::underway(&root) else {
+            return self.transient_notice(
+                "Nothing to abort",
+                "No merge or rebase is under way.",
+                cx,
+            );
+        };
+        self.run_git_write(
+            format!("Could not abort the {}", what.name()),
+            move || git::abort(&root, what),
+            cx,
+        );
+    }
+
+    pub(super) fn continue_rebase(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        if git::underway(&root) != Some(Underway::Rebase) {
+            return self.transient_notice(
+                "No rebase under way",
+                "There is nothing to continue.",
+                cx,
+            );
+        }
+        self.run_merge_like(
+            "continue the rebase".into(),
+            Some(Underway::Rebase),
+            move || git::continue_rebase(&root),
+            cx,
+        );
+    }
+
+    /// `git rebase --skip`, for a step whose changes are already upstream.
+    pub(super) fn skip_rebase_step(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        self.run_merge_like(
+            "skip the rebase step".into(),
+            Some(Underway::Rebase),
+            move || git::skip_rebase_step(&root),
+            cx,
+        );
+    }
+
+    /// Pushes every local tag, after asking, as it publishes them all at once.
+    pub(super) fn push_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "Push every local tag?",
+            Some("git push --tags sends each tag this repository has to its remote."),
+            &confirm_buttons("Cancel", "Push Tags"),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(CONFIRMED) {
+                let _ = this.update(cx, |this, cx| {
+                    this.run_git_write(
+                        "Could not push tags".into(),
+                        move || git::push_tags(&root),
+                        cx,
+                    )
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Runs a git command that changes the repository, then refreshes; failures become a notice.
+    fn run_git_write(
+        &mut self,
+        failed: String,
+        op: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let done = cx.background_executor().spawn(async move { op() }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = done {
+                    this.transient_notice(failed, format!("{err:#}"), cx);
+                }
+                this.tree.invalidate();
+                this.git_kick(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A merge, rebase or rebase step: stopping on conflicts is reported as that, not a failure.
+    /// `expected` is what must be under way first: nothing for a new merge or rebase.
+    fn run_merge_like(
+        &mut self,
+        what: String,
+        expected: Option<Underway>,
+        op: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        if let Some(busy) = git::underway(&root).filter(|_| expected.is_none()) {
+            return self.transient_notice(
+                format!("A {} is under way", busy.name()),
+                format!("Finish it or run Git: Abort merge or rebase before you {what}."),
+                cx,
+            );
+        }
+        cx.spawn(async move |this, cx| {
+            let done = cx.background_executor().spawn(async move { op() }).await;
+            let _ = this.update(cx, |this, cx| {
+                match (done, git::underway(&root)) {
+                    (Ok(()), _) => {}
+                    (Err(_), Some(stopped)) => this.transient_notice(
+                        format!("The {} stopped on conflicts", stopped.name()),
+                        match stopped {
+                            Underway::Merge => "Resolve them in Changes, then commit. Git: Abort merge or rebase gives up.",
+                            Underway::Rebase => "Resolve and stage them in Changes, then run Git: Continue rebase. A step with nothing left to commit needs Git: Skip rebase step; Git: Abort merge or rebase gives up.",
+                        },
+                        cx,
+                    ),
+                    (Err(err), None) => {
+                        this.transient_notice(format!("Could not {what}"), format!("{err:#}"), cx)
+                    }
+                }
+                this.tree.invalidate();
+                this.git_kick(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn delete_branch(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let (repo, branch) = (root.clone(), name.clone());
+            let unique = cx
+                .background_executor()
+                .spawn(async move { git::unique_commits(&repo, &branch) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let unique = match unique {
+                    Ok(n) => n,
+                    Err(err) => {
+                        return this.transient_notice(format!("Could not delete {name}"), format!("{err:#}"), cx);
+                    }
+                };
+                if unique == 0 {
+                    let (repo, branch) = (root.clone(), name.clone());
+                    return this.run_git_write(
+                        format!("Could not delete {name}"),
+                        move || git::delete_branch(&repo, &branch, false),
+                        cx,
+                    );
+                }
+                let s = if unique == 1 { "" } else { "s" };
+                let answer = window.prompt(
+                    PromptLevel::Warning,
+                    &format!("Delete branch {name}?"),
+                    Some(&format!("Its {unique} commit{s} are on no other branch or remote, and would be lost.")),
+                    &confirm_buttons("Cancel", "Delete Anyway"),
+                    cx,
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    if answer.await == Ok(CONFIRMED) {
+                        let _ = this.update(cx, |this, cx| {
+                            this.run_git_write(
+                                format!("Could not delete {name}"),
+                                move || git::delete_branch(&root, &name, true),
+                                cx,
+                            )
+                        });
+                    }
+                })
+                .detach();
+            });
+        })
+        .detach();
+    }
+
     /// The branch picker: lists branches in the background, then opens the palette on them.
     pub(super) fn open_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else {
@@ -216,11 +561,39 @@ impl Shell {
             BranchPick::PopStash(commit) => return self.git_stash_pop(commit, cx),
             BranchPick::OpenWorktree(path) => return self.open_worktree(path, cx),
             BranchPick::PickWorktreeBranch => {
-                return self.open_worktrees(Mode::NewWorktree, window, cx);
+                return self.open_worktrees(Mode::NewWorktree, false, window, cx);
             }
-            BranchPick::AddWorktree(how) => return self.add_worktree(how, cx),
+            BranchPick::AddWorktree(how) => return self.add_worktree(how, window, cx),
             BranchPick::RemoveWorktree(path) => {
                 return self.remove_worktree(path, false, window, cx);
+            }
+            BranchPick::Merge(name) => {
+                let what = format!("merge {name}");
+                return self.run_merge_like(what, None, move || git::merge(&root, &name), cx);
+            }
+            BranchPick::Rebase(name) => {
+                let what = format!("rebase onto {name}");
+                return self.run_merge_like(what, None, move || git::rebase(&root, &name), cx);
+            }
+            BranchPick::Delete(name) => return self.delete_branch(name, window, cx),
+            BranchPick::Rename { from, to } => {
+                return self.run_git_write(
+                    format!("Could not rename {from}"),
+                    move || git::rename_branch(&root, &from, &to),
+                    cx,
+                );
+            }
+            BranchPick::Tag(name) => {
+                return self.run_git_write(
+                    format!("Could not create tag {name}"),
+                    move || git::create_tag(&root, &name),
+                    cx,
+                );
+            }
+            BranchPick::CopyCommit(sha) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
+                let short: String = sha.chars().take(7).collect();
+                return self.transient_notice("Commit id copied", short, cx);
             }
         };
         cx.spawn(async move |this, cx| {
@@ -257,6 +630,62 @@ mod tests {
             when: "2 days ago".into(),
             subject: "Work".into(),
         }
+    }
+
+    #[test]
+    fn merging_rebasing_and_deleting_offer_every_usable_branch_but_the_current() {
+        let list = [
+            branch("main", false, true),
+            branch("feat", false, false),
+            branch("busy", false, false),
+            branch("origin/feat", true, false),
+        ];
+        let busy = Worktree {
+            path: "/w/busy".into(),
+            branch: Some("busy".into()),
+            head: String::new(),
+            bare: false,
+            locked: false,
+            prunable: false,
+        };
+        let picks = |mode| -> Vec<BranchPick> {
+            other_branch_entries(&list, std::slice::from_ref(&busy), mode)
+                .into_iter()
+                .map(|e| e.pick)
+                .collect()
+        };
+        assert_eq!(
+            picks(Mode::MergeBranch),
+            [
+                BranchPick::Merge("feat".into()),
+                BranchPick::Merge("busy".into()),
+                BranchPick::Merge("origin/feat".into()),
+            ]
+        );
+        assert_eq!(
+            picks(Mode::DeleteBranch),
+            [BranchPick::Delete("feat".into())]
+        );
+    }
+
+    #[test]
+    fn a_typed_name_renames_the_branch_or_tags_the_commit() {
+        let rename = named_entries(Mode::RenameBranch, Some("main"), " trunk ");
+        assert_eq!(
+            rename[0].pick,
+            BranchPick::Rename {
+                from: "main".into(),
+                to: "trunk".into()
+            }
+        );
+        assert!(named_entries(Mode::RenameBranch, Some("main"), "main").is_empty());
+        assert!(named_entries(Mode::RenameBranch, None, "trunk").is_empty());
+        assert!(named_entries(Mode::NewTag, None, "-f").is_empty());
+        assert!(named_entries(Mode::NewTag, None, "v 1").is_empty());
+        assert_eq!(
+            named_entries(Mode::NewTag, None, "v1")[0].pick,
+            BranchPick::Tag("v1".into())
+        );
     }
 
     #[test]

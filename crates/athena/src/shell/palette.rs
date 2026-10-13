@@ -36,6 +36,8 @@ pub(super) enum Target {
     Task(String),
     /// A web page, such as a pull request check's run.
     Link(String),
+    /// Moving or renaming a sidebar folder, or moving a project into one.
+    SidebarFolder(super::sidebar::FolderPick),
 }
 
 impl Clone for Target {
@@ -49,6 +51,7 @@ impl Clone for Target {
             Self::Folder(path) => Self::Folder(path.clone()),
             Self::Task(command) => Self::Task(command.clone()),
             Self::Link(url) => Self::Link(url.clone()),
+            Self::SidebarFolder(pick) => Self::SidebarFolder(pick.clone()),
         }
     }
 }
@@ -76,6 +79,22 @@ pub(super) enum Mode {
     RemoveWorktree,
     /// The current branch's pull request checks.
     Checks,
+    /// Sidebar folders a project or folder can move into.
+    MoveToFolder,
+    RenameFolder,
+    MergeBranch,
+    RebaseOnto,
+    DeleteBranch,
+    RenameBranch,
+    NewTag,
+    /// The repository's recent history.
+    Log,
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -97,6 +116,12 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Worktrees | Mode::RemoveWorktree => "No matching worktrees",
         Mode::NewWorktree => "Type a name for a new branch",
         Mode::Checks => "No matching checks",
+        Mode::MoveToFolder => "Type a name for a new folder",
+        Mode::RenameFolder => "Type the folder's new name",
+        Mode::MergeBranch | Mode::RebaseOnto | Mode::DeleteBranch => "No matching branches",
+        Mode::RenameBranch => "Type the branch's new name",
+        Mode::NewTag => "Type a name for the tag",
+        Mode::Log => "No matching commits",
         _ => "No matching commands",
     }
 }
@@ -280,8 +305,51 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ),
         ("Git: Pop stash…", Box::new(actions::GitPopStash)),
         (
+            "Git: Merge branch into current…",
+            Box::new(super::branches::GitMergeBranch),
+        ),
+        (
+            "Git: Rebase current branch onto…",
+            Box::new(super::branches::GitRebaseOnto),
+        ),
+        (
+            "Git: Abort merge or rebase",
+            Box::new(super::branches::GitAbortMergeOrRebase),
+        ),
+        (
+            "Git: Continue rebase",
+            Box::new(super::branches::GitContinueRebase),
+        ),
+        (
+            "Git: Skip rebase step",
+            Box::new(super::branches::GitSkipRebaseStep),
+        ),
+        (
+            "Git: Delete branch…",
+            Box::new(super::branches::GitDeleteBranch),
+        ),
+        (
+            "Git: Rename branch…",
+            Box::new(super::branches::GitRenameBranch),
+        ),
+        ("Git: Create tag…", Box::new(super::branches::GitCreateTag)),
+        ("Git: Push tags", Box::new(super::branches::GitPushTags)),
+        ("Git: Show log", Box::new(super::branches::GitShowLog)),
+        (
             "Git: Open worktree…",
             Box::new(super::worktrees::GitOpenWorktree),
+        ),
+        (
+            "Git: New worktree with Claude…",
+            Box::new(super::worktrees::GitNewWorktreeWithClaude),
+        ),
+        (
+            "Git: Finish worktree…",
+            Box::new(super::worktrees::GitFinishWorktree),
+        ),
+        (
+            "Git: Prune worktrees",
+            Box::new(super::worktrees::GitPruneWorktrees),
         ),
         (
             "Git: Create worktree…",
@@ -327,6 +395,11 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::lsp::DisallowProjectLinters),
         ),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
+        ("Toggle project sidebar", Box::new(actions::ToggleSidebar)),
+        (
+            "Move project to folder…",
+            Box::new(actions::MoveProjectToFolder),
+        ),
         ("Focus outline", Box::new(super::outline::ShowOutline)),
         ("Show explorer", Box::new(super::outline::ShowExplorer)),
         ("Problems", Box::new(actions::ShowProblems)),
@@ -438,6 +511,7 @@ fn project_files(root: &Path) -> Vec<String> {
 
 impl Shell {
     pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        self.git.claude_in_new_worktree = false;
         let placeholder = match mode {
             Mode::Files => "Go to file…  (@ symbol, # workspace symbol, > command)",
             Mode::FilesBeside => "Open to the side…",
@@ -453,6 +527,14 @@ impl Shell {
             Mode::NewWorktree => "Pick a branch for the new worktree, or type a new branch name…",
             Mode::RemoveWorktree => "Delete a worktree…",
             Mode::Checks => "Open a pull request check…",
+            Mode::MoveToFolder => "Move to a folder, or type a name for a new one…",
+            Mode::RenameFolder => "New name for the folder…",
+            Mode::MergeBranch => "Merge a branch into the current one…",
+            Mode::RebaseOnto => "Rebase the current branch onto…",
+            Mode::DeleteBranch => "Delete a branch…",
+            Mode::RenameBranch => "New name for the current branch…",
+            Mode::NewTag => "Tag the current commit as…",
+            Mode::Log => "Search history; pick a commit to copy its id…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -475,6 +557,14 @@ impl Shell {
             | Mode::Worktrees
             | Mode::NewWorktree
             | Mode::RemoveWorktree
+            | Mode::MoveToFolder
+            | Mode::RenameFolder
+            | Mode::MergeBranch
+            | Mode::RebaseOnto
+            | Mode::DeleteBranch
+            | Mode::RenameBranch
+            | Mode::NewTag
+            | Mode::Log
             | Mode::Symbols
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
@@ -889,8 +979,47 @@ impl Shell {
                 &query,
             )),
             Mode::RemoveWorktree => Some(super::worktrees::remove_entries(&self.git.worktrees)),
+            Mode::MergeBranch | Mode::RebaseOnto | Mode::DeleteBranch => {
+                Some(super::branches::other_branch_entries(
+                    &self.git.branches,
+                    &self.git.worktrees,
+                    palette.mode,
+                ))
+            }
+            Mode::RenameBranch | Mode::NewTag => {
+                let current = self.git.branches.iter().find(|b| b.current);
+                Some(super::branches::named_entries(
+                    palette.mode,
+                    current.map(|b| b.name.as_str()),
+                    &query,
+                ))
+            }
+            Mode::Log => Some(super::branches::log_entries(&self.git.commits, now_secs())),
             _ => None,
         };
+        let folder_rows = match (palette.mode, &self.sidebar_subject) {
+            (Mode::MoveToFolder, Some(subject)) => Some(super::sidebar::move_entries(
+                &self.workspace,
+                subject,
+                &query,
+            )),
+            (Mode::RenameFolder, Some(super::sidebar::Subject::Folder(path))) => {
+                Some(super::sidebar::rename_entries(path, &query))
+            }
+            _ => None,
+        };
+        if let Some(rows) = folder_rows {
+            palette.entries = rows
+                .into_iter()
+                .map(|(label, detail, pick)| Entry {
+                    kind: None,
+                    key: label.clone(),
+                    label,
+                    detail,
+                    target: Target::SidebarFolder(pick),
+                })
+                .collect();
+        }
         if let Some(rows) = branch_rows {
             palette.entries = rows
                 .into_iter()
@@ -940,6 +1069,7 @@ impl Shell {
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.restore_palette_origin(cx);
+        self.git.claude_in_new_worktree = false;
         if let Some(palette) = self.palette.take() {
             self.fade_out_palette(palette, cx);
         }
@@ -1007,6 +1137,7 @@ impl Shell {
             Some(Target::Task(command)) => self.run_task(command, window, cx),
             Some(Target::Link(url)) if url.starts_with("https://") => cx.open_url(&url),
             Some(Target::Link(_)) => {}
+            Some(Target::SidebarFolder(pick)) => self.run_folder_pick(pick, cx),
             None => {}
         }
         cx.notify();
@@ -1081,6 +1212,7 @@ impl Shell {
                                         | Target::Symbol(..)
                                         | Target::Folder(_)
                                         | Target::Link(_)
+                                        | Target::SidebarFolder(_)
                                 )
                                 .then(|| entry.detail.clone())
                                 .flatten()

@@ -77,12 +77,22 @@ pub(super) struct GitState {
     committing: bool,
     /// Branches for the branch picker, newest first.
     pub(super) branches: Vec<git::Branch>,
+    /// History for Git: Show log, newest first.
+    pub(super) commits: Vec<git::Commit>,
     /// Stashes for the branch picker, newest first.
     pub(super) stashes: Vec<git::Stash>,
     /// The active repository's worktrees for the pickers, the main one first.
     pub(super) worktrees: Vec<git::Worktree>,
     /// Each open project's main worktree when it is a linked worktree.
     pub(super) worktree_mains: HashMap<PathBuf, Option<PathBuf>>,
+    /// The next worktree created from the picker starts a Claude session.
+    pub(super) claude_in_new_worktree: bool,
+    /// Every worktree of each open main repository, for the sidebar to offer the unopened ones.
+    pub(super) listed_worktrees: HashMap<PathBuf, Vec<git::Worktree>>,
+    pub(super) worktree_lists_asked: u64,
+    /// The work tree and branch the focused terminal sits in, when not the active project's.
+    pub(super) terminal_repo: Option<(PathBuf, Option<String>)>,
+    terminal_seen: Option<(Option<PathBuf>, Option<PathBuf>)>,
     /// Each open project's git folders, `None` outside a repository.
     pub(super) dirs: HashMap<PathBuf, Option<GitDirs>>,
     /// Background projects waiting for a summary, read one at a time.
@@ -295,6 +305,7 @@ impl Shell {
         self.set_autofetch(self.settings.file.git_autofetch(), window, cx);
         self.start_github(window, cx);
         self.group_worktrees();
+        self.refresh_worktree_lists(cx);
         // The window is not active yet while it is being built, so the first run is kicked.
         self.git_kick(cx);
         self.git.poll = Some(cx.spawn_in(window, async move |this, cx| {
@@ -474,11 +485,6 @@ impl Shell {
             repo.dirty = summary.dirty;
             cx.notify();
         }
-    }
-
-    /// Whether a full status has run, so ignored folders are known.
-    pub(super) fn git_scanned(&self, root: &Path) -> bool {
-        self.git.repos.get(root).is_some_and(|r| r.checked)
     }
 
     fn is_active_root(&self, root: &Path) -> bool {
@@ -827,7 +833,37 @@ impl Shell {
         Some(PathBuf::from(entry.orig.as_ref()?.strip_prefix(prefix)?))
     }
 
+    /// Notes which work tree the focused terminal is in, when it is not the active project's.
+    fn note_terminal_repo(&mut self, cx: &mut Context<Self>) {
+        let cwd = match self.focused_item_view() {
+            Some(ItemView::Terminal(view)) => view.read(cx).foreground().and_then(|(_, cwd)| cwd),
+            _ => None,
+        };
+        let root = self.workspace.active_project().map(|p| p.root.clone());
+        // Unchanged places in one work tree need no disk reads; another tree's branch may move.
+        let seen = (cwd.clone(), root.clone());
+        if self.git.terminal_seen.as_ref() == Some(&seen) && self.git.terminal_repo.is_none() {
+            return;
+        }
+        self.git.terminal_seen = Some(seen);
+        // The terminal's folder comes resolved; a root saved by an older build may not be.
+        let project = root.and_then(|r| git::work_tree(&r.canonicalize().unwrap_or(r)));
+        let elsewhere = cwd
+            .as_deref()
+            .and_then(git::work_tree)
+            .filter(|top| Some(top) != project.as_ref())
+            .map(|top| {
+                let branch = athena_workspace::git_branch(&top);
+                (top, branch)
+            });
+        if self.git.terminal_repo != elsewhere {
+            self.git.terminal_repo = elsewhere;
+            cx.notify();
+        }
+    }
+
     pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        self.note_terminal_repo(cx);
         let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else {
             return;
         };
@@ -1801,17 +1837,74 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
     .on_action(cx.listener(|this, _: &GitPopStash, w, cx| this.open_stashes(w, cx)))
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitOpenWorktree, w, cx| {
-            this.open_worktrees(super::palette::Mode::Worktrees, w, cx)
+            this.open_worktrees(super::palette::Mode::Worktrees, false, w, cx)
         }),
     )
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitCreateWorktree, w, cx| {
-            this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+            this.open_worktrees(super::palette::Mode::NewWorktree, false, w, cx)
+        }),
+    )
+    .on_action(cx.listener(
+        |this, _: &super::worktrees::GitNewWorktreeWithClaude, w, cx| {
+            this.open_worktrees(super::palette::Mode::NewWorktree, true, w, cx)
+        },
+    ))
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitMergeBranch, w, cx| {
+            this.open_branch_mode(super::palette::Mode::MergeBranch, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitRebaseOnto, w, cx| {
+            this.open_branch_mode(super::palette::Mode::RebaseOnto, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitDeleteBranch, w, cx| {
+            this.open_branch_mode(super::palette::Mode::DeleteBranch, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitRenameBranch, w, cx| {
+            this.open_branch_mode(super::palette::Mode::RenameBranch, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitCreateTag, w, cx| {
+            this.open_branch_mode(super::palette::Mode::NewTag, w, cx)
+        }),
+    )
+    .on_action(cx.listener(|this, _: &super::branches::GitShowLog, w, cx| {
+        this.open_branch_mode(super::palette::Mode::Log, w, cx)
+    }))
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitAbortMergeOrRebase, _, cx| {
+            this.abort_underway(cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitContinueRebase, _, cx| this.continue_rebase(cx)),
+    )
+    .on_action(cx.listener(|this, _: &super::branches::GitPushTags, w, cx| this.push_tags(w, cx)))
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitSkipRebaseStep, _, cx| {
+            this.skip_rebase_step(cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitFinishWorktree, w, cx| {
+            this.finish_worktree(w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitPruneWorktrees, _, cx| {
+            this.prune_worktrees(cx)
         }),
     )
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitDeleteWorktree, w, cx| {
-            this.open_worktrees(super::palette::Mode::RemoveWorktree, w, cx)
+            this.open_worktrees(super::palette::Mode::RemoveWorktree, false, w, cx)
         }),
     )
     .on_action(
