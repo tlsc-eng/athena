@@ -333,9 +333,28 @@ impl Shell {
         }
     }
 
-    /// Orders the rail so each linked worktree follows its main repository, when that is open.
+    /// Orders the rail by folder, each linked worktree in its main repository's folder right
+    /// after it, when that is open.
     pub(super) fn group_worktrees(&mut self) {
         self.note_worktree_mains();
+        let folders: Vec<(PathBuf, Vec<String>)> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| (p.root.clone(), p.folder.clone()))
+            .collect();
+        for project in &mut self.workspace.projects {
+            let main = self
+                .git
+                .worktree_mains
+                .get(&project.root)
+                .cloned()
+                .flatten();
+            if let Some((_, folder)) = main.and_then(|m| folders.iter().find(|(r, _)| *r == m)) {
+                project.folder = folder.clone();
+            }
+        }
+        self.workspace.group_folders();
         let roots: Vec<PathBuf> = self
             .workspace
             .projects
@@ -387,6 +406,24 @@ impl RailGroups {
             start = end;
         }
         Self { roots, groups }
+    }
+
+    /// The index of the project at `root` and the group it belongs to.
+    pub fn group_of(&self, root: &Path) -> Option<(usize, Range<usize>)> {
+        let from = self.roots.iter().position(|r| r == root)?;
+        Some((from, self.groups[from].clone()))
+    }
+
+    pub fn len(&self) -> usize {
+        self.roots.len()
+    }
+
+    /// Whether a group starts at `at`, the end counting as one.
+    pub fn starts_group(&self, at: usize) -> bool {
+        match self.groups.get(at) {
+            Some(group) => group.start == at,
+            None => at == self.roots.len(),
+        }
     }
 
     /// What moves when the project at `root` is dropped before the one at `before`, or last, and
@@ -529,6 +566,28 @@ mod tests {
             "/c-x" => Some(PathBuf::from("/c")),
             _ => None,
         }
+    }
+
+    #[test]
+    fn a_repository_lands_beside_any_group_and_a_worktree_only_among_its_siblings() {
+        let (roots, groups) = rail(&["/a", "/a-feat", "/a-fix", "/b"]);
+        assert_eq!(groups.block(&roots[0]), Some(0..3));
+        assert_eq!(groups.block(&roots[1]), None);
+        assert_eq!(groups.beside(&roots[3], Some(0)), Some((3..4, 0, false)));
+        assert_eq!(
+            groups.beside(&roots[0], Some(3)),
+            Some((0..3, 3, false)),
+            "dropping just after itself can still change its folder"
+        );
+        assert_eq!(groups.beside(&roots[0], Some(0)), None);
+        assert_eq!(
+            groups.beside(&roots[3], Some(1)),
+            None,
+            "not inside a group"
+        );
+        assert_eq!(groups.beside(&roots[0], None), Some((0..3, 4, false)));
+        assert_eq!(groups.beside(&roots[2], Some(1)), Some((2..3, 1, true)));
+        assert_eq!(groups.beside(&roots[1], Some(4)), None);
     }
 
     #[test]

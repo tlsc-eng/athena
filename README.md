@@ -642,8 +642,18 @@ information rather than triggering the install dialog).
   list, stats and logs. Athena never starts, stops or removes containers.
 - Workspace layout, open projects and tabs are restored on launch, each editor with its cursor,
   scroll position, folds and word wrap choice as they were left.
-- Drag a project in the rail to reorder it; drop it on "+" to move it to the end. A repository
-  carries its linked worktrees along, and a worktree moves only among its siblings.
+- The project rail widens into a sidebar with names, branches and folders: **Toggle Project
+  Sidebar** (`cmd-alt-b`, View menu, palette, or the ⇥ button under "+"). Folders group projects
+  and can nest: right-click a project and pick **Move to Folder…**, then pick a folder or type a
+  new name (`Work/Clients` nests one folder in another). Click a folder to collapse it; in the
+  narrow rail it shows as a square with its initials and, when collapsed, how many projects it
+  holds. Right-click a folder to rename, move or remove it (its projects stay, moving up a level).
+  A linked worktree always sits in its repository's folder. Folders and which ones are collapsed
+  are saved per window; a build older than 0.12 shows the projects as one flat list.
+- Drag a project in the rail to reorder it: dropped between two projects it joins their folder,
+  dropped on a folder it goes last in it, and dropped on "+" it leaves every folder and goes to
+  the end. Folders drag the same way. A repository carries its linked worktrees along, and a
+  worktree moves only among its siblings.
 - Open Recent (`ctrl-r` outside a terminal, or File > Open Recent) lists the last 20 project
   folders you closed, and every project of a window you closed, however many there are.
 - Several windows: New Window (`cmd-shift-n`), Open Project in New Window… (File), Move Project
@@ -908,6 +918,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | ``ctrl-` `` | Show and focus the terminal panel, or hide it when it has focus |
 | ``ctrl-shift-` `` | New terminal in the panel (bound as `ctrl-~` too, which is what macOS reports for it) |
 | `cmd-b` | Toggle file tree |
+| `cmd-alt-b` | Toggle project sidebar |
 | `cmd-shift-s` | Save as |
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |
 | `cmd-shift-f` | Find in project |

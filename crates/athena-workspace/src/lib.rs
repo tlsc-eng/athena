@@ -1,3 +1,4 @@
+mod folders;
 pub mod gh;
 pub mod git;
 mod layout;
@@ -7,6 +8,7 @@ mod scope;
 pub mod watch;
 mod windows;
 
+pub use folders::SidebarRow;
 pub use layout::{
     Axis, DiffBase, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath,
     Pane, PaneId, Rect, ViewState,
@@ -55,6 +57,9 @@ pub struct Workspace {
     /// Projects of windows closed while Athena kept running, newest first; their shells still run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked: Vec<Project>,
+    /// Sidebar folders this window shows closed, by path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed: Vec<Vec<String>>,
 }
 
 /// The workspace fields settings.json may set; workspace.json keeps them as the fallback.
@@ -98,6 +103,8 @@ pub struct UiState {
     pub font_zoom: i32,
     /// Interface size, in 10% steps from the default.
     pub zoom_level: i32,
+    /// The project rail is the wide sidebar, with names and folders.
+    pub sidebar_expanded: bool,
 }
 
 impl Default for UiState {
@@ -109,6 +116,7 @@ impl Default for UiState {
             terminal_panel_open: false,
             font_zoom: 0,
             zoom_level: 0,
+            sidebar_expanded: false,
         }
     }
 }
@@ -145,6 +153,7 @@ impl Default for Workspace {
             theme: ThemeChoice::System,
             windows: Vec::new(),
             parked: Vec::new(),
+            collapsed: Vec::new(),
         }
     }
 }

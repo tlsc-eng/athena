@@ -79,6 +79,9 @@ pub struct Project {
     pub claude_command: Option<String>,
     #[serde(default, skip_serializing_if = "Panel::is_empty")]
     pub panel: Panel,
+    /// The sidebar folder holding the project, outermost first; empty at the top level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder: Vec<String>,
     /// Whether the ESLint and Biome the project installs may run; they are the project's code.
     #[serde(default, skip_serializing_if = "LinterTrust::is_not_asked")]
     pub linters: LinterTrust,
@@ -123,6 +126,7 @@ impl Project {
             layout: default_layout(),
             claude_command: None,
             panel: Panel::default(),
+            folder: Vec::new(),
             linters: LinterTrust::NotAsked,
             terminal: None,
         }

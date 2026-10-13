@@ -36,6 +36,8 @@ pub(super) enum Target {
     Task(String),
     /// A web page, such as a pull request check's run.
     Link(String),
+    /// Moving or renaming a sidebar folder, or moving a project into one.
+    SidebarFolder(super::sidebar::FolderPick),
 }
 
 impl Clone for Target {
@@ -49,6 +51,7 @@ impl Clone for Target {
             Self::Folder(path) => Self::Folder(path.clone()),
             Self::Task(command) => Self::Task(command.clone()),
             Self::Link(url) => Self::Link(url.clone()),
+            Self::SidebarFolder(pick) => Self::SidebarFolder(pick.clone()),
         }
     }
 }
@@ -76,6 +79,9 @@ pub(super) enum Mode {
     RemoveWorktree,
     /// The current branch's pull request checks.
     Checks,
+    /// Sidebar folders a project or folder can move into.
+    MoveToFolder,
+    RenameFolder,
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -97,6 +103,8 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Worktrees | Mode::RemoveWorktree => "No matching worktrees",
         Mode::NewWorktree => "Type a name for a new branch",
         Mode::Checks => "No matching checks",
+        Mode::MoveToFolder => "Type a name for a new folder",
+        Mode::RenameFolder => "Type the folder's new name",
         _ => "No matching commands",
     }
 }
@@ -327,6 +335,11 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::lsp::DisallowProjectLinters),
         ),
         ("Toggle file tree", Box::new(actions::ToggleFileTree)),
+        ("Toggle project sidebar", Box::new(actions::ToggleSidebar)),
+        (
+            "Move project to folder…",
+            Box::new(actions::MoveProjectToFolder),
+        ),
         ("Focus outline", Box::new(super::outline::ShowOutline)),
         ("Show explorer", Box::new(super::outline::ShowExplorer)),
         ("Problems", Box::new(actions::ShowProblems)),
@@ -453,6 +466,8 @@ impl Shell {
             Mode::NewWorktree => "Pick a branch for the new worktree, or type a new branch name…",
             Mode::RemoveWorktree => "Delete a worktree…",
             Mode::Checks => "Open a pull request check…",
+            Mode::MoveToFolder => "Move to a folder, or type a name for a new one…",
+            Mode::RenameFolder => "New name for the folder…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -475,6 +490,8 @@ impl Shell {
             | Mode::Worktrees
             | Mode::NewWorktree
             | Mode::RemoveWorktree
+            | Mode::MoveToFolder
+            | Mode::RenameFolder
             | Mode::Symbols
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
@@ -891,6 +908,29 @@ impl Shell {
             Mode::RemoveWorktree => Some(super::worktrees::remove_entries(&self.git.worktrees)),
             _ => None,
         };
+        let folder_rows = match (palette.mode, &self.sidebar_subject) {
+            (Mode::MoveToFolder, Some(subject)) => Some(super::sidebar::move_entries(
+                &self.workspace,
+                subject,
+                &query,
+            )),
+            (Mode::RenameFolder, Some(super::sidebar::Subject::Folder(path))) => {
+                Some(super::sidebar::rename_entries(path, &query))
+            }
+            _ => None,
+        };
+        if let Some(rows) = folder_rows {
+            palette.entries = rows
+                .into_iter()
+                .map(|(label, detail, pick)| Entry {
+                    kind: None,
+                    key: label.clone(),
+                    label,
+                    detail,
+                    target: Target::SidebarFolder(pick),
+                })
+                .collect();
+        }
         if let Some(rows) = branch_rows {
             palette.entries = rows
                 .into_iter()
@@ -1007,6 +1047,7 @@ impl Shell {
             Some(Target::Task(command)) => self.run_task(command, window, cx),
             Some(Target::Link(url)) if url.starts_with("https://") => cx.open_url(&url),
             Some(Target::Link(_)) => {}
+            Some(Target::SidebarFolder(pick)) => self.run_folder_pick(pick, cx),
             None => {}
         }
         cx.notify();
@@ -1081,6 +1122,7 @@ impl Shell {
                                         | Target::Symbol(..)
                                         | Target::Folder(_)
                                         | Target::Link(_)
+                                        | Target::SidebarFolder(_)
                                 )
                                 .then(|| entry.detail.clone())
                                 .flatten()

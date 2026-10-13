@@ -14,6 +14,8 @@ pub struct WindowEntry {
     pub window: Option<WindowState>,
     #[serde(default)]
     pub ui: UiState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed: Vec<Vec<String>>,
 }
 
 impl Workspace {
@@ -59,6 +61,7 @@ impl Workspace {
             active: index,
             window: entry.window,
             ui: self.app_ui(entry.ui),
+            collapsed: entry.collapsed.clone(),
             windows: Vec::new(),
             parked: Vec::new(),
             recent: self.recent.clone(),
@@ -91,6 +94,7 @@ impl Workspace {
             theme: self.theme,
             windows: Vec::new(),
             parked: Vec::new(),
+            collapsed: Vec::new(),
         }
     }
 
@@ -107,6 +111,7 @@ impl Workspace {
                     active: w.active_project().map(|p| p.root.clone()),
                     window: w.window,
                     ui: app.app_ui(w.ui),
+                    collapsed: w.collapsed.clone(),
                 })
                 .collect(),
         };
@@ -115,6 +120,7 @@ impl Workspace {
             active: first.and_then(|w| w.active),
             window: first.and_then(|w| w.window),
             ui: app.app_ui(first.map_or(app.ui, |w| w.ui)),
+            collapsed: first.map_or_else(Vec::new, |w| w.collapsed.clone()),
             windows: entries,
             parked: parked.to_vec(),
             recent: app.recent.clone(),
@@ -309,18 +315,21 @@ mod tests {
                 active: Some("/n/gone".into()),
                 window: bounds(10.),
                 ui: UiState::default(),
+                collapsed: Vec::new(),
             },
             WindowEntry {
                 roots: vec!["/n/b".into(), "/n/b".into()],
                 active: None,
                 window: bounds(500.),
                 ui: UiState::default(),
+                collapsed: Vec::new(),
             },
             WindowEntry {
                 roots: vec!["/n/b".into()],
                 active: Some("/n/b".into()),
                 window: bounds(900.),
                 ui: UiState::default(),
+                collapsed: Vec::new(),
             },
         ];
         let (windows, _) = w.into_windows();
@@ -344,6 +353,7 @@ mod tests {
                 active: None,
                 window: bounds(30.),
                 ui: UiState::default(),
+                collapsed: Vec::new(),
             }],
             ..Workspace::default()
         };

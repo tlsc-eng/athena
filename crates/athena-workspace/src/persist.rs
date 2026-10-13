@@ -101,7 +101,10 @@ mod tests {
             terminal_panel_open: true,
             font_zoom: -2,
             zoom_level: 3,
+            sidebar_expanded: true,
         };
+        w.projects[0].folder = vec!["work".into(), "clients".into()];
+        w.collapsed = vec![vec!["work".into()]];
         save(&path, &w).unwrap();
         assert_eq!(load(&path).unwrap(), w);
         assert_eq!(
