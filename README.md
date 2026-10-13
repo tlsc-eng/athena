@@ -432,8 +432,8 @@ information rather than triggering the install dialog).
   Code) fetches the active project every three minutes while the window is in front.
 - Projects you are not looking at keep their branch, upstream counts and a "changes" marker up to
   date too: a branch switch or commit in any worktree (from a terminal, Claude or another app) is
-  picked up within a second, edits within a few seconds, and everything is re-read every 30
-  seconds while the window is in front. The project rail's tooltip shows it under the path.
+  picked up within a second, edits within a few seconds in projects you have opened this session,
+  and everything is re-read every 30 seconds while the window is in front. The project rail's tooltip shows it under the path.
 - Worktrees: **Git: Open worktree…**, **Git: Create worktree…** and **Git: Delete worktree…** in
   the palette, and **Create worktree…** in the branch picker. A new worktree checks out a new
   branch made at `HEAD`, a local branch no other worktree has, or a remote branch as a new

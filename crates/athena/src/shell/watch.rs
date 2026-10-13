@@ -143,7 +143,9 @@ impl Shell {
         let mut regrouped = false;
         for (root, dirs) in repos {
             if everything || paths.iter().any(|p| dirs.moves_worktrees(p)) {
+                // A worktree re-created under a new name has a new git folder.
                 self.git.worktree_mains.remove(&root);
+                self.git.dirs.remove(&root);
                 regrouped = true;
             }
             if everything || paths.iter().any(|p| dirs.moves_branch(p)) {
@@ -154,6 +156,16 @@ impl Shell {
             self.note_worktree_mains();
             cx.notify();
         }
+    }
+
+    fn repo_watched(&self, root: &Path) -> bool {
+        let common = self
+            .git
+            .dirs
+            .get(root)
+            .and_then(Option::as_ref)
+            .map(|d| &d.common_dir);
+        common.is_some_and(|c| self.watch.git_watchers.contains_key(c))
     }
 
     /// Something outside Athena (or a save) changed files under `root`.
@@ -167,16 +179,20 @@ impl Shell {
             }
         }
         let active = self.workspace.active_project().map(|p| p.root.as_path()) == Some(root);
+        let scanned = active || self.git_scanned(root);
         let decorations = self.git_decorations(root);
+        let watched = self.repo_watched(root);
         // FSEvents reports real paths, while decorations are keyed under the project's own root.
         let real = root.canonicalize().ok();
         let in_root = |p: &PathBuf| match real.as_ref().and_then(|r| p.strip_prefix(r).ok()) {
             Some(rel) if !p.starts_with(root) => root.join(rel),
             _ => p.clone(),
         };
-        if paths
-            .iter()
-            .any(|p| affects_git(root, &in_root(p), decorations.as_deref()))
+        // Without a full status nothing is known to be ignored, and a build would re-read it nonstop.
+        if scanned
+            && paths
+                .iter()
+                .any(|p| affects_git(root, &in_root(p), decorations.as_deref(), watched))
         {
             if active {
                 self.git_kick(cx);
@@ -221,12 +237,18 @@ fn real_path(file: &Path) -> PathBuf {
         .unwrap_or_else(|| file.to_path_buf())
 }
 
-/// Whether a change can alter `git status`: anything in the work tree that is not already known to
-/// be ignored. Branches and refs inside `.git` reach the shell through the repository's own
-/// watcher, and `git status` itself rewrites the index, so `.git` is left out.
-fn affects_git(root: &Path, path: &Path, decorations: Option<&Decorations>) -> bool {
-    !path.starts_with(root.join(".git"))
-        && decorations.is_none_or(|d| d.get(path) != Some(FileStatus::Ignored))
+/// Whether a change can alter `git status`: anything in the work tree not known to be ignored, and
+/// in `.git` only HEAD and refs when no repository watcher reports them (status rewrites the index).
+fn affects_git(
+    root: &Path,
+    path: &Path,
+    decorations: Option<&Decorations>,
+    repo_watched: bool,
+) -> bool {
+    match path.strip_prefix(root.join(".git")) {
+        Ok(inside) => !repo_watched && (inside == Path::new("HEAD") || inside.starts_with("refs")),
+        Err(_) => decorations.is_none_or(|d| d.get(path) != Some(FileStatus::Ignored)),
+    }
 }
 
 /// The paths under a common git folder that name branches or worktrees, not objects or indexes.
@@ -271,11 +293,13 @@ mod tests {
     #[test]
     fn git_internals_are_left_to_the_repository_watcher() {
         let root = Path::new("/p");
-        let affects = |p: &str| affects_git(root, Path::new(p), None);
-        assert!(affects("/p/src/main.rs"));
-        assert!(!affects("/p/.git/HEAD"));
-        assert!(!affects("/p/.git/index"));
-        assert!(affects("/p/.gitignore"));
+        let affects = |p: &str, watched| affects_git(root, Path::new(p), None, watched);
+        assert!(affects("/p/src/main.rs", true));
+        assert!(!affects("/p/.git/HEAD", true));
+        assert!(affects("/p/.git/HEAD", false));
+        assert!(affects("/p/.git/refs/heads/main", false));
+        assert!(!affects("/p/.git/index", false));
+        assert!(affects("/p/.gitignore", true));
     }
 
     #[test]
@@ -311,7 +335,7 @@ mod tests {
                 (root.join("notes"), entry("notes/", FileStatus::Untracked)),
             ],
         );
-        let affects = |p: &str| affects_git(root, Path::new(p), Some(&decorations));
+        let affects = |p: &str| affects_git(root, Path::new(p), Some(&decorations), true);
         assert!(!affects("/p/target/debug/build/out.o"));
         assert!(!affects("/p/target"));
         assert!(affects("/p/notes/new.md"));

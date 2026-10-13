@@ -403,7 +403,14 @@ impl Shell {
                         this.git.summarizing = false;
                         return None;
                     }
-                    let root = this.git.summary_queue.remove(0);
+                    let mut root = this.git.summary_queue.remove(0);
+                    while this.is_active_root(&root) {
+                        if this.git.summary_queue.is_empty() {
+                            this.git.summarizing = false;
+                            return None;
+                        }
+                        root = this.git.summary_queue.remove(0);
+                    }
                     let slow = this.git.repos.get(&root).is_some_and(|r| r.slow);
                     Some((root, slow))
                 });
@@ -431,16 +438,23 @@ impl Shell {
         result: anyhow::Result<git::Summary>,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspace.projects.iter().any(|p| p.root == root) {
+        // The full status of an active project is newer than any summary.
+        if !self.workspace.projects.iter().any(|p| p.root == root) || self.is_active_root(root) {
             return;
         }
         self.git
             .summarized
             .insert(root.to_path_buf(), Instant::now());
+        if self.git.dirs.get(root).is_some_and(Option::is_none) {
+            self.git.dirs.remove(root);
+        }
         let summary = match result {
             Ok(summary) => summary,
             Err(err) => {
                 tracing::debug!(root = %root.display(), "git summary: {err:#}");
+                if err.is::<git::TimedOut>() {
+                    self.git_repo(root).slow = true;
+                }
                 return;
             }
         };
@@ -462,10 +476,26 @@ impl Shell {
         }
     }
 
+    /// Whether a full status has run, so ignored folders are known.
+    pub(super) fn git_scanned(&self, root: &Path) -> bool {
+        self.git.repos.get(root).is_some_and(|r| r.checked)
+    }
+
+    fn is_active_root(&self, root: &Path) -> bool {
+        self.workspace
+            .active_project()
+            .is_some_and(|p| p.root == root)
+    }
+
     /// The branch, how far it is from its upstream and whether it has changes, as one line.
     pub(super) fn git_caption(&self, root: &Path) -> Option<String> {
         let repo = self.git.repos.get(root)?;
-        let mut parts = vec![repo.branch.clone()?];
+        let branch = match &repo.branch {
+            Some(branch) => branch.clone(),
+            None if repo.dirty || repo.tracking.is_some() => "detached".into(),
+            None => return None,
+        };
+        let mut parts = vec![branch];
         if let Some(t) = &repo.tracking {
             match (t.ahead, t.behind) {
                 (0, 0) => {}
@@ -888,11 +918,15 @@ impl Shell {
         let repo = self.git_repo(root);
         let first = !std::mem::replace(&mut repo.checked, true);
         // Most polls find nothing new; skipping the redraw keeps an idle window idle.
-        let dirty = snapshot
-            .entries
-            .iter()
-            .any(|(_, e)| e.status() != FileStatus::Ignored);
+        // A slow repository's summaries skip untracked files, so its marker does too.
+        let slow = repo.slow;
+        let dirty = snapshot.entries.iter().any(|(_, e)| match e.status() {
+            FileStatus::Ignored => false,
+            FileStatus::Untracked => !slow,
+            _ => true,
+        });
         if first
+            || repo.dirty != dirty
             || *repo.entries != snapshot.entries
             || repo.branch != snapshot.branch
             || repo.tracking != snapshot.tracking
