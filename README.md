@@ -404,6 +404,15 @@ information rather than triggering the install dialog).
   forced, so git's refusal over local changes is shown as is. After the branches it lists
   **Stash changes**, **Stash changes (include untracked)** and one **Pop stash@{n}** row per
   stash; the stash that was picked is the one popped even if the list renumbered meanwhile.
+- More branch work in the palette: **Git: Merge branch into current…** and **Git: Rebase current
+  branch onto…** list the other branches; a merge or rebase that stops on conflicts says so, and
+  the conflicts show in Changes as usual. Commit to finish a merge, or stage the resolved files and
+  run **Git: Continue rebase**; **Git: Abort merge or rebase** gives up either. **Git: Delete
+  branch…** lists local branches no worktree has checked out, and asks first when the branch has
+  commits no other branch or remote has. **Git: Rename branch…** renames the current branch.
+  **Git: Create tag…** tags the current commit and **Git: Push tags** pushes every tag.
+  **Git: Show log** lists the last 500 commits with author, age and branches; type to search, and
+  pick one to copy its id.
 - Fetch, pull and push: the status bar's sync cell beside the branch shows "↓2 ↑1" against the
   upstream, **Publish** when the branch has none, or "Pulling…" while one runs. Clicking it offers
   Pull and Push (or Publish Branch), Fetch, Stash Changes, Stash Changes (Include Untracked) and
