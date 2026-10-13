@@ -74,7 +74,7 @@ pub struct Project {
     /// `None` once every pane has been closed; a file without the key gets one terminal.
     #[serde(default = "default_layout")]
     pub layout: Option<Layout>,
-    /// The command that starts Claude Code here (e.g. a profile wrapper like `claude-tlsc`).
+    /// No longer read; kept so the value saved by older builds survives a save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_command: Option<String>,
     #[serde(default, skip_serializing_if = "Panel::is_empty")]

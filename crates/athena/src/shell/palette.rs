@@ -294,7 +294,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Open file to the side", Box::new(actions::QuickOpenBeside)),
         ("New Claude session", Box::new(actions::NewClaudeSession)),
         (
-            "Change the command that starts Claude",
+            "Start Claude with another command…",
             Box::new(actions::ChangeClaudeCommand),
         ),
         (
@@ -442,7 +442,7 @@ impl Shell {
             Mode::Files => "Go to file…  (@ symbol, # workspace symbol, > command)",
             Mode::FilesBeside => "Open to the side…",
             Mode::Commands => "Run a command…",
-            Mode::Claude => "Command that starts Claude Code here…",
+            Mode::Claude => "Command to start Claude Code with…",
             Mode::Branches => "Switch to a branch, or type a name to create one…",
             Mode::Symbols => "Go to symbol in file…",
             Mode::WorkspaceSymbols => "Go to symbol in workspace…",
@@ -1000,7 +1000,7 @@ impl Shell {
             Some(Target::File(path)) if beside => self.open_file_beside(path, window, cx),
             Some(Target::File(path)) => self.open_file(path, window, cx),
             Some(Target::Command(action)) => window.dispatch_action(action, cx),
-            Some(Target::Claude(command)) => self.start_claude_with(command, window, cx),
+            Some(Target::Claude(command)) => self.run_in_new_terminal(command, window, cx),
             Some(Target::Branch(pick)) => self.run_branch(pick, window, cx),
             Some(Target::Symbol(path, at)) => self.lsp.jump = Some((path, at)),
             Some(Target::Folder(root)) => self.open_folder(root, cx),

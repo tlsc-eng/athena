@@ -11,33 +11,13 @@ use super::palette::Mode;
 use crate::claude_hooks;
 
 impl Shell {
-    /// Opens a terminal tab running Claude Code, asking once per project which command starts it.
+    /// Opens a terminal tab running `claude`; any per-folder profile choice is left to the user's shell.
     pub(super) fn new_claude_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self
-            .workspace
-            .active_project()
-            .and_then(|p| p.claude_command.clone())
-        {
-            Some(command) => self.start_claude_with(command, window, cx),
-            None => self.open_palette(Mode::Claude, window, cx),
-        }
+        self.run_in_new_terminal("claude".into(), window, cx);
     }
 
     pub(super) fn change_claude_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_palette(Mode::Claude, window, cx);
-    }
-
-    pub(super) fn start_claude_with(
-        &mut self,
-        command: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(i) = self.workspace.active else {
-            return;
-        };
-        self.workspace.projects[i].claude_command = Some(command.clone());
-        self.run_in_new_terminal(command, window, cx);
     }
 
     /// Opens a terminal tab in the active project and types `command` into it once it starts.

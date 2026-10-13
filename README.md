@@ -597,8 +597,9 @@ information rather than triggering the install dialog).
 
 **Claude Code**
 
-- A new Claude session opens in its own terminal tab; the command that starts Claude is asked
-  once per project.
+- A new Claude session (`cmd-shift-t`) opens in its own terminal tab running `claude`; **Start
+  Claude with another command…** in the palette runs a different one once. A command saved
+  per project by older versions is no longer used.
 - Tabs show **running** while Claude works, **needs input** while it waits on a permission, a
   question or a plan, and **done** when it finishes, until you look at the tab. A session whose
   background agents are still working stays **running** until they report back and it finishes.
