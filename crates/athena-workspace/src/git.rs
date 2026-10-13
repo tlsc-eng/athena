@@ -1531,7 +1531,8 @@ impl Underway {
 /// The merge or rebase under way in the work tree holding `root`, read from its git folder.
 pub fn underway(root: &Path) -> Option<Underway> {
     let dir = git_dirs(root)?.git_dir;
-    if dir.join("rebase-merge").exists() || dir.join("rebase-apply").exists() {
+    // `git am` uses rebase-apply too, without the `rebasing` marker.
+    if dir.join("rebase-merge").exists() || dir.join("rebase-apply/rebasing").exists() {
         Some(Underway::Rebase)
     } else if dir.join("MERGE_HEAD").exists() {
         Some(Underway::Merge)
@@ -1566,6 +1567,12 @@ pub fn rebase(root: &Path, onto: &str) -> Result<()> {
 pub fn abort(root: &Path, what: Underway) -> Result<()> {
     let mut cmd = filtering_git(root);
     cmd.args([what.name(), "--abort"]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+pub fn skip_rebase_step(root: &Path) -> Result<()> {
+    let mut cmd = no_editor(root);
+    cmd.args(["rebase", "--skip"]);
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 

@@ -92,6 +92,7 @@ pub(super) struct GitState {
     pub(super) worktree_lists_asked: u64,
     /// The work tree and branch the focused terminal sits in, when not the active project's.
     pub(super) terminal_repo: Option<(PathBuf, Option<String>)>,
+    terminal_seen: Option<(Option<PathBuf>, Option<PathBuf>)>,
     /// Each open project's git folders, `None` outside a repository.
     pub(super) dirs: HashMap<PathBuf, Option<GitDirs>>,
     /// Background projects waiting for a summary, read one at a time.
@@ -838,10 +839,15 @@ impl Shell {
             Some(ItemView::Terminal(view)) => view.read(cx).foreground().and_then(|(_, cwd)| cwd),
             _ => None,
         };
-        let project = self
-            .workspace
-            .active_project()
-            .and_then(|p| git::work_tree(&p.root));
+        let root = self.workspace.active_project().map(|p| p.root.clone());
+        // Unchanged places in one work tree need no disk reads; another tree's branch may move.
+        let seen = (cwd.clone(), root.clone());
+        if self.git.terminal_seen.as_ref() == Some(&seen) && self.git.terminal_repo.is_none() {
+            return;
+        }
+        self.git.terminal_seen = Some(seen);
+        // The terminal's folder comes resolved; a root saved by an older build may not be.
+        let project = root.and_then(|r| git::work_tree(&r.canonicalize().unwrap_or(r)));
         let elsewhere = cwd
             .as_deref()
             .and_then(git::work_tree)
@@ -1880,7 +1886,12 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
     .on_action(
         cx.listener(|this, _: &super::branches::GitContinueRebase, _, cx| this.continue_rebase(cx)),
     )
-    .on_action(cx.listener(|this, _: &super::branches::GitPushTags, _, cx| this.push_tags(cx)))
+    .on_action(cx.listener(|this, _: &super::branches::GitPushTags, w, cx| this.push_tags(w, cx)))
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitSkipRebaseStep, _, cx| {
+            this.skip_rebase_step(cx)
+        }),
+    )
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitFinishWorktree, w, cx| {
             this.finish_worktree(w, cx)

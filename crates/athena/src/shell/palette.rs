@@ -321,6 +321,10 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::branches::GitContinueRebase),
         ),
         (
+            "Git: Skip rebase step",
+            Box::new(super::branches::GitSkipRebaseStep),
+        ),
+        (
             "Git: Delete branch…",
             Box::new(super::branches::GitDeleteBranch),
         ),

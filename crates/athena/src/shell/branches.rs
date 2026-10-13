@@ -16,6 +16,7 @@ actions!(
         GitRenameBranch,
         GitAbortMergeOrRebase,
         GitContinueRebase,
+        GitSkipRebaseStep,
         GitCreateTag,
         GitPushTags,
         GitShowLog
@@ -43,8 +44,11 @@ pub(super) enum BranchPick {
     Merge(String),
     Rebase(String),
     Delete(String),
-    /// The current branch's new name.
-    Rename(String),
+    /// The current branch, as the picker listed it, and its new name.
+    Rename {
+        from: String,
+        to: String,
+    },
     Tag(String),
     /// Copies a commit's id.
     CopyCommit(String),
@@ -204,7 +208,10 @@ pub(super) fn named_entries(mode: Mode, current: Option<&str>, query: &str) -> V
     let (label, pick) = match (mode, current) {
         (Mode::RenameBranch, Some(current)) if current != name => (
             format!("Rename “{current}” to “{name}”"),
-            BranchPick::Rename(name.to_string()),
+            BranchPick::Rename {
+                from: current.to_string(),
+                to: name.to_string(),
+            },
         ),
         (Mode::NewTag, _) => (
             format!("Create tag “{name}” at the current commit"),
@@ -257,10 +264,13 @@ impl Shell {
         if !git::available() {
             return;
         }
+        let repo = root.clone();
         cx.spawn_in(window, async move |this, cx| {
+            let root = repo.clone();
             let listed = cx
                 .background_executor()
                 .spawn(async move {
+                    let root = repo;
                     let commits = match mode {
                         Mode::Log => git::repo_log(&root, 500)?,
                         _ => Vec::new(),
@@ -270,6 +280,8 @@ impl Shell {
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match listed {
+                // The user moved to another project while this one was read.
+                _ if this.active_root().as_ref() != Some(&root) => {}
                 Ok((branches, worktrees, commits)) => {
                     this.git.branches = branches;
                     this.git.worktrees = worktrees;
@@ -316,20 +328,49 @@ impl Shell {
         }
         self.run_merge_like(
             "continue the rebase".into(),
+            Some(Underway::Rebase),
             move || git::continue_rebase(&root),
             cx,
         );
     }
 
-    pub(super) fn push_tags(&mut self, cx: &mut Context<Self>) {
+    /// `git rebase --skip`, for a step whose changes are already upstream.
+    pub(super) fn skip_rebase_step(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else {
             return;
         };
-        self.run_git_write(
-            "Could not push tags".into(),
-            move || git::push_tags(&root),
+        self.run_merge_like(
+            "skip the rebase step".into(),
+            Some(Underway::Rebase),
+            move || git::skip_rebase_step(&root),
             cx,
         );
+    }
+
+    /// Pushes every local tag, after asking, as it publishes them all at once.
+    pub(super) fn push_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "Push every local tag?",
+            Some("git push --tags sends each tag this repository has to its remote."),
+            &confirm_buttons("Cancel", "Push Tags"),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(CONFIRMED) {
+                let _ = this.update(cx, |this, cx| {
+                    this.run_git_write(
+                        "Could not push tags".into(),
+                        move || git::push_tags(&root),
+                        cx,
+                    )
+                });
+            }
+        })
+        .detach();
     }
 
     /// Runs a git command that changes the repository, then refreshes; failures become a notice.
@@ -353,15 +394,24 @@ impl Shell {
     }
 
     /// A merge, rebase or rebase step: stopping on conflicts is reported as that, not a failure.
+    /// `expected` is what must be under way first: nothing for a new merge or rebase.
     fn run_merge_like(
         &mut self,
         what: String,
+        expected: Option<Underway>,
         op: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         let Some(root) = self.active_root() else {
             return;
         };
+        if let Some(busy) = git::underway(&root).filter(|_| expected.is_none()) {
+            return self.transient_notice(
+                format!("A {} is under way", busy.name()),
+                format!("Finish it or run Git: Abort merge or rebase before you {what}."),
+                cx,
+            );
+        }
         cx.spawn(async move |this, cx| {
             let done = cx.background_executor().spawn(async move { op() }).await;
             let _ = this.update(cx, |this, cx| {
@@ -371,7 +421,7 @@ impl Shell {
                         format!("The {} stopped on conflicts", stopped.name()),
                         match stopped {
                             Underway::Merge => "Resolve them in Changes, then commit. Git: Abort merge or rebase gives up.",
-                            Underway::Rebase => "Resolve and stage them in Changes, then run Git: Continue rebase, or Git: Abort merge or rebase.",
+                            Underway::Rebase => "Resolve and stage them in Changes, then run Git: Continue rebase. A step with nothing left to commit needs Git: Skip rebase step; Git: Abort merge or rebase gives up.",
                         },
                         cx,
                     ),
@@ -519,17 +569,14 @@ impl Shell {
             }
             BranchPick::Merge(name) => {
                 let what = format!("merge {name}");
-                return self.run_merge_like(what, move || git::merge(&root, &name), cx);
+                return self.run_merge_like(what, None, move || git::merge(&root, &name), cx);
             }
             BranchPick::Rebase(name) => {
                 let what = format!("rebase onto {name}");
-                return self.run_merge_like(what, move || git::rebase(&root, &name), cx);
+                return self.run_merge_like(what, None, move || git::rebase(&root, &name), cx);
             }
             BranchPick::Delete(name) => return self.delete_branch(name, window, cx),
-            BranchPick::Rename(to) => {
-                let Some(from) = self.cached_branch(&root) else {
-                    return;
-                };
+            BranchPick::Rename { from, to } => {
                 return self.run_git_write(
                     format!("Could not rename {from}"),
                     move || git::rename_branch(&root, &from, &to),
@@ -624,7 +671,13 @@ mod tests {
     #[test]
     fn a_typed_name_renames_the_branch_or_tags_the_commit() {
         let rename = named_entries(Mode::RenameBranch, Some("main"), " trunk ");
-        assert_eq!(rename[0].pick, BranchPick::Rename("trunk".into()));
+        assert_eq!(
+            rename[0].pick,
+            BranchPick::Rename {
+                from: "main".into(),
+                to: "trunk".into()
+            }
+        );
         assert!(named_entries(Mode::RenameBranch, Some("main"), "main").is_empty());
         assert!(named_entries(Mode::RenameBranch, None, "trunk").is_empty());
         assert!(named_entries(Mode::NewTag, None, "-f").is_empty());
