@@ -669,11 +669,18 @@ information rather than triggering the install dialog).
 - The project rail widens into a sidebar with names, branches and folders: **Toggle Project
   Sidebar** (`cmd-alt-b`, View menu, palette, or the ⇥ button under "+"). Folders group projects
   and can nest: right-click a project and pick **Move to Folder…**, then pick a folder or type a
-  new name (`Work/Clients` nests one folder in another). Click a folder to collapse it; in the
-  narrow rail it shows as a square with its initials and, when collapsed, how many projects it
-  holds. Right-click a folder to rename, move or remove it (its projects stay, moving up a level).
-  A linked worktree always sits in its repository's folder. Folders and which ones are collapsed
-  are saved per window; a build older than 0.12 shows the projects as one flat list.
+  new name (`Work/Clients` nests one folder in another). Click a folder to collapse it, and a
+  collapsed folder shows the most urgent Claude state among its projects. In the narrow rail an
+  open folder and its projects sit on one tinted backing, a collapsed folder shows its first
+  projects in miniature, and clicking it lists its projects to switch to without opening it.
+  Thin dividers set off folders and repositories with worktrees from lone projects. Right-click a
+  folder to rename, move or remove it (its projects stay, moving up a level). A linked worktree
+  always sits in its repository's folder. Folders and which ones are collapsed are saved per
+  window; a build older than 0.12 shows the projects as one flat list.
+- A repository's worktrees collapse under it: click ▾ at the end of its row in the wide sidebar,
+  or right-click it and pick **Collapse Worktrees**. The row then shows ▸ and how many worktrees
+  it hides, and its Claude dot speaks for them; the active worktree stays in view. The narrow rail
+  hides the worktrees too, with the count on the repository's square. It is saved per project.
 - Drag a project in the rail to reorder it: dropped between two projects it joins their folder,
   dropped on a folder it goes last in it, and dropped on "+" it leaves every folder and goes to
   the end. Folders drag the same way. A repository carries its linked worktrees along, and a

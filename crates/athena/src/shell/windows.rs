@@ -1078,6 +1078,17 @@ impl Shell {
                 }
             }));
         }
+        let wide = self.workspace.ui.sidebar_expanded;
+        if self.worktree_count(index, &self.rail_groups(), wide) > 0 {
+            let label = if self.workspace.projects[index].worktrees_collapsed {
+                "Expand Worktrees"
+            } else {
+                "Collapse Worktrees"
+            };
+            items.push(super::menus::shell_item(label, cx, move |this, _, cx| {
+                this.toggle_worktrees(index, cx)
+            }));
+        }
         items.push(athena_ui::MenuItem::separator());
         items.push(match worktree {
             true => super::menus::shell_item("Finish Worktree…", cx, move |this, w, cx| {

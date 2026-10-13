@@ -318,13 +318,20 @@ impl Shell {
     }
 
     fn switch_to(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.switch(index, true, cx);
+    }
+
+    /// `reveal` opens the sidebar folders around the project.
+    fn switch(&mut self, index: usize, reveal: bool, cx: &mut Context<Self>) {
         if Some(index) == self.workspace.active || index >= self.workspace.projects.len() {
             return;
         }
         self.rail_from = self.workspace.active.unwrap_or(index);
         self.switch_count += 1;
         self.workspace.activate(index);
-        self.workspace.reveal(index);
+        if reveal {
+            self.workspace.reveal(index);
+        }
         self.zoomed = None;
         self.focus_pending = true;
         self.schedule_save(cx);

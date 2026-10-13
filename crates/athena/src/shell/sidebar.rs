@@ -137,6 +137,49 @@ fn row_of(rows: &[SidebarRow], workspace: &Workspace, index: usize) -> Option<us
     })
 }
 
+/// The line span of each open folder with its depth, from its heading to its last shown line.
+fn open_folder_spans(rows: &[SidebarRow], lines: &[Option<usize>]) -> Vec<(usize, Range<usize>)> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(r, row)| {
+            let SidebarRow::Folder {
+                depth,
+                collapsed: false,
+                ..
+            } = row
+            else {
+                return None;
+            };
+            let end = rows[r + 1..]
+                .iter()
+                .position(|row| row.depth() <= *depth)
+                .map_or(rows.len(), |n| r + 1 + n);
+            let first = lines[r]?;
+            let last = lines[r..end].iter().rev().find_map(|l| *l)?;
+            Some((*depth, first..last + 1))
+        })
+        .collect()
+}
+
+/// The top-level blocks starting at `starts` that get a divider above them: those beside a block
+/// of more than one line, so lone projects stay undivided.
+fn divider_lines(starts: &[usize], len: usize) -> Vec<usize> {
+    let size = |k: usize| starts.get(k + 1).copied().unwrap_or(len) - starts[k];
+    (1..starts.len())
+        .filter(|&k| size(k - 1) > 1 || size(k) > 1)
+        .map(|k| starts[k])
+        .collect()
+}
+
+fn claude_dot(t: &Theme, state: ClaudeState) -> gpui::Div {
+    let color = match state {
+        ClaudeState::NeedsInput => t.color.warning,
+        ClaudeState::Running => t.color.success,
+        ClaudeState::Finished => t.color.content_muted,
+    };
+    div().size(px(6.)).flex_none().bg(color)
+}
+
 fn initials(name: &str) -> String {
     name.chars().take(2).collect::<String>().to_uppercase()
 }
@@ -153,6 +196,41 @@ impl Shell {
         self.workspace.toggle_folder(path);
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    pub(super) fn toggle_worktrees(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(project) = self.workspace.projects.get_mut(index) {
+            project.worktrees_collapsed = !project.worktrees_collapsed;
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// The linked worktrees of the repository at `index`, the unopened ones too when `wide` shows
+    /// them; 0 for a linked worktree.
+    pub(super) fn worktree_count(&self, index: usize, groups: &RailGroups, wide: bool) -> usize {
+        let root = &self.workspace.projects[index].root;
+        match groups.group_of(root) {
+            Some((from, group)) if from == group.start => {
+                let unopened = if wide {
+                    self.unopened_worktrees(root).len()
+                } else {
+                    0
+                };
+                group.len() - 1 + unopened
+            }
+            _ => 0,
+        }
+    }
+
+    /// A linked worktree the sidebar leaves out, its repository collapsed and it not active.
+    fn worktree_hidden(&self, index: usize, groups: &RailGroups) -> bool {
+        let root = &self.workspace.projects[index].root;
+        groups.group_of(root).is_some_and(|(from, group)| {
+            from != group.start
+                && self.workspace.projects[group.start].worktrees_collapsed
+                && Some(index) != self.workspace.active
+        })
     }
 
     /// Opens the folder picker for the active project.
@@ -261,6 +339,46 @@ impl Shell {
         }
     }
 
+    /// The narrow rail's click on a closed folder: its projects, to switch to without opening it.
+    fn open_folder_flyout(
+        &mut self,
+        path: Vec<String>,
+        position: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let groups = self.rail_groups();
+        let mut items = Vec::new();
+        for i in self.workspace.folder_range(&path) {
+            let project = &self.workspace.projects[i];
+            let mut label = project.name();
+            if groups
+                .group_of(&project.root)
+                .is_some_and(|(from, group)| from != group.start)
+            {
+                label = format!("↳ {label}");
+            }
+            let sub = &project.folder[path.len()..];
+            if !sub.is_empty() {
+                label = format!("{} / {label}", folder_label(sub));
+            }
+            let item =
+                super::menus::shell_item(label, cx, move |this, _, cx| this.switch(i, false, cx));
+            items.push(if Some(i) == self.workspace.active {
+                item.hint("current")
+            } else {
+                item
+            });
+        }
+        items.push(athena_ui::MenuItem::separator());
+        items.push(super::menus::shell_item(
+            "Expand Folder",
+            cx,
+            move |this, _, cx| this.toggle_folder(&path, cx),
+        ));
+        self.open_context_menu(position, items, window, cx);
+    }
+
     /// Right-click on a sidebar folder.
     fn open_folder_menu(
         &mut self,
@@ -304,19 +422,38 @@ impl Shell {
         let monograms = self.workspace.monograms();
         let groups = Rc::new(self.rail_groups());
         let mut items: Vec<AnyElement> = Vec::with_capacity(rows.len());
-        // Each row's line; unopened worktrees add lines of their own in the wide sidebar.
+        // Each row's line, None when hidden; unopened worktrees add lines of their own when wide.
         let mut line_of_row = Vec::with_capacity(rows.len());
+        // Lines where a top-level folder, repository with its worktrees, or lone project begins.
+        let mut block_starts = Vec::new();
         for row in &rows {
-            line_of_row.push(items.len());
             match row {
                 SidebarRow::Folder {
                     path,
                     depth,
                     collapsed,
                     projects,
-                } => items
-                    .push(self.render_folder_row(path, *depth, *collapsed, *projects, &groups, cx)),
+                } => {
+                    line_of_row.push(Some(items.len()));
+                    if *depth == 0 {
+                        block_starts.push(items.len());
+                    }
+                    items.push(self.render_folder_row(
+                        path, *depth, *collapsed, *projects, &monograms, &groups, cx,
+                    ))
+                }
                 SidebarRow::Project { index, depth } => {
+                    if self.worktree_hidden(*index, &groups) {
+                        line_of_row.push(None);
+                        continue;
+                    }
+                    line_of_row.push(Some(items.len()));
+                    let linked = groups
+                        .group_of(&self.workspace.projects[*index].root)
+                        .is_some_and(|(from, group)| from != group.start);
+                    if *depth == 0 && !linked {
+                        block_starts.push(items.len());
+                    }
                     items.push(self.render_project_row(
                         *index,
                         *depth,
@@ -331,7 +468,8 @@ impl Shell {
             }
         }
 
-        let line = |index: usize| row_of(&rows, &self.workspace, index).map(|r| line_of_row[r]);
+        let line =
+            |index: usize| row_of(&rows, &self.workspace, index).and_then(|r| line_of_row[r]);
         let active_row = self.workspace.active.and_then(line);
         let from_row = line(self.rail_from).or(active_row);
         let indicator = active_row.map(|to| {
@@ -353,6 +491,47 @@ impl Shell {
                 move |el, d| el.top(px(from_y + (to_y - from_y) * d)),
             )
         });
+
+        // Overlays placed by line, like the indicator, so the rail's lines keep one height.
+        let pitch = row_h + gap;
+        let s = t.ui_scale;
+        let mid = RAIL_WIDTH / 2.;
+        let trays: Vec<AnyElement> = if wide {
+            Vec::new()
+        } else {
+            open_folder_spans(&rows, &line_of_row)
+                .into_iter()
+                .map(|(depth, span)| {
+                    let pad = if depth == 0 { 4. } else { 2. };
+                    div()
+                        .absolute()
+                        .top(px(s * (span.start as f32 * pitch - pad)))
+                        .h(px(s * (span.len() as f32 * pitch - gap + 2. * pad)))
+                        .left(px(s * (mid - RAIL_ITEM / 2. - pad)))
+                        .w(px(s * (RAIL_ITEM + 2. * pad)))
+                        .rounded(t.shape.radius_control)
+                        .bg(t.color.surface_sunken)
+                        .into_any_element()
+                })
+                .collect()
+        };
+        let dividers: Vec<AnyElement> = if wide {
+            Vec::new()
+        } else {
+            divider_lines(&block_starts, items.len())
+                .into_iter()
+                .map(|line| {
+                    div()
+                        .absolute()
+                        .top(px(s * (line as f32 * pitch - gap / 2.)))
+                        .left(px(s * (mid - 10.)))
+                        .w(px(s * 20.))
+                        .h(px(1.))
+                        .bg(t.color.border)
+                        .into_any_element()
+                })
+                .collect()
+        };
 
         let drop_tint = t.color.surface_accent;
         let add = sidebar_button(&t, "rail-add", "+", wide.then_some("Open project"))
@@ -426,6 +605,8 @@ impl Shell {
                             .when(!wide, |el| el.items_center())
                             .when(wide, |el| el.px(t.ui(6.)))
                             .gap(t.ui(gap))
+                            .children(trays)
+                            .children(dividers)
                             .children(items)
                             .children(indicator),
                     ),
@@ -445,10 +626,11 @@ impl Shell {
         let Some((_, group)) = groups.group_of(root) else {
             return Vec::new();
         };
-        if group.end != index + 1 {
+        let main = &self.workspace.projects[group.start];
+        if group.end != index + 1 || main.worktrees_collapsed {
             return Vec::new();
         }
-        let main = &self.workspace.projects[group.start].root;
+        let main = &main.root;
         let t = cx.theme().clone();
         self.unopened_worktrees(main)
             .into_iter()
@@ -500,12 +682,25 @@ impl Shell {
         depth: usize,
         collapsed: bool,
         projects: usize,
+        monograms: &[String],
         groups: &Rc<RailGroups>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
         let wide = self.workspace.ui.sidebar_expanded;
         let name = path.last().cloned().unwrap_or_default();
+        let inside = self.workspace.folder_range(path);
+        let claude = if collapsed {
+            let roots: Vec<&Path> = self.workspace.projects[inside.clone()]
+                .iter()
+                .map(|p| p.root.as_path())
+                .collect();
+            self.project_claude_state(&roots, cx)
+                .map(|state| claude_dot(&t, state))
+        } else {
+            None
+        };
+        let flyout = !wide && collapsed;
         let drop_tint = t.color.surface_accent;
         let drag = FolderDrag {
             path: path.to_vec(),
@@ -533,7 +728,13 @@ impl Shell {
             .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
             .on_click(cx.listener({
                 let path = path.to_vec();
-                move |this, _, _, cx| this.toggle_folder(&path, cx)
+                move |this, e: &gpui::ClickEvent, window, cx| {
+                    if flyout {
+                        this.open_folder_flyout(path.clone(), e.position(), window, cx)
+                    } else {
+                        this.toggle_folder(&path, cx)
+                    }
+                }
             }))
             .on_mouse_down(
                 MouseButton::Right,
@@ -581,7 +782,32 @@ impl Shell {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(if collapsed { "▸" } else { "▾" })
                 .child(div().flex_1().min_w_0().truncate().child(name))
+                .children(claude)
                 .when(collapsed, |el| el.child(projects.to_string()))
+                .into_any_element()
+        } else if collapsed {
+            // Its first projects in miniature, so a closed folder never passes for a project.
+            let cells = monograms[inside].iter().take(4).map(|m| {
+                div()
+                    .size(t.ui(11.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(2.))
+                    .bg(t.color.surface_hover)
+                    .text_size(t.ui(8.))
+                    .child(m.chars().next().map(String::from).unwrap_or_default())
+            });
+            el.size(t.ui(RAIL_ITEM))
+                .flex_wrap()
+                .content_center()
+                .justify_center()
+                .gap(t.ui(2.))
+                .p(t.ui(3.))
+                .border_1()
+                .border_color(t.color.border)
+                .children(cells)
+                .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
                 .into_any_element()
         } else {
             el.size(t.ui(RAIL_ITEM))
@@ -590,16 +816,6 @@ impl Shell {
                 .border_color(t.color.border)
                 .text_size(t.typography.caption)
                 .child(initials(&name))
-                .when(collapsed, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .right(px(2.))
-                            .bottom(px(0.))
-                            .text_size(px(9.))
-                            .child(projects.to_string()),
-                    )
-                })
                 .into_any_element()
         }
     }
@@ -656,14 +872,20 @@ impl Shell {
             .on_drop(cx.listener(move |this, drag: &ProjectDrag, _, cx| {
                 this.drop_project(drag, Some(i), cx)
             }));
-        let claude = self.project_claude_state(&project.root, cx).map(|state| {
-            let color = match state {
-                ClaudeState::NeedsInput => t.color.warning,
-                ClaudeState::Running => t.color.success,
-                ClaudeState::Finished => t.color.content_muted,
-            };
-            div().size(px(6.)).flex_none().bg(color)
-        });
+        let worktrees = self.worktree_count(i, groups, wide);
+        let folded = worktrees > 0 && project.worktrees_collapsed;
+        // A collapsed repository's row speaks for the worktrees it hides.
+        let mut claude_roots = vec![project.root.as_path()];
+        if folded && let Some((_, group)) = groups.group_of(&project.root) {
+            claude_roots.extend(
+                (group.start + 1..group.end)
+                    .filter(|&j| Some(j) != self.workspace.active)
+                    .map(|j| self.workspace.projects[j].root.as_path()),
+            );
+        }
+        let claude = self
+            .project_claude_state(&claude_roots, cx)
+            .map(|state| claude_dot(&t, state));
         let el = div()
             .id(("rail-item", i))
             .group(group)
@@ -707,6 +929,24 @@ impl Shell {
                     .text_color(t.color.content_muted)
                     .child(c)
             });
+            let fold = (worktrees > 0).then(|| {
+                div()
+                    .id(("rail-fold", i))
+                    .flex_none()
+                    .px(t.ui(4.))
+                    .rounded(t.shape.radius_control)
+                    .text_color(t.color.content_muted)
+                    .hover(|s| s.bg(t.color.surface).text_color(t.color.content))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_worktrees(i, cx)
+                    }))
+                    .child(if folded {
+                        format!("▸ {worktrees}")
+                    } else {
+                        "▾".into()
+                    })
+            });
             el.h(t.ui(ROW))
                 .w_full()
                 .pl(t.ui(6. + INDENT * indent as f32))
@@ -724,6 +964,7 @@ impl Shell {
                 )
                 .children(branch)
                 .children(claude)
+                .children(fold)
                 .into_any_element()
         } else {
             el.size(t.ui(RAIL_ITEM))
@@ -741,6 +982,16 @@ impl Shell {
                         .bg(t.color.border_strong)
                 }))
                 .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
+                .when(folded, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .right(px(2.))
+                            .top(px(0.))
+                            .text_size(px(9.))
+                            .child(worktrees.to_string()),
+                    )
+                })
                 .into_any_element()
         }
     }
@@ -792,5 +1043,57 @@ impl RailGroups {
         }
         let at = before.unwrap_or(self.len());
         (self.starts_group(at) && at != group.start).then_some((group, at, false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(path: &str, collapsed: bool) -> SidebarRow {
+        let path: Vec<String> = path.split('/').map(String::from).collect();
+        SidebarRow::Folder {
+            depth: path.len() - 1,
+            path,
+            collapsed,
+            projects: 1,
+        }
+    }
+
+    fn project(index: usize, depth: usize) -> SidebarRow {
+        SidebarRow::Project { index, depth }
+    }
+
+    #[test]
+    fn an_open_folder_spans_its_shown_lines_and_a_closed_one_none() {
+        let rows = [
+            folder("work", false),
+            project(0, 1),
+            folder("work/clients", false),
+            project(1, 2),
+            project(2, 2),
+            project(3, 1),
+            project(4, 0),
+            folder("hobby", true),
+        ];
+        // The last worktree in work/clients is hidden.
+        let lines = [
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            None,
+            Some(4),
+            Some(5),
+            Some(6),
+        ];
+        assert_eq!(open_folder_spans(&rows, &lines), [(0, 0..5), (1, 2..4)]);
+    }
+
+    #[test]
+    fn dividers_only_border_blocks_of_more_than_one_line() {
+        assert_eq!(divider_lines(&[0, 1, 2, 5, 6], 7), [2, 5]);
+        assert!(divider_lines(&[0, 1, 2], 3).is_empty());
+        assert!(divider_lines(&[], 0).is_empty());
     }
 }

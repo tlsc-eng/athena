@@ -85,6 +85,9 @@ pub struct Project {
     /// Whether the ESLint and Biome the project installs may run; they are the project's code.
     #[serde(default, skip_serializing_if = "LinterTrust::is_not_asked")]
     pub linters: LinterTrust,
+    /// The wide sidebar hides this repository's linked worktrees, except the active one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktrees_collapsed: bool,
     /// Phase 3 stored a single shell here; read only to migrate it into `layout`.
     #[serde(default, skip_serializing)]
     terminal: Option<u64>,
@@ -128,6 +131,7 @@ impl Project {
             panel: Panel::default(),
             folder: Vec::new(),
             linters: LinterTrust::NotAsked,
+            worktrees_collapsed: false,
             terminal: None,
         }
     }
