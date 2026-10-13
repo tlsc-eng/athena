@@ -604,7 +604,9 @@ information rather than triggering the install dialog).
   question or a plan, and **done** when it finishes, until you look at the tab. A session whose
   background agents are still working stays **running** until they report back and it finishes.
   Athena also posts a macOS banner when a session needs you or finishes, unless you are looking at
-  that tab (a run from outside the app bundle shows a toast instead). This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
+  that tab (a run from outside the app bundle shows a toast instead). Opening the tab resolves
+  its notifications: they are marked read, the Dock badge drops, and their banners leave
+  Notification Center. This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
   them a tab shows only **running** while Claude draws, and nothing once it stops.
 - An MCP server, `athena mcp-stdio`, answers from the running app (see below).
 - Each file Claude edits in an Athena terminal refreshes its open diffs; the **Claude** drawer tab

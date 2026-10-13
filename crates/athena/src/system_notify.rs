@@ -13,7 +13,7 @@ mod mac {
     use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
     use objc2::{AllocAnyThread, define_class, msg_send};
     use objc2_app_kit::NSApplication;
-    use objc2_foundation::{MainThreadMarker, NSBundle, NSError, NSString};
+    use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSError, NSString};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
@@ -114,6 +114,18 @@ mod mac {
             .addNotificationRequest_withCompletionHandler(&request, Some(&done));
     }
 
+    pub fn withdraw(ids: &[u64]) {
+        if !bundled() {
+            return;
+        }
+        let ids: Vec<Retained<NSString>> = ids
+            .iter()
+            .map(|id| NSString::from_str(&id.to_string()))
+            .collect();
+        UNUserNotificationCenter::currentNotificationCenter()
+            .removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&ids));
+    }
+
     fn describe(error: *mut NSError) -> String {
         // SAFETY: the completion handlers pass a valid NSError or null.
         match unsafe { error.as_ref() } {
@@ -151,6 +163,12 @@ pub fn available() -> bool {
 pub fn post(id: u64, title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     mac::post(id, title, body);
+}
+
+/// Takes banners for notifications already dealt with out of Notification Center.
+pub fn withdraw(ids: &[u64]) {
+    #[cfg(target_os = "macos")]
+    mac::withdraw(ids);
 }
 
 pub fn set_badge(count: usize) {

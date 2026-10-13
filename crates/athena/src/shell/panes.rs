@@ -191,6 +191,12 @@ impl Shell {
                             this.notify_coalesced(cx);
                             return;
                         }
+                        TerminalEvent::Seen => {
+                            if let Some(session) = view.read(cx).session() {
+                                this.resolve_notices(session, cx);
+                            }
+                            return;
+                        }
                         TerminalEvent::Notice { title, body } => {
                             return this.transient_notice(title.clone(), body.clone(), cx);
                         }

@@ -98,6 +98,8 @@ pub enum TerminalEvent {
     Attached(PaneId),
     /// Label, bell or Claude state changed; tab strips and the project rail should redraw.
     Changed,
+    /// The user looked at the tab while it was marked, so its notifications are dealt with.
+    Seen,
     /// The right-click menu opened or closed; it is drawn in-window, under native web views.
     ContextMenu { open: bool },
     /// Something the user asked for could not be done, worth a toast.
@@ -1513,10 +1515,12 @@ impl Render for TerminalView {
         }
         let focused = self.focus.is_focused(window);
         if focused
+            && window.is_window_active()
             && let Some(terminal) = self.terminal.as_mut()
             && std::mem::take(&mut terminal.bell)
         {
             cx.emit(TerminalEvent::Changed);
+            cx.emit(TerminalEvent::Seen);
         }
         let root =
             div()

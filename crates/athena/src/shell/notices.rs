@@ -93,6 +93,18 @@ impl Log {
             .find(|n| n.id == id)
             .map(|n| n.project.clone())
     }
+
+    /// Marks the session's unread notifications read and returns their ids.
+    fn resolve(&mut self, session: Session) -> Vec<u64> {
+        self.list
+            .iter_mut()
+            .filter(|n| !n.read && n.session == Some(session))
+            .map(|n| {
+                n.read = true;
+                n.id
+            })
+            .collect()
+    }
 }
 
 /// Saves without command text, which can hold secrets typed on the command line.
@@ -773,6 +785,15 @@ impl Shell {
             self.notices_changed(cx);
         }
     }
+
+    /// Marks a session's notifications read once its tab is looked at, and takes down their banners.
+    pub(super) fn resolve_notices(&mut self, session: Session, cx: &mut Context<Self>) {
+        let ids = self.notices.borrow_mut().resolve(session);
+        if !ids.is_empty() {
+            crate::system_notify::withdraw(&ids);
+            self.notices_changed(cx);
+        }
+    }
 }
 
 /// Project and tab showing a daemon session, if any project holds it.
@@ -812,6 +833,31 @@ mod tests {
         assert_eq!(reused, first, "the panel hands the freed id out again");
         let projects = std::slice::from_ref(&project);
         assert_eq!(find_session(projects, 7), Some(("/p".into(), id)));
+    }
+
+    #[test]
+    fn looking_at_a_session_resolves_only_its_unread_notifications() {
+        let mut log = Log::default();
+        for (session, read) in [
+            (Some(7), false),
+            (Some(8), false),
+            (Some(7), true),
+            (None, false),
+        ] {
+            let id = log.next_id();
+            log.push(Notification {
+                id,
+                project: Some("/p".into()),
+                session,
+                kind: NoticeKind::ClaudeStopped,
+                at: 0,
+                read,
+            });
+        }
+        assert_eq!(log.resolve(7), vec![1]);
+        assert!(log.resolve(7).is_empty());
+        let unread: Vec<u64> = log.list.iter().filter(|n| !n.read).map(|n| n.id).collect();
+        assert_eq!(unread, vec![2, 4]);
     }
 
     #[test]
