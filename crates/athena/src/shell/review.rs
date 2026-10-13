@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
@@ -11,7 +10,6 @@ use gpui::{AppContext as _, Context, Entity, EntityId, Window};
 
 use super::Shell;
 use super::item::{ItemView, file_label};
-use super::notices::ToastAction;
 use crate::snapshots::{self, Before};
 
 /// Bigger files are not diffed; shaping and highlighting them would stall the window.
@@ -19,10 +17,8 @@ pub(super) const MAX_DIFF_BYTES: usize = 20 * 1024 * 1024;
 /// Copies kept by revert and discard are deleted after this long.
 const KEEP_COPIES: Duration = Duration::from_secs(30 * 24 * 3600);
 
-/// Toasts for Claude's edits, one per file, so a burst of edits replaces rather than stacks.
 #[derive(Default)]
 pub(super) struct ReviewState {
-    edit_toasts: HashMap<PathBuf, u64>,
     loads: Loads,
     pub(super) timeline: super::timeline::TimelineState,
     /// The file "Select for Compare" picked, the left side of the next Compare with Selected.
@@ -623,8 +619,7 @@ impl Shell {
         .detach();
     }
 
-    /// A Claude Code hook reported an edit: refresh its diffs and offer a review of the session's
-    /// changes to the file.
+    /// A Claude Code hook reported an edit: refresh its diffs.
     pub(super) fn claude_edited(&mut self, path: PathBuf, session: String, cx: &mut Context<Self>) {
         let Some(root) = self
             .workspace
@@ -638,36 +633,7 @@ impl Shell {
         };
         self.reload_diffs(&root, Some(&path), cx);
         self.claude_sessions_stale(cx);
-        let kept = snapshots::store()
-            .map(|store| snapshots::read(&store, &session, &path) != Before::Unknown)
-            .unwrap_or(false);
-        tracing::debug!(path = %path.display(), kept, "Claude edited a file");
-        let base = if kept {
-            DiffBase::Snapshot { session }
-        } else {
-            DiffBase::Index
-        };
-        let rel = path
-            .strip_prefix(&root)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
-        let open = path.clone();
-        let action = ToastAction {
-            label: "Review diff",
-            run: Rc::new(move |this: &mut Shell, window, cx| {
-                if let Some(i) = this.workspace.projects.iter().position(|p| p.root == root) {
-                    this.switch_to(i, cx);
-                }
-                this.open_diff(open.clone(), base.clone(), window, cx);
-            }),
-        };
-        if let Some(old) = self.review.edit_toasts.remove(&path) {
-            self.dismiss_toast(old, cx);
-        }
-        let title = format!("Claude edited {}", file_label(&path));
-        let id = self.action_toast(title, rel, action, cx);
-        self.review.edit_toasts.insert(path, id);
+        tracing::debug!(path = %path.display(), session, "Claude edited a file");
     }
 }
 
