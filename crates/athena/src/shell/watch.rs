@@ -154,6 +154,7 @@ impl Shell {
         }
         if regrouped {
             self.note_worktree_mains();
+            self.refresh_worktree_lists(cx);
             cx.notify();
         }
     }

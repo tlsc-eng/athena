@@ -218,7 +218,7 @@ impl Shell {
             BranchPick::PickWorktreeBranch => {
                 return self.open_worktrees(Mode::NewWorktree, window, cx);
             }
-            BranchPick::AddWorktree(how) => return self.add_worktree(how, cx),
+            BranchPick::AddWorktree(how) => return self.add_worktree(how, window, cx),
             BranchPick::RemoveWorktree(path) => {
                 return self.remove_worktree(path, false, window, cx);
             }

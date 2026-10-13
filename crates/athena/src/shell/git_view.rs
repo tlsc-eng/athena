@@ -83,6 +83,10 @@ pub(super) struct GitState {
     pub(super) worktrees: Vec<git::Worktree>,
     /// Each open project's main worktree when it is a linked worktree.
     pub(super) worktree_mains: HashMap<PathBuf, Option<PathBuf>>,
+    /// The next worktree created from the picker starts a Claude session.
+    pub(super) claude_in_new_worktree: bool,
+    /// Every worktree of each open main repository, for the sidebar to offer the unopened ones.
+    pub(super) listed_worktrees: HashMap<PathBuf, Vec<git::Worktree>>,
     /// Each open project's git folders, `None` outside a repository.
     pub(super) dirs: HashMap<PathBuf, Option<GitDirs>>,
     /// Background projects waiting for a summary, read one at a time.
@@ -295,6 +299,7 @@ impl Shell {
         self.set_autofetch(self.settings.file.git_autofetch(), window, cx);
         self.start_github(window, cx);
         self.group_worktrees();
+        self.refresh_worktree_lists(cx);
         // The window is not active yet while it is being built, so the first run is kicked.
         self.git_kick(cx);
         self.git.poll = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1806,7 +1811,24 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
     )
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitCreateWorktree, w, cx| {
+            this.git.claude_in_new_worktree = false;
             this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+        }),
+    )
+    .on_action(cx.listener(
+        |this, _: &super::worktrees::GitNewWorktreeWithClaude, w, cx| {
+            this.git.claude_in_new_worktree = true;
+            this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+        },
+    ))
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitFinishWorktree, w, cx| {
+            this.finish_worktree(w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitPruneWorktrees, _, cx| {
+            this.prune_worktrees(cx)
         }),
     )
     .on_action(

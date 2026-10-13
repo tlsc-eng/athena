@@ -365,6 +365,7 @@ impl Shell {
         self.debug.reload_project(&root);
         self.workspace.active = previous;
         self.group_worktrees();
+        self.refresh_worktree_lists(cx);
         if let Some(index) = self.workspace.projects.iter().position(|p| p.root == root) {
             self.switch_to(index, cx);
         }

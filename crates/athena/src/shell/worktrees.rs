@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use athena_workspace::git::{self, Branch, NewWorktree, Worktree};
-use gpui::{Context, PromptLevel, Window, actions};
+use gpui::{Context, PromptButton, PromptLevel, Window, actions};
 
 use super::Shell;
 use super::branches::{BranchEntry, BranchPick};
@@ -13,12 +14,24 @@ use crate::actions::display_path;
 
 actions!(
     athena,
-    [GitOpenWorktree, GitCreateWorktree, GitDeleteWorktree]
+    [
+        GitOpenWorktree,
+        GitCreateWorktree,
+        GitDeleteWorktree,
+        GitNewWorktreeWithClaude,
+        GitFinishWorktree,
+        GitPruneWorktrees
+    ]
 );
 
-/// Where a worktree for `branch` goes: beside the main worktree, as `<repo>-<branch>`, with a
-/// number added while that folder is taken.
-pub(super) fn worktree_path(main: &Path, branch: &str, taken: impl Fn(&Path) -> bool) -> PathBuf {
+/// Where a worktree for `branch` goes: in `dir`, else beside the main worktree, as
+/// `<repo>-<branch>`, with a number added while that folder is taken.
+pub(super) fn worktree_path(
+    main: &Path,
+    dir: Option<&Path>,
+    branch: &str,
+    taken: impl Fn(&Path) -> bool,
+) -> PathBuf {
     let slug: String = branch
         .chars()
         .map(|c| {
@@ -34,7 +47,7 @@ pub(super) fn worktree_path(main: &Path, branch: &str, taken: impl Fn(&Path) -> 
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "worktree".into());
-    let parent = main.parent().unwrap_or(main);
+    let parent = dir.unwrap_or_else(|| main.parent().unwrap_or(main));
     let base = parent.join(format!("{repo}-{slug}"));
     let mut path = base.clone();
     let mut n = 2;
@@ -65,6 +78,27 @@ fn worktree_detail(w: &Worktree, main: bool) -> String {
     }
     detail.push(display_path(&w.path));
     detail.join(" · ")
+}
+
+/// What finishing the worktree at `root` deletes and what it keeps.
+fn finish_detail(root: &Path, summary: &git::Summary, unique: u32) -> String {
+    let mut detail = format!("Its project closes and {} is deleted.", display_path(root));
+    if summary.dirty {
+        detail.push_str(" Its uncommitted and untracked changes are lost.");
+    }
+    if let Some(branch) = &summary.branch {
+        detail.push_str(&format!(
+            " Branch {branch} is kept unless you delete it too"
+        ));
+        if unique > 0 {
+            let s = if unique == 1 { "" } else { "s" };
+            detail.push_str(&format!(
+                ", which loses its {unique} commit{s} no other branch has"
+            ));
+        }
+        detail.push('.');
+    }
+    detail
 }
 
 /// Rows of "Open worktree…": every worktree with a folder, then creating one.
@@ -206,8 +240,14 @@ impl Shell {
         self.open_folder(path, cx);
     }
 
-    /// `git worktree add` beside the main worktree, then opens the new worktree.
-    pub(super) fn add_worktree(&mut self, how: NewWorktree, cx: &mut Context<Self>) {
+    /// `git worktree add` beside the main worktree, then opens the new worktree, starting Claude
+    /// there when it was asked for with the worktree.
+    pub(super) fn add_worktree(
+        &mut self,
+        how: NewWorktree,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.active_root() else {
             return;
         };
@@ -224,14 +264,21 @@ impl Shell {
                 .split_once('/')
                 .map_or(remote.clone(), |(_, b)| b.to_string()),
         };
-        let path = worktree_path(&main, &branch, |p| p.exists());
-        cx.spawn(async move |this, cx| {
+        let dir = self.settings.file.git_worktree_dir();
+        let path = worktree_path(&main, dir.as_deref(), &branch, |p| p.exists());
+        let claude = std::mem::take(&mut self.git.claude_in_new_worktree);
+        cx.spawn_in(window, async move |this, cx| {
             let target = path.clone();
             let done = cx
                 .background_executor()
-                .spawn(async move { git::add_worktree(&root, &target, &how) })
+                .spawn(async move {
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    git::add_worktree(&root, &target, &how)
+                })
                 .await;
-            let _ = this.update(cx, |this, cx| match done {
+            let _ = this.update_in(cx, |this, window, cx| match done {
                 Ok(()) => {
                     this.transient_notice(
                         "Worktree created",
@@ -239,6 +286,9 @@ impl Shell {
                         cx,
                     );
                     this.open_folder(path, cx);
+                    if claude {
+                        this.new_claude_session(window, cx);
+                    }
                 }
                 Err(err) => this.transient_notice(
                     format!("Could not create a worktree for {branch}"),
@@ -316,6 +366,198 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Closes the active worktree's project and deletes the worktree, and its branch if asked.
+    pub(super) fn finish_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let Some(main) = git::main_worktree(&root) else {
+            return self.transient_notice(
+                "Not a linked worktree",
+                "Finish worktree works on a project open in a linked worktree, not a repository's \
+                 main one.",
+                cx,
+            );
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let (probe, repo) = (root.clone(), main.clone());
+            let facts = cx
+                .background_executor()
+                .spawn(async move {
+                    let summary = git::summary(&probe, true)?;
+                    let unique = match &summary.branch {
+                        Some(branch) => git::unique_commits(&repo, branch)?,
+                        None => 0,
+                    };
+                    anyhow::Ok((summary, unique))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match facts {
+                Ok((summary, unique)) => {
+                    this.confirm_finish(root, main, summary, unique, window, cx)
+                }
+                Err(err) => {
+                    this.transient_notice("Could not read the worktree", format!("{err:#}"), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn confirm_finish(
+        &mut self,
+        root: PathBuf,
+        main: PathBuf,
+        summary: git::Summary,
+        unique: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let detail = finish_detail(&root, &summary, unique);
+        let mut buttons = vec![
+            PromptButton::cancel("Cancel"),
+            PromptButton::ok("Delete Worktree"),
+        ];
+        if summary.branch.is_some() {
+            buttons.push(PromptButton::new("Delete Worktree and Branch"));
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Finish this worktree?",
+            Some(&detail),
+            &buttons,
+            cx,
+        );
+        let branch = summary.branch;
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice @ 1..) = answer.await else {
+                return;
+            };
+            let branch = branch.filter(|_| choice == 2);
+            let _ = this.update_in(cx, |this, window, cx| {
+                let mut dirty = this.dirty_editors(Some(&root), cx);
+                if this.autosave_delay().is_some() {
+                    dirty.retain(|e| !e.update(cx, |e, cx| e.save(cx)));
+                }
+                this.settle_unsaved(
+                    dirty,
+                    "finishing the worktree",
+                    window,
+                    cx,
+                    move |this, cx| {
+                        this.remove_project(&root, cx);
+                        this.delete_finished(root, main, branch, cx);
+                    },
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn delete_finished(
+        &mut self,
+        root: PathBuf,
+        main: PathBuf,
+        branch: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let target = root.clone();
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    git::remove_worktree(&main, &target, true)?;
+                    if let Some(branch) = &branch {
+                        git::delete_branch(&main, branch, true)?;
+                    }
+                    anyhow::Ok(())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match done {
+                Ok(()) => this.transient_notice("Worktree finished", display_path(&root), cx),
+                Err(err) => {
+                    this.transient_notice("Could not finish the worktree", format!("{err:#}"), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// `git worktree prune` in the active repository.
+    pub(super) fn prune_worktrees(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let done = cx
+                .background_executor()
+                .spawn(async move { git::prune_worktrees(&root) })
+                .await;
+            let _ = this.update(cx, |this, cx| match done {
+                Ok(()) => this.transient_notice(
+                    "Worktrees pruned",
+                    "Git forgot the worktrees whose folders are gone.",
+                    cx,
+                ),
+                Err(err) => {
+                    this.transient_notice("Could not prune worktrees", format!("{err:#}"), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Re-reads the worktrees of every open main repository, for the sidebar's unopened ones.
+    pub(super) fn refresh_worktree_lists(&mut self, cx: &mut Context<Self>) {
+        if !git::available() {
+            return;
+        }
+        let mains: Vec<PathBuf> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .filter(|r| r.join(".git").is_dir())
+            .collect();
+        cx.spawn(async move |this, cx| {
+            let lists = cx
+                .background_executor()
+                .spawn(async move {
+                    mains
+                        .into_iter()
+                        .filter_map(|main| {
+                            let mut list = git::worktrees(&main).ok()?;
+                            list.retain(|w| !w.bare && !w.prunable);
+                            for w in &mut list {
+                                w.path = w.path.canonicalize().unwrap_or_else(|_| w.path.clone());
+                            }
+                            (list.len() > 1).then_some((main, list))
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.git.listed_worktrees != lists {
+                    this.git.listed_worktrees = lists;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The linked worktrees of the main repository at `root` that are not open as projects.
+    pub(super) fn unopened_worktrees(&self, root: &Path) -> Vec<&Worktree> {
+        let Some(list) = self.git.listed_worktrees.get(root) else {
+            return Vec::new();
+        };
+        let real = root.canonicalize().ok();
+        list.iter()
+            .filter(|w| Some(&w.path) != real.as_ref() && w.path != root)
+            .filter(|w| !self.workspace.projects.iter().any(|p| p.root == w.path))
+            .collect()
     }
 
     /// The main worktree of the project at `root` when it is a linked worktree, cached.
@@ -641,15 +883,43 @@ mod tests {
     }
 
     #[test]
+    fn finishing_says_what_is_lost_and_what_is_kept() {
+        let root = Path::new("/w/athena-feat");
+        let summary = |branch: Option<&str>, dirty| git::Summary {
+            branch: branch.map(String::from),
+            tracking: None,
+            dirty,
+        };
+        let clean = finish_detail(root, &summary(Some("feat"), false), 0);
+        assert!(
+            clean.ends_with("Branch feat is kept unless you delete it too."),
+            "{clean}"
+        );
+        assert!(!clean.contains("lost"));
+        let risky = finish_detail(root, &summary(Some("feat"), true), 2);
+        assert!(risky.contains("changes are lost"), "{risky}");
+        assert!(
+            risky.contains("loses its 2 commits no other branch has"),
+            "{risky}"
+        );
+        let detached = finish_detail(root, &summary(None, false), 0);
+        assert!(!detached.contains("Branch"), "{detached}");
+    }
+
+    #[test]
     fn new_worktrees_go_beside_the_main_one_named_after_the_branch() {
         let main = Path::new("/code/athena");
         assert_eq!(
-            worktree_path(main, "feat/x y", |_| false),
+            worktree_path(main, None, "feat/x y", |_| false),
             PathBuf::from("/code/athena-feat-x-y")
+        );
+        assert_eq!(
+            worktree_path(main, Some(Path::new("/w")), "dev", |_| false),
+            PathBuf::from("/w/athena-dev")
         );
         let taken = |p: &Path| p == Path::new("/code/athena-dev");
         assert_eq!(
-            worktree_path(main, "dev", taken),
+            worktree_path(main, None, "dev", taken),
             PathBuf::from("/code/athena-dev-2")
         );
     }

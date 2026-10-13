@@ -444,6 +444,15 @@ information rather than triggering the install dialog).
   while a project is open in the worktree or a folder inside it, or a terminal (Claude's included)
   sits in it; one with uncommitted or untracked changes is deleted only after **Delete Anyway**,
   and one whose folder is already gone can still be removed. The worktree's branch is kept.
+- Worktrees for Claude: **Git: New worktree with Claude…** (palette, or right-click a repository
+  in the rail) creates the worktree as above, opens it and starts a Claude session in it. When
+  the work is done, **Git: Finish worktree…** (palette, or right-click the worktree) closes its
+  project and deletes the worktree; **Delete Worktree and Branch** deletes its branch too. The
+  prompt says first what would be lost: uncommitted changes, and commits no other branch or
+  remote has. In the wide sidebar, a repository lists its worktrees that are not open, dimmed;
+  click one to open it. **Git: Prune worktrees** forgets worktrees whose folders are gone.
+  `"git": {"worktree_dir": "~/worktrees"}` in [settings.json](#settings) puts new worktrees in
+  that folder instead of beside the repository.
 - GitHub, through the [GitHub CLI](https://cli.github.com) (`gh`) when it is installed and signed
   in to github.com: a dot in the status bar for the latest workflow run on the current branch
   (amber while it runs, green or red when it passed or failed, grey when cancelled or skipped;

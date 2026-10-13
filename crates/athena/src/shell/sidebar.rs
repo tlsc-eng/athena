@@ -297,27 +297,38 @@ impl Shell {
         let rows = self.workspace.sidebar_rows();
         let monograms = self.workspace.monograms();
         let groups = Rc::new(self.rail_groups());
-        let items: Vec<AnyElement> = rows
-            .iter()
-            .enumerate()
-            .map(|(r, row)| match row {
+        let mut items: Vec<AnyElement> = Vec::with_capacity(rows.len());
+        // Each row's line; unopened worktrees add lines of their own in the wide sidebar.
+        let mut line_of_row = Vec::with_capacity(rows.len());
+        for (r, row) in rows.iter().enumerate() {
+            line_of_row.push(items.len());
+            match row {
                 SidebarRow::Folder {
                     path,
                     depth,
                     collapsed,
                     projects,
-                } => self.render_folder_row(r, path, *depth, *collapsed, *projects, &groups, cx),
+                } => items.push(
+                    self.render_folder_row(r, path, *depth, *collapsed, *projects, &groups, cx),
+                ),
                 SidebarRow::Project { index, depth } => {
-                    self.render_project_row(*index, *depth, monograms[*index].clone(), &groups, cx)
+                    items.push(self.render_project_row(
+                        *index,
+                        *depth,
+                        monograms[*index].clone(),
+                        &groups,
+                        cx,
+                    ));
+                    if wide {
+                        items.extend(self.render_unopened(*index, *depth, &groups, cx));
+                    }
                 }
-            })
-            .collect();
+            }
+        }
 
-        let active_row = self
-            .workspace
-            .active
-            .and_then(|a| row_of(&rows, &self.workspace, a));
-        let from_row = row_of(&rows, &self.workspace, self.rail_from).or(active_row);
+        let line = |index: usize| row_of(&rows, &self.workspace, index).map(|r| line_of_row[r]);
+        let active_row = self.workspace.active.and_then(line);
+        let from_row = line(self.rail_from).or(active_row);
         let indicator = active_row.map(|to| {
             let s = t.ui_scale;
             let y = |r: usize| s * (TOP + r as f32 * (row_h + gap) + (row_h - 20.) / 2.);
@@ -405,6 +416,66 @@ impl Shell {
             )
             .child(footer)
             .children(indicator)
+    }
+
+    /// After the last project of a repository's group, its worktrees that are not open, dimmed.
+    fn render_unopened(
+        &self,
+        index: usize,
+        depth: usize,
+        groups: &Rc<RailGroups>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let root = &self.workspace.projects[index].root;
+        let Some((_, group)) = groups.group_of(root) else {
+            return Vec::new();
+        };
+        if group.end != index + 1 {
+            return Vec::new();
+        }
+        let main = &self.workspace.projects[group.start].root;
+        let t = cx.theme().clone();
+        self.unopened_worktrees(main)
+            .into_iter()
+            .map(|w| {
+                let path = w.path.clone();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let tip = format!("{} — not open; click to open it", path.display());
+                div()
+                    .id(SharedString::from(format!(
+                        "rail-unopened-{}",
+                        path.display()
+                    )))
+                    .h(t.ui(ROW))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(t.ui(6.))
+                    .pl(t.ui(6. + INDENT * (depth + 1) as f32))
+                    .pr(t.ui(6.))
+                    .rounded(t.shape.radius_control)
+                    .text_size(t.typography.caption)
+                    .text_color(t.color.content_muted)
+                    .opacity(0.6)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(1.).bg(t.color.surface_hover))
+                    .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_worktree(path.clone(), cx)),
+                    )
+                    .child("↳")
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .children(
+                        w.branch
+                            .clone()
+                            .map(|b| div().flex_none().max_w(t.ui(90.)).truncate().child(b)),
+                    )
+                    .into_any_element()
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]

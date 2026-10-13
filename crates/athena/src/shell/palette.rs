@@ -292,6 +292,18 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::worktrees::GitOpenWorktree),
         ),
         (
+            "Git: New worktree with Claude…",
+            Box::new(super::worktrees::GitNewWorktreeWithClaude),
+        ),
+        (
+            "Git: Finish worktree…",
+            Box::new(super::worktrees::GitFinishWorktree),
+        ),
+        (
+            "Git: Prune worktrees",
+            Box::new(super::worktrees::GitPruneWorktrees),
+        ),
+        (
             "Git: Create worktree…",
             Box::new(super::worktrees::GitCreateWorktree),
         ),
@@ -980,6 +992,7 @@ impl Shell {
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.restore_palette_origin(cx);
+        self.git.claude_in_new_worktree = false;
         if let Some(palette) = self.palette.take() {
             self.fade_out_palette(palette, cx);
         }

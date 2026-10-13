@@ -1053,6 +1053,7 @@ impl Shell {
             return;
         };
         let in_folder = self.workspace.projects[index].folder.len();
+        let worktree = self.worktree_main(&root).is_some();
         let mut items = vec![super::menus::shell_item("Move to Folder…", cx, {
             let root = root.clone();
             move |this, w, cx| {
@@ -1071,6 +1072,20 @@ impl Shell {
                 }
             }));
         }
+        items.push(athena_ui::MenuItem::separator());
+        items.push(match worktree {
+            true => super::menus::shell_item("Finish Worktree…", cx, move |this, w, cx| {
+                this.switch_to(index, cx);
+                this.finish_worktree(w, cx)
+            }),
+            false => {
+                super::menus::shell_item("New Worktree with Claude…", cx, move |this, w, cx| {
+                    this.switch_to(index, cx);
+                    this.git.claude_in_new_worktree = true;
+                    this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+                })
+            }
+        });
         items.push(athena_ui::MenuItem::separator());
         items.push(super::menus::shell_item(
             "Move Project to New Window",

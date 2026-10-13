@@ -140,7 +140,7 @@ impl Shell {
     }
 
     /// Drops the project at `root`, which may no longer be the active one once a prompt is answered.
-    fn remove_project(&mut self, root: &Path, cx: &mut Context<Self>) {
+    pub(super) fn remove_project(&mut self, root: &Path, cx: &mut Context<Self>) {
         let Some(index) = self.workspace.projects.iter().position(|p| p.root == root) else {
             return;
         };

@@ -27,6 +27,7 @@
   // "theme": "system",                 // "system", "light" or "dark"
   // "ide_integration": false,          // Claude Code connects to Athena as its IDE
   // "git": { "autofetch": true },      // fetch the active project every three minutes
+  // "git.worktree_dir": "~/worktrees", // new worktrees go here, not beside their repository
   // "explorer": { "confirmDragAndDrop": false }, // move tree entries without asking
   // "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   // "eslint": { "fixOnSave": true },   // ⌘S applies ESLint's fixes; needs the project's server

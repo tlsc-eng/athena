@@ -1512,6 +1512,33 @@ pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
+/// `git worktree prune`: forgets worktrees whose folders are gone.
+pub fn prune_worktrees(root: &Path) -> Result<()> {
+    let mut cmd = git(root);
+    cmd.args(["worktree", "prune"]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// Commits on `branch` that no other local branch and no remote branch has, which deleting it loses.
+pub fn unique_commits(root: &Path, branch: &str) -> Result<u32> {
+    refuse_dash(branch)?;
+    let head = format!("refs/heads/{branch}");
+    let mut cmd = git(root);
+    cmd.args(["rev-list", "--count", &head, "--not"])
+        .arg(format!("--exclude={branch}"))
+        .args(["--branches", "--remotes"]);
+    let out = run(cmd, None)?;
+    Ok(String::from_utf8_lossy(&out).trim().parse()?)
+}
+
+/// `git branch -d`, or `-D` with `force` for a branch whose commits are merged nowhere.
+pub fn delete_branch(root: &Path, branch: &str, force: bool) -> Result<()> {
+    refuse_dash(branch)?;
+    let mut cmd = git(root);
+    cmd.args(["branch", if force { "-D" } else { "-d" }, "--", branch]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
 /// The main worktree of the linked worktree at `root`, read from its `.git` file without git.
 pub fn main_worktree(root: &Path) -> Option<PathBuf> {
     let pointer = std::fs::read_to_string(root.join(".git")).ok()?;
@@ -2645,6 +2672,12 @@ mod tests {
         assert!(new_dirs.moves_worktrees(&new_dirs.git_dir));
         std::fs::create_dir_all(new.join("sub")).unwrap();
         assert_eq!(git_dirs(&new.join("sub")), Some(new_dirs));
+        assert_eq!(unique_commits(&dir, "feat").unwrap(), 0);
+        repo_git(
+            &new,
+            &["commit", "-q", "--allow-empty", "-m", "only on feat"],
+        );
+        assert_eq!(unique_commits(&dir, "feat").unwrap(), 1);
         let clean = summary(&new, true).unwrap();
         assert_eq!(clean.branch.as_deref(), Some("feat"));
         assert!(!clean.dirty);
@@ -2676,6 +2709,13 @@ mod tests {
         remove_worktree(&dir, &gone, false).unwrap();
         assert_eq!(worktrees(&dir).unwrap().len(), 1);
         assert!(branches(&dir).unwrap().iter().any(|b| b.name == "feat"));
+        assert!(
+            delete_branch(&dir, "feat", false).is_err(),
+            "feat has an unmerged commit"
+        );
+        delete_branch(&dir, "feat", true).unwrap();
+        assert!(!branches(&dir).unwrap().iter().any(|b| b.name == "feat"));
+        prune_worktrees(&dir).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

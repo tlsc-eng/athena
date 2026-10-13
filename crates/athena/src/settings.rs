@@ -32,6 +32,8 @@ pub struct Settings {
     pub ide_integration: Option<bool>,
     /// VS Code's `git.autofetch`: fetch the active project every three minutes.
     pub autofetch: Option<bool>,
+    /// `git.worktree_dir`: where new worktrees go instead of beside their repository.
+    pub worktree_dir: Option<String>,
     /// Each language server's settings by program name, sent as it starts and when they change.
     pub lsp: HashMap<String, Value>,
     /// VS Code's `explorer.confirmDragAndDrop`: ask before a file dragged in the tree moves.
@@ -230,6 +232,15 @@ impl Settings {
         self.autofetch.unwrap_or(false)
     }
 
+    /// The folder new worktrees go in, `~` expanded; `None` puts them beside their repository.
+    pub fn git_worktree_dir(&self) -> Option<std::path::PathBuf> {
+        let dir = self.worktree_dir.as_deref()?.trim();
+        match dir.strip_prefix("~/") {
+            Some(rest) => Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest)),
+            None => Some(dir.into()),
+        }
+    }
+
     pub fn confirm_drag_and_drop(&self) -> bool {
         self.confirm_drag_and_drop.unwrap_or(true)
     }
@@ -372,6 +383,32 @@ pub fn merge_json(base: &mut Value, over: &Value) {
 }
 
 /// Where a project keeps its own settings, beside VS Code's.
+fn git_block(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    let Some(object) = value.as_object().filter(|o| !o.is_empty()) else {
+        return Err(
+            "must be {\"autofetch\": true or false, \"worktree_dir\": \"~/folder\"}".into(),
+        );
+    };
+    for (key, value) in object {
+        match key.as_str() {
+            "autofetch" => {
+                let on = value.as_bool().ok_or("autofetch must be true or false")?;
+                settings.autofetch = Some(on);
+            }
+            "worktree_dir" => settings.worktree_dir = Some(worktree_dir(value)?),
+            other => return Err(format!("has no setting \"{other}\"")),
+        }
+    }
+    Ok(())
+}
+
+fn worktree_dir(value: &Value) -> Result<String, String> {
+    match value.as_str().map(str::trim) {
+        Some(dir) if dir.starts_with('/') || dir.starts_with("~/") => Ok(dir.to_string()),
+        _ => Err("worktree_dir must be a folder path starting with / or ~/".into()),
+    }
+}
+
 pub const PROJECT_FILE: &str = ".athena/settings.json";
 pub const VSCODE_FILE: &str = ".vscode/settings.json";
 
@@ -383,6 +420,7 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
         ("theme", s.theme.take().is_some()),
         ("ide_integration", s.ide_integration.take().is_some()),
         ("git.autofetch", s.autofetch.take().is_some()),
+        ("git.worktree_dir", s.worktree_dir.take().is_some()),
         (
             "explorer.confirmDragAndDrop",
             s.confirm_drag_and_drop.take().is_some(),
@@ -597,13 +635,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 }
                 _ => Err("must be {\"fixOnSave\": true or false}".into()),
             },
-            "git" => match value.get("autofetch").map(Value::as_bool) {
-                Some(Some(on)) => {
-                    settings.autofetch = Some(on);
-                    Ok(())
-                }
-                _ => Err("must be {\"autofetch\": true or false}".into()),
-            },
+            "git" => git_block(&mut settings, value),
             "explorer" => match value.get("confirmDragAndDrop").map(Value::as_bool) {
                 Some(Some(on)) => {
                     settings.confirm_drag_and_drop = Some(on);
@@ -657,6 +689,9 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                     .as_bool()
                     .map(|on| settings.autofetch = Some(on))
                     .ok_or_else(|| "must be true or false".to_string()),
+                Some(("git", "worktree_dir")) => {
+                    worktree_dir(value).map(|dir| settings.worktree_dir = Some(dir))
+                }
                 Some(("explorer", "confirmDragAndDrop")) => value
                     .as_bool()
                     .map(|on| settings.confirm_drag_and_drop = Some(on))
@@ -1425,6 +1460,13 @@ pub(crate) mod tests {
         );
         let (dotted, _) = parse(r#"{"git.autofetch": true}"#).unwrap();
         assert!(dotted.git_autofetch());
+        let (dir, problems) =
+            parse(r#"{"git": {"autofetch": false, "worktree_dir": "/w"}}"#).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(dir.git_worktree_dir(), Some("/w".into()));
+        assert!(!dir.git_autofetch());
+        let (_, problems) = parse(r#"{"git.worktree_dir": "relative"}"#).unwrap();
+        assert_eq!(problems.len(), 1);
         assert!(!s.confirm_drag_and_drop() && s.zoom_level == Some(1));
         assert!(
             Settings::default().confirm_drag_and_drop(),
