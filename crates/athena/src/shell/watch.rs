@@ -180,7 +180,7 @@ impl Shell {
             }
         }
         let active = self.workspace.active_project().map(|p| p.root.as_path()) == Some(root);
-        let scanned = active || self.git_scanned(root);
+        let scanned = active || self.git_checked(root);
         let decorations = self.git_decorations(root);
         let watched = self.repo_watched(root);
         // FSEvents reports real paths, while decorations are keyed under the project's own root.

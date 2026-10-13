@@ -1575,6 +1575,13 @@ impl GitDirs {
     }
 }
 
+/// The top of the work tree holding `path`: the nearest folder at or above it with a `.git`.
+pub fn work_tree(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
 /// The git folders of the repository holding `root`, read from disk without running git.
 pub fn git_dirs(root: &Path) -> Option<GitDirs> {
     let top = root.ancestors().find(|d| d.join(".git").exists())?;
@@ -2672,6 +2679,7 @@ mod tests {
         assert!(new_dirs.moves_worktrees(&new_dirs.git_dir));
         std::fs::create_dir_all(new.join("sub")).unwrap();
         assert_eq!(git_dirs(&new.join("sub")), Some(new_dirs));
+        assert_eq!(work_tree(&new.join("sub")), Some(new.clone()));
         assert_eq!(unique_commits(&dir, "feat").unwrap(), 0);
         repo_git(
             &new,

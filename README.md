@@ -453,6 +453,9 @@ information rather than triggering the install dialog).
   click one to open it. **Git: Prune worktrees** forgets worktrees whose folders are gone.
   `"git": {"worktree_dir": "~/worktrees"}` in [settings.json](#settings) puts new worktrees in
   that folder instead of beside the repository.
+- When the focused terminal (Claude's included) has moved into another work tree, such as a
+  worktree it made, the status bar shows "terminal: <branch> in <folder>" beside the project's
+  branch; click it to open that work tree as a project.
 - GitHub, through the [GitHub CLI](https://cli.github.com) (`gh`) when it is installed and signed
   in to github.com: a dot in the status bar for the latest workflow run on the current branch
   (amber while it runs, green or red when it passed or failed, grey when cancelled or skipped;

@@ -87,6 +87,8 @@ pub(super) struct GitState {
     pub(super) claude_in_new_worktree: bool,
     /// Every worktree of each open main repository, for the sidebar to offer the unopened ones.
     pub(super) listed_worktrees: HashMap<PathBuf, Vec<git::Worktree>>,
+    /// The work tree and branch the focused terminal sits in, when not the active project's.
+    pub(super) terminal_repo: Option<(PathBuf, Option<String>)>,
     /// Each open project's git folders, `None` outside a repository.
     pub(super) dirs: HashMap<PathBuf, Option<GitDirs>>,
     /// Background projects waiting for a summary, read one at a time.
@@ -481,11 +483,6 @@ impl Shell {
         }
     }
 
-    /// Whether a full status has run, so ignored folders are known.
-    pub(super) fn git_scanned(&self, root: &Path) -> bool {
-        self.git.repos.get(root).is_some_and(|r| r.checked)
-    }
-
     fn is_active_root(&self, root: &Path) -> bool {
         self.workspace
             .active_project()
@@ -832,7 +829,32 @@ impl Shell {
         Some(PathBuf::from(entry.orig.as_ref()?.strip_prefix(prefix)?))
     }
 
+    /// Notes which work tree the focused terminal is in, when it is not the active project's.
+    fn note_terminal_repo(&mut self, cx: &mut Context<Self>) {
+        let cwd = match self.focused_item_view() {
+            Some(ItemView::Terminal(view)) => view.read(cx).foreground().and_then(|(_, cwd)| cwd),
+            _ => None,
+        };
+        let project = self
+            .workspace
+            .active_project()
+            .and_then(|p| git::work_tree(&p.root));
+        let elsewhere = cwd
+            .as_deref()
+            .and_then(git::work_tree)
+            .filter(|top| Some(top) != project.as_ref())
+            .map(|top| {
+                let branch = athena_workspace::git_branch(&top);
+                (top, branch)
+            });
+        if self.git.terminal_repo != elsewhere {
+            self.git.terminal_repo = elsewhere;
+            cx.notify();
+        }
+    }
+
     pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        self.note_terminal_repo(cx);
         let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else {
             return;
         };
