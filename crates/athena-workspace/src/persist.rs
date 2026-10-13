@@ -87,6 +87,7 @@ mod tests {
 
         let mut w = Workspace::default();
         w.add_project("/n/a".into());
+        w.add_project("/n/b".into());
         w.window = Some(WindowState {
             x: 10.,
             y: 20.,
@@ -105,8 +106,11 @@ mod tests {
         };
         w.projects[0].folder = vec!["work".into(), "clients".into()];
         w.collapsed = vec![vec!["work".into()]];
+        w.projects[0].worktrees_collapsed = true;
         save(&path, &w).unwrap();
         assert_eq!(load(&path).unwrap(), w);
+        let saved = fs::read_to_string(&path).unwrap();
+        assert_eq!(saved.matches("worktrees_collapsed").count(), 1);
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

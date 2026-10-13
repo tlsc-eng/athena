@@ -491,16 +491,16 @@ impl Shell {
         )
     }
 
-    /// Highest-priority Claude state across a project's tabs, for the rail.
+    /// Highest-priority Claude state across the tabs of the projects at `roots`, for the rail.
     pub(super) fn project_claude_state(
         &self,
-        root: &Path,
+        roots: &[&Path],
         cx: &Context<Self>,
     ) -> Option<ClaudeState> {
         let states = self
             .items
             .iter()
-            .filter(|((r, _), _)| r == root)
+            .filter(|((r, _), _)| roots.contains(&r.as_path()))
             .filter_map(|(_, v)| v.shown_claude_state(cx));
         states.max_by_key(|s| match s {
             ClaudeState::NeedsInput => 2,
