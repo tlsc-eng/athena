@@ -600,13 +600,14 @@ information rather than triggering the install dialog).
 - A new Claude session opens in its own terminal tab; the command that starts Claude is asked
   once per project.
 - Tabs show **running** while Claude works, **needs input** while it waits on a permission, a
-  question or a plan, and **done** when it finishes, until you look at the tab. Athena also posts
-  a notification (a toast, or a macOS banner when Athena is in the background) when a session
-  needs you or finishes. This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
+  question or a plan, and **done** when it finishes, until you look at the tab. A session whose
+  background agents are still working stays **running** until they report back and it finishes.
+  Athena also posts a macOS banner when a session needs you or finishes, unless you are looking at
+  that tab (a run from outside the app bundle shows a toast instead). This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
   them a tab shows only **running** while Claude draws, and nothing once it stops.
 - An MCP server, `athena mcp-stdio`, answers from the running app (see below).
-- Each file Claude edits in an Athena terminal posts a toast ("Claude edited main.go")
-  whose **Review diff** opens the file's changes since before the session's first edit to it (see
+- Each file Claude edits in an Athena terminal refreshes its open diffs; the **Claude** drawer tab
+  opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
 - The **Claude** drawer tab (palette: **Claude: Show sessions**) lists the project's recent
   sessions from `~/.claude` and every `~/.claude-*` profile: title, todo progress, messages,
@@ -815,12 +816,11 @@ from this project** in the command palette removes them from any other.
 Before Claude's first edit to a file in a session, the `PreToolUse` hook copies the file into
 `~/Library/Application Support/athena/snapshots/<session>/` (or notes that the session is creating
 it). The hook always exits 0, so it never blocks an edit. After each edit, the `PostToolUse` hook
-tells the window, which reloads open diffs of that file and shows "Claude edited main.go" with a
-**Review diff** action (one toast per file, kept for 15 seconds). When no copy was kept for that
-session, Review diff opens the file's unstaged changes instead.
+tells the window, which reloads open diffs of that file. When no copy was kept for that session,
+the file's diff shows its unstaged changes instead.
 
-Review diff opens "main.go (Claude's Edits)": "Before Claude" on the left, the file on disk on the
-right, with **Revert** on each change. Edits made by you or anyone else after Claude's first edit
+The diff opened from the **Claude** drawer tab is "main.go (Claude's Edits)": "Before Claude" on
+the left, the file on disk on the right, with **Revert** on each change. Edits made by you or anyone else after Claude's first edit
 are in the diff too, since it compares with the file as it was then. If no copy was kept because
 the file was over 20 MB or not a regular file, the review compares with the index instead,
 labels that side "Index" and says why. A review tab whose copy no longer exists (for example
