@@ -1087,8 +1087,7 @@ impl Shell {
             false => {
                 super::menus::shell_item("New Worktree with Claude…", cx, move |this, w, cx| {
                     this.switch_to(index, cx);
-                    this.git.claude_in_new_worktree = true;
-                    this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+                    this.open_worktrees(super::palette::Mode::NewWorktree, true, w, cx)
                 })
             }
         });

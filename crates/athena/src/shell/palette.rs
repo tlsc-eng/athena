@@ -507,6 +507,7 @@ fn project_files(root: &Path) -> Vec<String> {
 
 impl Shell {
     pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        self.git.claude_in_new_worktree = false;
         let placeholder = match mode {
             Mode::Files => "Go to file…  (@ symbol, # workspace symbol, > command)",
             Mode::FilesBeside => "Open to the side…",

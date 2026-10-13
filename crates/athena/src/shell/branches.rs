@@ -511,7 +511,7 @@ impl Shell {
             BranchPick::PopStash(commit) => return self.git_stash_pop(commit, cx),
             BranchPick::OpenWorktree(path) => return self.open_worktree(path, cx),
             BranchPick::PickWorktreeBranch => {
-                return self.open_worktrees(Mode::NewWorktree, window, cx);
+                return self.open_worktrees(Mode::NewWorktree, false, window, cx);
             }
             BranchPick::AddWorktree(how) => return self.add_worktree(how, window, cx),
             BranchPick::RemoveWorktree(path) => {

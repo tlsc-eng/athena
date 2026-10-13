@@ -389,17 +389,20 @@ fn git_block(settings: &mut Settings, value: &Value) -> Result<(), String> {
             "must be {\"autofetch\": true or false, \"worktree_dir\": \"~/folder\"}".into(),
         );
     };
+    // Every key that is right applies, even beside one that is not.
+    let mut problem = None;
     for (key, value) in object {
-        match key.as_str() {
-            "autofetch" => {
-                let on = value.as_bool().ok_or("autofetch must be true or false")?;
-                settings.autofetch = Some(on);
-            }
-            "worktree_dir" => settings.worktree_dir = Some(worktree_dir(value)?),
-            other => return Err(format!("has no setting \"{other}\"")),
-        }
+        let applied = match key.as_str() {
+            "autofetch" => value
+                .as_bool()
+                .map(|on| settings.autofetch = Some(on))
+                .ok_or_else(|| "autofetch must be true or false".to_string()),
+            "worktree_dir" => worktree_dir(value).map(|dir| settings.worktree_dir = Some(dir)),
+            other => Err(format!("has no setting \"{other}\"")),
+        };
+        problem = problem.or(applied.err());
     }
-    Ok(())
+    problem.map_or(Ok(()), Err)
 }
 
 fn worktree_dir(value: &Value) -> Result<String, String> {

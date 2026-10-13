@@ -89,6 +89,7 @@ pub(super) struct GitState {
     pub(super) claude_in_new_worktree: bool,
     /// Every worktree of each open main repository, for the sidebar to offer the unopened ones.
     pub(super) listed_worktrees: HashMap<PathBuf, Vec<git::Worktree>>,
+    pub(super) worktree_lists_asked: u64,
     /// The work tree and branch the focused terminal sits in, when not the active project's.
     pub(super) terminal_repo: Option<(PathBuf, Option<String>)>,
     /// Each open project's git folders, `None` outside a repository.
@@ -1830,19 +1831,17 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
     .on_action(cx.listener(|this, _: &GitPopStash, w, cx| this.open_stashes(w, cx)))
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitOpenWorktree, w, cx| {
-            this.open_worktrees(super::palette::Mode::Worktrees, w, cx)
+            this.open_worktrees(super::palette::Mode::Worktrees, false, w, cx)
         }),
     )
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitCreateWorktree, w, cx| {
-            this.git.claude_in_new_worktree = false;
-            this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+            this.open_worktrees(super::palette::Mode::NewWorktree, false, w, cx)
         }),
     )
     .on_action(cx.listener(
         |this, _: &super::worktrees::GitNewWorktreeWithClaude, w, cx| {
-            this.git.claude_in_new_worktree = true;
-            this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
+            this.open_worktrees(super::palette::Mode::NewWorktree, true, w, cx)
         },
     ))
     .on_action(
@@ -1894,7 +1893,7 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
     )
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitDeleteWorktree, w, cx| {
-            this.open_worktrees(super::palette::Mode::RemoveWorktree, w, cx)
+            this.open_worktrees(super::palette::Mode::RemoveWorktree, false, w, cx)
         }),
     )
     .on_action(

@@ -82,7 +82,10 @@ fn worktree_detail(w: &Worktree, main: bool) -> String {
 
 /// What finishing the worktree at `root` deletes and what it keeps.
 fn finish_detail(root: &Path, summary: &git::Summary, unique: u32) -> String {
-    let mut detail = format!("Its project closes and {} is deleted.", display_path(root));
+    let mut detail = format!(
+        "Its project closes and {} is deleted, with the files git ignores there.",
+        display_path(root)
+    );
     if summary.dirty {
         detail.push_str(" Its uncommitted and untracked changes are lost.");
     }
@@ -191,9 +194,11 @@ pub(super) fn new_entries(
 
 impl Shell {
     /// Lists the worktrees and branches in the background, then opens the palette in `mode`.
+    /// `claude` starts a Claude session in the worktree a NewWorktree palette creates.
     pub(super) fn open_worktrees(
         &mut self,
         mode: Mode,
+        claude: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -219,6 +224,7 @@ impl Shell {
                     this.git.worktrees = worktrees;
                     this.git.branches = branches;
                     this.open_palette(mode, window, cx);
+                    this.git.claude_in_new_worktree = claude && mode == Mode::NewWorktree;
                 }
                 Err(err) => {
                     this.transient_notice("Could not list worktrees", format!("{err:#}"), cx)
@@ -285,8 +291,10 @@ impl Shell {
                         format!("{branch} is checked out in {}.", display_path(&path)),
                         cx,
                     );
-                    this.open_folder(path, cx);
-                    if claude {
+                    this.open_folder(path.clone(), cx);
+                    // Another window may hold the folder already; Claude starts only where it opened.
+                    let opened = this.active_root().and_then(|r| r.canonicalize().ok());
+                    if claude && opened.is_some() && opened == path.canonicalize().ok() {
                         this.new_claude_session(window, cx);
                     }
                 }
@@ -317,15 +325,7 @@ impl Shell {
             .iter()
             .map(|p| p.root.clone())
             .collect();
-        let cwds: Vec<PathBuf> = self
-            .items
-            .values()
-            .filter_map(|item| match item {
-                ItemView::Terminal(v) => v.read(cx).foreground()?.1,
-                _ => None,
-            })
-            .collect();
-        if let Some((title, body)) = worktree_in_use(&path, &roots, &cwds) {
+        if let Some((title, body)) = worktree_in_use(&path, &roots, &self.terminal_cwds(cx)) {
             return self.transient_notice(title, body, cx);
         }
         cx.spawn_in(window, async move |this, cx| {
@@ -430,7 +430,7 @@ impl Shell {
             &buttons,
             cx,
         );
-        let branch = summary.branch;
+        let (branch, force) = (summary.branch, summary.dirty);
         cx.spawn_in(window, async move |this, cx| {
             let Ok(choice @ 1..) = answer.await else {
                 return;
@@ -448,7 +448,7 @@ impl Shell {
                     cx,
                     move |this, cx| {
                         this.remove_project(&root, cx);
-                        this.delete_finished(root, main, branch, cx);
+                        this.delete_finished(root, main, branch, force, cx);
                     },
                 );
             });
@@ -456,33 +456,73 @@ impl Shell {
         .detach();
     }
 
+    /// Deletes a finished worktree once its project is closed; `force` only when the user was
+    /// told its changes would be lost.
     fn delete_finished(
         &mut self,
         root: PathBuf,
         main: PathBuf,
         branch: Option<String>,
+        force: bool,
         cx: &mut Context<Self>,
     ) {
+        let roots: Vec<PathBuf> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .collect();
+        if let Some((title, body)) = worktree_in_use(&root, &roots, &self.terminal_cwds(cx)) {
+            return self.transient_notice(title, format!("{body} The worktree was kept."), cx);
+        }
         cx.spawn(async move |this, cx| {
             let target = root.clone();
             let done = cx
                 .background_executor()
                 .spawn(async move {
-                    git::remove_worktree(&main, &target, true)?;
-                    if let Some(branch) = &branch {
-                        git::delete_branch(&main, branch, true)?;
-                    }
-                    anyhow::Ok(())
+                    git::remove_worktree(&main, &target, force)?;
+                    let branch_done = branch
+                        .map(|b| git::delete_branch(&main, &b, true).map_err(|e| (b, e)))
+                        .transpose();
+                    anyhow::Ok(branch_done)
                 })
                 .await;
-            let _ = this.update(cx, |this, cx| match done {
-                Ok(()) => this.transient_notice("Worktree finished", display_path(&root), cx),
-                Err(err) => {
-                    this.transient_notice("Could not finish the worktree", format!("{err:#}"), cx)
+            let _ = this.update(cx, |this, cx| {
+                match done {
+                    Ok(Ok(_)) => {
+                        this.transient_notice("Worktree finished", display_path(&root), cx)
+                    }
+                    Ok(Err((branch, err))) => this.transient_notice(
+                        format!("Worktree deleted, but branch {branch} was kept"),
+                        format!("{err:#}"),
+                        cx,
+                    ),
+                    Err(err) if err.is::<git::Dirty>() => this.transient_notice(
+                        "The worktree was kept",
+                        "It changed after you were asked; open it again to look.",
+                        cx,
+                    ),
+                    Err(err) => this.transient_notice(
+                        "Could not finish the worktree",
+                        format!("{err:#}"),
+                        cx,
+                    ),
                 }
+                this.refresh_worktree_lists(cx);
+                this.git_kick(cx);
             });
         })
         .detach();
+    }
+
+    fn terminal_cwds(&self, cx: &Context<Self>) -> Vec<PathBuf> {
+        self.items
+            .values()
+            .filter_map(|item| match item {
+                ItemView::Terminal(v) => v.read(cx).foreground()?.1,
+                _ => None,
+            })
+            .collect()
     }
 
     /// `git worktree prune` in the active repository.
@@ -514,6 +554,8 @@ impl Shell {
         if !git::available() {
             return;
         }
+        self.git.worktree_lists_asked += 1;
+        let asked = self.git.worktree_lists_asked;
         let mains: Vec<PathBuf> = self
             .workspace
             .projects
@@ -539,6 +581,10 @@ impl Shell {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // A newer listing is under way or done; this one may be stale.
+                if this.git.worktree_lists_asked != asked {
+                    return;
+                }
                 if this.git.listed_worktrees != lists {
                     this.git.listed_worktrees = lists;
                     cx.notify();
@@ -554,9 +600,17 @@ impl Shell {
             return Vec::new();
         };
         let real = root.canonicalize().ok();
+        // Roots older builds saved through a symlink are resolved, but only for a likely match.
+        let open = |w: &Worktree| {
+            self.workspace.projects.iter().any(|p| {
+                p.root == w.path
+                    || (p.root.file_name() == w.path.file_name()
+                        && p.root.canonicalize().is_ok_and(|r| r == w.path))
+            })
+        };
         list.iter()
             .filter(|w| Some(&w.path) != real.as_ref() && w.path != root)
-            .filter(|w| !self.workspace.projects.iter().any(|p| p.root == w.path))
+            .filter(|w| !open(w))
             .collect()
     }
 
