@@ -238,6 +238,9 @@ impl Workspace {
             Some(a) if a == index => Some(index.min(self.projects.len() - 1)),
             other => other,
         };
+        let projects = &self.projects;
+        self.collapsed
+            .retain(|path| projects.iter().any(|p| p.folder.starts_with(path)));
         Some(project)
     }
 

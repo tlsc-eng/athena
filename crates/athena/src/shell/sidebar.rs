@@ -191,7 +191,16 @@ impl Shell {
                 }
             }
             FolderPick::Move(Subject::Folder(path), parent) => {
-                self.workspace.move_folder(&path, &parent);
+                if !self.workspace.move_folder(&path, &parent) {
+                    self.transient_notice(
+                        "Folder not moved",
+                        format!(
+                            "“{}” already holds a folder of that name.",
+                            folder_label(&parent)
+                        ),
+                        cx,
+                    );
+                }
             }
             FolderPick::Rename(path, name) => {
                 if !self.workspace.rename_folder(&path, &name) {
@@ -206,12 +215,9 @@ impl Shell {
         self.folders_changed(cx);
     }
 
-    /// Regroups the sidebar after a move, keeping the active project in sight.
+    /// Regroups the sidebar after a move.
     pub(super) fn folders_changed(&mut self, cx: &mut Context<Self>) {
         self.group_worktrees();
-        if let Some(active) = self.workspace.active {
-            self.workspace.reveal(active);
-        }
         self.rail_from = self.workspace.active.unwrap_or(0);
         self.schedule_save(cx);
         cx.notify();
@@ -300,7 +306,7 @@ impl Shell {
         let mut items: Vec<AnyElement> = Vec::with_capacity(rows.len());
         // Each row's line; unopened worktrees add lines of their own in the wide sidebar.
         let mut line_of_row = Vec::with_capacity(rows.len());
-        for (r, row) in rows.iter().enumerate() {
+        for row in &rows {
             line_of_row.push(items.len());
             match row {
                 SidebarRow::Folder {
@@ -308,9 +314,8 @@ impl Shell {
                     depth,
                     collapsed,
                     projects,
-                } => items.push(
-                    self.render_folder_row(r, path, *depth, *collapsed, *projects, &groups, cx),
-                ),
+                } => items
+                    .push(self.render_folder_row(path, *depth, *collapsed, *projects, &groups, cx)),
                 SidebarRow::Project { index, depth } => {
                     items.push(self.render_project_row(
                         *index,
@@ -481,7 +486,6 @@ impl Shell {
     #[allow(clippy::too_many_arguments)]
     fn render_folder_row(
         &self,
-        r: usize,
         path: &[String],
         depth: usize,
         collapsed: bool,
@@ -505,7 +509,10 @@ impl Shell {
         let fits = groups.clone();
         let into = path.to_vec();
         let el = div()
-            .id(("rail-folder", r))
+            .id(SharedString::from(format!(
+                "rail-folder-{}",
+                path.join("/")
+            )))
             .relative()
             .flex()
             .items_center()

@@ -1053,14 +1053,20 @@ impl Shell {
             return;
         };
         let in_folder = self.workspace.projects[index].folder.len();
-        let worktree = self.worktree_main(&root).is_some();
-        let mut items = vec![super::menus::shell_item("Move to Folder…", cx, {
-            let root = root.clone();
-            move |this, w, cx| {
-                this.pick_folder_for(super::sidebar::Subject::Project(root.clone()), w, cx)
-            }
-        })];
-        if in_folder > 0 {
+        let main = self.worktree_main(&root);
+        let worktree = main.is_some();
+        let grouped = main.is_some_and(|m| self.workspace.projects.iter().any(|p| p.root == m));
+        let mut items = Vec::new();
+        // A linked worktree always sits in its repository's folder.
+        if !grouped {
+            items.push(super::menus::shell_item("Move to Folder…", cx, {
+                let root = root.clone();
+                move |this, w, cx| {
+                    this.pick_folder_for(super::sidebar::Subject::Project(root.clone()), w, cx)
+                }
+            }));
+        }
+        if in_folder > 0 && !grouped {
             items.push(super::menus::shell_item("Move Out of Folder", cx, {
                 let root = root.clone();
                 move |this, _, cx| {

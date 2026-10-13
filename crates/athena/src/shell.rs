@@ -324,6 +324,7 @@ impl Shell {
         self.rail_from = self.workspace.active.unwrap_or(index);
         self.switch_count += 1;
         self.workspace.activate(index);
+        self.workspace.reveal(index);
         self.zoomed = None;
         self.focus_pending = true;
         self.schedule_save(cx);

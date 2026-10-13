@@ -200,6 +200,9 @@ impl Workspace {
         };
         let mut renamed = parent.to_vec();
         renamed.push(name.to_string());
+        if renamed == folder {
+            return true;
+        }
         if name.is_empty() || self.folders().contains(&renamed) {
             return false;
         }
@@ -222,10 +225,10 @@ impl Workspace {
         if range.is_empty() {
             return false;
         }
-        let end = if parent.is_empty() {
-            self.projects.len()
-        } else {
-            self.folder_range(parent).end
+        let end = match self.folder_range(parent) {
+            _ if parent.is_empty() => self.projects.len(),
+            inside if inside.is_empty() => range.end,
+            inside => inside.end,
         };
         if !(range.start..=range.end).contains(&end) {
             self.move_projects(range, end);
@@ -245,6 +248,7 @@ impl Workspace {
                 project.folder.remove(depth);
             }
         }
+        self.collapsed.retain(|path| path != folder);
         for path in &mut self.collapsed {
             if path.starts_with(folder) {
                 path.remove(depth);
@@ -434,6 +438,23 @@ mod tests {
         assert_eq!(w.projects[1].folder, Vec::<String>::new());
         assert_eq!(w.projects[2].folder, path("clients"));
         assert_eq!(w.collapsed, [path("clients")]);
+        assert!(
+            w.rename_folder(&path("clients"), "clients"),
+            "an unchanged name is fine"
+        );
+
+        w.delete_folder(&path("clients"));
+        assert!(
+            w.collapsed.is_empty(),
+            "a removed folder is not left collapsed"
+        );
+        let mut nested = workspace(&[("a", "work"), ("b", "work/clients")]);
+        nested.toggle_folder(&path("work/clients"));
+        nested.delete_folder(&path("work/clients"));
+        assert!(
+            nested.collapsed.is_empty(),
+            "its parent does not take its collapse"
+        );
     }
 
     #[test]
