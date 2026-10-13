@@ -82,6 +82,19 @@ pub(super) enum Mode {
     /// Sidebar folders a project or folder can move into.
     MoveToFolder,
     RenameFolder,
+    MergeBranch,
+    RebaseOnto,
+    DeleteBranch,
+    RenameBranch,
+    NewTag,
+    /// The repository's recent history.
+    Log,
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// The mode Go to File's query asks for with its first character, as in VS Code.
@@ -105,6 +118,10 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Checks => "No matching checks",
         Mode::MoveToFolder => "Type a name for a new folder",
         Mode::RenameFolder => "Type the folder's new name",
+        Mode::MergeBranch | Mode::RebaseOnto | Mode::DeleteBranch => "No matching branches",
+        Mode::RenameBranch => "Type the branch's new name",
+        Mode::NewTag => "Type a name for the tag",
+        Mode::Log => "No matching commits",
         _ => "No matching commands",
     }
 }
@@ -287,6 +304,33 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::GitStashIncludeUntracked),
         ),
         ("Git: Pop stash…", Box::new(actions::GitPopStash)),
+        (
+            "Git: Merge branch into current…",
+            Box::new(super::branches::GitMergeBranch),
+        ),
+        (
+            "Git: Rebase current branch onto…",
+            Box::new(super::branches::GitRebaseOnto),
+        ),
+        (
+            "Git: Abort merge or rebase",
+            Box::new(super::branches::GitAbortMergeOrRebase),
+        ),
+        (
+            "Git: Continue rebase",
+            Box::new(super::branches::GitContinueRebase),
+        ),
+        (
+            "Git: Delete branch…",
+            Box::new(super::branches::GitDeleteBranch),
+        ),
+        (
+            "Git: Rename branch…",
+            Box::new(super::branches::GitRenameBranch),
+        ),
+        ("Git: Create tag…", Box::new(super::branches::GitCreateTag)),
+        ("Git: Push tags", Box::new(super::branches::GitPushTags)),
+        ("Git: Show log", Box::new(super::branches::GitShowLog)),
         (
             "Git: Open worktree…",
             Box::new(super::worktrees::GitOpenWorktree),
@@ -480,6 +524,12 @@ impl Shell {
             Mode::Checks => "Open a pull request check…",
             Mode::MoveToFolder => "Move to a folder, or type a name for a new one…",
             Mode::RenameFolder => "New name for the folder…",
+            Mode::MergeBranch => "Merge a branch into the current one…",
+            Mode::RebaseOnto => "Rebase the current branch onto…",
+            Mode::DeleteBranch => "Delete a branch…",
+            Mode::RenameBranch => "New name for the current branch…",
+            Mode::NewTag => "Tag the current commit as…",
+            Mode::Log => "Search history; pick a commit to copy its id…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -504,6 +554,12 @@ impl Shell {
             | Mode::RemoveWorktree
             | Mode::MoveToFolder
             | Mode::RenameFolder
+            | Mode::MergeBranch
+            | Mode::RebaseOnto
+            | Mode::DeleteBranch
+            | Mode::RenameBranch
+            | Mode::NewTag
+            | Mode::Log
             | Mode::Symbols
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
@@ -918,6 +974,22 @@ impl Shell {
                 &query,
             )),
             Mode::RemoveWorktree => Some(super::worktrees::remove_entries(&self.git.worktrees)),
+            Mode::MergeBranch | Mode::RebaseOnto | Mode::DeleteBranch => {
+                Some(super::branches::other_branch_entries(
+                    &self.git.branches,
+                    &self.git.worktrees,
+                    palette.mode,
+                ))
+            }
+            Mode::RenameBranch | Mode::NewTag => {
+                let current = self.git.branches.iter().find(|b| b.current);
+                Some(super::branches::named_entries(
+                    palette.mode,
+                    current.map(|b| b.name.as_str()),
+                    &query,
+                ))
+            }
+            Mode::Log => Some(super::branches::log_entries(&self.git.commits, now_secs())),
             _ => None,
         };
         let folder_rows = match (palette.mode, &self.sidebar_subject) {

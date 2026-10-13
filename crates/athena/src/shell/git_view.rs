@@ -77,6 +77,8 @@ pub(super) struct GitState {
     committing: bool,
     /// Branches for the branch picker, newest first.
     pub(super) branches: Vec<git::Branch>,
+    /// History for Git: Show log, newest first.
+    pub(super) commits: Vec<git::Commit>,
     /// Stashes for the branch picker, newest first.
     pub(super) stashes: Vec<git::Stash>,
     /// The active repository's worktrees for the pickers, the main one first.
@@ -1843,6 +1845,43 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
             this.open_worktrees(super::palette::Mode::NewWorktree, w, cx)
         },
     ))
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitMergeBranch, w, cx| {
+            this.open_branch_mode(super::palette::Mode::MergeBranch, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitRebaseOnto, w, cx| {
+            this.open_branch_mode(super::palette::Mode::RebaseOnto, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitDeleteBranch, w, cx| {
+            this.open_branch_mode(super::palette::Mode::DeleteBranch, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitRenameBranch, w, cx| {
+            this.open_branch_mode(super::palette::Mode::RenameBranch, w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitCreateTag, w, cx| {
+            this.open_branch_mode(super::palette::Mode::NewTag, w, cx)
+        }),
+    )
+    .on_action(cx.listener(|this, _: &super::branches::GitShowLog, w, cx| {
+        this.open_branch_mode(super::palette::Mode::Log, w, cx)
+    }))
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitAbortMergeOrRebase, _, cx| {
+            this.abort_underway(cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::branches::GitContinueRebase, _, cx| this.continue_rebase(cx)),
+    )
+    .on_action(cx.listener(|this, _: &super::branches::GitPushTags, _, cx| this.push_tags(cx)))
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitFinishWorktree, w, cx| {
             this.finish_worktree(w, cx)
