@@ -336,7 +336,7 @@ impl Shell {
         let from_row = line(self.rail_from).or(active_row);
         let indicator = active_row.map(|to| {
             let s = t.ui_scale;
-            let y = |r: usize| s * (TOP + r as f32 * (row_h + gap) + (row_h - 20.) / 2.);
+            let y = |r: usize| s * (r as f32 * (row_h + gap) + (row_h - 20.) / 2.);
             let (from_y, to_y) = (y(from_row.unwrap_or(to)), y(to));
             let bar = div()
                 .absolute()
@@ -382,6 +382,7 @@ impl Shell {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
         let footer = if wide {
             div()
+                .flex_none()
                 .flex()
                 .items_center()
                 .justify_between()
@@ -390,6 +391,7 @@ impl Shell {
                 .child(toggle)
         } else {
             div()
+                .flex_none()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -399,7 +401,6 @@ impl Shell {
         };
 
         div()
-            .relative()
             .w(t.ui(if wide { SIDEBAR_WIDTH } else { RAIL_WIDTH }))
             .flex_none()
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_tint))
@@ -412,15 +413,24 @@ impl Shell {
             .border_color(t.color.border)
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .when(!wide, |el| el.items_center())
-                    .when(wide, |el| el.px(t.ui(6.)))
-                    .gap(t.ui(gap))
-                    .children(items),
+                    .id("sidebar-rows")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .relative()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .when(!wide, |el| el.items_center())
+                            .when(wide, |el| el.px(t.ui(6.)))
+                            .gap(t.ui(gap))
+                            .children(items)
+                            .children(indicator),
+                    ),
             )
             .child(footer)
-            .children(indicator)
     }
 
     /// After the last project of a repository's group, its worktrees that are not open, dimmed.
