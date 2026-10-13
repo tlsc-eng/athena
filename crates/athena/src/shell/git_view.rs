@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use athena_editor::{EditorView, GutterMark, diff};
 use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput, Theme, Tooltip};
 use athena_workspace::DiffBase;
-use athena_workspace::git::{self, Decorations, Entry, FileStatus, Hunk};
+use athena_workspace::git::{self, Decorations, Entry, FileStatus, GitDirs, Hunk};
 use gpui::{
     AnyElement, Context, Entity, Focusable, FontWeight, Hsla, PromptLevel, Subscription, Task,
     Window, div, prelude::*, px, uniform_list,
@@ -20,6 +20,10 @@ use super::item::ItemView;
 const POLL: Duration = Duration::from_secs(5);
 /// Saves and focus changes come in bursts; one status run covers the burst.
 const KICK_DELAY: Duration = Duration::from_millis(300);
+/// How often the projects nobody is looking at get their branch and change marker re-read.
+const SUMMARY_POLL: Duration = Duration::from_secs(30);
+/// Edits in a background project (a build writing files) re-read its summary at most this often.
+const SUMMARY_GAP: Duration = Duration::from_secs(5);
 /// The cursor rests this long on a line before it is blamed.
 const BLAME_DELAY: Duration = Duration::from_millis(150);
 /// A status run slower than this switches the project to cheaper untracked-file scanning.
@@ -37,6 +41,8 @@ struct Repo {
     slow: bool,
     branch: Option<String>,
     tracking: Option<git::Tracking>,
+    /// Anything to commit, untracked files included unless the repository is slow.
+    dirty: bool,
     /// Conflicted files and the conflict blocks left in them.
     conflicts: (usize, usize),
     entries: Rc<Vec<(PathBuf, Entry)>>,
@@ -77,6 +83,15 @@ pub(super) struct GitState {
     pub(super) worktrees: Vec<git::Worktree>,
     /// Each open project's main worktree when it is a linked worktree.
     pub(super) worktree_mains: HashMap<PathBuf, Option<PathBuf>>,
+    /// Each open project's git folders, `None` outside a repository.
+    pub(super) dirs: HashMap<PathBuf, Option<GitDirs>>,
+    /// Background projects waiting for a summary, read one at a time.
+    summary_queue: Vec<PathBuf>,
+    summarizing: bool,
+    summarized: HashMap<PathBuf, Instant>,
+    /// A summary held back by `SUMMARY_GAP`, run once the gap has passed.
+    summary_later: HashMap<PathBuf, Task<()>>,
+    summaries_polled: Option<Instant>,
     /// The fetch, pull, push or stash under way, as the status bar words it.
     pub(super) remote_busy: Option<&'static str>,
     autofetch: Option<Task<()>>,
@@ -287,6 +302,7 @@ impl Shell {
                 let alive = this.update_in(cx, |this, window, cx| {
                     if window.is_window_active() {
                         this.refresh_git(cx);
+                        this.poll_summaries(cx);
                     }
                 });
                 if alive.is_err() {
@@ -309,10 +325,179 @@ impl Shell {
         }));
     }
 
+    /// Re-reads git state for `root`: all of it when it is the active project, else its summary.
+    pub(super) fn git_changed(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if self
+            .workspace
+            .active_project()
+            .is_some_and(|p| p.root == root)
+        {
+            self.git_kick(cx);
+        } else {
+            self.queue_summary(root, cx);
+        }
+    }
+
+    /// Queues a summary for `root`, or for when `SUMMARY_GAP` has passed since the last one.
+    pub(super) fn throttled_summary(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let wait = self
+            .git
+            .summarized
+            .get(root)
+            .map(|at| SUMMARY_GAP.saturating_sub(at.elapsed()))
+            .unwrap_or_default();
+        if wait.is_zero() {
+            return self.queue_summary(root, cx);
+        }
+        if self.git.summary_later.contains_key(root) {
+            return;
+        }
+        let later = root.to_path_buf();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                this.git.summary_later.remove(&later);
+                this.queue_summary(&later, cx);
+            });
+        });
+        self.git.summary_later.insert(root.to_path_buf(), task);
+    }
+
+    fn poll_summaries(&mut self, cx: &mut Context<Self>) {
+        if self
+            .git
+            .summaries_polled
+            .is_some_and(|at| at.elapsed() < SUMMARY_POLL)
+        {
+            return;
+        }
+        self.git.summaries_polled = Some(Instant::now());
+        let active = self.workspace.active_project().map(|p| p.root.clone());
+        let roots: Vec<PathBuf> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .filter(|r| Some(r) != active.as_ref())
+            .collect();
+        for root in roots {
+            self.queue_summary(&root, cx);
+        }
+    }
+
+    fn queue_summary(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if !git::available() {
+            return;
+        }
+        if !self.git.summary_queue.iter().any(|r| r == root) {
+            self.git.summary_queue.push(root.to_path_buf());
+        }
+        if std::mem::replace(&mut self.git.summarizing, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(KICK_DELAY).await;
+            loop {
+                let next = this.update(cx, |this, _| {
+                    if this.git.summary_queue.is_empty() {
+                        this.git.summarizing = false;
+                        return None;
+                    }
+                    let root = this.git.summary_queue.remove(0);
+                    let slow = this.git.repos.get(&root).is_some_and(|r| r.slow);
+                    Some((root, slow))
+                });
+                let Ok(Some((root, slow))) = next else {
+                    return;
+                };
+                let task_root = root.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { git::summary(&task_root, !slow) })
+                    .await;
+                let arrived =
+                    this.update(cx, |this, cx| this.git_summary_arrived(&root, result, cx));
+                if arrived.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn git_summary_arrived(
+        &mut self,
+        root: &Path,
+        result: anyhow::Result<git::Summary>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workspace.projects.iter().any(|p| p.root == root) {
+            return;
+        }
+        self.git
+            .summarized
+            .insert(root.to_path_buf(), Instant::now());
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(err) => {
+                tracing::debug!(root = %root.display(), "git summary: {err:#}");
+                return;
+            }
+        };
+        tracing::debug!(
+            root = %root.display(),
+            branch = ?summary.branch,
+            dirty = summary.dirty,
+            "git summary"
+        );
+        let repo = self.git_repo(root);
+        if repo.branch != summary.branch
+            || repo.tracking != summary.tracking
+            || repo.dirty != summary.dirty
+        {
+            repo.branch = summary.branch;
+            repo.tracking = summary.tracking;
+            repo.dirty = summary.dirty;
+            cx.notify();
+        }
+    }
+
+    /// The branch, how far it is from its upstream and whether it has changes, as one line.
+    pub(super) fn git_caption(&self, root: &Path) -> Option<String> {
+        let repo = self.git.repos.get(root)?;
+        let mut parts = vec![repo.branch.clone()?];
+        if let Some(t) = &repo.tracking {
+            match (t.ahead, t.behind) {
+                (0, 0) => {}
+                (a, 0) => parts.push(format!("↑{a}")),
+                (0, b) => parts.push(format!("↓{b}")),
+                (a, b) => parts.push(format!("↑{a} ↓{b}")),
+            }
+        }
+        if repo.dirty {
+            parts.push("changes".into());
+        }
+        Some(parts.join(" · "))
+    }
+
+    /// Each open project's git folders, read once.
+    pub(super) fn note_git_dirs(&mut self) {
+        for project in &self.workspace.projects {
+            if !self.git.dirs.contains_key(&project.root) {
+                let dirs = git::git_dirs(&project.root);
+                self.git.dirs.insert(project.root.clone(), dirs);
+            }
+        }
+    }
+
     /// Forgets a closed project's git state and gutter marks.
     pub(super) fn git_project_closed(&mut self, root: &Path) {
         self.git.repos.remove(root);
         self.git.worktree_mains.remove(root);
+        self.git.dirs.remove(root);
+        self.git.summarized.remove(root);
+        self.git.summary_later.remove(root);
+        self.git.summary_queue.retain(|r| r != root);
         self.git.marks.retain(|path, _| !path.starts_with(root));
     }
 
@@ -696,13 +881,23 @@ impl Shell {
         }
         repo.slow |= slow;
         repo.prefix = Some(prefix);
+        // A folder that became a repository after it was opened has no git folders noted yet.
+        if self.git.dirs.get(root).is_some_and(Option::is_none) {
+            self.git.dirs.remove(root);
+        }
+        let repo = self.git_repo(root);
         let first = !std::mem::replace(&mut repo.checked, true);
         // Most polls find nothing new; skipping the redraw keeps an idle window idle.
+        let dirty = snapshot
+            .entries
+            .iter()
+            .any(|(_, e)| e.status() != FileStatus::Ignored);
         if first
             || *repo.entries != snapshot.entries
             || repo.branch != snapshot.branch
             || repo.tracking != snapshot.tracking
         {
+            repo.dirty = dirty;
             repo.branch = snapshot.branch;
             repo.tracking = snapshot.tracking;
             repo.decorations = Rc::new(Decorations::new(root, &snapshot.entries));

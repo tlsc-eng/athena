@@ -1524,6 +1524,83 @@ pub fn main_worktree(root: &Path) -> Option<PathBuf> {
     common.parent().map(Path::to_path_buf)
 }
 
+/// Where a work tree keeps its own git files and the ones all its repository's worktrees share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitDirs {
+    /// `.git`, or `.git/worktrees/<name>` for a linked worktree; holds this work tree's HEAD.
+    pub git_dir: PathBuf,
+    /// Holds the refs and `packed-refs`; the same folder as `git_dir` outside linked worktrees.
+    pub common_dir: PathBuf,
+}
+
+impl GitDirs {
+    /// Whether a change at `path` can move this work tree's branch or its upstream counts.
+    pub fn moves_branch(&self, path: &Path) -> bool {
+        path == self.git_dir.join("HEAD")
+            || path == self.common_dir.join("packed-refs")
+            || path.starts_with(self.common_dir.join("refs"))
+    }
+
+    /// Whether a change at `path` adds or removes one of the repository's worktrees.
+    pub fn moves_worktrees(&self, path: &Path) -> bool {
+        path == self.common_dir.join("worktrees")
+            || path.parent() == Some(&self.common_dir.join("worktrees"))
+    }
+}
+
+/// The git folders of the repository holding `root`, read from disk without running git.
+pub fn git_dirs(root: &Path) -> Option<GitDirs> {
+    let top = root.ancestors().find(|d| d.join(".git").exists())?;
+    let dot = top.join(".git");
+    let git_dir = if dot.is_dir() {
+        dot
+    } else {
+        let pointer = std::fs::read_to_string(&dot).ok()?;
+        top.join(pointer.strip_prefix("gitdir:")?.trim())
+    };
+    let git_dir = git_dir.canonicalize().ok()?;
+    let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(rel) => git_dir.join(rel.trim()).canonicalize().ok()?,
+        Err(_) => git_dir.clone(),
+    };
+    Some(GitDirs {
+        git_dir,
+        common_dir,
+    })
+}
+
+/// A project's branch, upstream counts and whether it has changes, without listing them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub branch: Option<String>,
+    pub tracking: Option<Tracking>,
+    pub dirty: bool,
+}
+
+/// A cheaper [`status`] for projects nobody is looking at; `untracked` counts new files as changes.
+pub fn summary(root: &Path, untracked: bool) -> Result<Summary> {
+    let mut cmd = git(root);
+    cmd.args([
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        if untracked {
+            "--untracked-files=normal"
+        } else {
+            "--untracked-files=no"
+        },
+        "--",
+        ".",
+    ]);
+    let parsed = parse_status(&run(cmd, None)?);
+    Ok(Summary {
+        branch: parsed.branch,
+        tracking: parsed.tracking,
+        dirty: !parsed.entries.is_empty(),
+    })
+}
+
 /// Per-file statuses plus every folder's most severe one, for colouring a file tree.
 #[derive(Clone, Debug, Default)]
 pub struct Decorations {
@@ -2552,6 +2629,29 @@ mod tests {
         );
         assert_eq!(main_worktree(&new), Some(dir.clone()));
         assert_eq!(main_worktree(&dir), None);
+        let main_dirs = git_dirs(&dir).unwrap();
+        let new_dirs = git_dirs(&new).unwrap();
+        assert_eq!(main_dirs.git_dir, dir.join(".git"));
+        assert_eq!(main_dirs.common_dir, dir.join(".git"));
+        assert_eq!(new_dirs.common_dir, main_dirs.common_dir);
+        assert_eq!(
+            new_dirs.git_dir.parent(),
+            Some(&*dir.join(".git/worktrees"))
+        );
+        assert!(new_dirs.moves_branch(&new_dirs.git_dir.join("HEAD")));
+        assert!(new_dirs.moves_branch(&dir.join(".git/refs/heads/feat")));
+        assert!(!new_dirs.moves_branch(&main_dirs.git_dir.join("HEAD")));
+        assert!(!new_dirs.moves_branch(&new_dirs.git_dir.join("index")));
+        assert!(new_dirs.moves_worktrees(&new_dirs.git_dir));
+        std::fs::create_dir_all(new.join("sub")).unwrap();
+        assert_eq!(git_dirs(&new.join("sub")), Some(new_dirs));
+        let clean = summary(&new, true).unwrap();
+        assert_eq!(clean.branch.as_deref(), Some("feat"));
+        assert!(!clean.dirty);
+        std::fs::write(new.join("sub/n.txt"), "n\n").unwrap();
+        assert!(summary(&new, true).unwrap().dirty);
+        assert!(!summary(&new, false).unwrap().dirty);
+        std::fs::remove_dir_all(new.join("sub")).unwrap();
         assert_eq!(current_branch(&new).unwrap().as_deref(), Some("feat"));
 
         std::fs::write(new.join("f.txt"), "changed\n").unwrap();

@@ -22,15 +22,28 @@ impl FolderWatcher {
         root: &Path,
         on_change: impl Fn(Vec<PathBuf>) + Send + 'static,
     ) -> notify::Result<Self> {
+        Self::filtered(root, |_| true, on_change)
+    }
+
+    /// Like [`new`](Self::new), but changes `keep` rejects are dropped before they wake anyone.
+    pub fn filtered(
+        root: &Path,
+        keep: impl Fn(&Path) -> bool + Send + 'static,
+        on_change: impl Fn(Vec<PathBuf>) + Send + 'static,
+    ) -> notify::Result<Self> {
         let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
         let everything = root.to_path_buf();
         let mut inner =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 let paths = match event {
-                    Ok(event) if !event.need_rescan() => event.paths,
+                    Ok(event) if !event.need_rescan() => {
+                        event.paths.into_iter().filter(|p| keep(p)).collect()
+                    }
                     _ => vec![everything.clone()],
                 };
-                let _ = tx.send(paths);
+                if !paths.is_empty() {
+                    let _ = tx.send(paths);
+                }
             })?;
         inner.watch(root, RecursiveMode::Recursive)?;
         std::thread::Builder::new()

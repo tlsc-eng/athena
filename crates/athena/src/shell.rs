@@ -545,7 +545,7 @@ impl Shell {
                 let main = self
                     .worktree_main(&project.root)
                     .filter(|m| self.workspace.projects.iter().any(|p| p.root == *m));
-                let root = match &main {
+                let mut root = match &main {
                     Some(main) => format!(
                         "{} — worktree of {}",
                         project.root.display(),
@@ -553,6 +553,9 @@ impl Shell {
                     ),
                     None => project.root.display().to_string(),
                 };
+                if let Some(caption) = self.git_caption(&project.root) {
+                    root = format!("{root}\n{caption}");
+                }
                 let group = format!("rail-item-{i}");
                 let drag = ProjectDrag {
                     root: project.root.clone(),
