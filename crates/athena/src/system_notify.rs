@@ -66,7 +66,7 @@ mod mac {
         }
     }
 
-    fn bundled() -> bool {
+    pub fn bundled() -> bool {
         NSBundle::mainBundle().bundleIdentifier().is_some()
     }
 
@@ -138,6 +138,14 @@ pub fn init(clicks: async_channel::Sender<u64>) {
     let _ = CLICKS.set(clicks);
     #[cfg(target_os = "macos")]
     mac::init();
+}
+
+/// Whether `post` can show a banner; a binary run outside the app bundle cannot.
+pub fn available() -> bool {
+    #[cfg(target_os = "macos")]
+    return mac::bundled();
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 pub fn post(id: u64, title: &str, body: &str) {

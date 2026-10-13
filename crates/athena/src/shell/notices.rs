@@ -284,14 +284,14 @@ impl Shell {
             if let Some(ItemView::Terminal(view)) = &view {
                 view.update(cx, |v, cx| v.mark_attention(cx));
             }
-            if window.is_window_active() {
-                self.show_toast(notification.id, None, TOAST_FOR, cx);
-            } else {
+            if crate::system_notify::available() {
                 let (title, body) = describe(
                     &notification.kind,
                     self.project_name(&notification.project).as_deref(),
                 );
                 crate::system_notify::post(notification.id, &title, &body);
+            } else {
+                self.show_toast(notification.id, None, TOAST_FOR, cx);
             }
         }
         self.notices.borrow_mut().push(notification);
@@ -616,6 +616,25 @@ impl Shell {
                                     .text_color(t.color.accent)
                                     .child(label)
                             })),
+                    )
+                    .child(
+                        div()
+                            .id(("toast-close", id))
+                            .flex_none()
+                            .m(t.ui(8.))
+                            .size(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(t.shape.radius_control)
+                            .text_color(t.color.content_muted)
+                            .hover(|s| s.bg(t.color.surface_active).text_color(t.color.content))
+                            .tooltip(|_, cx| athena_ui::Tooltip::view("Dismiss", cx))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.dismiss_toast(id, cx);
+                            }))
+                            .child("×"),
                     );
                 match closing {
                     Some(_) => motion::animate_exit(
