@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use athena_editor::{
@@ -142,6 +142,27 @@ pub(super) fn resize_handle(
         )
 }
 
+const AWAKE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a terminal last told the sidebar about Claude.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct ClaudeMark {
+    pub state: Option<ClaudeState>,
+    /// Claude Code is the terminal's foreground program.
+    pub open: bool,
+    /// It, or a process under it, holds a power assertion that keeps the Mac awake.
+    pub awake: bool,
+}
+
+fn rank(state: Option<ClaudeState>) -> u8 {
+    match state {
+        None => 0,
+        Some(ClaudeState::Finished) => 1,
+        Some(ClaudeState::Running) => 2,
+        Some(ClaudeState::NeedsInput) => 3,
+    }
+}
+
 impl Shell {
     pub(super) fn active_root(&self) -> Option<PathBuf> {
         Some(self.workspace.active_project()?.root.clone())
@@ -188,7 +209,25 @@ impl Shell {
                         }
                         TerminalEvent::Changed => {
                             this.check_playwright_run(cx);
-                            this.notify_coalesced(cx);
+                            // Another project's tabs are off screen; only its sidebar marks show.
+                            let open = view.read(cx).is_claude();
+                            let before = this
+                                .claude_marks
+                                .get(&view.entity_id())
+                                .copied()
+                                .unwrap_or_default();
+                            let after = ClaudeMark {
+                                state: ItemView::Terminal(view.clone()).shown_claude_state(cx),
+                                open,
+                                awake: open && before.awake,
+                            };
+                            this.claude_marks.insert(view.entity_id(), after);
+                            let on_screen = this
+                                .terminal_key(&view)
+                                .is_some_and(|(root, _)| Some(root) == this.active_root());
+                            if on_screen || after != before {
+                                this.notify_coalesced(cx);
+                            }
                             return;
                         }
                         TerminalEvent::Seen => {
@@ -491,22 +530,93 @@ impl Shell {
         )
     }
 
-    /// Highest-priority Claude state across the tabs of the projects at `roots`, for the rail.
-    pub(super) fn project_claude_state(
-        &self,
-        roots: &[&Path],
-        cx: &Context<Self>,
-    ) -> Option<ClaudeState> {
-        let states = self
-            .items
-            .iter()
-            .filter(|((r, _), _)| roots.contains(&r.as_path()))
-            .filter_map(|(_, v)| v.shown_claude_state(cx));
-        states.max_by_key(|s| match s {
-            ClaudeState::NeedsInput => 2,
-            ClaudeState::Running => 1,
-            ClaudeState::Finished => 0,
-        })
+    /// What the rail shows of Claude across the projects at `roots`, from what their terminals
+    /// last reported, so drawing it reads no terminal.
+    pub(super) fn rail_claude(&self, roots: &[&Path]) -> ClaudeMark {
+        let mut out = ClaudeMark::default();
+        for ((root, _), view) in &self.items {
+            let ItemView::Terminal(t) = view else {
+                continue;
+            };
+            let Some(mark) = self.claude_marks.get(&t.entity_id()) else {
+                continue;
+            };
+            if roots.contains(&root.as_path()) {
+                if rank(mark.state) > rank(out.state) {
+                    out.state = mark.state;
+                }
+                out.open |= mark.open;
+                out.awake |= mark.awake;
+            }
+        }
+        out
+    }
+
+    /// Rechecks every few seconds, while Claude is open, which Claude terminals keep the Mac awake.
+    pub(super) fn poll_awake(&mut self, cx: &mut Context<Self>) {
+        self._awake_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AWAKE_POLL).await;
+                let Ok(claude) = this.update(cx, |this, cx| this.claude_pids(cx)) else {
+                    return;
+                };
+                if claude.is_empty() {
+                    continue;
+                }
+                // Claude Code runs `caffeinate` under itself, so a holder's ancestors are checked.
+                let awake: HashSet<i32> = cx
+                    .background_executor()
+                    .spawn(async {
+                        crate::power::assertion_holders()
+                            .into_iter()
+                            .flat_map(crate::procinfo::ancestry)
+                            .collect()
+                    })
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.note_awake(&claude, &awake, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn claude_pids(&self, cx: &gpui::App) -> Vec<(gpui::EntityId, i32)> {
+        self.items
+            .values()
+            .filter_map(|view| match view {
+                ItemView::Terminal(t)
+                    if self
+                        .claude_marks
+                        .get(&t.entity_id())
+                        .is_some_and(|m| m.open) =>
+                {
+                    Some((t.entity_id(), t.read(cx).foreground_pid()?))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn note_awake(
+        &mut self,
+        claude: &[(gpui::EntityId, i32)],
+        awake: &HashSet<i32>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut moved = false;
+        for (id, pid) in claude {
+            if let Some(mark) = self.claude_marks.get_mut(id) {
+                let now = awake.contains(pid);
+                moved |= mark.awake != now;
+                mark.awake = now;
+            }
+        }
+        if moved {
+            cx.notify();
+        }
     }
 
     /// Moves keyboard focus to the focused pane's active item.

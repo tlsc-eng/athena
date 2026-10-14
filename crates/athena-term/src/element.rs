@@ -691,6 +691,7 @@ impl Element for TerminalElement {
         let cursor_bounds = frame.cursor_bounds;
         self.view.update(cx, |view, _| {
             view.cursor_bounds = cursor_bounds;
+            view.painted = true;
             view.origin = bounds.origin;
         });
     }

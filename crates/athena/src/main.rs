@@ -5,6 +5,7 @@ mod cli;
 mod ide;
 mod keymap;
 mod mcp;
+mod power;
 mod procinfo;
 mod settings;
 mod shell;
