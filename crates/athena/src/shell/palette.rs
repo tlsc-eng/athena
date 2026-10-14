@@ -814,8 +814,12 @@ impl Shell {
             let _ = this.update(cx, |this, cx| {
                 let files = Rc::new(files);
                 let changed = this.palette_files.get(&root) != Some(&files);
+                let projects = &this.workspace.projects;
+                this.palette_files
+                    .retain(|r, _| projects.iter().any(|p| p.root == *r));
                 this.palette_files.insert(root.clone(), files.clone());
-                if changed {
+                let active = this.workspace.active_project().map(|p| &p.root) == Some(&root);
+                if changed && active {
                     this.show_palette_files(&root, &files, cx);
                 }
             });

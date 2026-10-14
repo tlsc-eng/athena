@@ -79,12 +79,13 @@ impl FileTree {
     /// Has every listing read again, e.g. after the window regains focus.
     pub fn invalidate(&mut self) {
         self.stale.extend(self.listings.keys().cloned());
+        self.stale.extend(self.reading.iter().cloned());
     }
 
     /// Has the listings a change to `path` can make stale read again: its folder's, and its own.
     pub fn forget(&mut self, path: &Path) {
         for dir in [Some(path), path.parent()].into_iter().flatten() {
-            if self.listings.contains_key(dir) {
+            if self.listings.contains_key(dir) || self.reading.contains(dir) {
                 self.stale.insert(dir.to_path_buf());
             }
         }
@@ -133,8 +134,12 @@ impl FileTree {
             && r == root
             && *e == edit
         {
-            let stale = self.stale.iter().filter(|d| d.starts_with(root));
-            for dir in stale.filter(|d| !self.reading.contains(*d)) {
+            let expanded = self.expanded.get(root);
+            let shown = |d: &&PathBuf| *d == root || expanded.is_some_and(|e| e.contains(*d));
+            for dir in self.stale.iter().filter(shown) {
+                if self.reading.contains(dir) {
+                    continue;
+                }
                 self.wanted.insert(dir.clone());
             }
             return rows.clone();

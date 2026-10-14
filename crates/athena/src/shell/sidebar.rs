@@ -257,8 +257,8 @@ fn reveal_line(scroll: &gpui::ScrollHandle, top: f32, height: f32) -> bool {
     } else {
         return true;
     };
-    let max = f32::from(scroll.max_offset().height);
-    scroll.set_offset(gpui::point(px(0.), px(-y.clamp(0., max))));
+    // Layout clamps to the content as it is now; folders a switch opened may have grown it.
+    scroll.set_offset(gpui::point(px(0.), px(-y.max(0.))));
     true
 }
 
@@ -612,6 +612,9 @@ impl Shell {
             let top = s * row as f32 * (row_h + gap);
             if reveal_line(&self.rail_scroll, top, s * row_h) {
                 self.rail_revealed = self.switch_count;
+            } else {
+                let shell = cx.entity_id();
+                cx.defer(move |cx| cx.notify(shell));
             }
         }
         let from_row = line(self.rail_from).or(active_row);

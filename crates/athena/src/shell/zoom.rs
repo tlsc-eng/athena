@@ -47,7 +47,8 @@ impl Shell {
         if cx.theme().ui_zoom() != self.workspace.ui.zoom_level {
             cx.global_mut::<Theme>()
                 .set_ui_zoom(self.workspace.ui.zoom_level);
-            cx.refresh_windows();
+            // A refresh asked for while drawing is dropped, so ask once this frame is done.
+            cx.defer(|cx| cx.refresh_windows());
         }
     }
 }
