@@ -223,13 +223,23 @@ fn awake_mark(t: &Theme, mark: ClaudeMark) -> Option<gpui::Div> {
     })
 }
 
-/// The tooltip line for what Claude is doing to sleep, if it is open.
-fn claude_line(mark: ClaudeMark) -> Option<&'static str> {
-    match mark {
-        ClaudeMark { awake: true, .. } => Some("Claude Code is keeping the Mac awake"),
-        ClaudeMark { open: true, .. } => Some("Claude Code is open"),
-        _ => None,
+/// The tooltip lines for what Claude is doing, the most urgent session first, and for sleep.
+fn claude_lines(mark: ClaudeMark) -> Option<String> {
+    let state = match mark.state {
+        Some(ClaudeState::NeedsInput) => "Claude needs input",
+        Some(ClaudeState::Running) => "Claude is running",
+        Some(ClaudeState::Finished) => "Claude is done",
+        None if mark.open => "Claude Code is open",
+        None => return None,
+    };
+    let mut lines = match mark.sessions {
+        0 | 1 => state.to_string(),
+        n => format!("{state} ({n} sessions)"),
+    };
+    if mark.awake {
+        lines.push_str("\nKeeping the Mac awake");
     }
+    Some(lines)
 }
 
 fn initials(name: &str) -> String {
@@ -761,7 +771,7 @@ impl Shell {
             folder_label(path),
             if projects == 1 { "" } else { "s" }
         );
-        if let Some(line) = claude_line(mark) {
+        if let Some(line) = claude_lines(mark) {
             tip = format!("{tip}\n{line}");
         }
         let fits = groups.clone();
@@ -933,7 +943,7 @@ impl Shell {
             );
         }
         let mark = self.rail_claude(&claude_roots);
-        if let Some(line) = claude_line(mark) {
+        if let Some(line) = claude_lines(mark) {
             tip = format!("{tip}\n{line}");
         }
         let claude = claude_dot(&t, mark);
@@ -1142,6 +1152,25 @@ mod tests {
             Some(6),
         ];
         assert_eq!(open_folder_spans(&rows, &lines), [(0, 0..5), (1, 2..4)]);
+    }
+
+    #[test]
+    fn the_tooltip_names_the_most_urgent_state_and_how_many_sessions() {
+        let mark = |state, sessions, awake| ClaudeMark {
+            state,
+            open: true,
+            awake,
+            sessions,
+        };
+        assert_eq!(
+            claude_lines(mark(Some(ClaudeState::NeedsInput), 3, true)).as_deref(),
+            Some("Claude needs input (3 sessions)\nKeeping the Mac awake")
+        );
+        assert_eq!(
+            claude_lines(mark(None, 1, false)).as_deref(),
+            Some("Claude Code is open")
+        );
+        assert_eq!(claude_lines(ClaudeMark::default()), None);
     }
 
     #[test]

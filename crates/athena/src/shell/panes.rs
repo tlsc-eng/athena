@@ -152,6 +152,8 @@ pub(super) struct ClaudeMark {
     pub open: bool,
     /// It, or a process under it, holds a power assertion that keeps the Mac awake.
     pub awake: bool,
+    /// How many Claude sessions a sidebar row's mark sums up.
+    pub sessions: usize,
 }
 
 fn rank(state: Option<ClaudeState>) -> u8 {
@@ -220,6 +222,7 @@ impl Shell {
                                 state: ItemView::Terminal(view.clone()).shown_claude_state(cx),
                                 open,
                                 awake: open && before.awake,
+                                ..ClaudeMark::default()
                             };
                             this.claude_marks.insert(view.entity_id(), after);
                             let on_screen = this
@@ -547,6 +550,7 @@ impl Shell {
                 }
                 out.open |= mark.open;
                 out.awake |= mark.awake;
+                out.sessions += usize::from(mark.open || mark.state.is_some());
             }
         }
         out
