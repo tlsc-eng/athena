@@ -632,14 +632,18 @@ information rather than triggering the install dialog).
   question or a plan, and **done** when it finishes, until you look at the tab. A session whose
   background agents are still working stays **running** until they report back and it finishes.
   Athena also posts a macOS banner when a session needs you or finishes, unless you are looking at
-  that tab (a run from outside the app bundle shows a toast instead). Opening the tab resolves
+  that tab (with banners turned off in System Settings, or from outside the app bundle, it shows a
+  toast in the window instead). **Next Claude Session Needing You** (`cmd-alt-j`, View menu,
+  palette) goes to the next session waiting for an answer, or the next that has finished. Opening the tab resolves
   its notifications: they are marked read, the Dock badge drops, and their banners leave
   Notification Center. This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
   them a tab shows only **running** while Claude draws, and nothing once it stops.
 - The project rail shows the same state as a filled square, and a hollow square for a project
   with a Claude session open and nothing to report. A small cup marks a project whose Claude is keeping
   the Mac awake: Claude Code runs `caffeinate` while it works, so Athena checks the Mac's power
-  assertions every 5 seconds while any Claude is open. The project's tooltip says which.
+  assertions every 5 seconds while any Claude is open. The project's tooltip spells out the
+  state (needs input, running, done) and how many sessions a folder or collapsed repository
+  stands for.
 - An MCP server, `athena mcp-stdio`, answers from the running app (see below).
 - Each file Claude edits in an Athena terminal refreshes its open diffs; the **Claude** drawer tab
   opens the file's changes since before the session's first edit to it (see
@@ -680,12 +684,16 @@ information rather than triggering the install dialog).
   projects without opening it. Thin dividers set off folders and repositories with worktrees from lone projects. Right-click a
   folder to rename, move or remove it (its projects stay, moving up a level). A linked worktree
   always sits in its repository's folder. Folders and which ones are collapsed are saved per
-  window; a build older than 0.12 shows the projects as one flat list.
+  window; a build older than 0.12 shows the projects as one flat list. The palette can also
+  collapse or expand the active project's folder, or collapse every folder. **Switch Project…**
+  (`ctrl-cmd-p`) finds a project by name, those Claude needs first. After a switch the sidebar
+  scrolls to the active project.
 - A repository's worktrees start collapsed under it: its row shows ▸ and how many worktrees it
   hides, and its Claude dot speaks for them; the active worktree stays in view. Click ▸ at the end
   of the row in the wide sidebar, or right-click it and pick **Expand Worktrees**, to show them.
-  The narrow rail hides the worktrees too, with the count on the repository's square. It is saved
-  per project.
+  The narrow rail hides the worktrees too, with the count on the repository's square; click the
+  count to show them. The palette's **Collapse or expand the project's worktrees** does the same
+  from the keyboard. It is saved per project.
 - Drag a project in the rail to reorder it: dropped between two projects it joins their folder,
   dropped on a folder it goes last in it, and dropped on "+" it leaves every folder and goes to
   the end. Folders drag the same way. A repository carries its linked worktrees along, and a
@@ -935,9 +943,10 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-o` | Open project |
 | `cmd-shift-n` | New window |
 | `cmd-shift-w` | Close project |
-| `cmd-alt-[` | Previous project |
-| `cmd-alt-]` | Next project |
-| `cmd-alt-1…9` | Select project 1–9 |
+| `cmd-alt-[` | Previous project (collapsed folders stay closed) |
+| `cmd-alt-]` | Next project (collapsed folders stay closed) |
+| `cmd-alt-1…9` | Select the 1st–9th project the sidebar shows |
+| `ctrl-cmd-p` | Switch project by name |
 | `cmd-t` | New terminal |
 | `cmd-shift-t` | New Claude session |
 | `cmd-w` | Close tab (with a panel terminal focused: close that terminal) |
@@ -973,6 +982,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `ctrl--` | Go back |
 | `ctrl-shift--` | Go forward (also bound as `ctrl-_`, which is what macOS reports for it) |
 | `cmd-j` | Notifications |
+| `cmd-alt-j` | Next Claude session needing you |
 | `ctrl-cmd-f` | Toggle full screen |
 | `cmd-m` | Minimize |
 | `cmd-h` | Hide Athena |
@@ -1410,7 +1420,7 @@ cargo build --release --locked -p athena -p athena-mux
 ```
 
 macOS banners and the Dock badge only work from the bundled app; a `cargo run` build shows
-notifications inside the window.
+notifications inside the window, as the app does when banners are turned off.
 
 The checks CI runs:
 
