@@ -779,12 +779,12 @@ impl Render for LargeFileView {
             );
         }
         let viewport = self.viewport.clone();
-        let entity = cx.entity();
         let measure = canvas(
-            move |bounds, _, cx| {
+            move |bounds, window, _| {
                 if viewport.get() != bounds {
                     viewport.set(bounds);
-                    entity.update(cx, |_, cx| cx.notify());
+                    // A notify during prepaint asks for no new frame.
+                    window.request_animation_frame();
                 }
             },
             |_, _, _, _| {},

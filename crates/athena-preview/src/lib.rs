@@ -211,6 +211,7 @@ impl PreviewView {
             if let Some(web) = &self.web {
                 web.load(&self.url);
                 self.loading = true;
+                window.request_animation_frame();
             }
         }
         if let Some(web) = &self.web {

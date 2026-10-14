@@ -384,7 +384,7 @@ impl Shell {
                 )),
             Some(item) => div()
                 .size_full()
-                .children(self.item_view(&root, item, cx).map(|v| v.element())),
+                .children(self.item_view(&root, item, cx).map(|v| v.element(false))),
         };
         let list = (panel.terminals.len() > 1).then(|| {
             let rows: Vec<AnyElement> = panel

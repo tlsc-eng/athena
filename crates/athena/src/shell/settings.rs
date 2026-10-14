@@ -296,6 +296,7 @@ impl Shell {
             self.workspace.ui.font_zoom = zoom_for(size);
             cx.global_mut::<Theme>()
                 .set_code_zoom(self.workspace.ui.font_zoom);
+            cx.refresh_windows();
         }
         let editors: Vec<Entity<EditorView>> = self
             .items

@@ -1794,17 +1794,25 @@ impl Shell {
             .child(fades_stale);
 
         let active = pane.active_item().cloned();
+        let (switches, fresh) = self.content_switches.fade(root, pane_id, t.motion.fast);
+        // Reused paint keeps the opacity it was drawn with, so content mid-fade is drawn afresh.
+        let fading = fresh
+            || self.content_switch.1.running(t.motion.base)
+            || self.entering == Some(pane_id)
+            || self
+                .pane_opening
+                .is_some_and(|(p, o)| p == pane_id && o.running(t.motion.base))
+            || self.leaving.contains_key(&(root.to_path_buf(), pane_id));
         let content: AnyElement = match active
             .as_ref()
             .and_then(|item| self.item_view(root, item, cx))
         {
-            Some(view) => view.element(),
+            Some(view) => view.element(!fading),
             None => div().into_any_element(),
         };
         let drop_layer = cx
             .has_active_drag()
             .then(|| self.render_drop_layer(pane_id, &t, cx));
-        let (switches, fresh) = self.content_switches.fade(root, pane_id, t.motion.fast);
         // Opacity only: moving or resizing the box would resize the shell mid-animation.
         let content = motion::animate_enter(
             t.motion.reduced,

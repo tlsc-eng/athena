@@ -3,7 +3,8 @@ use std::path::Path;
 use athena_editor::{DiffView, EditorView, ImageView, LargeFileView};
 use athena_preview::{DocView, PreviewView};
 use athena_term::{ClaudeState, TerminalView};
-use gpui::{AnyElement, App, Entity, FocusHandle, Focusable, IntoElement};
+use gpui::{AnyElement, AnyView, App, Entity, FocusHandle, Focusable, IntoElement, Render};
+use gpui::{StyleRefinement, Styled};
 
 use super::settings_ui::SettingsView;
 use super::shortcuts_ui::ShortcutsView;
@@ -38,17 +39,26 @@ impl ItemView {
         }
     }
 
-    pub fn element(&self) -> AnyElement {
+    /// `cached` reuses the view's last frame until it notifies; terminals always draw.
+    pub fn element(&self, cached: bool) -> AnyElement {
+        fn view<V: Render>(v: &Entity<V>, cached: bool) -> AnyElement {
+            let view = AnyView::from(v.clone());
+            match cached {
+                true => view.cached(StyleRefinement::default().size_full()),
+                false => view,
+            }
+            .into_any_element()
+        }
         match self {
             Self::Terminal(v) => v.clone().into_any_element(),
-            Self::Editor(v) => v.clone().into_any_element(),
-            Self::Image(v) => v.clone().into_any_element(),
-            Self::Large(v) => v.clone().into_any_element(),
-            Self::Preview(v) => v.clone().into_any_element(),
-            Self::Doc(v) => v.clone().into_any_element(),
-            Self::Diff(v) => v.clone().into_any_element(),
-            Self::Settings(v) => v.clone().into_any_element(),
-            Self::Shortcuts(v) => v.clone().into_any_element(),
+            Self::Editor(v) => view(v, cached),
+            Self::Image(v) => view(v, cached),
+            Self::Large(v) => view(v, cached),
+            Self::Preview(v) => view(v, cached),
+            Self::Doc(v) => view(v, cached),
+            Self::Diff(v) => view(v, cached),
+            Self::Settings(v) => view(v, cached),
+            Self::Shortcuts(v) => view(v, cached),
         }
     }
 

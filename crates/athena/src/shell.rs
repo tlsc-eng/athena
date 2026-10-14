@@ -165,6 +165,8 @@ pub struct Shell {
     /// The project or folder the open folder picker moves or renames.
     sidebar_subject: Option<sidebar::Subject>,
     switch_count: u64,
+    /// The switch whose fade-in the content is playing, and since when.
+    content_switch: (u64, motion::Opening),
     focus_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -196,6 +198,7 @@ impl Shell {
                     let reduced = motion::system_reduce_motion();
                     if cx.theme().motion.reduced != reduced {
                         cx.global_mut::<athena_ui::Theme>().motion.reduced = reduced;
+                        cx.refresh_windows();
                     }
                 }
             }),
@@ -273,6 +276,7 @@ impl Shell {
             claude_marks: HashMap::new(),
             _awake_poll: None,
             switch_count: 0,
+            content_switch: (0, motion::Opening::now()),
             focus_pending: true,
             _subscriptions: subscriptions,
         };
@@ -543,6 +547,9 @@ impl Shell {
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
+        if self.content_switch.0 != self.switch_count {
+            self.content_switch = (self.switch_count, motion::Opening::now());
+        }
         let body = match self.workspace.active {
             Some(_) => div()
                 .size_full()

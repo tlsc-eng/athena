@@ -494,6 +494,7 @@ impl Element for EditorElement {
             (numbers_right, fold_column, text_left)
         };
 
+        let scroll_before = self.view.read(cx).scroll;
         // Keep the cursor's row on screen after edits and keyboard moves.
         self.view.update(cx, |view, _| {
             view.viewport = bounds.size;
@@ -1088,9 +1089,24 @@ impl Element for EditorElement {
             },
         );
 
-        let stored = rows.into_iter().map(|(_, _, r)| r).collect();
+        let stored: Vec<LayoutRow> = rows.into_iter().map(|(_, _, r)| r).collect();
+        let ends = |rows: &[LayoutRow]| {
+            let end = |r: &LayoutRow| (r.row, r.chars.start);
+            (rows.first().map(end), rows.last().map(end))
+        };
         self.view.update(cx, |view, _| {
             view.scroll.x = scroll_x;
+            // Popups, lenses and inlay requests read this layout at render, which came first.
+            let moved = view.scroll != scroll_before
+                || view.layout.as_ref().is_none_or(|old| {
+                    old.origin != bounds.origin
+                        || old.text_left != text_left
+                        || old.line_height != lh
+                        || ends(&old.rows) != ends(&stored)
+                });
+            if moved {
+                window.request_animation_frame();
+            }
             view.autoscroll = false;
             view.layout = Some(EditorLayout {
                 origin: bounds.origin,

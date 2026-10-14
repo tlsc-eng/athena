@@ -274,6 +274,7 @@ impl SettingsView {
     fn reset(&mut self, i: usize, cx: &mut Context<Self>) {
         self.typing.remove(&i);
         self.errors.remove(&i);
+        cx.notify();
         cx.emit(SettingsEvent::Unset {
             scope: self.scope,
             keys: SETTINGS[i].keys,
