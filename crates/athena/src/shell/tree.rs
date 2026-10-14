@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use athena_ui::motion::{self, Closing, Opening};
 use athena_ui::{ActiveTheme, TextInput};
@@ -18,7 +19,7 @@ use super::panes::{DIVIDER_HIT, Drag, clamp_tree_width, resize_handle};
 const ROW_HEIGHT: f32 = 24.;
 const INDENT: f32 = 12.;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct DirEntry {
     name: String,
     path: PathBuf,
@@ -53,11 +54,21 @@ pub(super) struct Edit {
     pub _subscriptions: Vec<Subscription>,
 }
 
+/// The entry an inline edit is for, and what it does.
+type EditKey = (PathBuf, EditKind);
+
 /// Expanded folders per project and a cache of folder listings.
 #[derive(Default)]
 pub(super) struct FileTree {
     expanded: HashMap<PathBuf, HashSet<PathBuf>>,
     listings: HashMap<PathBuf, Vec<DirEntry>>,
+    /// Listings to read again; each keeps showing until its new one arrives.
+    stale: HashSet<PathBuf>,
+    /// Folders a render found missing or stale, for the next background read.
+    wanted: HashSet<PathBuf>,
+    reading: HashSet<PathBuf>,
+    /// The last rows built, for the root and inline edit they were built with.
+    shown: Option<(PathBuf, Option<EditKey>, Rc<Vec<Row>>)>,
     pub editing: Option<Edit>,
     scroll: UniformListScrollHandle,
     /// A path to bring into view at the next render.
@@ -65,16 +76,17 @@ pub(super) struct FileTree {
 }
 
 impl FileTree {
-    /// Drops cached listings so the next render re-reads the disk (e.g. after the window regains focus).
+    /// Has every listing read again, e.g. after the window regains focus.
     pub fn invalidate(&mut self) {
-        self.listings.clear();
+        self.stale.extend(self.listings.keys().cloned());
     }
 
-    /// Drops the listings a change to `path` can make stale: its folder's, and its own if a folder.
+    /// Has the listings a change to `path` can make stale read again: its folder's, and its own.
     pub fn forget(&mut self, path: &Path) {
-        self.listings.remove(path);
-        if let Some(parent) = path.parent() {
-            self.listings.remove(parent);
+        for dir in [Some(path), path.parent()].into_iter().flatten() {
+            if self.listings.contains_key(dir) {
+                self.stale.insert(dir.to_path_buf());
+            }
         }
     }
 
@@ -95,20 +107,39 @@ impl FileTree {
             }
             set.insert(d.to_path_buf());
         }
+        self.shown = None;
     }
 
     pub fn scroll_to(&mut self, path: &Path) {
         self.reveal = Some(path.to_path_buf());
     }
 
+    /// What is known of `dir`, asking for a read when that is nothing or stale.
     fn listing(&mut self, dir: &Path) -> &[DirEntry] {
-        self.listings
-            .entry(dir.to_path_buf())
-            .or_insert_with(|| read_dir(dir))
+        let known = self.listings.get(dir);
+        if (known.is_none() || self.stale.contains(dir)) && !self.reading.contains(dir) {
+            self.wanted.insert(dir.to_path_buf());
+        }
+        self.listings.get(dir).map_or(&[], Vec::as_slice)
     }
 
-    fn rows(&mut self, root: &Path) -> Vec<Row> {
-        let expanded = self.expanded.get(root).cloned().unwrap_or_default();
+    fn rows(&mut self, root: &Path) -> Rc<Vec<Row>> {
+        let edit = self
+            .editing
+            .as_ref()
+            .filter(|e| e.root == root)
+            .map(|e| (e.target.clone(), e.kind));
+        if let Some((r, e, rows)) = &self.shown
+            && r == root
+            && *e == edit
+        {
+            let stale = self.stale.iter().filter(|d| d.starts_with(root));
+            for dir in stale.filter(|d| !self.reading.contains(*d)) {
+                self.wanted.insert(dir.clone());
+            }
+            return rows.clone();
+        }
+        let expanded = self.expanded.remove(root).unwrap_or_default();
         let mut rows = Vec::new();
         let mut stack: Vec<(usize, DirEntry)> = self
             .listing(root)
@@ -130,9 +161,12 @@ impl FileTree {
                 edit: false,
             });
         }
-        if let Some(edit) = self.editing.as_ref().filter(|e| e.root == root) {
-            splice_edit(&mut rows, root, edit.target.as_path(), edit.kind);
+        self.expanded.insert(root.to_path_buf(), expanded);
+        if let Some((target, kind)) = &edit {
+            splice_edit(&mut rows, root, target, *kind);
         }
+        let rows = Rc::new(rows);
+        self.shown = Some((root.to_path_buf(), edit, rows.clone()));
         rows
     }
 
@@ -140,8 +174,11 @@ impl FileTree {
         let set = self.expanded.entry(root.to_path_buf()).or_default();
         if !set.remove(dir) {
             set.insert(dir.to_path_buf());
-            self.listings.remove(dir);
+            if self.listings.contains_key(dir) {
+                self.stale.insert(dir.to_path_buf());
+            }
         }
+        self.shown = None;
     }
 }
 
@@ -236,12 +273,54 @@ impl Shell {
         cx.notify();
     }
 
+    /// Reads the folders the tree asked for off the main thread, then shows them.
+    fn read_tree_listings(&mut self, cx: &mut Context<Self>) {
+        if self.tree.wanted.is_empty() {
+            return;
+        }
+        let dirs: Vec<PathBuf> = self.tree.wanted.drain().collect();
+        for dir in &dirs {
+            self.tree.stale.remove(dir);
+            self.tree.reading.insert(dir.clone());
+        }
+        cx.spawn(async move |this, cx| {
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    dirs.into_iter()
+                        .map(|dir| {
+                            let listing = read_dir(&dir);
+                            (dir, listing)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let tree = &mut this.tree;
+                let mut changed = false;
+                for (dir, listing) in read {
+                    tree.reading.remove(&dir);
+                    if tree.listings.get(&dir) != Some(&listing) {
+                        tree.listings.insert(dir, listing);
+                        changed = true;
+                    }
+                }
+                if changed || tree.reading.is_empty() {
+                    tree.shown = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.workspace.ui.tree_visible && self.tree_closing.is_none() {
             return None;
         }
         let root = self.workspace.active_project()?.root.clone();
         let rows = self.tree.rows(&root);
+        self.read_tree_listings(cx);
         let open = self.open_editor_path();
         let dirty: HashSet<PathBuf> = self
             .items
@@ -255,7 +334,8 @@ impl Shell {
         let t = cx.theme().clone();
         let git_theme = t.clone();
         let count = rows.len();
-        if let Some(path) = self.tree.reveal.take()
+        let pending = !self.tree.reading.is_empty();
+        if let Some(path) = self.tree.reveal.take_if(|_| !pending)
             && let Some(ix) = rows.iter().position(|r| r.entry.path == path)
         {
             // A new entry's field sits just below the folder it goes in.
