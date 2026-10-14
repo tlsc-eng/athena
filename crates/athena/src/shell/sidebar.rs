@@ -242,6 +242,26 @@ fn claude_lines(mark: ClaudeMark) -> Option<String> {
     Some(lines)
 }
 
+/// Scrolls the rail the least that shows the line from `top` down `height`; false before the
+/// rail has been laid out.
+fn reveal_line(scroll: &gpui::ScrollHandle, top: f32, height: f32) -> bool {
+    let view = f32::from(scroll.bounds().size.height);
+    if view <= 0. {
+        return false;
+    }
+    let shown = -f32::from(scroll.offset().y);
+    let y = if top < shown {
+        top
+    } else if top + height > shown + view {
+        top + height - view
+    } else {
+        return true;
+    };
+    let max = f32::from(scroll.max_offset().height);
+    scroll.set_offset(gpui::point(px(0.), px(-y.clamp(0., max))));
+    true
+}
+
 fn fold_tip(folded: bool, worktrees: usize) -> String {
     match (folded, worktrees) {
         (true, 1) => "Show 1 worktree".into(),
@@ -478,7 +498,7 @@ impl Shell {
         self.open_context_menu(position, items, window, cx);
     }
 
-    pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let wide = self.workspace.ui.sidebar_expanded;
         let (row_h, gap) = if wide {
@@ -539,6 +559,15 @@ impl Shell {
         let line =
             |index: usize| row_of(&rows, &self.workspace, index).and_then(|r| line_of_row[r]);
         let active_row = self.workspace.active.and_then(line);
+        if self.rail_revealed != self.switch_count
+            && let Some(row) = active_row
+        {
+            let s = t.ui_scale;
+            let top = s * row as f32 * (row_h + gap);
+            if reveal_line(&self.rail_scroll, top, s * row_h) {
+                self.rail_revealed = self.switch_count;
+            }
+        }
         let from_row = line(self.rail_from).or(active_row);
         let indicator = active_row.map(|to| {
             let s = t.ui_scale;
@@ -664,6 +693,7 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.rail_scroll)
                     .child(
                         div()
                             .relative()

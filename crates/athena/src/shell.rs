@@ -164,6 +164,9 @@ pub struct Shell {
     claude_marks: HashMap<gpui::EntityId, panes::ClaudeMark>,
     _awake_poll: Option<Task<()>>,
     rail_from: usize,
+    rail_scroll: gpui::ScrollHandle,
+    /// The switch the rail last scrolled the active project into view for.
+    rail_revealed: u64,
     /// The project or folder the open folder picker moves or renames.
     sidebar_subject: Option<sidebar::Subject>,
     switch_count: u64,
@@ -217,6 +220,8 @@ impl Shell {
         let debug = debug::DebugState::load(&windows::workspace_path(cx), &roots);
         let mut shell = Self {
             rail_from: workspace.active.unwrap_or(0),
+            rail_scroll: gpui::ScrollHandle::new(),
+            rail_revealed: u64::MAX,
             sidebar_subject: None,
             workspace,
             window_handle: window.window_handle(),
