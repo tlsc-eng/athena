@@ -313,6 +313,20 @@ impl Shell {
         }
     }
 
+    /// The projects the sidebar shows a row for, top to bottom, which ⌥⌘1…9 count.
+    pub(super) fn shown_projects(&self) -> Vec<usize> {
+        let groups = self.rail_groups();
+        self.workspace
+            .sidebar_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::Project { index, .. } => Some(index),
+                SidebarRow::Folder { .. } => None,
+            })
+            .filter(|&index| !self.worktree_hidden(index, &groups))
+            .collect()
+    }
+
     /// A linked worktree the sidebar leaves out, its repository collapsed and it not active.
     fn worktree_hidden(&self, index: usize, groups: &RailGroups) -> bool {
         let root = &self.workspace.projects[index].root;

@@ -417,10 +417,11 @@ impl Shell {
         self.close_active_project(window, cx);
     }
 
+    /// Steps through every project, leaving collapsed folders closed.
     fn cycle(&mut self, step: isize, cx: &mut Context<Self>) {
         let len = self.workspace.projects.len() as isize;
         if let Some(active) = self.workspace.active {
-            self.switch_to((active as isize + step).rem_euclid(len) as usize, cx);
+            self.switch((active as isize + step).rem_euclid(len) as usize, false, cx);
         }
     }
 
@@ -665,7 +666,11 @@ impl Render for Shell {
             .on_action(cx.listener(Self::close_project))
             .on_action(cx.listener(|this, _: &PrevProject, _, cx| this.cycle(-1, cx)))
             .on_action(cx.listener(|this, _: &NextProject, _, cx| this.cycle(1, cx)))
-            .on_action(cx.listener(|this, a: &SelectProject, _, cx| this.switch_to(a.0, cx)))
+            .on_action(cx.listener(|this, a: &SelectProject, _, cx| {
+                if let Some(&index) = this.shown_projects().get(a.0) {
+                    this.switch_to(index, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &Quit, w, cx| this.quit(w, cx)))
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
