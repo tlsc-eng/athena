@@ -188,7 +188,16 @@ impl Shell {
                         }
                         TerminalEvent::Changed => {
                             this.check_playwright_run(cx);
-                            this.notify_coalesced(cx);
+                            // Another project's tabs are off screen; only its sidebar dot shows.
+                            let shown = ItemView::Terminal(view.clone()).shown_claude_state(cx);
+                            let dot_moved =
+                                this.rail_claude.insert(view.entity_id(), shown) != Some(shown);
+                            let on_screen = this
+                                .terminal_key(&view)
+                                .is_some_and(|(root, _)| Some(root) == this.active_root());
+                            if on_screen || dot_moved {
+                                this.notify_coalesced(cx);
+                            }
                             return;
                         }
                         TerminalEvent::Seen => {

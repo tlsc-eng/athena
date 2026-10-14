@@ -185,6 +185,8 @@ pub struct TerminalView {
     pub(crate) focus: FocusHandle,
     pub(crate) marked: String,
     pub(crate) cursor_bounds: Option<Bounds<Pixels>>,
+    /// Painted since output last asked for a frame; a hidden terminal's output redraws nothing.
+    pub(crate) painted: bool,
     pub(crate) origin: gpui::Point<Pixels>,
     pub(crate) hovered_link: Option<Link>,
     pub(crate) rows: RowCache,
@@ -231,6 +233,7 @@ impl TerminalView {
             focus: cx.focus_handle(),
             marked: String::new(),
             cursor_bounds: None,
+            painted: false,
             grid: GridSize {
                 cols: 80,
                 rows: 24,
@@ -512,7 +515,11 @@ impl TerminalView {
                     for msg in batch {
                         this.on_message(msg, cx);
                     }
-                    cx.notify();
+                    // The shell reads every terminal for its badges, so one notify redraws the
+                    // whole window; a terminal off screen picks its output up when next shown.
+                    if std::mem::take(&mut this.painted) {
+                        cx.notify();
+                    }
                 });
                 if alive.is_err() {
                     return;
