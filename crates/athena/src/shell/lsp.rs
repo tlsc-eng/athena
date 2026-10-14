@@ -2267,6 +2267,19 @@ impl Shell {
             .collect()
     }
 
+    /// Every diagnostic published for the project at `root`, in no order.
+    pub(super) fn lsp_diagnostics_in<'a>(
+        &'a self,
+        root: &'a Path,
+    ) -> impl Iterator<Item = &'a Diagnostic> + 'a {
+        self.lsp.diagnostics.values().flat_map(move |published| {
+            published
+                .iter()
+                .filter(move |((r, _), _)| r == root)
+                .flat_map(|(_, list)| list)
+        })
+    }
+
     /// Whether a language server has started for the active project.
     pub(super) fn lsp_running_for_active(&self) -> bool {
         let root = self.active_root();

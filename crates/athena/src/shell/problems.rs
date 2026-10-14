@@ -143,13 +143,15 @@ impl Shell {
     /// Error, warning and information counts in the active project.
     fn problem_counts(&self) -> (usize, usize, usize) {
         let mut counts = (0, 0, 0);
-        for (_, list) in self.project_problems() {
-            for p in list {
-                match p.severity {
-                    Severity::Error => counts.0 += 1,
-                    Severity::Warning => counts.1 += 1,
-                    _ => counts.2 += 1,
-                }
+        let Some(root) = self.active_root() else {
+            return counts;
+        };
+        for d in self.lsp_diagnostics_in(&root) {
+            match d.severity {
+                Severity::Error => counts.0 += 1,
+                Severity::Warning => counts.1 += 1,
+                Severity::Information => counts.2 += 1,
+                Severity::Hint => {}
             }
         }
         counts
