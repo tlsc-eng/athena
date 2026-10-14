@@ -2,9 +2,13 @@
 //! identifier, so `cargo run` builds keep to in-app notices.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Notification ids from banners the user clicked, read by the shell.
 static CLICKS: OnceLock<async_channel::Sender<u64>> = OnceLock::new();
+
+/// Whether macOS last said Athena may show banners; until it answers, assume so.
+static ALLOWED: AtomicBool = AtomicBool::new(true);
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -20,7 +24,8 @@ mod mac {
         UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
 
-    use super::CLICKS;
+    use super::{ALLOWED, CLICKS};
+    use std::sync::atomic::Ordering;
 
     define_class!(
         #[unsafe(super(NSObject))]
@@ -79,17 +84,27 @@ mod mac {
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         // The center holds its delegate weakly; this one lives for the whole process.
         std::mem::forget(delegate);
+        ask();
+    }
+
+    /// Asks for permission, which prompts only the first time and otherwise reports the setting.
+    pub fn ask() {
+        if !bundled() {
+            return;
+        }
         let done = RcBlock::new(|granted: Bool, error: *mut NSError| {
-            if !granted.as_bool() {
+            let was = ALLOWED.swap(granted.as_bool(), Ordering::Relaxed);
+            if was && !granted.as_bool() {
                 tracing::warn!("notifications not allowed: {}", describe(error));
             }
         });
-        center.requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert
-                | UNAuthorizationOptions::Sound
-                | UNAuthorizationOptions::Badge,
-            &done,
-        );
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Alert
+                    | UNAuthorizationOptions::Sound
+                    | UNAuthorizationOptions::Badge,
+                &done,
+            );
     }
 
     pub fn post(id: u64, title: &str, body: &str) {
@@ -152,10 +167,16 @@ pub fn init(clicks: async_channel::Sender<u64>) {
     mac::init();
 }
 
-/// Whether `post` can show a banner; a binary run outside the app bundle cannot.
+/// Rereads whether banners are allowed, which System Settings can change at any time.
+pub fn recheck() {
+    #[cfg(target_os = "macos")]
+    mac::ask();
+}
+
+/// Whether `post` can show a banner: not outside the app bundle, nor once banners are denied.
 pub fn available() -> bool {
     #[cfg(target_os = "macos")]
-    return mac::bundled();
+    return mac::bundled() && ALLOWED.load(Ordering::Relaxed);
     #[cfg(not(target_os = "macos"))]
     false
 }

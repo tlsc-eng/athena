@@ -201,6 +201,7 @@ impl Shell {
                     // Claude Code hears this window's selection now, even if it has not moved.
                     this.ide_selection_stale();
                     this.tree.invalidate();
+                    crate::system_notify::recheck();
                     this.reload_changed_files(cx);
                     this.git_kick(cx);
                     let reduced = motion::system_reduce_motion();
