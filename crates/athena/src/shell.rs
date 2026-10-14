@@ -158,8 +158,9 @@ pub struct Shell {
     /// Unsaved files were settled by the Save question, so quitting must not keep copies of them.
     quit_settled: bool,
     redraw_pending: Option<Task<()>>,
-    /// The Claude dot each terminal last gave the sidebar, by view.
-    rail_claude: HashMap<gpui::EntityId, Option<athena_term::ClaudeState>>,
+    /// What each terminal last gave the sidebar about Claude, by view.
+    claude_marks: HashMap<gpui::EntityId, panes::ClaudeMark>,
+    _awake_poll: Option<Task<()>>,
     rail_from: usize,
     /// The project or folder the open folder picker moves or renames.
     sidebar_subject: Option<sidebar::Subject>,
@@ -269,7 +270,8 @@ impl Shell {
             save_task: None,
             quit_settled: false,
             redraw_pending: None,
-            rail_claude: HashMap::new(),
+            claude_marks: HashMap::new(),
+            _awake_poll: None,
             switch_count: 0,
             focus_pending: true,
             _subscriptions: subscriptions,
@@ -282,6 +284,7 @@ impl Shell {
         shell.restore_terminal_panel();
         shell.announce_recovery(cx);
         shell.start_usage(window, cx);
+        shell.poll_awake(cx);
         shell.start_git(window, cx);
         shell.start_ide(window, cx);
         shell.start_keymap(window, cx);

@@ -13,6 +13,7 @@ use gpui::{
 use super::Shell;
 use super::dnd::{ProjectDrag, TabGhost};
 use super::palette::Mode;
+use super::panes::ClaudeMark;
 use super::worktrees::RailGroups;
 use crate::actions::AddProject;
 
@@ -171,13 +172,64 @@ fn divider_lines(starts: &[usize], len: usize) -> Vec<usize> {
         .collect()
 }
 
-fn claude_dot(t: &Theme, state: ClaudeState) -> gpui::Div {
-    let color = match state {
-        ClaudeState::NeedsInput => t.color.warning,
-        ClaudeState::Running => t.color.success,
-        ClaudeState::Finished => t.color.content_muted,
-    };
-    div().size(px(6.)).flex_none().bg(color)
+/// A filled square for Claude's state, or a hollow one for a Claude session with nothing to say.
+fn claude_dot(t: &Theme, mark: ClaudeMark) -> Option<gpui::Div> {
+    let dot = div().size(px(6.)).flex_none();
+    match mark.state {
+        Some(ClaudeState::NeedsInput) => Some(dot.bg(t.color.warning)),
+        Some(ClaudeState::Running) => Some(dot.bg(t.color.success)),
+        Some(ClaudeState::Finished) => Some(dot.bg(t.color.content_muted)),
+        None => mark
+            .open
+            .then(|| dot.border_1().border_color(t.color.content_muted)),
+    }
+}
+
+/// A cup drawn from borders, as an emoji would break the rail's flat colours.
+fn awake_mark(t: &Theme, mark: ClaudeMark) -> Option<gpui::Div> {
+    let color = t.color.warning;
+    mark.awake.then(|| {
+        div()
+            .relative()
+            .flex_none()
+            .w(px(9.))
+            .h(px(6.))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .w(px(6.))
+                    .h(px(6.))
+                    .border_l_1()
+                    .border_r_1()
+                    .border_b_1()
+                    .rounded_b(px(2.))
+                    .border_color(color),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(5.))
+                    .top(px(1.))
+                    .w(px(3.))
+                    .h(px(3.))
+                    .border_t_1()
+                    .border_r_1()
+                    .border_b_1()
+                    .rounded_r(px(1.))
+                    .border_color(color),
+            )
+    })
+}
+
+/// The tooltip line for what Claude is doing to sleep, if it is open.
+fn claude_line(mark: ClaudeMark) -> Option<&'static str> {
+    match mark {
+        ClaudeMark { awake: true, .. } => Some("Claude Code is keeping the Mac awake"),
+        ClaudeMark { open: true, .. } => Some("Claude Code is open"),
+        _ => None,
+    }
 }
 
 fn initials(name: &str) -> String {
@@ -690,27 +742,31 @@ impl Shell {
         let wide = self.workspace.ui.sidebar_expanded;
         let name = path.last().cloned().unwrap_or_default();
         let inside = self.workspace.folder_range(path);
-        let claude = if collapsed {
+        let mark = if collapsed {
             let roots: Vec<&Path> = self.workspace.projects[inside.clone()]
                 .iter()
                 .map(|p| p.root.as_path())
                 .collect();
-            self.project_claude_state(&roots, cx)
-                .map(|state| claude_dot(&t, state))
+            self.rail_claude(&roots)
         } else {
-            None
+            ClaudeMark::default()
         };
+        let claude = claude_dot(&t, mark);
+        let awake = awake_mark(&t, mark);
         let flyout = !wide && collapsed;
         let drop_tint = t.color.surface_accent;
         let drag = FolderDrag {
             path: path.to_vec(),
             label: name.clone().into(),
         };
-        let tip = format!(
+        let mut tip = format!(
             "{} — {projects} project{}",
             folder_label(path),
             if projects == 1 { "" } else { "s" }
         );
+        if let Some(line) = claude_line(mark) {
+            tip = format!("{tip}\n{line}");
+        }
         let fits = groups.clone();
         let into = path.to_vec();
         let el = div()
@@ -782,6 +838,7 @@ impl Shell {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(if collapsed { "▸" } else { "▾" })
                 .child(div().flex_1().min_w_0().truncate().child(name))
+                .children(awake)
                 .children(claude)
                 .when(collapsed, |el| el.child(projects.to_string()))
                 .into_any_element()
@@ -808,6 +865,7 @@ impl Shell {
                 .border_color(t.color.border)
                 .children(cells)
                 .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
+                .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
                 .into_any_element()
         } else {
             el.size(t.ui(RAIL_ITEM))
@@ -883,9 +941,12 @@ impl Shell {
                     .map(|j| self.workspace.projects[j].root.as_path()),
             );
         }
-        let claude = self
-            .project_claude_state(&claude_roots, cx)
-            .map(|state| claude_dot(&t, state));
+        let mark = self.rail_claude(&claude_roots);
+        if let Some(line) = claude_line(mark) {
+            tip = format!("{tip}\n{line}");
+        }
+        let claude = claude_dot(&t, mark);
+        let awake = awake_mark(&t, mark);
         let el = div()
             .id(("rail-item", i))
             .group(group)
@@ -963,6 +1024,7 @@ impl Shell {
                         .child(project.name()),
                 )
                 .children(branch)
+                .children(awake)
                 .children(claude)
                 .children(fold)
                 .into_any_element()
@@ -982,6 +1044,7 @@ impl Shell {
                         .bg(t.color.border_strong)
                 }))
                 .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
+                .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
                 .when(folded, |el| {
                     el.child(
                         div()

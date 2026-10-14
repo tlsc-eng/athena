@@ -636,6 +636,10 @@ information rather than triggering the install dialog).
   its notifications: they are marked read, the Dock badge drops, and their banners leave
   Notification Center. This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
   them a tab shows only **running** while Claude draws, and nothing once it stops.
+- The project rail shows the same state as a filled square, and a hollow square for a project
+  with a Claude session open and nothing to report. A small cup marks a project whose Claude is keeping
+  the Mac awake: Claude Code runs `caffeinate` while it works, so Athena checks the Mac's power
+  assertions every 5 seconds while any Claude is open. The project's tooltip says which.
 - An MCP server, `athena mcp-stdio`, answers from the running app (see below).
 - Each file Claude edits in an Athena terminal refreshes its open diffs; the **Claude** drawer tab
   opens the file's changes since before the session's first edit to it (see
