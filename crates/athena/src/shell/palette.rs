@@ -401,6 +401,22 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Move project to folder…",
             Box::new(actions::MoveProjectToFolder),
         ),
+        (
+            "Collapse or expand the project's folder",
+            Box::new(actions::ToggleProjectFolder),
+        ),
+        (
+            "Collapse or expand the project's worktrees",
+            Box::new(actions::ToggleWorktrees),
+        ),
+        (
+            "Collapse all folders",
+            Box::new(actions::CollapseAllFolders),
+        ),
+        (
+            "Next Claude session needing you",
+            Box::new(actions::NextClaudeAttention),
+        ),
         ("Focus outline", Box::new(super::outline::ShowOutline)),
         ("Show explorer", Box::new(super::outline::ShowExplorer)),
         ("Problems", Box::new(actions::ShowProblems)),

@@ -79,6 +79,9 @@ use crate::actions::{
     TogglePaneZoom, TogglePreview, ToggleSidebar, ToggleWordWrapDefault, Zoom,
 };
 use crate::actions::{
+    CollapseAllFolders, NextClaudeAttention, ToggleProjectFolder, ToggleWorktrees,
+};
+use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, GoToSymbol, GoToWorkspaceSymbol,
     NavigateBack, NavigateForward, NextProblem, PrevProblem, RevealInTree, SendToClaude,
     ShowChanges, ShowProblems, SwitchBranch, ToggleBlame, ToggleIdeIntegration,
@@ -798,6 +801,18 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &MoveProjectToFolder, window, cx| {
                 this.move_project_to_folder(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleProjectFolder, _, cx| this.toggle_active_folder(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleWorktrees, _, cx| this.toggle_active_worktrees(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CollapseAllFolders, _, cx| this.collapse_all_folders(cx)),
+            )
+            .on_action(cx.listener(|this, _: &NextClaudeAttention, window, cx| {
+                this.next_claude_attention(window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &outline::ShowOutline, w, cx| this.show_outline(true, w, cx)),

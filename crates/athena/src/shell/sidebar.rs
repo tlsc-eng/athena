@@ -296,6 +296,38 @@ impl Shell {
         }
     }
 
+    /// Opens or closes the folder holding the active project.
+    pub(super) fn toggle_active_folder(&mut self, cx: &mut Context<Self>) {
+        if let Some(folder) = self
+            .workspace
+            .active_project()
+            .map(|p| p.folder.clone())
+            .filter(|f| !f.is_empty())
+        {
+            self.toggle_folder(&folder, cx);
+        }
+    }
+
+    /// Shows or hides the worktrees of the active project's repository.
+    pub(super) fn toggle_active_worktrees(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let groups = self.rail_groups();
+        let wide = self.workspace.ui.sidebar_expanded;
+        if let Some((_, group)) = groups.group_of(&root)
+            && self.worktree_count(group.start, &groups, wide) > 0
+        {
+            self.toggle_worktrees(group.start, cx);
+        }
+    }
+
+    pub(super) fn collapse_all_folders(&mut self, cx: &mut Context<Self>) {
+        self.workspace.collapsed = self.workspace.folders();
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     /// The linked worktrees of the repository at `index`, the unopened ones too when `wide` shows
     /// them; 0 for a linked worktree.
     pub(super) fn worktree_count(&self, index: usize, groups: &RailGroups, wide: bool) -> usize {

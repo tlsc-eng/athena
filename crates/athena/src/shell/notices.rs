@@ -513,6 +513,48 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌥⌘J: the next Claude session waiting for an answer, else the next that has finished.
+    pub(super) fn next_claude_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut waiting: Vec<(u8, usize, ItemId, PathBuf)> = Vec::new();
+        for ((root, id), view) in &self.items {
+            let ItemView::Terminal(t) = view else {
+                continue;
+            };
+            let urgency = match self.claude_marks.get(&t.entity_id()).and_then(|m| m.state) {
+                Some(ClaudeState::NeedsInput) => 2,
+                Some(ClaudeState::Finished) => 1,
+                _ => continue,
+            };
+            if let Some(index) = self.workspace.projects.iter().position(|p| p.root == *root) {
+                waiting.push((urgency, index, *id, root.clone()));
+            }
+        }
+        let Some(top) = waiting.iter().map(|w| w.0).max() else {
+            return self.transient_notice(
+                "No Claude session needs you",
+                "None is waiting for an answer or has finished.",
+                cx,
+            );
+        };
+        waiting.retain(|w| w.0 == top);
+        waiting.sort_by_key(|w| (w.1, w.2));
+        let here = self.workspace.active.map(|index| {
+            let focused = self.workspace.projects[index]
+                .layout
+                .as_ref()
+                .and_then(|l| l.focused_pane()?.active_item())
+                .map(|i| i.id);
+            (index, focused)
+        });
+        let next = waiting
+            .iter()
+            .find(|w| here.is_none_or(|(index, focused)| (w.1, Some(w.2)) > (index, focused)))
+            .unwrap_or(&waiting[0]);
+        let (root, id) = (next.3.clone(), next.2);
+        self.focus_item(&root, id, window, cx);
+        cx.notify();
+    }
+
     fn focus_item(
         &mut self,
         root: &Path,
