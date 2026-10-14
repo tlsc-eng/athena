@@ -100,6 +100,8 @@ pub struct Shell {
     drop_hint: Option<(PaneId, dnd::DropZone)>,
     palette: Option<palette::Palette>,
     palette_closing: Option<(palette::Palette, motion::Closing)>,
+    /// Each project's files as last walked, listed while Go to File walks them again.
+    palette_files: HashMap<PathBuf, Rc<Vec<String>>>,
     context_menu: Option<(gpui::Entity<athena_ui::ContextMenu>, Subscription)>,
     /// Tabs whose editor or terminal has its own right-click menu open.
     item_menus: HashSet<(PathBuf, ItemId)>,
@@ -226,6 +228,7 @@ impl Shell {
             drop_hint: None,
             palette: None,
             palette_closing: None,
+            palette_files: HashMap::new(),
             context_menu: None,
             item_menus: HashSet::new(),
             tree: tree::FileTree::default(),

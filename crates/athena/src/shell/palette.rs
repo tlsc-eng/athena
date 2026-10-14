@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use athena_editor::EditorView;
@@ -728,44 +729,56 @@ impl Shell {
             .collect()
     }
 
-    /// Lists the project's files once they have been walked, off the main thread.
+    /// Lists the project's files as last walked at once, then as walked again off the main thread.
     fn load_palette_files(&mut self, cx: &mut Context<Self>) {
-        if let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) {
-            let walk = cx
-                .background_executor()
-                .spawn(async move { (project_files(&root), root) });
-            cx.spawn(async move |this, cx| {
-                let (files, root) = walk.await;
-                let _ = this.update(cx, |this, cx| {
-                    let Some(palette) = this
-                        .palette
-                        .as_mut()
-                        .filter(|p| matches!(p.mode, Mode::Files | Mode::FilesBeside))
-                    else {
-                        return;
-                    };
-                    palette.entries = files
-                        .into_iter()
-                        .map(|rel| {
-                            let path = root.join(&rel);
-                            let (dir, name) = match rel.rfind('/') {
-                                Some(i) => (Some(rel[..i].to_string()), rel[i + 1..].to_string()),
-                                None => (None, rel.clone()),
-                            };
-                            Entry {
-                                label: name,
-                                detail: dir,
-                                kind: None,
-                                key: rel,
-                                target: Target::File(path),
-                            }
-                        })
-                        .collect();
-                    this.filter_palette(cx);
-                });
-            })
-            .detach();
+        let Some(root) = self.workspace.active_project().map(|p| p.root.clone()) else {
+            return;
+        };
+        if let Some(files) = self.palette_files.get(&root).cloned() {
+            self.show_palette_files(&root, &files, cx);
         }
+        let walk = cx
+            .background_executor()
+            .spawn(async move { (project_files(&root), root) });
+        cx.spawn(async move |this, cx| {
+            let (files, root) = walk.await;
+            let _ = this.update(cx, |this, cx| {
+                let files = Rc::new(files);
+                let changed = this.palette_files.get(&root) != Some(&files);
+                this.palette_files.insert(root.clone(), files.clone());
+                if changed {
+                    this.show_palette_files(&root, &files, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn show_palette_files(&mut self, root: &Path, files: &[String], cx: &mut Context<Self>) {
+        let Some(palette) = self
+            .palette
+            .as_mut()
+            .filter(|p| matches!(p.mode, Mode::Files | Mode::FilesBeside))
+        else {
+            return;
+        };
+        palette.entries = files
+            .iter()
+            .map(|rel| {
+                let (dir, name) = match rel.rfind('/') {
+                    Some(i) => (Some(rel[..i].to_string()), rel[i + 1..].to_string()),
+                    None => (None, rel.clone()),
+                };
+                Entry {
+                    label: name,
+                    detail: dir,
+                    kind: None,
+                    key: rel.clone(),
+                    target: Target::File(root.join(rel)),
+                }
+            })
+            .collect();
+        self.filter_palette(cx);
     }
 
     /// Go to File's query changed: a leading `@`, `#` or `>` switches what is listed first.
