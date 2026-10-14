@@ -242,6 +242,14 @@ fn claude_lines(mark: ClaudeMark) -> Option<String> {
     Some(lines)
 }
 
+fn fold_tip(folded: bool, worktrees: usize) -> String {
+    match (folded, worktrees) {
+        (true, 1) => "Show 1 worktree".into(),
+        (true, n) => format!("Show {n} worktrees"),
+        (false, _) => "Hide worktrees".into(),
+    }
+}
+
 fn initials(name: &str) -> String {
     name.chars().take(2).collect::<String>().to_uppercase()
 }
@@ -999,6 +1007,7 @@ impl Shell {
                     .rounded(t.shape.radius_control)
                     .text_color(t.color.content_muted)
                     .hover(|s| s.bg(t.color.surface).text_color(t.color.content))
+                    .tooltip(move |_, cx| Tooltip::view(fold_tip(folded, worktrees), cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.toggle_worktrees(i, cx)
@@ -1049,10 +1058,19 @@ impl Shell {
                 .when(folded, |el| {
                     el.child(
                         div()
+                            .id(("rail-fold", i))
                             .absolute()
-                            .right(px(2.))
+                            .right(px(1.))
                             .top(px(0.))
+                            .px(px(1.))
+                            .rounded(px(2.))
                             .text_size(px(9.))
+                            .hover(|s| s.bg(t.color.surface).text_color(t.color.content))
+                            .tooltip(move |_, cx| Tooltip::view(fold_tip(true, worktrees), cx))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_worktrees(i, cx)
+                            }))
                             .child(worktrees.to_string()),
                     )
                 })
