@@ -38,6 +38,8 @@ pub struct Settings {
     pub lsp: HashMap<String, Value>,
     /// VS Code's `explorer.confirmDragAndDrop`: ask before a file dragged in the tree moves.
     pub confirm_drag_and_drop: Option<bool>,
+    /// VS Code's `explorer.excludeGitIgnore`: leave git-ignored entries out of the tree.
+    pub exclude_git_ignore: Option<bool>,
     /// `window.zoom_level`: interface text and spacing in 10% steps from the default.
     pub zoom_level: Option<i32>,
     /// VS Code ESLint's `eslint.fixOnSave`-style switch: Cmd+S applies ESLint's fixes first.
@@ -264,6 +266,11 @@ impl Settings {
         self.confirm_drag_and_drop.unwrap_or(true)
     }
 
+    /// Off unless chosen: as in VS Code, the tree shows git-ignored entries dimmed.
+    pub fn exclude_git_ignore(&self) -> bool {
+        self.exclude_git_ignore.unwrap_or(false)
+    }
+
     /// Off unless chosen, as fixes that rewrite code on save should be.
     pub fn eslint_fix_on_save(&self) -> bool {
         self.eslint_fix_on_save.unwrap_or(false)
@@ -424,6 +431,31 @@ fn git_block(settings: &mut Settings, value: &Value) -> Result<(), String> {
     problem.map_or(Ok(()), Err)
 }
 
+fn explorer_block(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    let Some(object) = value.as_object().filter(|o| !o.is_empty()) else {
+        return Err(
+            "must be {\"confirmDragAndDrop\": true or false, \"excludeGitIgnore\": true or false}"
+                .into(),
+        );
+    };
+    let mut problem = None;
+    for (key, value) in object {
+        let flag = match key.as_str() {
+            "confirmDragAndDrop" => &mut settings.confirm_drag_and_drop,
+            "excludeGitIgnore" => &mut settings.exclude_git_ignore,
+            other => {
+                problem = problem.or(Some(format!("has no setting \"{other}\"")));
+                continue;
+            }
+        };
+        match value.as_bool() {
+            Some(on) => *flag = Some(on),
+            None => problem = problem.or(Some(format!("{key} must be true or false"))),
+        }
+    }
+    problem.map_or(Ok(()), Err)
+}
+
 fn worktree_dir(value: &Value) -> Result<String, String> {
     match value.as_str().map(str::trim) {
         Some(dir) if dir.starts_with('/') || dir.starts_with("~/") => Ok(dir.to_string()),
@@ -446,6 +478,10 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
         (
             "explorer.confirmDragAndDrop",
             s.confirm_drag_and_drop.take().is_some(),
+        ),
+        (
+            "explorer.excludeGitIgnore",
+            s.exclude_git_ignore.take().is_some(),
         ),
         ("window.zoom_level", s.zoom_level.take().is_some()),
         ("editor.font_size", s.editor.font_size.take().is_some()),
@@ -662,13 +698,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 _ => Err("must be {\"fixOnSave\": true or false}".into()),
             },
             "git" => git_block(&mut settings, value),
-            "explorer" => match value.get("confirmDragAndDrop").map(Value::as_bool) {
-                Some(Some(on)) => {
-                    settings.confirm_drag_and_drop = Some(on);
-                    Ok(())
-                }
-                _ => Err("must be {\"confirmDragAndDrop\": true or false}".into()),
-            },
+            "explorer" => explorer_block(&mut settings, value),
             "window" => match value.get("zoom_level").map(zoom_level) {
                 Some(Ok(level)) => {
                     settings.zoom_level = Some(level);
@@ -724,6 +754,10 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 Some(("explorer", "confirmDragAndDrop")) => value
                     .as_bool()
                     .map(|on| settings.confirm_drag_and_drop = Some(on))
+                    .ok_or_else(|| "must be true or false".to_string()),
+                Some(("explorer", "excludeGitIgnore")) => value
+                    .as_bool()
+                    .map(|on| settings.exclude_git_ignore = Some(on))
                     .ok_or_else(|| "must be true or false".to_string()),
                 Some(("window", "zoom_level")) => {
                     zoom_level(value).map(|level| settings.zoom_level = Some(level))
@@ -1529,6 +1563,15 @@ pub(crate) mod tests {
             Settings::default().confirm_drag_and_drop(),
             "on by default, as in VS Code"
         );
+        assert!(
+            !Settings::default().exclude_git_ignore(),
+            "off, as in VS Code"
+        );
+        let (both, problems) =
+            parse(r#"{"explorer": {"confirmDragAndDrop": false, "excludeGitIgnore": true}}"#)
+                .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!both.confirm_drag_and_drop() && both.exclude_git_ignore());
         assert!(s.eslint_fix_on_save());
         assert!(!Settings::default().eslint_fix_on_save(), "off by default");
         let (dotted, _) = parse(r#"{"eslint.fixOnSave": true}"#).unwrap();

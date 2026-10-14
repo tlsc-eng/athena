@@ -503,6 +503,10 @@ information rather than triggering the install dialog).
   (one undo step each) and on disk. When the results stopped at 2000 it refuses ("Too many
   results to replace safely") rather than rewrite files you have not seen; narrow the search or
   the files to include.
+- The file tree shows dotfiles, and, as in VS Code, files and folders `.gitignore` matches (a
+  `.env`, `node_modules`, `target`) dimmed; `"explorer": { "excludeGitIgnore": true }` leaves them
+  out instead. `.git` and `.DS_Store` are never listed. Go to file (`cmd-p`) skips dotfiles and
+  git-ignored files.
 - Right-click menus. Tree: New File, New Folder, Rename, Delete (to the Trash), Reveal in Finder,
   Copy Path, Copy Relative Path, Open to the Side, and on files Select for Compare / Compare with
   Selected. Tabs: Close, Close Others, Close to the Right, Close All, Move Terminal into Panel (on
@@ -1260,6 +1264,7 @@ Athena applies it as soon as you save:
   "git": { "autofetch": true },      // fetch every three minutes; off by default, as in VS Code
   "eslint": { "fixOnSave": true },   // cmd-s applies ESLint's fixes first; off by default
   "explorer": { "confirmDragAndDrop": false },   // move tree entries without asking
+  "explorer.excludeGitIgnore": true, // hide git-ignored entries in the tree rather than dim them
   "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   "lsp": {
     "gopls": { "staticcheck": true, "hints": { "parameterNames": true } },

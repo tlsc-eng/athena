@@ -267,6 +267,9 @@ impl Shell {
             return;
         }
         let old = std::mem::replace(&mut self.settings.file, file);
+        if old.exclude_git_ignore() != self.settings.file.exclude_git_ignore() {
+            self.tree.invalidate();
+        }
         let before = self.workspace.preferences();
         let mut now = self.settings.file.over(self.settings.fallback);
         self.settings.unapplied = window.is_none();

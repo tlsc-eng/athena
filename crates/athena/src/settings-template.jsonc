@@ -29,6 +29,7 @@
   // "git": { "autofetch": true },      // fetch the active project every three minutes
   // "git.worktree_dir": "~/worktrees", // new worktrees go here, not beside their repository
   // "explorer": { "confirmDragAndDrop": false }, // move tree entries without asking
+  // "explorer.excludeGitIgnore": true, // hide git-ignored entries rather than dim them
   // "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   // "eslint": { "fixOnSave": true },   // ⌘S applies ESLint's fixes; needs the project's server
   // // The Claude tab estimates each session's cost from built-in list prices; these replace

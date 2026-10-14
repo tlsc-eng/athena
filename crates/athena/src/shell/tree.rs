@@ -24,6 +24,8 @@ struct DirEntry {
     name: String,
     path: PathBuf,
     is_dir: bool,
+    /// Matched by .gitignore, or inside a folder that is; drawn dimmed.
+    ignored: bool,
 }
 
 #[derive(Clone)]
@@ -156,7 +158,10 @@ impl FileTree {
             let open = entry.is_dir && expanded.contains(&entry.path);
             if open {
                 for child in self.listing(&entry.path).iter().rev() {
-                    stack.push((depth + 1, child.clone()));
+                    let mut child = child.clone();
+                    // A walk started inside an ignored folder cannot see the rule that matched it.
+                    child.ignored |= entry.ignored;
+                    stack.push((depth + 1, child));
                 }
             }
             rows.push(Row {
@@ -207,6 +212,7 @@ fn splice_edit(rows: &mut Vec<Row>, root: &Path, target: &Path, kind: EditKind) 
                 name: String::new(),
                 path: target.to_path_buf(),
                 is_dir: kind == EditKind::NewFolder,
+                ignored: false,
             },
             expanded: false,
             edit: true,
@@ -214,18 +220,25 @@ fn splice_edit(rows: &mut Vec<Row>, root: &Path, target: &Path, kind: EditKind) 
     );
 }
 
-/// One folder's children: .gitignore honoured, `.git` and macOS clutter hidden, folders first.
-fn read_dir(dir: &Path) -> Vec<DirEntry> {
-    let mut entries: Vec<DirEntry> = ignore::WalkBuilder::new(dir)
-        .max_depth(Some(1))
-        .hidden(false)
-        .filter_entry(|e| !matches!(e.file_name().to_str(), Some(".git" | ".DS_Store")))
-        .build()
-        .flatten()
-        .filter(|e| e.depth() == 1)
+/// One folder's children, folders first, with `.git` and macOS clutter hidden; git-ignored
+/// entries are marked, or left out when `exclude_ignored`.
+fn read_dir(dir: &Path, exclude_ignored: bool) -> Vec<DirEntry> {
+    let walk = |honour_ignores: bool| {
+        ignore::WalkBuilder::new(dir)
+            .max_depth(Some(1))
+            .standard_filters(honour_ignores)
+            .hidden(false)
+            .filter_entry(|e| !matches!(e.file_name().to_str(), Some(".git" | ".DS_Store")))
+            .build()
+            .flatten()
+            .filter(|e| e.depth() == 1)
+    };
+    let kept: HashSet<PathBuf> = walk(true).map(ignore::DirEntry::into_path).collect();
+    let mut entries: Vec<DirEntry> = walk(exclude_ignored)
         .map(|e| DirEntry {
             name: e.file_name().to_string_lossy().into_owned(),
             is_dir: e.file_type().is_some_and(|t| t.is_dir()),
+            ignored: !kept.contains(e.path()),
             path: e.into_path(),
         })
         .collect();
@@ -284,6 +297,7 @@ impl Shell {
             return;
         }
         let dirs: Vec<PathBuf> = self.tree.wanted.drain().collect();
+        let exclude_ignored = self.settings.file.exclude_git_ignore();
         for dir in &dirs {
             self.tree.stale.remove(dir);
             self.tree.reading.insert(dir.clone());
@@ -294,7 +308,7 @@ impl Shell {
                 .spawn(async move {
                     dirs.into_iter()
                         .map(|dir| {
-                            let listing = read_dir(&dir);
+                            let listing = read_dir(&dir, exclude_ignored);
                             (dir, listing)
                         })
                         .collect::<Vec<_>>()
@@ -394,7 +408,8 @@ impl Shell {
                         }
                         let selected = open.as_ref() == Some(&row.entry.path);
                         let unsaved = dirty.contains(&row.entry.path);
-                        let git = this.git_status_for(&row.entry.path);
+                        let ignored = row.entry.ignored;
+                        let git = this.git_status_for(&row.entry.path).filter(|_| !ignored);
                         let drop_dir = match is_dir {
                             true => path.clone(),
                             false => path.parent().unwrap_or(&root).to_path_buf(),
@@ -431,10 +446,17 @@ impl Shell {
                                     .bg(t.color.surface_accent)
                             })
                             .when(!selected, |el| {
-                                el.when_some(git, |el, s| {
-                                    el.text_color(super::git_view::status_color(s, &git_theme))
-                                })
-                                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                                el.when(ignored, |el| el.text_color(t.color.content_disabled))
+                                    .when_some(git, |el, s| {
+                                        el.text_color(super::git_view::status_color(s, &git_theme))
+                                    })
+                                    .hover(|s| {
+                                        let s = s.bg(t.color.surface_hover);
+                                        match ignored {
+                                            true => s,
+                                            false => s.text_color(t.color.content),
+                                        }
+                                    })
                             })
                             .on_mouse_down(
                                 MouseButton::Right,
@@ -623,6 +645,7 @@ mod tests {
                     .into_owned(),
                 path: PathBuf::from(path),
                 is_dir,
+                ignored: false,
             },
             expanded: is_dir,
             edit: false,
@@ -682,5 +705,37 @@ mod tests {
         assert!(open.contains(Path::new("/p/a")) && open.contains(Path::new("/p/a/b")));
         assert!(!open.contains(root));
         assert_eq!(tree.reveal.as_deref(), Some(Path::new("/p/a/b/c.rs")));
+    }
+
+    #[test]
+    fn read_dir_marks_git_ignored_entries_or_leaves_them_out() {
+        let dir = std::env::temp_dir().join(format!("athena-tree-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join(".gitignore"), ".env\ntarget/\n").unwrap();
+        std::fs::write(dir.join(".env"), "").unwrap();
+        std::fs::write(dir.join("main.rs"), "").unwrap();
+        let shown = |exclude| {
+            read_dir(&dir, exclude)
+                .into_iter()
+                .map(|e| (e.name, e.ignored))
+                .collect::<Vec<_>>()
+        };
+        let all = shown(false);
+        let kept = shown(true);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            all,
+            [
+                ("target".into(), true),
+                (".env".into(), true),
+                (".gitignore".into(), false),
+                ("main.rs".into(), false),
+            ]
+        );
+        assert_eq!(
+            kept,
+            [(".gitignore".into(), false), ("main.rs".into(), false)]
+        );
     }
 }
