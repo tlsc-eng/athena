@@ -391,17 +391,15 @@ impl Shell {
         }
     }
 
-    /// The narrow rail's click on a closed folder: its projects, to switch to without opening it.
-    fn open_folder_flyout(
-        &mut self,
-        path: Vec<String>,
-        position: gpui::Point<gpui::Pixels>,
-        window: &mut Window,
+    /// A closed folder's projects in the narrow rail, to switch to without opening it.
+    fn folder_project_items(
+        &self,
+        path: &[String],
         cx: &mut Context<Self>,
-    ) {
+    ) -> Vec<athena_ui::MenuItem> {
         let groups = self.rail_groups();
         let mut items = Vec::new();
-        for i in self.workspace.folder_range(&path) {
+        for i in self.workspace.folder_range(path) {
             let project = &self.workspace.projects[i];
             let mut label = project.name();
             if groups
@@ -423,12 +421,7 @@ impl Shell {
             });
         }
         items.push(athena_ui::MenuItem::separator());
-        items.push(super::menus::shell_item(
-            "Expand Folder",
-            cx,
-            move |this, _, cx| this.toggle_folder(&path, cx),
-        ));
-        self.open_context_menu(position, items, window, cx);
+        items
     }
 
     /// Right-click on a sidebar folder.
@@ -440,7 +433,12 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let collapsed = self.workspace.collapsed.contains(&path);
-        let items = vec![
+        let mut items = if collapsed && !self.workspace.ui.sidebar_expanded {
+            self.folder_project_items(&path, cx)
+        } else {
+            Vec::new()
+        };
+        items.extend([
             super::menus::shell_item(if collapsed { "Expand" } else { "Collapse" }, cx, {
                 let path = path.clone();
                 move |this, _, cx| this.toggle_folder(&path, cx)
@@ -458,7 +456,7 @@ impl Shell {
                 this.workspace.delete_folder(&path);
                 this.folders_changed(cx);
             }),
-        ];
+        ]);
         self.open_context_menu(position, items, window, cx);
     }
 
@@ -753,7 +751,6 @@ impl Shell {
         };
         let claude = claude_dot(&t, mark);
         let awake = awake_mark(&t, mark);
-        let flyout = !wide && collapsed;
         let drop_tint = t.color.surface_accent;
         let drag = FolderDrag {
             path: path.to_vec(),
@@ -784,13 +781,7 @@ impl Shell {
             .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
             .on_click(cx.listener({
                 let path = path.to_vec();
-                move |this, e: &gpui::ClickEvent, window, cx| {
-                    if flyout {
-                        this.open_folder_flyout(path.clone(), e.position(), window, cx)
-                    } else {
-                        this.toggle_folder(&path, cx)
-                    }
-                }
+                move |this, _, _, cx| this.toggle_folder(&path, cx)
             }))
             .on_mouse_down(
                 MouseButton::Right,

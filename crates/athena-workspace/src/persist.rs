@@ -106,7 +106,7 @@ mod tests {
         };
         w.projects[0].folder = vec!["work".into(), "clients".into()];
         w.collapsed = vec![vec!["work".into()]];
-        w.projects[0].worktrees_collapsed = true;
+        w.projects[0].worktrees_collapsed = false;
         save(&path, &w).unwrap();
         assert_eq!(load(&path).unwrap(), w);
         let saved = fs::read_to_string(&path).unwrap();

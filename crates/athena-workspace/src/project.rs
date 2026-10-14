@@ -86,7 +86,7 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "LinterTrust::is_not_asked")]
     pub linters: LinterTrust,
     /// The wide sidebar hides this repository's linked worktrees, except the active one.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default = "folded", skip_serializing_if = "Clone::clone")]
     pub worktrees_collapsed: bool,
     /// Phase 3 stored a single shell here; read only to migrate it into `layout`.
     #[serde(default, skip_serializing)]
@@ -118,6 +118,10 @@ impl LinterTrust {
     }
 }
 
+fn folded() -> bool {
+    true
+}
+
 fn default_layout() -> Option<Layout> {
     Some(Layout::new(ItemKind::Terminal { session: None }))
 }
@@ -131,7 +135,7 @@ impl Project {
             panel: Panel::default(),
             folder: Vec::new(),
             linters: LinterTrust::NotAsked,
-            worktrees_collapsed: false,
+            worktrees_collapsed: true,
             terminal: None,
         }
     }
