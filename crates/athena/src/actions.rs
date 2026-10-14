@@ -38,6 +38,7 @@ actions!(
         ToggleWorktrees,
         CollapseAllFolders,
         NextClaudeAttention,
+        SwitchProject,
         ToggleNotifications,
         ShowContainers,
         NewClaudeSession,
@@ -195,6 +196,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-alt-b", ToggleSidebar, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
         KeyBinding::new("cmd-alt-j", NextClaudeAttention, None),
+        KeyBinding::new("ctrl-cmd-p", SwitchProject, None),
         KeyBinding::new("ctrl-`", ToggleTerminalPanel, None),
         // macOS reports ⌃⇧` as ⌃~, so that is the binding that matches; the other is for the menu.
         KeyBinding::new("ctrl-~", NewPanelTerminal, None),
@@ -364,6 +366,7 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Find in Project…", FindInProject),
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
                 MenuItem::action("Toggle Project Sidebar", ToggleSidebar),
+                MenuItem::action("Switch Project…", SwitchProject),
                 MenuItem::action("Next Claude Session Needing You", NextClaudeAttention),
                 MenuItem::action("Reveal Active File in Tree", RevealInTree),
                 MenuItem::action("Problems", ShowProblems),

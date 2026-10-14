@@ -79,7 +79,7 @@ use crate::actions::{
     TogglePaneZoom, TogglePreview, ToggleSidebar, ToggleWordWrapDefault, Zoom,
 };
 use crate::actions::{
-    CollapseAllFolders, NextClaudeAttention, ToggleProjectFolder, ToggleWorktrees,
+    CollapseAllFolders, NextClaudeAttention, SwitchProject, ToggleProjectFolder, ToggleWorktrees,
 };
 use crate::actions::{
     FindInProject, FontZoomIn, FontZoomOut, FontZoomReset, GoToSymbol, GoToWorkspaceSymbol,
@@ -812,6 +812,9 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &CollapseAllFolders, _, cx| this.collapse_all_folders(cx)),
             )
+            .on_action(cx.listener(|this, _: &SwitchProject, window, cx| {
+                this.open_palette(palette::Mode::Projects, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NextClaudeAttention, window, cx| {
                 this.next_claude_attention(window, cx)
             }))

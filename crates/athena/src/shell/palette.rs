@@ -16,6 +16,7 @@ use super::Shell;
 use super::fuzzy;
 use super::lsp::document_key;
 use crate::actions;
+use athena_term::ClaudeState;
 
 const MAX_FILES: usize = 20_000;
 const MAX_ROWS: usize = 50;
@@ -33,6 +34,8 @@ pub(super) enum Target {
     Symbol(PathBuf, Position),
     /// A recently closed project folder.
     Folder(PathBuf),
+    /// An open project, by its root.
+    Project(PathBuf),
     /// A shell command Run Task starts in a new terminal.
     Task(String),
     /// A web page, such as a pull request check's run.
@@ -50,6 +53,7 @@ impl Clone for Target {
             Self::Branch(pick) => Self::Branch(pick.clone()),
             Self::Symbol(path, at) => Self::Symbol(path.clone(), *at),
             Self::Folder(path) => Self::Folder(path.clone()),
+            Self::Project(root) => Self::Project(root.clone()),
             Self::Task(command) => Self::Task(command.clone()),
             Self::Link(url) => Self::Link(url.clone()),
             Self::SidebarFolder(pick) => Self::SidebarFolder(pick.clone()),
@@ -71,6 +75,8 @@ pub(super) enum Mode {
     WorkspaceSymbols,
     /// Recently closed project folders.
     Recent,
+    /// The window's open projects, those Claude needs first.
+    Projects,
     Stashes,
     /// package.json scripts and Makefile targets.
     Tasks,
@@ -113,6 +119,7 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Files | Mode::FilesBeside => "No matching files",
         Mode::Symbols | Mode::WorkspaceSymbols => "No matching symbols",
         Mode::Recent => "No recently opened folders",
+        Mode::Projects => "No matching projects",
         Mode::Tasks => "No matching tasks",
         Mode::Worktrees | Mode::RemoveWorktree => "No matching worktrees",
         Mode::NewWorktree => "Type a name for a new branch",
@@ -413,6 +420,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Collapse all folders",
             Box::new(actions::CollapseAllFolders),
         ),
+        ("Switch project…", Box::new(actions::SwitchProject)),
         (
             "Next Claude session needing you",
             Box::new(actions::NextClaudeAttention),
@@ -538,6 +546,7 @@ impl Shell {
             Mode::Symbols => "Go to symbol in file…",
             Mode::WorkspaceSymbols => "Go to symbol in workspace…",
             Mode::Recent => "Open a recent folder…",
+            Mode::Projects => "Switch to a project…",
             Mode::Stashes => "Pop a stash…",
             Mode::Tasks => "Select the task to run…",
             Mode::Worktrees => "Open a worktree…",
@@ -587,6 +596,7 @@ impl Shell {
             Mode::Claude => claude_entries(""),
             Mode::Commands => self.command_entries(window, cx),
             Mode::Recent => self.recent_entries(),
+            Mode::Projects => self.project_entries(),
             Mode::Tasks => self.task_entries(),
             Mode::Checks => self.check_entries(),
         };
@@ -723,6 +733,49 @@ impl Shell {
                 target: Target::Task(task.command),
             })
             .collect()
+    }
+
+    /// Open projects, those with a Claude session needing input first, then working, then done.
+    fn project_entries(&self) -> Vec<Entry> {
+        let groups = self.rail_groups();
+        let mut entries: Vec<(u8, Entry)> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|project| {
+                let state = self.rail_claude(&[project.root.as_path()]).state;
+                let (urgency, kind) = match state {
+                    Some(ClaudeState::NeedsInput) => (0, Some("needs input")),
+                    Some(ClaudeState::Running) => (1, Some("running")),
+                    Some(ClaudeState::Finished) => (2, Some("done")),
+                    None => (3, None),
+                };
+                let linked = groups
+                    .group_of(&project.root)
+                    .is_some_and(|(from, group)| from != group.start);
+                let name = project.name();
+                let place = (!project.folder.is_empty()).then(|| project.folder.join(" / "));
+                let caption = self.git_caption(&project.root);
+                let detail = match (place, caption) {
+                    (Some(place), Some(caption)) => Some(format!("{place} · {caption}")),
+                    (place, caption) => place.or(caption),
+                };
+                let entry = Entry {
+                    label: if linked {
+                        format!("↳ {name}")
+                    } else {
+                        name.clone()
+                    },
+                    detail,
+                    kind,
+                    key: name,
+                    target: Target::Project(project.root.clone()),
+                };
+                (urgency, entry)
+            })
+            .collect();
+        entries.sort_by_key(|(urgency, _)| *urgency);
+        entries.into_iter().map(|(_, entry)| entry).collect()
     }
 
     /// Closed project folders that still exist, newest first.
@@ -1163,6 +1216,11 @@ impl Shell {
             Some(Target::Branch(pick)) => self.run_branch(pick, window, cx),
             Some(Target::Symbol(path, at)) => self.lsp.jump = Some((path, at)),
             Some(Target::Folder(root)) => self.open_folder(root, cx),
+            Some(Target::Project(root)) => {
+                if let Some(index) = self.workspace.projects.iter().position(|p| p.root == root) {
+                    self.switch_to(index, cx);
+                }
+            }
             Some(Target::Task(command)) => self.run_task(command, window, cx),
             Some(Target::Link(url)) if url.starts_with("https://") => cx.open_url(&url),
             Some(Target::Link(_)) => {}
@@ -1240,6 +1298,7 @@ impl Shell {
                                         | Target::Branch(_)
                                         | Target::Symbol(..)
                                         | Target::Folder(_)
+                                        | Target::Project(_)
                                         | Target::Link(_)
                                         | Target::SidebarFolder(_)
                                 )
