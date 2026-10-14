@@ -156,6 +156,14 @@ impl Setting {
                     .collect();
                 Value::Object(prices)
             }),
+            ["claude", "profiles"] => (!s.claude_profiles.is_empty()).then(|| {
+                Value::Object(
+                    s.claude_profiles
+                        .iter()
+                        .map(|(folder, profile)| (folder.clone(), json!(profile)))
+                        .collect(),
+                )
+            }),
             ["lsp"] => (!s.lsp.is_empty()).then(|| {
                 Value::Object(s.lsp.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             }),
@@ -528,6 +536,22 @@ pub static SETTINGS: &[Setting] = &[
                 }
             }}"#,
             example: r#"{"claude-sonnet-5": {"input": 3, "output": 15}}"#,
+        },
+        user_only: true,
+        also: None,
+    },
+    Setting {
+        keys: &["claude", "profiles"],
+        aliases: &[],
+        title: "Profiles by Folder",
+        description: "Which Claude Code config folder the title bar's plan usage shows for a \
+                      project under each folder; the deepest match wins. \"tlsc\" names \
+                      ~/.claude-tlsc. Other projects show the profile of their newest session.",
+        group: Group::Claude,
+        kind: Kind::Json {
+            schema: r#"{"type": "object", "propertyNames": {"pattern": "^(/|~/)"},
+                "additionalProperties": {"type": "string", "minLength": 1}}"#,
+            example: r#"{"~/code/ai": "ai", "~/code": "tlsc"}"#,
         },
         user_only: true,
         also: None,

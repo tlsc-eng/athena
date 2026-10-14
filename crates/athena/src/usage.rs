@@ -28,6 +28,16 @@ pub struct Profile {
     service: String,
 }
 
+impl Profile {
+    #[cfg(test)]
+    pub fn named(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            service: service_for(None),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {
     /// `5h`, `7d`, or a model name for per-model weekly caps.

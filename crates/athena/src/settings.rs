@@ -46,6 +46,8 @@ pub struct Settings {
     pub claude_prices: HashMap<String, crate::transcripts::Price>,
     /// `claude.hooks`: Athena's hooks in every Claude Code config folder; on unless turned off.
     pub claude_hooks: Option<bool>,
+    /// `claude.profiles`: folder prefix (`/` or `~/`) to config folder name, such as `claude-tlsc`.
+    pub claude_profiles: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -226,6 +228,23 @@ fn code_actions_on_save(value: &Value) -> Result<(bool, bool), String> {
 impl Settings {
     pub fn claude_hooks(&self) -> bool {
         self.claude_hooks.unwrap_or(true)
+    }
+
+    /// The Claude Code profile `claude.profiles` names for `root`; the longest matching folder wins.
+    pub fn claude_profile_for(&self, root: &Path) -> Option<&str> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        self.claude_profiles
+            .iter()
+            .filter_map(|(folder, profile)| {
+                let folder = match folder.strip_prefix("~/") {
+                    Some(rest) => home.as_ref()?.join(rest),
+                    None => folder.into(),
+                };
+                root.starts_with(&folder)
+                    .then(|| (folder.components().count(), profile.as_str()))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, profile)| profile)
     }
 
     pub fn git_autofetch(&self) -> bool {
@@ -435,6 +454,10 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
             !std::mem::take(&mut s.claude_prices).is_empty(),
         ),
         ("claude.hooks", s.claude_hooks.take().is_some()),
+        (
+            "claude.profiles",
+            !std::mem::take(&mut s.claude_profiles).is_empty(),
+        ),
     ];
     for (key, set) in app_wide {
         if set {
@@ -672,12 +695,15 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                         .try_for_each(|(name, value)| match name.as_str() {
                             "prices" => claude_prices(&mut settings, value),
                             "hooks" => claude_hooks(&mut settings, value),
+                            "profiles" => claude_profiles(&mut settings, value),
                             _ => Err(format!("has no setting \"{name}\"")),
                         })
                 }
-                _ => {
-                    Err("must be {\"prices\": {model id: prices}, \"hooks\": true or false}".into())
-                }
+                _ => Err(
+                    "must be {\"prices\": {model id: prices}, \"hooks\": true or false, \
+                          \"profiles\": {folder: profile}}"
+                        .into(),
+                ),
             },
             k if k.len() > 2 && k.starts_with('[') && k.ends_with(']') => {
                 let lang = settings
@@ -712,6 +738,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 }
                 Some(("claude", "prices")) => claude_prices(&mut settings, value),
                 Some(("claude", "hooks")) => claude_hooks(&mut settings, value),
+                Some(("claude", "profiles")) => claude_profiles(&mut settings, value),
                 _ => Err("is not a setting".into()),
             },
         };
@@ -727,6 +754,33 @@ fn claude_hooks(settings: &mut Settings, value: &Value) -> Result<(), String> {
         .as_bool()
         .map(|on| settings.claude_hooks = Some(on))
         .ok_or_else(|| "must be true or false".to_string())
+}
+
+/// Reads `{"~/code/ai": "ai"}`; `ai`, `claude-ai` and `~/.claude-ai` all name `~/.claude-ai`.
+fn claude_profiles(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    let folders = value
+        .as_object()
+        .ok_or("must be an object of profiles by folder")?;
+    for (folder, profile) in folders {
+        if !(folder.starts_with('/') || folder.starts_with("~/")) {
+            return Err(format!("\"{folder}\" must start with / or ~/"));
+        }
+        let name = profile
+            .as_str()
+            .map(|p| p.trim().trim_start_matches("~/").trim_start_matches('.'))
+            .filter(|p| !p.is_empty() && !p.contains('/'))
+            .ok_or(format!(
+                "\"{folder}\" must name a profile, such as \"tlsc\" for ~/.claude-tlsc"
+            ))?;
+        let name = if name == "claude" || name.starts_with("claude-") {
+            name.to_string()
+        } else {
+            format!("claude-{name}")
+        };
+        settings.claude_profiles.retain(|(f, _)| f != folder);
+        settings.claude_profiles.push((folder.clone(), name));
+    }
+    Ok(())
 }
 
 /// Reads `{"claude-opus-5": {"input": 5, "output": 25}}`; cache prices default to the usual
@@ -1509,6 +1563,42 @@ pub(crate) mod tests {
             let (_, problems) = parse(bad).unwrap();
             assert_eq!(problems.len(), 1, "{bad}");
         }
+    }
+
+    #[test]
+    fn claude_profiles_name_config_folders_and_the_deepest_folder_wins() {
+        let (s, problems) = parse(
+            r#"{"claude": {"profiles": {"/code": "tlsc", "/code/ai": "claude-ai",
+                "/work": "~/.claude-work", "/plain": "claude"}}}"#,
+        )
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        let at = |p: &str| s.claude_profile_for(Path::new(p));
+        assert_eq!(at("/code/hobby/athena"), Some("claude-tlsc"));
+        assert_eq!(at("/code/ai/x"), Some("claude-ai"));
+        assert_eq!(at("/code/ai"), Some("claude-ai"));
+        assert_eq!(at("/work/x"), Some("claude-work"));
+        assert_eq!(at("/plain/x"), Some("claude"));
+        assert_eq!(at("/codex"), None, "matches whole folders only");
+        let (dotted, _) = parse(r#"{"claude.profiles": {"/a": "ai"}}"#).unwrap();
+        assert_eq!(
+            dotted.claude_profile_for(Path::new("/a/b")),
+            Some("claude-ai")
+        );
+        for bad in [
+            r#"{"claude": {"profiles": {"code": "tlsc"}}}"#,
+            r#"{"claude": {"profiles": {"/code": ""}}}"#,
+            r#"{"claude": {"profiles": {"/code": 1}}}"#,
+            r#"{"claude": {"profiles": {"/code": "a/b"}}}"#,
+            r#"{"claude": {"profiles": []}}"#,
+        ] {
+            let (_, problems) = parse(bad).unwrap();
+            assert_eq!(problems.len(), 1, "{bad}");
+        }
+        let (project, problems) =
+            parse_project(r#"{"claude": {"profiles": {"/code": "tlsc"}}}"#).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(project.claude_profiles.is_empty());
     }
 
     #[test]

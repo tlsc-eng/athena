@@ -930,6 +930,19 @@ sign-in Claude Code keeps in the Keychain and asks api.anthropic.com for usage e
 nothing is stored. It uses the same undocumented endpoint as Claude Code's `/usage`, so it may stop
 working after a Claude Code update.
 
+With more than one signed-in profile (`~/.claude-*` config folders), the title bar shows the
+active project's profile, named before the figures, and the popover marks it **this project**.
+Athena picks it from `claude.profiles` in settings.json, where the deepest matching folder wins
+and `"tlsc"` names `~/.claude-tlsc`:
+
+```json
+"claude.profiles": { "~/code/ai": "ai", "~/code": "tlsc" }
+```
+
+A project under none of those folders shows the profile of its newest Claude session, checked at
+each refresh. Folders are matched as written, without resolving symlinks, so a worktree outside
+the listed folders also goes by its newest session. With neither, it shows the busiest profile.
+
 ## Keyboard shortcuts
 
 Keys use GPUI's binding syntax as written in the source. `1…9` means each digit from 1 to 9.
@@ -1207,7 +1220,7 @@ Servers, each with its title, description, key and a control: a checkbox, a numb
 once you pause typing or press Return; a value it cannot take is explained under the field and
 not written), a
 dropdown, or, for settings that hold structured values (`lsp`, `claude.prices`,
-`editor.codeActionsOnSave`), a link to the JSON file. Search matches titles, descriptions, keys
+`claude.profiles`, `editor.codeActionsOnSave`), a link to the JSON file. Search matches titles, descriptions, keys
 and VS Code's spellings.
 **User** edits your settings.json; **Project · name** edits the active project's
 `.athena/settings.json`, creating it on the first change, and leaves out app-wide settings (see

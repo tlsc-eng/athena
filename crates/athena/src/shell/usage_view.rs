@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use athena_proto::NoticeKind;
@@ -10,6 +11,7 @@ use gpui::{
 };
 
 use super::Shell;
+use crate::transcripts;
 use crate::usage::{self, Profile, Status};
 
 const POLL: Duration = Duration::from_secs(5 * 60);
@@ -20,6 +22,8 @@ const LEVELS: [f32; 2] = [75., 90.];
 #[derive(Default)]
 pub(super) struct UsageState {
     readings: Vec<(Profile, Status)>,
+    /// Profile of each open project's newest transcript, by project root.
+    latest: HashMap<PathBuf, String>,
     fetched: Option<Instant>,
     open: bool,
     /// Generation of the current opening, keying its enter animation.
@@ -27,6 +31,29 @@ pub(super) struct UsageState {
     closing: Option<Closing>,
     /// Highest threshold already announced per profile and window, reset when usage drops.
     announced: HashMap<(String, String), f32>,
+}
+
+fn peak(status: &Status) -> f32 {
+    match status {
+        Status::Windows(w) => w.iter().map(|x| x.used).fold(0., f32::max),
+        _ => 0.,
+    }
+}
+
+/// The preferred profile's reading even when it has no figures, else the busiest one's.
+fn choose<'a>(
+    readings: &'a [(Profile, Status)],
+    preferred: Option<&str>,
+) -> Option<&'a (Profile, Status)> {
+    readings
+        .iter()
+        .find(|(p, _)| Some(p.name.as_str()) == preferred)
+        .or_else(|| {
+            readings
+                .iter()
+                .filter(|(_, s)| matches!(s, Status::Windows(w) if !w.is_empty()))
+                .max_by(|(_, a), (_, b)| peak(a).total_cmp(&peak(b)))
+        })
 }
 
 fn resets_in(at: i64) -> Option<String> {
@@ -52,16 +79,37 @@ impl Shell {
         self._usage = Some(cx.spawn_in(window, async move |this, cx| {
             let mut fresh = fresh;
             loop {
-                let readings = cx
+                let Ok(roots) = this.update(cx, |this, _| {
+                    this.workspace
+                        .projects
+                        .iter()
+                        .map(|p| p.root.clone())
+                        .collect::<Vec<_>>()
+                }) else {
+                    return;
+                };
+                let (readings, latest) = cx
                     .background_executor()
                     .spawn(async move {
-                        usage::profiles(fresh)
+                        let readings = usage::profiles(fresh)
                             .into_iter()
                             .map(|p| {
                                 let s = usage::fetch(&p);
                                 (p, s)
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        let latest = std::env::home_dir()
+                            .map(|home| {
+                                roots
+                                    .into_iter()
+                                    .filter_map(|root| {
+                                        let p = transcripts::latest_profile(&home, &root)?;
+                                        Some((root, p.name))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (readings, latest)
                     })
                     .await;
                 fresh = false;
@@ -74,7 +122,7 @@ impl Shell {
                     .max()
                     .map_or(POLL, |d| d.max(POLL));
                 if this
-                    .update(cx, |this, cx| this.usage_arrived(readings, cx))
+                    .update(cx, |this, cx| this.usage_arrived(readings, latest, cx))
                     .is_err()
                 {
                     return;
@@ -84,7 +132,12 @@ impl Shell {
         }));
     }
 
-    fn usage_arrived(&mut self, readings: Vec<(Profile, Status)>, cx: &mut Context<Self>) {
+    fn usage_arrived(
+        &mut self,
+        readings: Vec<(Profile, Status)>,
+        latest: HashMap<PathBuf, String>,
+        cx: &mut Context<Self>,
+    ) {
         let mut crossings = Vec::new();
         for (profile, status) in &readings {
             let Status::Windows(windows) = status else {
@@ -111,6 +164,7 @@ impl Shell {
             }
         }
         self.usage.readings = readings;
+        self.usage.latest = latest;
         self.usage.fetched = Some(Instant::now());
         for title in crossings {
             self.local_notice(
@@ -201,20 +255,22 @@ impl Shell {
                 .child("Usage")
                 .into_any_element();
         }
-        let busiest = self
-            .usage
-            .readings
-            .iter()
-            .filter_map(|(_, s)| match s {
-                Status::Windows(w) if !w.is_empty() => Some(w),
-                _ => None,
-            })
-            .max_by(|a, b| {
-                let peak = |w: &&Vec<usage::Window>| w.iter().map(|x| x.used).fold(0., f32::max);
-                peak(a).total_cmp(&peak(b))
+        let preferred = self.preferred_profile();
+        let shown = choose(&self.usage.readings, preferred);
+        let windows = shown.and_then(|(_, s)| match s {
+            Status::Windows(w) if !w.is_empty() => Some(w),
+            _ => None,
+        });
+        let tag = shown
+            .filter(|_| self.usage.readings.len() > 1)
+            .map(|(p, _)| {
+                p.name
+                    .strip_prefix("claude-")
+                    .unwrap_or(&p.name)
+                    .to_string()
             });
         let used = |label: &str| {
-            busiest
+            windows
                 .and_then(|w| w.iter().find(|x| x.label == label))
                 .map(|x| x.used)
         };
@@ -226,19 +282,22 @@ impl Shell {
                 .text_color(t.color.content_muted)
                 .child(format!("{label} n/a")),
         };
-        let summary = if busiest.is_some() {
+        let summary = if windows.is_some() {
             div()
                 .flex()
                 .gap(px(4.))
+                .children(tag.map(|tag| div().text_color(t.color.content_muted).child(tag)))
                 .child(part("5h", five))
                 .child(div().text_color(t.color.content_muted).child("·"))
                 .child(part("7d", week))
         } else if self.usage.readings.is_empty() {
             div().text_color(t.color.content_muted).child("Usage…")
         } else {
-            div()
-                .text_color(t.color.content_muted)
-                .child("Usage unavailable")
+            let label = match tag {
+                Some(tag) => format!("{tag} usage unavailable"),
+                None => "Usage unavailable".into(),
+            };
+            div().text_color(t.color.content_muted).child(label)
         };
         div()
             .id("usage")
@@ -274,6 +333,15 @@ impl Shell {
             })
             .child(summary)
             .into_any_element()
+    }
+
+    /// The profile `claude.profiles` names for the active project, else its newest session's.
+    fn preferred_profile(&self) -> Option<&str> {
+        let root = &self.workspace.active_project()?.root;
+        self.settings
+            .file
+            .claude_profile_for(root)
+            .or_else(|| self.usage.latest.get(root).map(String::as_str))
     }
 
     /// Open or still fading out; either way it covers web previews.
@@ -312,6 +380,7 @@ impl Shell {
             return None;
         }
         let t = cx.theme().clone();
+        let preferred = self.preferred_profile();
         let sections: Vec<AnyElement> =
             self.usage
                 .readings
@@ -378,8 +447,18 @@ impl Shell {
                         .gap(px(8.))
                         .child(
                             div()
+                                .flex()
+                                .gap(px(6.))
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(profile.name.clone()),
+                                .child(profile.name.clone())
+                                .when(Some(profile.name.as_str()) == preferred, |el| {
+                                    el.child(
+                                        div()
+                                            .font_weight(FontWeight::NORMAL)
+                                            .text_color(t.color.content_muted)
+                                            .child("this project"),
+                                    )
+                                }),
                         )
                         .child(body)
                         .into_any_element()
@@ -434,5 +513,37 @@ impl Shell {
                 |el, d| el.opacity(d).top(px(36. + 4. * d)),
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reading(name: &str, used: Option<f32>) -> (Profile, Status) {
+        let status = match used {
+            Some(used) => Status::Windows(vec![usage::Window {
+                label: "5h".into(),
+                used,
+                resets_at: None,
+            }]),
+            None => Status::Stale,
+        };
+        (Profile::named(name), status)
+    }
+
+    #[test]
+    fn the_projects_profile_is_shown_even_when_quieter_or_without_figures() {
+        let readings = [
+            reading("claude-ai", Some(80.)),
+            reading("claude-tlsc", Some(10.)),
+            reading("claude-work", None),
+        ];
+        let name = |p: Option<&str>| choose(&readings, p).map(|(p, _)| p.name.as_str());
+        assert_eq!(name(Some("claude-tlsc")), Some("claude-tlsc"));
+        assert_eq!(name(Some("claude-work")), Some("claude-work"));
+        assert_eq!(name(Some("claude-gone")), Some("claude-ai"), "busiest");
+        assert_eq!(name(None), Some("claude-ai"));
+        assert_eq!(choose(&[reading("claude-ai", None)], None), None);
     }
 }

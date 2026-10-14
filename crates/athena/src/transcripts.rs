@@ -475,6 +475,23 @@ fn project_dirs(home: &Path, root: &Path) -> Vec<(Profile, PathBuf)> {
         .collect()
 }
 
+/// The profile holding the project's most recently written transcript, from file times alone.
+pub fn latest_profile(home: &Path, root: &Path) -> Option<Profile> {
+    project_dirs(home, root)
+        .into_iter()
+        .flat_map(|(profile, dir)| {
+            fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+                .filter_map(|e| e.metadata().ok()?.modified().ok())
+                .map(move |modified| (modified, profile.clone()))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, profile)| profile)
+}
+
 /// The `limit` most recently active sessions of the project at `root`, newest first.
 pub fn sessions(home: &Path, root: &Path, limit: usize) -> Vec<Session> {
     let mut found: Vec<(SystemTime, u64, String, Profile, PathBuf)> = Vec::new();
@@ -826,6 +843,11 @@ mod tests {
             "subagent replies are not messages"
         );
         assert_eq!(sessions(&home, root, 1).len(), 1);
+        assert_eq!(
+            latest_profile(&home, root).map(|p| p.name),
+            Some("claude-work".into())
+        );
+        assert_eq!(latest_profile(&home, Path::new("/work/other")), None);
         fs::remove_dir_all(home).unwrap();
     }
 
