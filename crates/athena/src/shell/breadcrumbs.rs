@@ -31,6 +31,17 @@ pub(super) struct BreadcrumbState {
     asking: HashMap<PathBuf, (u64, Task<()>)>,
     /// The symbols last shown for each document, so a cursor move redraws only when they change.
     shown: HashMap<PathBuf, Vec<usize>>,
+    /// Each open editor's path resolved, as resolving it every frame is a syscall.
+    keys: HashMap<PathBuf, PathBuf>,
+}
+
+impl BreadcrumbState {
+    fn key(&mut self, path: &Path) -> PathBuf {
+        self.keys
+            .entry(path.to_path_buf())
+            .or_insert_with(|| document_key(path))
+            .clone()
+    }
 }
 
 /// Indexes of the symbols holding `at`, outermost first.
@@ -83,10 +94,11 @@ impl Shell {
         editor: &Entity<EditorView>,
         cx: &mut Context<Self>,
     ) -> Option<Rc<Vec<Symbol>>> {
-        let (doc, version) = {
+        let (path, version) = {
             let e = editor.read(cx);
-            (document_key(e.path()), e.version()?)
+            (e.path().to_path_buf(), e.version()?)
         };
+        let doc = self.breadcrumbs.key(&path);
         let cached = self.breadcrumbs.symbols.get(&doc).cloned();
         let fresh = cached.as_ref().is_some_and(|(v, _)| *v == version);
         let asked = self
@@ -159,6 +171,7 @@ impl Shell {
 
     pub(super) fn breadcrumbs_closed(&mut self, path: &Path) {
         let doc = document_key(path);
+        self.breadcrumbs.keys.retain(|_, key| *key != doc);
         self.breadcrumbs.symbols.remove(&doc);
         self.breadcrumbs.asking.remove(&doc);
         self.breadcrumbs.shown.remove(&doc);
@@ -190,9 +203,8 @@ impl Shell {
             }
             _ => Vec::new(),
         };
-        self.breadcrumbs
-            .shown
-            .insert(document_key(&path), chain.clone());
+        let doc = self.breadcrumbs.key(&path);
+        self.breadcrumbs.shown.insert(doc, chain.clone());
 
         let separator = || {
             div()
