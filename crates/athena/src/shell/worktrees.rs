@@ -575,7 +575,9 @@ impl Shell {
                             for w in &mut list {
                                 w.path = w.path.canonicalize().unwrap_or_else(|_| w.path.clone());
                             }
-                            (list.len() > 1).then_some((main, list))
+                            let real = main.canonicalize().ok();
+                            list.retain(|w| Some(&w.path) != real.as_ref() && w.path != main);
+                            (!list.is_empty()).then_some((main, list))
                         })
                         .collect::<HashMap<_, _>>()
                 })
@@ -599,7 +601,6 @@ impl Shell {
         let Some(list) = self.git.listed_worktrees.get(root) else {
             return Vec::new();
         };
-        let real = root.canonicalize().ok();
         // Roots older builds saved through a symlink are resolved, but only for a likely match.
         let open = |w: &Worktree| {
             self.workspace.projects.iter().any(|p| {
@@ -608,10 +609,7 @@ impl Shell {
                         && p.root.canonicalize().is_ok_and(|r| r == w.path))
             })
         };
-        list.iter()
-            .filter(|w| Some(&w.path) != real.as_ref() && w.path != root)
-            .filter(|w| !open(w))
-            .collect()
+        list.iter().filter(|w| !open(w)).collect()
     }
 
     /// The main worktree of the project at `root` when it is a linked worktree, cached.

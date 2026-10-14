@@ -87,7 +87,7 @@ pub(super) struct GitState {
     pub(super) worktree_mains: HashMap<PathBuf, Option<PathBuf>>,
     /// The next worktree created from the picker starts a Claude session.
     pub(super) claude_in_new_worktree: bool,
-    /// Every worktree of each open main repository, for the sidebar to offer the unopened ones.
+    /// The linked worktrees of each open main repository, for the sidebar to offer the unopened ones.
     pub(super) listed_worktrees: HashMap<PathBuf, Vec<git::Worktree>>,
     pub(super) worktree_lists_asked: u64,
     /// The work tree and branch the focused terminal sits in, when not the active project's.
