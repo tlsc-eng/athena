@@ -1047,7 +1047,6 @@ impl Shell {
             .collect()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_folder_row(
         &self,
         path: &[String],

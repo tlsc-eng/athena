@@ -247,6 +247,8 @@ impl Workspace {
         let projects = &self.projects;
         self.collapsed
             .retain(|path| projects.iter().any(|p| p.folder.starts_with(path)));
+        self.folder_styles
+            .retain(|s| projects.iter().any(|p| p.folder.starts_with(&s.path)));
         Some(project)
     }
 

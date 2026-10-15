@@ -300,17 +300,19 @@ impl Workspace {
             }
         }
         self.folder_styles.retain(|s| s.path != folder);
-        for style in &mut self.folder_styles {
-            if style.path.starts_with(folder) {
-                style.path.remove(depth);
+        // A lifted subfolder that lands on an existing folder gives way to that folder's style.
+        let existing: Vec<Vec<String>> = self
+            .folder_styles
+            .iter()
+            .filter(|s| !s.path.starts_with(folder))
+            .map(|s| s.path.clone())
+            .collect();
+        self.folder_styles.retain_mut(|style| {
+            if !style.path.starts_with(folder) {
+                return true;
             }
-        }
-        // A subfolder that now shares a path with an existing folder keeps the existing one's style.
-        let mut seen: Vec<Vec<String>> = Vec::new();
-        self.folder_styles.retain(|s| {
-            let fresh = !seen.contains(&s.path);
-            seen.push(s.path.clone());
-            fresh
+            style.path.remove(depth);
+            !existing.contains(&style.path)
         });
         self.group_folders();
     }
@@ -611,24 +613,29 @@ mod tests {
         assert_eq!(style_paths(&w), [path("clients")]);
         assert_eq!(w.folder_styles[0].icon, Some(FolderIcon::Book));
 
-        let mut merged = workspace(&[("d", "work/clients"), ("b", "clients")]);
-        styled(&mut merged, "clients", FolderIcon::Star, FolderColor::Cyan);
-        styled(
-            &mut merged,
-            "work/clients",
-            FolderIcon::Book,
-            FolderColor::Green,
-        );
-        merged.delete_folder(&path("work"));
-        assert_eq!(
-            merged.folder_styles,
-            [FolderStyle {
-                path: path("clients"),
-                icon: Some(FolderIcon::Star),
-                color: Some(FolderColor::Cyan),
-            }],
-            "the folder already there keeps its own style"
-        );
+        for lifted_first in [false, true] {
+            let mut merged = workspace(&[("d", "work/clients"), ("b", "clients")]);
+            let mut order = [
+                ("clients", FolderIcon::Star, FolderColor::Cyan),
+                ("work/clients", FolderIcon::Book, FolderColor::Green),
+            ];
+            if lifted_first {
+                order.reverse();
+            }
+            for (folder, icon, color) in order {
+                styled(&mut merged, folder, icon, color);
+            }
+            merged.delete_folder(&path("work"));
+            assert_eq!(
+                merged.folder_styles,
+                [FolderStyle {
+                    path: path("clients"),
+                    icon: Some(FolderIcon::Star),
+                    color: Some(FolderColor::Cyan),
+                }],
+                "the folder already there keeps its own style, whichever is listed first"
+            );
+        }
     }
 
     #[test]
@@ -639,6 +646,14 @@ mod tests {
         w.move_to_folder(1..2, &[]);
         assert_eq!(style_paths(&w), [path("work")]);
         w.move_to_folder(0..1, &[]);
+        assert!(w.folder_styles.is_empty());
+    }
+
+    #[test]
+    fn detaching_a_folders_last_project_forgets_its_style() {
+        let mut w = workspace(&[("a", "work"), ("b", "")]);
+        styled(&mut w, "work", FolderIcon::Flask, FolderColor::Red);
+        assert!(w.detach_project(0).is_some());
         assert!(w.folder_styles.is_empty());
     }
 }
