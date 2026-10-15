@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ItemKind, Project, UiState, WindowState, Workspace, canonical};
+use crate::{FolderStyle, ItemKind, Project, UiState, WindowState, Workspace, canonical};
 
 /// One window's projects, named by root, with its own bounds and panel sizes.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -16,6 +16,8 @@ pub struct WindowEntry {
     pub ui: UiState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_styles: Vec<FolderStyle>,
 }
 
 impl Workspace {
@@ -62,6 +64,7 @@ impl Workspace {
             window: entry.window,
             ui: self.app_ui(entry.ui),
             collapsed: entry.collapsed.clone(),
+            folder_styles: entry.folder_styles.clone(),
             windows: Vec::new(),
             parked: Vec::new(),
             recent: self.recent.clone(),
@@ -95,6 +98,7 @@ impl Workspace {
             windows: Vec::new(),
             parked: Vec::new(),
             collapsed: Vec::new(),
+            folder_styles: Vec::new(),
         }
     }
 
@@ -112,6 +116,7 @@ impl Workspace {
                     window: w.window,
                     ui: app.app_ui(w.ui),
                     collapsed: w.collapsed.clone(),
+                    folder_styles: w.folder_styles.clone(),
                 })
                 .collect(),
         };
@@ -121,6 +126,7 @@ impl Workspace {
             window: first.and_then(|w| w.window),
             ui: app.app_ui(first.map_or(app.ui, |w| w.ui)),
             collapsed: first.map_or_else(Vec::new, |w| w.collapsed.clone()),
+            folder_styles: first.map_or_else(Vec::new, |w| w.folder_styles.clone()),
             windows: entries,
             parked: parked.to_vec(),
             recent: app.recent.clone(),
@@ -316,6 +322,7 @@ mod tests {
                 window: bounds(10.),
                 ui: UiState::default(),
                 collapsed: Vec::new(),
+                folder_styles: Vec::new(),
             },
             WindowEntry {
                 roots: vec!["/n/b".into(), "/n/b".into()],
@@ -323,6 +330,7 @@ mod tests {
                 window: bounds(500.),
                 ui: UiState::default(),
                 collapsed: Vec::new(),
+                folder_styles: Vec::new(),
             },
             WindowEntry {
                 roots: vec!["/n/b".into()],
@@ -330,6 +338,7 @@ mod tests {
                 window: bounds(900.),
                 ui: UiState::default(),
                 collapsed: Vec::new(),
+                folder_styles: Vec::new(),
             },
         ];
         let (windows, _) = w.into_windows();
@@ -354,6 +363,7 @@ mod tests {
                 window: bounds(30.),
                 ui: UiState::default(),
                 collapsed: Vec::new(),
+                folder_styles: Vec::new(),
             }],
             ..Workspace::default()
         };
