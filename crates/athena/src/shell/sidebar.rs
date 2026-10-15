@@ -443,14 +443,32 @@ fn tile_shown(open: f32) -> f32 {
     (1. - open / TILE_FADE).clamp(0., 1.)
 }
 
-/// A line's box, `shown` of a pitch tall with the gap inside it, so the column can only stack lines
-/// where `line_tops` puts them. Part-drawn, its row is clipped and faded, settling into place.
-fn line_box(t: &Theme, item: AnyElement, shown: f32, wide: bool) -> AnyElement {
+/// Each line's laid-out heights: the block spacer above it, then its own box with the gap below.
+/// The list has no flex gap, so these alone stack the lines.
+fn list_boxes(shown: &[f32], spaced: &[f32], wide: bool) -> Vec<(f32, f32)> {
     let (row_h, gap) = line_size(wide);
+    shown
+        .iter()
+        .zip(spaced)
+        .map(|(shown, space)| (space * (BLOCK_SPACER + gap), shown * (row_h + gap)))
+        .collect()
+}
+
+/// Where an open folder's tray ends below its last line, `shown` of which is drawn: the line's
+/// foot when whole, the heading's foot once the lines have gone.
+fn tray_bottom(last_top: f32, shown: f32, wide: bool, pad: f32) -> f32 {
+    let (row_h, gap) = line_size(wide);
+    last_top + shown * (row_h + gap) - gap + pad
+}
+
+/// A line's box, `height` tall as `list_boxes` gives it, so the column can only stack lines where
+/// `line_tops` puts them. Part-drawn, its row is clipped and faded, settling into place.
+fn line_box(t: &Theme, item: AnyElement, height: f32, shown: f32, wide: bool) -> AnyElement {
+    let (row_h, _) = line_size(wide);
     let line = div()
         .flex_none()
         .when(!wide, |el| el.w(t.ui(RAIL_ITEM)))
-        .h(t.ui(shown * (row_h + gap)));
+        .h(t.ui(height));
     if shown >= 1. {
         return line.child(item).into_any_element();
     }
@@ -1222,7 +1240,7 @@ impl Shell {
                 };
                 let last = span.end - 1;
                 let top = tops[span.start] - pad;
-                let bottom = tops[last] + shown[last] * row_h + pad;
+                let bottom = tray_bottom(tops[last], shown[last], wide, pad);
                 // Gives way to the closed tile, and goes with the lines of a folder around it.
                 let strength = shown[span.start] * (1. - tile_shown(open_at(&folds, *r)));
                 Some(
@@ -1260,14 +1278,14 @@ impl Shell {
         };
         let rows_and_spacers: Vec<AnyElement> = items
             .into_iter()
+            .zip(list_boxes(&shown, &spaced, wide))
             .enumerate()
-            .flat_map(|(line, item)| {
-                let space = spaced[line];
-                let spacer = (space > 0.)
-                    .then(|| div().h(t.ui(extra * space)).flex_none().into_any_element());
+            .flat_map(|(line, (item, (spacer, height)))| {
+                let spacer =
+                    (spacer > 0.).then(|| div().h(t.ui(spacer)).flex_none().into_any_element());
                 spacer
                     .into_iter()
-                    .chain([line_box(&t, item, shown[line], wide)])
+                    .chain([line_box(&t, item, height, shown[line], wide)])
             })
             .collect();
 
@@ -1883,16 +1901,43 @@ mod tests {
     }
 
     #[test]
-    fn lines_keep_one_pitch_in_each_layout_while_others_ease() {
-        // A line's box is its row and the gap below it, so the rail steps 40 and the wide list 30.
-        let (row, gap) = line_size(false);
-        assert_eq!(row + gap, RAIL_ITEM + RAIL_GAP);
-        let rail = line_tops(&[1., 1., 0.5, 1., 1.], &[0.; 5], row + gap, 0.);
-        assert_eq!(rail, [0., 40., 80., 100., 140.]);
-        let (row, gap) = line_size(true);
-        assert_eq!(row + gap, ROW + ROW_GAP);
-        let wide = line_tops(&[1., 1., 0.5, 1., 1.], &[0.; 5], row + gap, 0.);
-        assert_eq!(wide, [0., 30., 60., 75., 105.]);
+    fn the_boxes_the_list_lays_out_stack_each_line_where_the_overlays_put_it() {
+        // The rail steps 40 with a 10 spacer, the wide list 30 with a 4 spacer.
+        let shown = [1., 0.5, 0.25, 1., 0.75, 1.];
+        let spaced = [0., 0., 0., 0.5, 0., 1.];
+        for (wide, pitch, extra) in [(false, 40., 10.), (true, 30., 4.)] {
+            let inset = list_inset(wide);
+            let tops = line_tops(&shown, &spaced, pitch, extra);
+            let mut y = inset;
+            for (line, (spacer, height)) in
+                list_boxes(&shown, &spaced, wide).into_iter().enumerate()
+            {
+                y += spacer;
+                assert!(
+                    (y - (inset + tops[line])).abs() < 1e-4,
+                    "line {line}, wide: {wide}"
+                );
+                y += height;
+            }
+        }
+    }
+
+    #[test]
+    fn a_closing_folders_tray_never_reaches_past_the_line_after_it() {
+        for (wide, pitch, extra) in [(false, 40., 10.), (true, 30., 4.)] {
+            let pad = tray_pad(wide, 0);
+            for step in 0..=20 {
+                // A folder with two lines easing shut, then the line after its block.
+                let open = step as f32 / 20.;
+                let shown = [1., open, open, 1.];
+                let tops = line_tops(&shown, &block_breaks(&[(3, open)], 4), pitch, extra);
+                let bottom = tray_bottom(tops[2], open, wide, pad);
+                assert!(bottom <= tops[3] + 1e-4, "open {open}, wide: {wide}");
+            }
+            let (row, _) = line_size(wide);
+            let tops = line_tops(&[1., 0., 0., 1.], &[0.; 4], pitch, extra);
+            assert_eq!(tray_bottom(tops[2], 0., wide, pad), row + pad);
+        }
     }
 
     #[test]
