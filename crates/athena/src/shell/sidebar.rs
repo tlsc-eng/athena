@@ -376,6 +376,23 @@ fn line_size(wide: bool) -> (f32, f32) {
     }
 }
 
+/// How far an open folder's tray reaches past its lines, less for nested folders.
+fn tray_pad(wide: bool, depth: usize) -> f32 {
+    match (wide, depth) {
+        (false, 0) => 4.,
+        (false, 1) => 2.,
+        (false, _) => 1.,
+        (true, 0) => 2.,
+        (true, _) => 1.,
+    }
+}
+
+/// Room above the first line for a tray around it, which the scrolled list would otherwise clip;
+/// the gap inside the last line's box leaves the same room below.
+fn list_inset(wide: bool) -> f32 {
+    tray_pad(wide, 0)
+}
+
 /// Where each line's top is drawn, `shown` being how much of each line is drawn and `spaced` how
 /// much block spacer sits above it; `line_box` and the spacers lay the column out by the same sums.
 fn line_tops(shown: &[f32], spaced: &[f32], pitch: f32, extra: f32) -> Vec<f32> {
@@ -1129,6 +1146,7 @@ impl Shell {
 
         let pitch = row_h + gap;
         let extra = BLOCK_SPACER + gap;
+        let inset = list_inset(wide);
         let spans = open_folder_spans(&rows, &line_of_row, items.len());
         let open_at = |folds: &[(Fold, f32)], r: usize| match &rows[r] {
             SidebarRow::Folder { path, .. } => folder_open(folds, collapsed, path),
@@ -1140,7 +1158,9 @@ impl Shell {
                 .map(|(r, span)| (span.end, shown[span.start] * open_at(folds, *r)))
                 .collect();
             let spaced = block_breaks(&ends, shown.len());
-            let tops = line_tops(shown, &spaced, pitch, extra);
+            let mut tops = line_tops(shown, &spaced, pitch, extra);
+            // Overlays are placed from the list's top edge, above its inset.
+            tops.iter_mut().for_each(|top| *top += inset);
             (spaced, tops)
         };
         let (spaced, tops) = tops_for(&folds, &shown);
@@ -1193,13 +1213,7 @@ impl Shell {
                     return None;
                 };
                 let color = folder_color(&t, self.workspace.folder_look(path).1);
-                let pad = match (wide, depth) {
-                    (false, 0) => 4.,
-                    (false, 1) => 2.,
-                    (false, _) => 1.,
-                    (true, 0) => 2.,
-                    (true, _) => 1.,
-                };
+                let pad = tray_pad(wide, *depth);
                 let (left, width) = if wide {
                     let inset = INDENT * *depth as f32;
                     (6. + inset, SIDEBAR_WIDTH - 12. - inset)
@@ -1326,7 +1340,9 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .justify_between()
-                    .py(t.ui(TOP))
+                    // The list's inset makes up the rest, so the first line stays TOP down.
+                    .pt(t.ui(TOP - inset))
+                    .pb(t.ui(TOP))
                     .opacity(fade)
                     .child(
                         div()
@@ -1343,6 +1359,7 @@ impl Shell {
                                     .flex_col()
                                     .when(!wide, |el| el.items_center())
                                     .when(wide, |el| el.px(t.ui(6.)))
+                                    .pt(t.ui(inset))
                                     .children(trays)
                                     .children(dividers)
                                     .children(rows_and_spacers)
@@ -1876,6 +1893,22 @@ mod tests {
         assert_eq!(row + gap, ROW + ROW_GAP);
         let wide = line_tops(&[1., 1., 0.5, 1., 1.], &[0.; 5], row + gap, 0.);
         assert_eq!(wide, [0., 30., 60., 75., 105.]);
+    }
+
+    #[test]
+    fn the_first_and_last_trays_draw_whole_inside_the_scrolled_list() {
+        for wide in [false, true] {
+            let (_, gap) = line_size(wide);
+            for depth in 0..3 {
+                let pad = tray_pad(wide, depth);
+                assert!(list_inset(wide) >= pad, "room above, wide: {wide}");
+                assert!(
+                    gap >= pad,
+                    "the last line's gap leaves room below, wide: {wide}"
+                );
+            }
+            assert!(list_inset(wide) <= TOP, "the first line stays where it was");
+        }
     }
 
     #[test]
