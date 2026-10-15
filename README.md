@@ -684,13 +684,17 @@ information rather than triggering the install dialog).
   Sidebar** (`cmd-alt-b`, View menu, palette, or the ⇥ button under "+"). Folders group projects
   and can nest: right-click a project and pick **Move to Folder…**, then pick a folder or type a
   new name (`Work/Clients` nests one folder in another). Click a folder to collapse it, and a
-  collapsed folder shows the most urgent Claude state among its projects. In the narrow rail an
-  open folder and its projects sit on one tinted backing, a collapsed folder shows its first
-  projects in miniature; click it to open it again, or right-click it to switch to one of its
-  projects without opening it. Thin dividers set off folders and repositories with worktrees from lone projects. Right-click a
-  folder to rename, move or remove it (its projects stay, moving up a level). A linked worktree
-  always sits in its repository's folder. Folders and which ones are collapsed are saved per
-  window; a build older than 0.12 shows the projects as one flat list. The palette can also
+  collapsed folder shows the most urgent Claude state among its projects. Every folder has an
+  icon and a colour, picked from its name until you choose: an open folder and its projects sit on
+  one backing tinted with its colour, nested folders inset inside their parent's, and a collapsed
+  folder in the narrow rail is its icon on a tile of that colour; click it to open it again, or
+  right-click it to switch to one of its projects without opening it. The wide sidebar tints open
+  folders the same way, with the icon where the ▸ was and the ▸ at the end of the row. Thin
+  dividers set off folders and repositories with worktrees from lone projects. Right-click a
+  folder to rename, move or remove it (its projects stay, moving up a level), or **Change Icon…**
+  and **Change Colour…** to pick from twelve icons and eight theme colours. A linked worktree
+  always sits in its repository's folder. Folders, their icons and colours, and which ones are
+  collapsed are saved per window; a build older than 0.12 shows the projects as one flat list. The palette can also
   collapse or expand the active project's folder, or collapse every folder. **Switch Project…**
   (`ctrl-cmd-p`) finds a project by name, those Claude needs first. After a switch the sidebar
   scrolls to the active project.

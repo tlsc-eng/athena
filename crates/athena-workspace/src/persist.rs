@@ -76,7 +76,10 @@ pub fn set_aside(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ItemId, ItemKind, PaneId, UiState, ViewState, WindowMode, WindowState};
+    use crate::{
+        FolderIcon, FolderStyle, ItemId, ItemKind, PaneId, UiState, ViewState, WindowMode,
+        WindowState,
+    };
 
     #[test]
     fn round_trip() {
@@ -106,11 +109,18 @@ mod tests {
         };
         w.projects[0].folder = vec!["work".into(), "clients".into()];
         w.collapsed = vec![vec!["work".into()]];
+        w.folder_styles = vec![FolderStyle {
+            path: vec!["work".into()],
+            icon: Some(FolderIcon::Rocket),
+            color: None,
+        }];
         w.projects[0].worktrees_collapsed = false;
         save(&path, &w).unwrap();
         assert_eq!(load(&path).unwrap(), w);
         let saved = fs::read_to_string(&path).unwrap();
         assert_eq!(saved.matches("worktrees_collapsed").count(), 1);
+        assert!(saved.contains(r#""folder_styles""#) && saved.contains(r#""rocket""#));
+        assert!(!saved.contains(r#""color""#), "an unset part is left out");
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

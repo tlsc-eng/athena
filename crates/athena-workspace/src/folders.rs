@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::Workspace;
+use crate::{FolderColor, FolderIcon, FolderStyle, Workspace, default_look};
 
 /// A line of the project sidebar: a folder heading, or a project at `index` in `projects`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +78,51 @@ impl Workspace {
         let projects = &self.projects;
         self.collapsed
             .retain(|path| projects.iter().any(|p| p.folder.starts_with(path)));
+        self.folder_styles
+            .retain(|s| projects.iter().any(|p| p.folder.starts_with(&s.path)));
+    }
+
+    /// The icon and colour `folder` shows: what the user chose, else the defaults for its name.
+    pub fn folder_look(&self, folder: &[String]) -> (FolderIcon, FolderColor) {
+        let (icon, color) = default_look(folder.last().map_or("", String::as_str));
+        match self.folder_style(folder) {
+            Some(style) => (style.icon.unwrap_or(icon), style.color.unwrap_or(color)),
+            None => (icon, color),
+        }
+    }
+
+    /// What the user chose for `folder`, if anything.
+    pub fn folder_style(&self, folder: &[String]) -> Option<&FolderStyle> {
+        self.folder_styles.iter().find(|s| s.path == folder)
+    }
+
+    /// Sets `folder`'s icon, or goes back to the default with `None`.
+    pub fn set_folder_icon(&mut self, folder: &[String], icon: Option<FolderIcon>) {
+        self.edit_style(folder, |s| s.icon = icon);
+    }
+
+    /// Sets `folder`'s colour, or goes back to the default with `None`.
+    pub fn set_folder_color(&mut self, folder: &[String], color: Option<FolderColor>) {
+        self.edit_style(folder, |s| s.color = color);
+    }
+
+    fn edit_style(&mut self, folder: &[String], edit: impl FnOnce(&mut FolderStyle)) {
+        let at = match self.folder_styles.iter().position(|s| s.path == folder) {
+            Some(at) => at,
+            None => {
+                self.folder_styles.push(FolderStyle {
+                    path: folder.to_vec(),
+                    icon: None,
+                    color: None,
+                });
+                self.folder_styles.len() - 1
+            }
+        };
+        edit(&mut self.folder_styles[at]);
+        let style = &self.folder_styles[at];
+        if style.icon.is_none() && style.color.is_none() {
+            self.folder_styles.remove(at);
+        }
     }
 
     /// The sidebar's rows, leaving out what collapsed folders hold.
@@ -254,6 +299,21 @@ impl Workspace {
                 path.remove(depth);
             }
         }
+        self.folder_styles.retain(|s| s.path != folder);
+        // A lifted subfolder that lands on an existing folder gives way to that folder's style.
+        let existing: Vec<Vec<String>> = self
+            .folder_styles
+            .iter()
+            .filter(|s| !s.path.starts_with(folder))
+            .map(|s| s.path.clone())
+            .collect();
+        self.folder_styles.retain_mut(|style| {
+            if !style.path.starts_with(folder) {
+                return true;
+            }
+            style.path.remove(depth);
+            !existing.contains(&style.path)
+        });
         self.group_folders();
     }
 
@@ -285,6 +345,9 @@ impl Workspace {
         }
         for path in &mut self.collapsed {
             swap(path);
+        }
+        for style in &mut self.folder_styles {
+            swap(&mut style.path);
         }
         self.group_folders();
     }
@@ -463,5 +526,134 @@ mod tests {
         w.toggle_folder(&path("work"));
         w.move_to_folder(0..1, &[]);
         assert!(w.collapsed.is_empty());
+    }
+
+    fn styled(w: &mut Workspace, folder: &str, icon: FolderIcon, color: FolderColor) {
+        w.set_folder_icon(&path(folder), Some(icon));
+        w.set_folder_color(&path(folder), Some(color));
+    }
+
+    fn style_paths(w: &Workspace) -> Vec<Vec<String>> {
+        w.folder_styles.iter().map(|s| s.path.clone()).collect()
+    }
+
+    #[test]
+    fn a_folder_look_is_the_choice_over_the_default_and_a_cleared_part_goes_back() {
+        let mut w = workspace(&[("a", "work")]);
+        let work = path("work");
+        let (icon, color) = default_look("work");
+        assert_eq!(w.folder_look(&work), (icon, color));
+        w.set_folder_icon(&work, Some(FolderIcon::Rocket));
+        assert_eq!(w.folder_look(&work), (FolderIcon::Rocket, color));
+        w.set_folder_color(&work, Some(FolderColor::Cyan));
+        assert_eq!(
+            w.folder_look(&work),
+            (FolderIcon::Rocket, FolderColor::Cyan)
+        );
+        w.set_folder_icon(&work, None);
+        assert_eq!(w.folder_look(&work), (icon, FolderColor::Cyan));
+        w.set_folder_color(&work, None);
+        assert!(
+            w.folder_styles.is_empty(),
+            "only customised folders are kept"
+        );
+    }
+
+    #[test]
+    fn default_looks_are_stable_and_mostly_differ_between_names() {
+        assert_eq!(default_look("work"), default_look("work"));
+        // Pinned so a change of hash, which would reshuffle every saved layout, is deliberate.
+        assert_eq!(
+            default_look("work"),
+            (FolderIcon::Gear, FolderColor::Accent)
+        );
+        let names = [
+            "work", "hobby", "clients", "oss", "infra", "docs", "labs", "home",
+        ];
+        let mut looks: Vec<_> = names.iter().map(|n| default_look(n)).collect();
+        looks.sort_by_key(|(i, c)| (*i as u8, *c as u8));
+        looks.dedup();
+        assert!(looks.len() >= names.len() - 1, "{looks:?}");
+    }
+
+    #[test]
+    fn folder_styles_follow_renames_and_moves_with_their_subfolders() {
+        let mut w = workspace(&[("a", "work"), ("d", "work/clients"), ("b", "hobby")]);
+        styled(&mut w, "work", FolderIcon::Flask, FolderColor::Red);
+        styled(&mut w, "work/clients", FolderIcon::Book, FolderColor::Green);
+        styled(&mut w, "hobby", FolderIcon::Leaf, FolderColor::Blue);
+
+        assert!(w.rename_folder(&path("work"), "job"));
+        assert_eq!(
+            style_paths(&w),
+            [path("job"), path("job/clients"), path("hobby")]
+        );
+        assert_eq!(
+            w.folder_look(&path("job")),
+            (FolderIcon::Flask, FolderColor::Red)
+        );
+
+        assert!(w.move_folder(&path("job"), &path("hobby")));
+        assert_eq!(
+            style_paths(&w),
+            [path("hobby/job"), path("hobby/job/clients"), path("hobby")]
+        );
+        assert_eq!(
+            w.folder_look(&path("hobby/job/clients")),
+            (FolderIcon::Book, FolderColor::Green)
+        );
+    }
+
+    #[test]
+    fn deleting_a_folder_drops_its_style_and_lifts_its_subfolders() {
+        let mut w = workspace(&[("a", "work"), ("d", "work/clients"), ("b", "clients")]);
+        styled(&mut w, "work", FolderIcon::Flask, FolderColor::Red);
+        styled(&mut w, "work/clients", FolderIcon::Book, FolderColor::Green);
+        w.delete_folder(&path("work"));
+        assert_eq!(style_paths(&w), [path("clients")]);
+        assert_eq!(w.folder_styles[0].icon, Some(FolderIcon::Book));
+
+        for lifted_first in [false, true] {
+            let mut merged = workspace(&[("d", "work/clients"), ("b", "clients")]);
+            let mut order = [
+                ("clients", FolderIcon::Star, FolderColor::Cyan),
+                ("work/clients", FolderIcon::Book, FolderColor::Green),
+            ];
+            if lifted_first {
+                order.reverse();
+            }
+            for (folder, icon, color) in order {
+                styled(&mut merged, folder, icon, color);
+            }
+            merged.delete_folder(&path("work"));
+            assert_eq!(
+                merged.folder_styles,
+                [FolderStyle {
+                    path: path("clients"),
+                    icon: Some(FolderIcon::Star),
+                    color: Some(FolderColor::Cyan),
+                }],
+                "the folder already there keeps its own style, whichever is listed first"
+            );
+        }
+    }
+
+    #[test]
+    fn styles_of_folders_that_empty_out_are_forgotten() {
+        let mut w = workspace(&[("a", "work"), ("b", "work/clients"), ("c", "")]);
+        styled(&mut w, "work", FolderIcon::Flask, FolderColor::Red);
+        styled(&mut w, "work/clients", FolderIcon::Book, FolderColor::Green);
+        w.move_to_folder(1..2, &[]);
+        assert_eq!(style_paths(&w), [path("work")]);
+        w.move_to_folder(0..1, &[]);
+        assert!(w.folder_styles.is_empty());
+    }
+
+    #[test]
+    fn detaching_a_folders_last_project_forgets_its_style() {
+        let mut w = workspace(&[("a", "work"), ("b", "")]);
+        styled(&mut w, "work", FolderIcon::Flask, FolderColor::Red);
+        assert!(w.detach_project(0).is_some());
+        assert!(w.folder_styles.is_empty());
     }
 }

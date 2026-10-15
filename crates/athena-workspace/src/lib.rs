@@ -1,3 +1,4 @@
+mod folder_style;
 mod folders;
 pub mod gh;
 pub mod git;
@@ -8,6 +9,7 @@ mod scope;
 pub mod watch;
 mod windows;
 
+pub use folder_style::{FolderColor, FolderIcon, FolderStyle, default_look};
 pub use folders::SidebarRow;
 pub use layout::{
     Axis, DiffBase, Direction, Divider, Item, ItemId, ItemKind, Layout, MIN_PANE, Node, NodePath,
@@ -60,6 +62,9 @@ pub struct Workspace {
     /// Sidebar folders this window shows closed, by path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed: Vec<Vec<String>>,
+    /// Icons and colours the user chose for sidebar folders, by path; the rest use defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_styles: Vec<FolderStyle>,
 }
 
 /// The workspace fields settings.json may set; workspace.json keeps them as the fallback.
@@ -154,6 +159,7 @@ impl Default for Workspace {
             windows: Vec::new(),
             parked: Vec::new(),
             collapsed: Vec::new(),
+            folder_styles: Vec::new(),
         }
     }
 }
@@ -241,6 +247,8 @@ impl Workspace {
         let projects = &self.projects;
         self.collapsed
             .retain(|path| projects.iter().any(|p| p.folder.starts_with(path)));
+        self.folder_styles
+            .retain(|s| projects.iter().any(|p| p.folder.starts_with(&s.path)));
         Some(project)
     }
 

@@ -4,10 +4,10 @@ use std::rc::Rc;
 
 use athena_term::ClaudeState;
 use athena_ui::{ActiveTheme, Theme, Tooltip, motion};
-use athena_workspace::{SidebarRow, Workspace};
+use athena_workspace::{FolderColor, FolderIcon, SidebarRow, Workspace, default_look};
 use gpui::{
-    Animation, AnyElement, Context, ExternalPaths, FontWeight, MouseButton, SharedString, Window,
-    div, prelude::*, px,
+    Animation, AnyElement, Context, ExternalPaths, FontWeight, Hsla, MouseButton, SharedString,
+    Window, div, prelude::*, px, svg,
 };
 
 use super::Shell;
@@ -25,6 +25,13 @@ const ROW: f32 = 28.;
 const ROW_GAP: f32 = 2.;
 const TOP: f32 = 8.;
 const INDENT: f32 = 12.;
+/// Height of the spacer that, with the row gap, sets blocks apart from what follows them.
+const BLOCK_SPACER: f32 = 2.;
+/// Alphas of a folder's colour: its open backing, that backing's edge, and its closed tile.
+const TRAY_TINT: f32 = 0.12;
+const TRAY_EDGE: f32 = 0.3;
+const TILE_TINT: f32 = 0.18;
+const FOLDER_ICON: f32 = 18.;
 
 /// A sidebar folder being dragged into another folder or out to the top level.
 #[derive(Clone, Debug)]
@@ -45,6 +52,63 @@ pub(super) enum Subject {
 pub(super) enum FolderPick {
     Move(Subject, Vec<String>),
     Rename(Vec<String>, String),
+    /// A folder's icon, or the default again with `None`.
+    Icon(Vec<String>, Option<FolderIcon>),
+    Color(Vec<String>, Option<FolderColor>),
+}
+
+pub(super) fn folder_color(t: &Theme, color: FolderColor) -> Hsla {
+    let ansi = &t.terminal.ansi;
+    match color {
+        FolderColor::Red => ansi[1],
+        FolderColor::Green => ansi[2],
+        FolderColor::Yellow => ansi[3],
+        FolderColor::Blue => ansi[4],
+        FolderColor::Magenta => ansi[5],
+        FolderColor::Cyan => ansi[6],
+        FolderColor::Accent => t.color.accent,
+        FolderColor::Muted => t.color.content_muted,
+    }
+}
+
+fn folder_icon_path(icon: FolderIcon) -> &'static str {
+    match icon {
+        FolderIcon::Cup => "folders/cup.svg",
+        FolderIcon::Briefcase => "folders/briefcase.svg",
+        FolderIcon::House => "folders/house.svg",
+        FolderIcon::Flask => "folders/flask.svg",
+        FolderIcon::Rocket => "folders/rocket.svg",
+        FolderIcon::Book => "folders/book.svg",
+        FolderIcon::Star => "folders/star.svg",
+        FolderIcon::Leaf => "folders/leaf.svg",
+        FolderIcon::Gear => "folders/gear.svg",
+        FolderIcon::Globe => "folders/globe.svg",
+        FolderIcon::Heart => "folders/heart.svg",
+        FolderIcon::Code => "folders/code.svg",
+    }
+}
+
+pub(super) fn folder_icon(t: &Theme, icon: FolderIcon, color: Hsla, size: f32) -> gpui::Svg {
+    svg()
+        .path(folder_icon_path(icon))
+        .size(t.ui(size))
+        .flex_none()
+        .text_color(color)
+}
+
+/// A folder's icon on a square tinted with its colour, as a closed folder shows in the rail.
+pub(super) fn folder_tile(t: &Theme, icon: FolderIcon, color: Hsla, size: f32) -> gpui::Div {
+    div()
+        .size(t.ui(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(t.shape.radius_control)
+        .border_1()
+        .border_color(color.opacity(TRAY_EDGE))
+        .bg(color.opacity(TILE_TINT))
+        .child(folder_icon(t, icon, color, size * 0.6))
 }
 
 pub(super) fn folder_label(path: &[String]) -> String {
@@ -127,6 +191,67 @@ pub(super) fn rename_entries(
     )]
 }
 
+/// Rows for Change Icon: every icon, the current one marked, and the default again when a
+/// choice was saved.
+pub(super) fn icon_entries(
+    workspace: &Workspace,
+    folder: &[String],
+) -> Vec<(String, Option<String>, FolderPick)> {
+    let (current, _) = workspace.folder_look(folder);
+    let mut out: Vec<_> = FolderIcon::ALL
+        .into_iter()
+        .map(|icon| {
+            (
+                icon.label().to_string(),
+                (icon == current).then(|| "current".to_string()),
+                FolderPick::Icon(folder.to_vec(), Some(icon)),
+            )
+        })
+        .collect();
+    if workspace
+        .folder_style(folder)
+        .is_some_and(|s| s.icon.is_some())
+    {
+        let (default, _) = default_look(folder.last().map_or("", String::as_str));
+        out.push((
+            "Use default".into(),
+            Some(default.label().to_string()),
+            FolderPick::Icon(folder.to_vec(), None),
+        ));
+    }
+    out
+}
+
+/// Rows for Change Colour, as `icon_entries` lists icons.
+pub(super) fn color_entries(
+    workspace: &Workspace,
+    folder: &[String],
+) -> Vec<(String, Option<String>, FolderPick)> {
+    let (_, current) = workspace.folder_look(folder);
+    let mut out: Vec<_> = FolderColor::ALL
+        .into_iter()
+        .map(|color| {
+            (
+                color.label().to_string(),
+                (color == current).then(|| "current".to_string()),
+                FolderPick::Color(folder.to_vec(), Some(color)),
+            )
+        })
+        .collect();
+    if workspace
+        .folder_style(folder)
+        .is_some_and(|s| s.color.is_some())
+    {
+        let (_, default) = default_look(folder.last().map_or("", String::as_str));
+        out.push((
+            "Use default".into(),
+            Some(default.label().to_string()),
+            FolderPick::Color(folder.to_vec(), None),
+        ));
+    }
+    out
+}
+
 /// The row the active-project bar sits beside: the project's, or the closed folder hiding it.
 fn row_of(rows: &[SidebarRow], workspace: &Workspace, index: usize) -> Option<usize> {
     let folder = &workspace.projects.get(index)?.folder;
@@ -138,8 +263,13 @@ fn row_of(rows: &[SidebarRow], workspace: &Workspace, index: usize) -> Option<us
     })
 }
 
-/// The line span of each open folder with its depth, from its heading to its last shown line.
-fn open_folder_spans(rows: &[SidebarRow], lines: &[Option<usize>]) -> Vec<(usize, Range<usize>)> {
+/// The row and line span of each open folder, from its heading to the line before whatever
+/// follows it, so the unopened worktrees under its last project count.
+fn open_folder_spans(
+    rows: &[SidebarRow],
+    lines: &[Option<usize>],
+    total: usize,
+) -> Vec<(usize, Range<usize>)> {
     rows.iter()
         .enumerate()
         .filter_map(|(r, row)| {
@@ -156,10 +286,27 @@ fn open_folder_spans(rows: &[SidebarRow], lines: &[Option<usize>]) -> Vec<(usize
                 .position(|row| row.depth() <= *depth)
                 .map_or(rows.len(), |n| r + 1 + n);
             let first = lines[r]?;
-            let last = lines[r..end].iter().rev().find_map(|l| *l)?;
-            Some((*depth, first..last + 1))
+            let after = lines[end..].iter().find_map(|l| *l).unwrap_or(total);
+            Some((r, first..after))
         })
         .collect()
+}
+
+/// The lines that get extra space above them: those right after an open folder's block.
+fn block_breaks(spans: &[(usize, Range<usize>)], total: usize) -> Vec<usize> {
+    let mut breaks: Vec<usize> = spans
+        .iter()
+        .map(|(_, span)| span.end)
+        .filter(|&end| end < total)
+        .collect();
+    breaks.sort_unstable();
+    breaks.dedup();
+    breaks
+}
+
+/// Where `line` starts below the top, `extra` more for each break at or above it.
+fn line_top(line: usize, breaks: &[usize], pitch: f32, extra: f32) -> f32 {
+    line as f32 * pitch + extra * breaks.iter().filter(|&&b| b <= line).count() as f32
 }
 
 /// The top-level blocks starting at `starts` that get a divider above them: those beside a block
@@ -268,10 +415,6 @@ fn fold_tip(folded: bool, worktrees: usize) -> String {
         (true, n) => format!("Show {n} worktrees"),
         (false, _) => "Hide worktrees".into(),
     }
-}
-
-fn initials(name: &str) -> String {
-    name.chars().take(2).collect::<String>().to_uppercase()
 }
 
 impl Shell {
@@ -397,8 +540,49 @@ impl Shell {
         self.open_palette_with(Mode::RenameFolder, &name, window, cx);
     }
 
+    fn pick_folder_style(
+        &mut self,
+        path: Vec<String>,
+        mode: Mode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_subject = Some(Subject::Folder(path));
+        self.open_palette(mode, window, cx);
+    }
+
+    /// The picture a Change Icon or Change Colour row shows beside its label: the icon in the
+    /// folder's colour, or the folder's icon on a tile in the colour offered.
+    pub(super) fn folder_pick_preview(&self, pick: &FolderPick, t: &Theme) -> Option<AnyElement> {
+        match pick {
+            FolderPick::Icon(path, icon) => {
+                let (_, color) = self.workspace.folder_look(path);
+                let default = default_look(path.last().map_or("", String::as_str)).0;
+                let color = folder_color(t, color);
+                Some(folder_icon(t, icon.unwrap_or(default), color, 16.).into_any_element())
+            }
+            FolderPick::Color(path, color) => {
+                let (icon, _) = self.workspace.folder_look(path);
+                let default = default_look(path.last().map_or("", String::as_str)).1;
+                let color = folder_color(t, color.unwrap_or(default));
+                Some(folder_tile(t, icon, color, 20.).into_any_element())
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn run_folder_pick(&mut self, pick: FolderPick, cx: &mut Context<Self>) {
         match pick {
+            FolderPick::Icon(path, icon) => {
+                self.workspace.set_folder_icon(&path, icon);
+                self.schedule_save(cx);
+                return cx.notify();
+            }
+            FolderPick::Color(path, color) => {
+                self.workspace.set_folder_color(&path, color);
+                self.schedule_save(cx);
+                return cx.notify();
+            }
             FolderPick::Move(Subject::Project(root), folder) => {
                 if let Some(block) = self.rail_groups().block(&root) {
                     self.workspace.move_to_folder(block, &folder);
@@ -532,6 +716,14 @@ impl Shell {
                 let path = path.clone();
                 move |this, w, cx| this.rename_folder_prompt(path.clone(), w, cx)
             }),
+            super::menus::shell_item("Change Icon…", cx, {
+                let path = path.clone();
+                move |this, w, cx| this.pick_folder_style(path.clone(), Mode::FolderIcon, w, cx)
+            }),
+            super::menus::shell_item("Change Colour…", cx, {
+                let path = path.clone();
+                move |this, w, cx| this.pick_folder_style(path.clone(), Mode::FolderColor, w, cx)
+            }),
             super::menus::shell_item("Move Folder…", cx, {
                 let path = path.clone();
                 move |this, w, cx| this.pick_folder_for(Subject::Folder(path.clone()), w, cx)
@@ -572,9 +764,9 @@ impl Shell {
                     if *depth == 0 {
                         block_starts.push(items.len());
                     }
-                    items.push(self.render_folder_row(
-                        path, *depth, *collapsed, *projects, &monograms, &groups, cx,
-                    ))
+                    items.push(
+                        self.render_folder_row(path, *depth, *collapsed, *projects, &groups, cx),
+                    )
                 }
                 SidebarRow::Project { index, depth } => {
                     if self.worktree_hidden(*index, &groups) {
@@ -602,6 +794,11 @@ impl Shell {
             }
         }
 
+        let pitch = row_h + gap;
+        let extra = BLOCK_SPACER + gap;
+        let spans = open_folder_spans(&rows, &line_of_row, items.len());
+        let breaks = block_breaks(&spans, items.len());
+        let top_of = |line: usize| line_top(line, &breaks, pitch, extra);
         let line =
             |index: usize| row_of(&rows, &self.workspace, index).and_then(|r| line_of_row[r]);
         let active_row = self.workspace.active.and_then(line);
@@ -609,7 +806,7 @@ impl Shell {
             && let Some(row) = active_row
         {
             let s = t.ui_scale;
-            let top = s * row as f32 * (row_h + gap);
+            let top = s * top_of(row);
             if reveal_line(&self.rail_scroll, top, s * row_h) {
                 self.rail_revealed = self.switch_count;
             } else {
@@ -620,7 +817,7 @@ impl Shell {
         let from_row = line(self.rail_from).or(active_row);
         let indicator = active_row.map(|to| {
             let s = t.ui_scale;
-            let y = |r: usize| s * (r as f32 * (row_h + gap) + (row_h - 20.) / 2.);
+            let y = |r: usize| s * (top_of(r) + (row_h - 20.) / 2.);
             let (from_y, to_y) = (y(from_row.unwrap_or(to)), y(to));
             let bar = div()
                 .absolute()
@@ -639,37 +836,55 @@ impl Shell {
         });
 
         // Overlays placed by line, like the indicator, so the rail's lines keep one height.
-        let pitch = row_h + gap;
         let s = t.ui_scale;
         let mid = RAIL_WIDTH / 2.;
-        let trays: Vec<AnyElement> = if wide {
-            Vec::new()
-        } else {
-            open_folder_spans(&rows, &line_of_row)
-                .into_iter()
-                .map(|(depth, span)| {
-                    let pad = if depth == 0 { 4. } else { 2. };
+        let trays: Vec<AnyElement> = spans
+            .iter()
+            .filter_map(|(r, span)| {
+                let SidebarRow::Folder { path, depth, .. } = &rows[*r] else {
+                    return None;
+                };
+                let color = folder_color(&t, self.workspace.folder_look(path).1);
+                let pad = match (wide, depth) {
+                    (false, 0) => 4.,
+                    (false, 1) => 2.,
+                    (false, _) => 1.,
+                    (true, 0) => 2.,
+                    (true, _) => 1.,
+                };
+                let (left, width) = if wide {
+                    let inset = INDENT * *depth as f32;
+                    (6. + inset, SIDEBAR_WIDTH - 12. - inset)
+                } else {
+                    (mid - RAIL_ITEM / 2. - pad, RAIL_ITEM + 2. * pad)
+                };
+                let top = top_of(span.start) - pad;
+                let bottom = top_of(span.end - 1) + row_h + pad;
+                Some(
                     div()
                         .absolute()
-                        .top(px(s * (span.start as f32 * pitch - pad)))
-                        .h(px(s * (span.len() as f32 * pitch - gap + 2. * pad)))
-                        .left(px(s * (mid - RAIL_ITEM / 2. - pad)))
-                        .w(px(s * (RAIL_ITEM + 2. * pad)))
+                        .top(px(s * top))
+                        .h(px(s * (bottom - top)))
+                        .left(px(s * left))
+                        .w(px(s * width))
                         .rounded(t.shape.radius_control)
-                        .bg(t.color.surface_sunken)
-                        .into_any_element()
-                })
-                .collect()
-        };
+                        .border_1()
+                        .border_color(color.opacity(TRAY_EDGE))
+                        .bg(color.opacity(TRAY_TINT))
+                        .into_any_element(),
+                )
+            })
+            .collect();
         let dividers: Vec<AnyElement> = if wide {
             Vec::new()
         } else {
             divider_lines(&block_starts, items.len())
                 .into_iter()
                 .map(|line| {
+                    let above = if breaks.contains(&line) { extra } else { 0. };
                     div()
                         .absolute()
-                        .top(px(s * (line as f32 * pitch - gap / 2.)))
+                        .top(px(s * (top_of(line) - (gap + above) / 2.)))
                         .left(px(s * (mid - 10.)))
                         .w(px(s * 20.))
                         .h(px(1.))
@@ -678,6 +893,16 @@ impl Shell {
                 })
                 .collect()
         };
+        let rows_and_spacers: Vec<AnyElement> = items
+            .into_iter()
+            .enumerate()
+            .flat_map(|(line, item)| {
+                let spacer = breaks
+                    .contains(&line)
+                    .then(|| div().h(t.ui(BLOCK_SPACER)).flex_none().into_any_element());
+                spacer.into_iter().chain([item])
+            })
+            .collect();
 
         let drop_tint = t.color.surface_accent;
         let add = sidebar_button(&t, "rail-add", "+", wide.then_some("Open project"))
@@ -754,7 +979,7 @@ impl Shell {
                             .gap(t.ui(gap))
                             .children(trays)
                             .children(dividers)
-                            .children(items)
+                            .children(rows_and_spacers)
                             .children(indicator),
                     ),
             )
@@ -794,11 +1019,11 @@ impl Shell {
                         path.display()
                     )))
                     .h(t.ui(ROW))
-                    .w_full()
+                    .ml(t.ui(INDENT * depth.saturating_sub(1) as f32))
                     .flex()
                     .items_center()
                     .gap(t.ui(6.))
-                    .pl(t.ui(6. + INDENT * (depth + 1) as f32))
+                    .pl(t.ui(6. + INDENT * (depth.min(1) + 1) as f32))
                     .pr(t.ui(6.))
                     .rounded(t.shape.radius_control)
                     .text_size(t.typography.caption)
@@ -822,20 +1047,20 @@ impl Shell {
             .collect()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_folder_row(
         &self,
         path: &[String],
         depth: usize,
         collapsed: bool,
         projects: usize,
-        monograms: &[String],
         groups: &Rc<RailGroups>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
         let wide = self.workspace.ui.sidebar_expanded;
         let name = path.last().cloned().unwrap_or_default();
+        let (icon, color) = self.workspace.folder_look(path);
+        let color = folder_color(&t, color);
         let inside = self.workspace.folder_range(path);
         let mark = if collapsed {
             let roots: Vec<&Path> = self.workspace.projects[inside.clone()]
@@ -874,7 +1099,6 @@ impl Shell {
             .rounded(t.shape.radius_control)
             .cursor_pointer()
             .text_color(t.color.content_muted)
-            .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
             .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
             .on_click(cx.listener({
                 let path = path.to_vec();
@@ -918,50 +1142,36 @@ impl Shell {
             }));
         if wide {
             el.h(t.ui(ROW))
-                .w_full()
-                .pl(t.ui(6. + INDENT * depth as f32))
+                .ml(t.ui(INDENT * depth as f32))
+                .pl(t.ui(6.))
                 .pr(t.ui(6.))
                 .gap(t.ui(6.))
                 .text_size(t.typography.caption)
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(if collapsed { "▸" } else { "▾" })
+                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                .child(folder_icon(&t, icon, color, 14.))
                 .child(div().flex_1().min_w_0().truncate().child(name))
                 .children(awake)
                 .children(claude)
+                .child(if collapsed { "▸" } else { "▾" })
                 .when(collapsed, |el| el.child(projects.to_string()))
                 .into_any_element()
         } else if collapsed {
-            // Its first projects in miniature, so a closed folder never passes for a project.
-            let cells = monograms[inside].iter().take(4).map(|m| {
-                div()
-                    .size(t.ui(11.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(2.))
-                    .bg(t.color.surface_hover)
-                    .text_size(t.ui(8.))
-                    .child(m.chars().next().map(String::from).unwrap_or_default())
-            });
             el.size(t.ui(RAIL_ITEM))
-                .flex_wrap()
-                .content_center()
                 .justify_center()
-                .gap(t.ui(2.))
-                .p(t.ui(3.))
                 .border_1()
-                .border_color(t.color.border)
-                .children(cells)
+                .border_color(color.opacity(TRAY_EDGE))
+                .bg(color.opacity(TILE_TINT))
+                .hover(|s| s.bg(color.opacity(TILE_TINT * 1.6)))
+                .child(folder_icon(&t, icon, color, FOLDER_ICON))
                 .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
                 .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
                 .into_any_element()
         } else {
             el.size(t.ui(RAIL_ITEM))
                 .justify_center()
-                .border_1()
-                .border_color(t.color.border)
-                .text_size(t.typography.caption)
-                .child(initials(&name))
+                .hover(|s| s.bg(t.color.surface_hover))
+                .child(folder_icon(&t, icon, color, FOLDER_ICON))
                 .into_any_element()
         }
     }
@@ -1069,7 +1279,8 @@ impl Shell {
             )
             .child(insertion);
         if wide {
-            let indent = depth + usize::from(main.is_some());
+            // The row starts at its folder's backing, then indents inside it.
+            let indent = depth.min(1) + usize::from(main.is_some());
             let branch = caption.map(|c| {
                 div()
                     .flex_none()
@@ -1098,7 +1309,7 @@ impl Shell {
                     })
             });
             el.h(t.ui(ROW))
-                .w_full()
+                .ml(t.ui(INDENT * depth.saturating_sub(1) as f32))
                 .pl(t.ui(6. + INDENT * indent as f32))
                 .pr(t.ui(6.))
                 .gap(t.ui(6.))
@@ -1248,7 +1459,35 @@ mod tests {
             Some(5),
             Some(6),
         ];
-        assert_eq!(open_folder_spans(&rows, &lines), [(0, 0..5), (1, 2..4)]);
+        assert_eq!(open_folder_spans(&rows, &lines, 7), [(0, 0..5), (2, 2..4)]);
+    }
+
+    #[test]
+    fn a_span_takes_in_the_lines_unopened_worktrees_add_after_its_last_project() {
+        let rows = [folder("work", false), project(0, 1), project(1, 0)];
+        // Two unopened worktrees sit on lines 2 and 3, so the next project is on line 4.
+        let lines = [Some(0), Some(1), Some(4)];
+        assert_eq!(open_folder_spans(&rows, &lines, 5), [(0, 0..4)]);
+        let last = [folder("work", false), project(0, 1)];
+        assert_eq!(
+            open_folder_spans(&last, &[Some(0), Some(1)], 4),
+            [(0, 0..4)]
+        );
+    }
+
+    #[test]
+    fn blocks_are_set_apart_from_what_follows_them_and_lines_shift_to_match() {
+        // work holds a nested folder that ends with it, then a project follows both.
+        let spans = [(0, 0..5), (2, 2..5), (6, 6..7)];
+        let breaks = block_breaks(&spans, 9);
+        assert_eq!(breaks, [5, 7]);
+        assert!(
+            block_breaks(&[(0, 0..3)], 3).is_empty(),
+            "nothing follows the last block"
+        );
+        assert_eq!(line_top(4, &breaks, 40., 10.), 160.);
+        assert_eq!(line_top(5, &breaks, 40., 10.), 210.);
+        assert_eq!(line_top(7, &breaks, 40., 10.), 300.);
     }
 
     #[test]
@@ -1268,6 +1507,38 @@ mod tests {
             Some("Claude Code is open")
         );
         assert_eq!(claude_lines(ClaudeMark::default()), None);
+    }
+
+    #[test]
+    fn every_folder_icon_is_bundled() {
+        use gpui::AssetSource;
+        for icon in FolderIcon::ALL {
+            let bytes = athena_ui::Assets.load(folder_icon_path(icon)).unwrap();
+            assert!(bytes.is_some(), "{icon:?}");
+        }
+    }
+
+    #[test]
+    fn the_style_pickers_mark_the_current_choice_and_offer_the_default_only_once_saved() {
+        let work = vec!["work".to_string()];
+        let mut w = Workspace::default();
+        let (icon, color) = default_look("work");
+        let rows = icon_entries(&w, &work);
+        assert_eq!(rows.len(), FolderIcon::ALL.len());
+        let marked: Vec<_> = rows.iter().filter(|r| r.1.is_some()).collect();
+        assert_eq!(marked.len(), 1);
+        assert_eq!(marked[0].2, FolderPick::Icon(work.clone(), Some(icon)));
+
+        w.set_folder_color(&work, Some(FolderColor::Cyan));
+        assert_eq!(icon_entries(&w, &work).len(), FolderIcon::ALL.len());
+        let rows = color_entries(&w, &work);
+        assert_eq!(rows.len(), FolderColor::ALL.len() + 1);
+        let last = rows.last().unwrap();
+        assert_eq!(last.0, "Use default");
+        assert_eq!(last.1.as_deref(), Some(color.label()));
+        assert_eq!(last.2, FolderPick::Color(work.clone(), None));
+        let cyan = rows.iter().find(|r| r.0 == "Cyan").unwrap();
+        assert_eq!(cyan.1.as_deref(), Some("current"));
     }
 
     #[test]
