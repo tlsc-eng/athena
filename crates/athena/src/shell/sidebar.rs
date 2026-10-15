@@ -384,6 +384,16 @@ fn line_tops(shown: &[f32], spaced: &[f32], pitch: f32, gap: f32, extra: f32) ->
         .collect()
 }
 
+/// Where the active bar sits beside `line`: a line easing in or out carries it from the heading
+/// above, so the two move as one.
+fn bar_top_of(shown: &[f32], tops: &[f32], line: usize) -> f32 {
+    if shown[line] >= 1. {
+        return tops[line];
+    }
+    let anchor = (0..line).rev().find(|&l| shown[l] >= 1.).unwrap_or(line);
+    tops[anchor] + (tops[line] - tops[anchor]) * shown[line]
+}
+
 /// How open the folder at `path` is drawn: its fold's progress, else whether it is collapsed.
 fn folder_open(folds: &[(Fold, f32)], collapsed: &[Vec<String>], path: &[String]) -> f32 {
     folds
@@ -582,13 +592,37 @@ impl Shell {
         cx.notify();
     }
 
+    /// Opens the folders around the project at `index`, easing each one it opens from where it
+    /// is drawn.
+    pub(super) fn reveal_project(&mut self, index: usize, cx: &Context<Self>) {
+        let base = cx.theme().motion.base;
+        let Some(folder) = self.workspace.projects.get(index).map(|p| p.folder.clone()) else {
+            return;
+        };
+        let opening: Vec<(Fold, f32)> = self
+            .workspace
+            .collapsed
+            .iter()
+            .filter(|path| folder.starts_with(path))
+            .map(|path| {
+                let fold = Fold::Folder(path.clone());
+                let from = self.fold_drawn(&fold, base);
+                (fold, from)
+            })
+            .collect();
+        self.workspace.reveal(index);
+        for (fold, from) in opening {
+            self.start_fold(fold, from, cx);
+        }
+    }
+
     /// How far the sidebar is drawn toward its wide layout at `now`, 1 being wide.
     fn sidebar_spread(&self, now: Instant, base: Duration) -> f32 {
         let wide = self.workspace.ui.sidebar_expanded;
         self.sidebar_width
             .filter(|tween| tween.open == wide)
             .map_or(if wide { 1. } else { 0. }, |tween| {
-                tween.at(now, base, motion::ease_standard())
+                tween.at(now, base, motion::ease_exit())
             })
     }
 
@@ -1002,6 +1036,8 @@ impl Shell {
         let mut line_of_row = Vec::with_capacity(rows.len());
         // How much of each line is drawn, below 1 while a fold eases it in or out.
         let mut shown: Vec<f32> = Vec::with_capacity(rows.len());
+        // How much of each line is drawn once every fold is done.
+        let mut settled: Vec<f32> = Vec::with_capacity(rows.len());
         // Lines where a top-level folder, repository with its worktrees, or lone project begins.
         let mut block_starts = Vec::new();
         for row in &rows {
@@ -1017,6 +1053,7 @@ impl Shell {
                         block_starts.push(items.len());
                     }
                     shown.push(inside(&folds, collapsed, &path[..*depth]));
+                    settled.push(inside(&[], collapsed, &path[..*depth]));
                     let closed = tile_shown(folder_open(&folds, collapsed, path));
                     items.push(self.render_folder_row(
                         path,
@@ -1051,12 +1088,19 @@ impl Shell {
                     }
                     let within = inside(&folds, collapsed, &project.folder);
                     let worktrees = within * folding.unwrap_or(1.);
-                    // The active worktree stays shown whatever its repository's fold does.
-                    shown.push(if linked && Some(*index) != self.workspace.active {
-                        worktrees
-                    } else {
-                        within
+                    let settled_within = inside(&[], collapsed, &project.folder);
+                    let folded = group.as_ref().is_some_and(|(_, group)| {
+                        self.workspace.projects[group.start].worktrees_collapsed
                     });
+                    let settled_worktrees = if folded { 0. } else { settled_within };
+                    // The active worktree stays shown whatever its repository's fold does.
+                    if linked && Some(*index) != self.workspace.active {
+                        shown.push(worktrees);
+                        settled.push(settled_worktrees);
+                    } else {
+                        shown.push(within);
+                        settled.push(settled_within);
+                    }
                     items.push(self.render_project_row(
                         *index,
                         *depth,
@@ -1069,6 +1113,7 @@ impl Shell {
                         let unopened =
                             self.render_unopened(*index, *depth, folding.is_some(), &groups, cx);
                         shown.extend(std::iter::repeat_n(worktrees, unopened.len()));
+                        settled.extend(std::iter::repeat_n(settled_worktrees, unopened.len()));
                         items.extend(unopened);
                     }
                 }
@@ -1078,24 +1123,21 @@ impl Shell {
         let pitch = row_h + gap;
         let extra = BLOCK_SPACER + gap;
         let spans = open_folder_spans(&rows, &line_of_row, items.len());
-        let open_at = |r: usize| match &rows[r] {
-            SidebarRow::Folder { path, .. } => folder_open(&folds, collapsed, path),
+        let open_at = |folds: &[(Fold, f32)], r: usize| match &rows[r] {
+            SidebarRow::Folder { path, .. } => folder_open(folds, collapsed, path),
             SidebarRow::Project { .. } => 1.,
         };
-        let ends: Vec<(usize, f32)> = spans
-            .iter()
-            .map(|(r, span)| (span.end, shown[span.start] * open_at(*r)))
-            .collect();
-        let spaced = block_breaks(&ends, items.len());
-        let tops = line_tops(&shown, &spaced, pitch, gap, extra);
-        // A line easing in or out carries the bar from the heading above it, so the two move as one.
-        let bar_top = |line: usize| {
-            if shown[line] >= 1. {
-                return tops[line];
-            }
-            let anchor = (0..line).rev().find(|&l| shown[l] >= 1.).unwrap_or(line);
-            tops[anchor] + (tops[line] - tops[anchor]) * shown[line]
+        let tops_for = |folds: &[(Fold, f32)], shown: &[f32]| {
+            let ends: Vec<(usize, f32)> = spans
+                .iter()
+                .map(|(r, span)| (span.end, shown[span.start] * open_at(folds, *r)))
+                .collect();
+            let spaced = block_breaks(&ends, shown.len());
+            let tops = line_tops(shown, &spaced, pitch, gap, extra);
+            (spaced, tops)
         };
+        let (spaced, tops) = tops_for(&folds, &shown);
+        let bar_top = |line: usize| bar_top_of(&shown, &tops, line);
         let line =
             |index: usize| row_of(&rows, &self.workspace, index).and_then(|r| line_of_row[r]);
         let active_row = self.workspace.active.and_then(line);
@@ -1104,7 +1146,9 @@ impl Shell {
             && let Some(row) = active_row
         {
             let s = t.ui_scale;
-            let top = s * tops[row];
+            // Where the row will rest, so a fold still easing cannot leave it scrolled part-way.
+            let (_, settled_tops) = tops_for(&[], &settled);
+            let top = s * bar_top_of(&settled, &settled_tops, row);
             if reveal_line(&self.rail_scroll, top, s * row_h) {
                 self.rail_revealed = self.switch_count;
             } else {
@@ -1159,7 +1203,7 @@ impl Shell {
                 let top = tops[span.start] - pad;
                 let bottom = tops[last] + shown[last] * row_h + pad;
                 // Gives way to the closed tile, and goes with the lines of a folder around it.
-                let strength = shown[span.start] * (1. - tile_shown(open_at(*r)));
+                let strength = shown[span.start] * (1. - tile_shown(open_at(&folds, *r)));
                 Some(
                     div()
                         .absolute()
@@ -1842,6 +1886,18 @@ mod tests {
         assert_eq!(tile_shown(1.), 0.);
         assert_eq!(tile_shown(0.5), 0.);
         assert_eq!(tile_shown(0.), 1.);
+    }
+
+    #[test]
+    fn the_bar_rides_a_line_easing_out_and_rests_on_its_heading() {
+        let tops = line_tops(&[1., 0.5, 0.5, 1.], &[0.; 4], 40., 8., 10.);
+        assert_eq!(bar_top_of(&[1., 0.5, 0.5, 1.], &tops, 2), 28.);
+        assert_eq!(bar_top_of(&[1., 0.5, 0.5, 1.], &tops, 3), tops[3]);
+        // Settled, the folder is shut: its last line rests on the heading, the next line below it.
+        let settled = [1., 0., 0., 1.];
+        let tops = line_tops(&settled, &[0.; 4], 40., 8., 10.);
+        assert_eq!(bar_top_of(&settled, &tops, 2), 0.);
+        assert_eq!(bar_top_of(&settled, &tops, 3), 40.);
     }
 
     #[test]

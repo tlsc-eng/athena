@@ -358,7 +358,7 @@ impl Shell {
         self.switch_count += 1;
         self.workspace.activate(index);
         if reveal {
-            self.workspace.reveal(index);
+            self.reveal_project(index, cx);
         }
         self.zoomed = None;
         self.focus_pending = true;
