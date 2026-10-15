@@ -275,9 +275,10 @@ impl Shell {
                 .map(|x| x.used)
         };
         let (five, week) = (used("5h"), used("7d"));
-        let color = self.level_color(five.unwrap_or(0.).max(week.unwrap_or(0.)), cx);
         let part = |label: &str, used: Option<f32>| match used {
-            Some(u) => div().text_color(color).child(format!("{label} {u:.0}%")),
+            Some(u) => div()
+                .text_color(self.level_color(u, cx))
+                .child(format!("{label} {u:.0}%")),
             None => div()
                 .text_color(t.color.content_muted)
                 .child(format!("{label} n/a")),
