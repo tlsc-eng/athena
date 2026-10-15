@@ -367,17 +367,25 @@ fn block_breaks(ends: &[(usize, f32)], total: usize) -> Vec<f32> {
     spaced
 }
 
+/// A sidebar line's row height and the gap below it, in the rail or the wide layout.
+fn line_size(wide: bool) -> (f32, f32) {
+    if wide {
+        (ROW, ROW_GAP)
+    } else {
+        (RAIL_ITEM, RAIL_GAP)
+    }
+}
+
 /// Where each line's top is drawn, `shown` being how much of each line is drawn and `spaced` how
-/// much block spacer sits above it.
-fn line_tops(shown: &[f32], spaced: &[f32], pitch: f32, gap: f32, extra: f32) -> Vec<f32> {
+/// much block spacer sits above it; `line_box` and the spacers lay the column out by the same sums.
+fn line_tops(shown: &[f32], spaced: &[f32], pitch: f32, extra: f32) -> Vec<f32> {
     let mut y = 0.;
     shown
         .iter()
         .zip(spaced)
         .map(|(shown, space)| {
             y += space * extra;
-            // A part-drawn line gives up the gap above it too, as `growing` lays it out.
-            let top = y - (1. - shown) * gap;
+            let top = y;
             y += shown * pitch;
             top
         })
@@ -418,30 +426,30 @@ fn tile_shown(open: f32) -> f32 {
     (1. - open / TILE_FADE).clamp(0., 1.)
 }
 
-/// A line drawn `shown` of the way in: its space and opacity scale with it, and it settles down
-/// into place as it arrives.
-fn growing(
-    t: &Theme,
-    item: AnyElement,
-    shown: f32,
-    height: f32,
-    gap: f32,
-    wide: bool,
-) -> AnyElement {
-    div()
+/// A line's box, `shown` of a pitch tall with the gap inside it, so the column can only stack lines
+/// where `line_tops` puts them. Part-drawn, its row is clipped and faded, settling into place.
+fn line_box(t: &Theme, item: AnyElement, shown: f32, wide: bool) -> AnyElement {
+    let (row_h, gap) = line_size(wide);
+    let line = div()
         .flex_none()
         .when(!wide, |el| el.w(t.ui(RAIL_ITEM)))
-        .h(t.ui(height * shown))
-        .mt(-t.ui(gap * (1. - shown)))
-        .overflow_hidden()
-        .opacity(shown)
-        .child(
-            div()
-                .relative()
-                .top(-t.ui(SETTLE * (1. - shown)))
-                .child(item),
-        )
-        .into_any_element()
+        .h(t.ui(shown * (row_h + gap)));
+    if shown >= 1. {
+        return line.child(item).into_any_element();
+    }
+    line.child(
+        div()
+            .h(t.ui(shown * row_h))
+            .overflow_hidden()
+            .opacity(shown)
+            .child(
+                div()
+                    .relative()
+                    .top(-t.ui(SETTLE * (1. - shown)))
+                    .child(item),
+            ),
+    )
+    .into_any_element()
 }
 
 /// The top-level blocks starting at `starts` that get a divider above them, and how strongly:
@@ -1017,11 +1025,7 @@ impl Shell {
         // The layouts swap halfway, each fading out before the other fades in.
         let wide = spread > 0.5;
         let fade = ((spread - 0.5).abs() * 2.).min(1.);
-        let (row_h, gap) = if wide {
-            (ROW, ROW_GAP)
-        } else {
-            (RAIL_ITEM, RAIL_GAP)
-        };
+        let (row_h, gap) = line_size(wide);
         let folds = self.fold_progress(now, t.motion.base);
         let collapsed = &self.workspace.collapsed;
         let closing: Vec<Vec<String>> = folds
@@ -1136,7 +1140,7 @@ impl Shell {
                 .map(|(r, span)| (span.end, shown[span.start] * open_at(folds, *r)))
                 .collect();
             let spaced = block_breaks(&ends, shown.len());
-            let tops = line_tops(shown, &spaced, pitch, gap, extra);
+            let tops = line_tops(shown, &spaced, pitch, extra);
             (spaced, tops)
         };
         let (spaced, tops) = tops_for(&folds, &shown);
@@ -1245,19 +1249,11 @@ impl Shell {
             .enumerate()
             .flat_map(|(line, item)| {
                 let space = spaced[line];
-                let spacer = (space > 0.).then(|| {
-                    div()
-                        .h(t.ui(BLOCK_SPACER * space))
-                        .mt(-t.ui(gap * (1. - space)))
-                        .flex_none()
-                        .into_any_element()
-                });
-                let item = if shown[line] < 1. {
-                    growing(&t, item, shown[line], row_h, gap, wide)
-                } else {
-                    item
-                };
-                spacer.into_iter().chain([item])
+                let spacer = (space > 0.)
+                    .then(|| div().h(t.ui(extra * space)).flex_none().into_any_element());
+                spacer
+                    .into_iter()
+                    .chain([line_box(&t, item, shown[line], wide)])
             })
             .collect();
 
@@ -1347,7 +1343,6 @@ impl Shell {
                                     .flex_col()
                                     .when(!wide, |el| el.items_center())
                                     .when(wide, |el| el.px(t.ui(6.)))
-                                    .gap(t.ui(gap))
                                     .children(trays)
                                     .children(dividers)
                                     .children(rows_and_spacers)
@@ -1864,30 +1859,36 @@ mod tests {
             [0.; 3],
             "nothing follows the last block"
         );
-        let tops = line_tops(&[1.; 9], &spaced, 40., 8., 10.);
+        let tops = line_tops(&[1.; 9], &spaced, 40., 10.);
         assert_eq!(tops[4], 160.);
         assert_eq!(tops[5], 210.);
         assert_eq!(tops[7], 300.);
     }
 
     #[test]
+    fn lines_keep_one_pitch_in_each_layout_while_others_ease() {
+        // A line's box is its row and the gap below it, so the rail steps 40 and the wide list 30.
+        let (row, gap) = line_size(false);
+        assert_eq!(row + gap, RAIL_ITEM + RAIL_GAP);
+        let rail = line_tops(&[1., 1., 0.5, 1., 1.], &[0.; 5], row + gap, 0.);
+        assert_eq!(rail, [0., 40., 80., 100., 140.]);
+        let (row, gap) = line_size(true);
+        assert_eq!(row + gap, ROW + ROW_GAP);
+        let wide = line_tops(&[1., 1., 0.5, 1., 1.], &[0.; 5], row + gap, 0.);
+        assert_eq!(wide, [0., 30., 60., 75., 105.]);
+    }
+
+    #[test]
     fn lines_easing_in_or_out_take_their_share_of_the_space_and_overlays_follow() {
         // A folder at line 0 half shut: its two lines are half drawn, as is the spacer after it.
         let spaced = block_breaks(&[(3, 0.5)], 4);
-        let tops = line_tops(&[1., 0.5, 0.5, 1.], &spaced, 40., 8., 10.);
-        assert_eq!(tops, [0., 36., 56., 85.]);
-        let shut = line_tops(
-            &[1., 0., 0., 1.],
-            &block_breaks(&[(3, 0.)], 4),
-            40.,
-            8.,
-            10.,
-        );
+        let tops = line_tops(&[1., 0.5, 0.5, 1.], &spaced, 40., 10.);
+        assert_eq!(tops, [0., 40., 60., 85.]);
+        let shut = line_tops(&[1., 0., 0., 1.], &block_breaks(&[(3, 0.)], 4), 40., 10.);
         assert_eq!(
             shut[3], 40.,
             "the next line sits where it will once the fold is done"
         );
-        assert_eq!(shut[2], 32., "a shut line ends at the heading's foot");
         assert_eq!(tile_shown(1.), 0.);
         assert_eq!(tile_shown(0.5), 0.);
         assert_eq!(tile_shown(0.), 1.);
@@ -1895,12 +1896,12 @@ mod tests {
 
     #[test]
     fn the_bar_rides_a_line_easing_out_and_rests_on_its_heading() {
-        let tops = line_tops(&[1., 0.5, 0.5, 1.], &[0.; 4], 40., 8., 10.);
-        assert_eq!(bar_top_of(&[1., 0.5, 0.5, 1.], &tops, 2), 28.);
+        let tops = line_tops(&[1., 0.5, 0.5, 1.], &[0.; 4], 40., 10.);
+        assert_eq!(bar_top_of(&[1., 0.5, 0.5, 1.], &tops, 2), 30.);
         assert_eq!(bar_top_of(&[1., 0.5, 0.5, 1.], &tops, 3), tops[3]);
         // Settled, the folder is shut: its last line rests on the heading, the next line below it.
         let settled = [1., 0., 0., 1.];
-        let tops = line_tops(&settled, &[0.; 4], 40., 8., 10.);
+        let tops = line_tops(&settled, &[0.; 4], 40., 10.);
         assert_eq!(bar_top_of(&settled, &tops, 2), 0.);
         assert_eq!(bar_top_of(&settled, &tops, 3), 40.);
     }
