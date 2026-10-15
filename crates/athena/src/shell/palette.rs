@@ -40,7 +40,7 @@ pub(super) enum Target {
     Task(String),
     /// A web page, such as a pull request check's run.
     Link(String),
-    /// Moving or renaming a sidebar folder, or moving a project into one.
+    /// Moving, renaming or restyling a sidebar folder, or moving a project into one.
     SidebarFolder(super::sidebar::FolderPick),
 }
 
@@ -89,6 +89,9 @@ pub(super) enum Mode {
     /// Sidebar folders a project or folder can move into.
     MoveToFolder,
     RenameFolder,
+    /// The icons a sidebar folder can show.
+    FolderIcon,
+    FolderColor,
     MergeBranch,
     RebaseOnto,
     DeleteBranch,
@@ -126,6 +129,8 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Checks => "No matching checks",
         Mode::MoveToFolder => "Type a name for a new folder",
         Mode::RenameFolder => "Type the folder's new name",
+        Mode::FolderIcon => "No matching icons",
+        Mode::FolderColor => "No matching colours",
         Mode::MergeBranch | Mode::RebaseOnto | Mode::DeleteBranch => "No matching branches",
         Mode::RenameBranch => "Type the branch's new name",
         Mode::NewTag => "Type a name for the tag",
@@ -559,6 +564,8 @@ impl Shell {
             Mode::Checks => "Open a pull request check…",
             Mode::MoveToFolder => "Move to a folder, or type a name for a new one…",
             Mode::RenameFolder => "New name for the folder…",
+            Mode::FolderIcon => "Pick an icon for the folder…",
+            Mode::FolderColor => "Pick a colour for the folder…",
             Mode::MergeBranch => "Merge a branch into the current one…",
             Mode::RebaseOnto => "Rebase the current branch onto…",
             Mode::DeleteBranch => "Delete a branch…",
@@ -589,6 +596,8 @@ impl Shell {
             | Mode::RemoveWorktree
             | Mode::MoveToFolder
             | Mode::RenameFolder
+            | Mode::FolderIcon
+            | Mode::FolderColor
             | Mode::MergeBranch
             | Mode::RebaseOnto
             | Mode::DeleteBranch
@@ -1096,6 +1105,12 @@ impl Shell {
             (Mode::RenameFolder, Some(super::sidebar::Subject::Folder(path))) => {
                 Some(super::sidebar::rename_entries(path, &query))
             }
+            (Mode::FolderIcon, Some(super::sidebar::Subject::Folder(path))) => {
+                Some(super::sidebar::icon_entries(&self.workspace, path))
+            }
+            (Mode::FolderColor, Some(super::sidebar::Subject::Folder(path))) => {
+                Some(super::sidebar::color_entries(&self.workspace, path))
+            }
             _ => None,
         };
         if let Some(rows) = folder_rows {
@@ -1255,6 +1270,10 @@ impl Shell {
                 // Positions index `key`; for files the label is the name at the end of it.
                 let offset = entry.key.chars().count() - entry.label.chars().count();
                 let label_bytes: Vec<usize> = entry.label.char_indices().map(|(b, _)| b).collect();
+                let preview = match &entry.target {
+                    Target::SidebarFolder(pick) => self.folder_pick_preview(pick, &t),
+                    _ => None,
+                };
                 let bold: Vec<_> = positions
                     .iter()
                     .filter(|&&p| p >= offset)
@@ -1292,9 +1311,11 @@ impl Shell {
                         div()
                             .flex()
                             .items_baseline()
+                            .when(preview.is_some(), |el| el.items_center())
                             .gap(t.ui(8.))
                             .min_w_0()
                             .overflow_hidden()
+                            .children(preview)
                             .child(
                                 StyledText::new(SharedString::from(entry.label.clone()))
                                     .with_highlights(bold),
