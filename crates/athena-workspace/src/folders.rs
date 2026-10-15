@@ -127,6 +127,12 @@ impl Workspace {
 
     /// The sidebar's rows, leaving out what collapsed folders hold.
     pub fn sidebar_rows(&self) -> Vec<SidebarRow> {
+        self.sidebar_rows_opening(&[])
+    }
+
+    /// The sidebar's rows with the folders in `closing` drawn open though collapsed, as while they
+    /// animate shut.
+    pub fn sidebar_rows_opening(&self, closing: &[Vec<String>]) -> Vec<SidebarRow> {
         let mut rows = Vec::new();
         let mut open: &[String] = &[];
         // The depth of the collapsed folder whose contents are being skipped.
@@ -142,7 +148,7 @@ impl Workspace {
                     break;
                 }
                 let folder = path[..=depth].to_vec();
-                let collapsed = self.collapsed.contains(&folder);
+                let collapsed = self.collapsed.contains(&folder) && !closing.contains(&folder);
                 let projects = self.projects[index..]
                     .iter()
                     .take_while(|p| p.folder.starts_with(&folder))
@@ -462,6 +468,23 @@ mod tests {
         );
         w.reveal(1);
         assert!(w.collapsed.is_empty());
+    }
+
+    #[test]
+    fn a_folder_animating_shut_keeps_its_rows_until_it_is_done() {
+        let mut w = workspace(&[("a", "work"), ("d", "work/clients"), ("b", "")]);
+        w.collapsed = vec![path("work"), path("work/clients")];
+        let shown = |closing: &[Vec<String>]| -> Vec<String> {
+            w.sidebar_rows_opening(closing)
+                .iter()
+                .map(|r| row(r, &w))
+                .collect()
+        };
+        assert_eq!(
+            shown(&[path("work")]),
+            ["▾ work (2)", "  a", "  ▸ work/clients (1)", "b"]
+        );
+        assert_eq!(shown(&[]), rows(&w));
     }
 
     #[test]

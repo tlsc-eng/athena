@@ -172,6 +172,10 @@ pub struct Shell {
     rail_revealed: u64,
     /// The project or folder the open folder picker moves or renames.
     sidebar_subject: Option<sidebar::Subject>,
+    /// Folders and worktree groups easing open or shut.
+    sidebar_folds: Vec<(sidebar::Fold, sidebar::Tween)>,
+    /// The sidebar easing between the rail and its wide layout.
+    sidebar_width: Option<sidebar::Tween>,
     switch_count: u64,
     /// The switch whose fade-in the content is playing, and since when.
     content_switch: (u64, motion::Opening),
@@ -227,6 +231,8 @@ impl Shell {
             rail_scroll: gpui::ScrollHandle::new(),
             rail_revealed: u64::MAX,
             sidebar_subject: None,
+            sidebar_folds: Vec::new(),
+            sidebar_width: None,
             workspace,
             window_handle: window.window_handle(),
             focus,
@@ -636,19 +642,23 @@ impl Render for Shell {
         self.take_pending_open(window, cx);
         self.sync_window_title(window, cx);
         crate::actions::sync_recent_menu(&self.workspace.recent, cx);
+        self.sync_sidebar_motion(window, cx);
         let t = cx.theme().clone();
+        let sidebar = self.render_sidebar(cx);
+        // The sidebar draws over its slot, so it paints above the content as it widens.
         let body = div()
             .relative()
             .flex_1()
             .min_h_0()
             .flex()
-            .child(self.render_sidebar(cx))
+            .child(self.render_sidebar_slot(cx))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .child(self.render_content(window, cx)),
-            );
+            )
+            .child(sidebar);
         let body = motion::animate_if(
             t.motion.reduced,
             body,
