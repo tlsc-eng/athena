@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use athena_term::ClaudeState;
 use athena_ui::{ActiveTheme, Theme, Tooltip, motion};
@@ -32,6 +33,10 @@ const TRAY_TINT: f32 = 0.12;
 const TRAY_EDGE: f32 = 0.3;
 const TILE_TINT: f32 = 0.18;
 const FOLDER_ICON: f32 = 18.;
+/// The last share of a folder's closing over which its closed tile fades in, and its tray out.
+const TILE_FADE: f32 = 0.25;
+/// How far above its place a line starts as it eases in.
+const SETTLE: f32 = 6.;
 
 /// A sidebar folder being dragged into another folder or out to the top level.
 #[derive(Clone, Debug)]
@@ -55,6 +60,64 @@ pub(super) enum FolderPick {
     /// A folder's icon, or the default again with `None`.
     Icon(Vec<String>, Option<FolderIcon>),
     Color(Vec<String>, Option<FolderColor>),
+}
+
+/// A part of the sidebar that eases open and shut.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Fold {
+    Folder(Vec<String>),
+    /// The linked worktrees of the repository at this root.
+    Worktrees(PathBuf),
+}
+
+/// An ease toward open or shut, from how open the part was drawn when it was toggled.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Tween {
+    open: bool,
+    from: f32,
+    since: Instant,
+}
+
+impl Tween {
+    /// The ease from `from` toward `open`; None when motion is reduced or nothing would move.
+    fn start(reduced: bool, open: bool, from: f32) -> Option<Self> {
+        let tween = Self {
+            open,
+            from,
+            since: Instant::now(),
+        };
+        (!reduced && tween.from != tween.target()).then_some(tween)
+    }
+
+    fn target(&self) -> f32 {
+        if self.open { 1. } else { 0. }
+    }
+
+    /// Covers only the distance left, so a reversal takes no longer than the way it came.
+    fn duration(&self, base: Duration) -> Duration {
+        base.mul_f32((self.target() - self.from).abs())
+    }
+
+    /// How open it is drawn at `now`, `shut` easing the way closed.
+    fn at(&self, now: Instant, base: Duration, shut: impl Fn(f32) -> f32) -> f32 {
+        let duration = self.duration(base).as_secs_f32();
+        let elapsed = now.saturating_duration_since(self.since).as_secs_f32();
+        let x = if duration > 0. {
+            (elapsed / duration).min(1.)
+        } else {
+            1.
+        };
+        let eased = if self.open {
+            motion::ease_standard()(x)
+        } else {
+            shut(x)
+        };
+        self.from + (self.target() - self.from) * eased
+    }
+
+    fn running(&self, now: Instant, base: Duration) -> bool {
+        now.saturating_duration_since(self.since) < self.duration(base)
+    }
 }
 
 pub(super) fn folder_color(t: &Theme, color: FolderColor) -> Hsla {
@@ -292,30 +355,151 @@ fn open_folder_spans(
         .collect()
 }
 
-/// The lines that get extra space above them: those right after an open folder's block.
-fn block_breaks(spans: &[(usize, Range<usize>)], total: usize) -> Vec<usize> {
-    let mut breaks: Vec<usize> = spans
+/// How much block spacer each of `total` lines gets above it, given where each open folder's
+/// block ends and how open it is drawn; blocks ending together share one spacer.
+fn block_breaks(ends: &[(usize, f32)], total: usize) -> Vec<f32> {
+    let mut spaced = vec![0f32; total];
+    for &(end, weight) in ends {
+        if let Some(space) = spaced.get_mut(end) {
+            *space = space.max(weight);
+        }
+    }
+    spaced
+}
+
+/// A sidebar line's row height and the gap below it, in the rail or the wide layout.
+fn line_size(wide: bool) -> (f32, f32) {
+    if wide {
+        (ROW, ROW_GAP)
+    } else {
+        (RAIL_ITEM, RAIL_GAP)
+    }
+}
+
+/// How far an open folder's tray reaches past its lines, less for nested folders.
+fn tray_pad(wide: bool, depth: usize) -> f32 {
+    match (wide, depth) {
+        (false, 0) => 4.,
+        (false, 1) => 2.,
+        (false, _) => 1.,
+        (true, 0) => 2.,
+        (true, _) => 1.,
+    }
+}
+
+/// Room above the first line for a tray around it, which the scrolled list would otherwise clip;
+/// the gap inside the last line's box leaves the same room below.
+fn list_inset(wide: bool) -> f32 {
+    tray_pad(wide, 0)
+}
+
+/// Where each line's top is drawn, `shown` being how much of each line is drawn and `spaced` how
+/// much block spacer sits above it; `line_box` and the spacers lay the column out by the same sums.
+fn line_tops(shown: &[f32], spaced: &[f32], pitch: f32, extra: f32) -> Vec<f32> {
+    let mut y = 0.;
+    shown
         .iter()
-        .map(|(_, span)| span.end)
-        .filter(|&end| end < total)
-        .collect();
-    breaks.sort_unstable();
-    breaks.dedup();
-    breaks
+        .zip(spaced)
+        .map(|(shown, space)| {
+            y += space * extra;
+            let top = y;
+            y += shown * pitch;
+            top
+        })
+        .collect()
 }
 
-/// Where `line` starts below the top, `extra` more for each break at or above it.
-fn line_top(line: usize, breaks: &[usize], pitch: f32, extra: f32) -> f32 {
-    line as f32 * pitch + extra * breaks.iter().filter(|&&b| b <= line).count() as f32
+/// Where the active bar sits beside `line`: a line easing in or out carries it from the heading
+/// above, so the two move as one.
+fn bar_top_of(shown: &[f32], tops: &[f32], line: usize) -> f32 {
+    if shown[line] >= 1. {
+        return tops[line];
+    }
+    let anchor = (0..line).rev().find(|&l| shown[l] >= 1.).unwrap_or(line);
+    tops[anchor] + (tops[line] - tops[anchor]) * shown[line]
 }
 
-/// The top-level blocks starting at `starts` that get a divider above them: those beside a block
-/// of more than one line, so lone projects stay undivided.
-fn divider_lines(starts: &[usize], len: usize) -> Vec<usize> {
-    let size = |k: usize| starts.get(k + 1).copied().unwrap_or(len) - starts[k];
+/// How open the folder at `path` is drawn: its fold's progress, else whether it is collapsed.
+fn folder_open(folds: &[(Fold, f32)], collapsed: &[Vec<String>], path: &[String]) -> f32 {
+    folds
+        .iter()
+        .find_map(|(fold, open)| matches!(fold, Fold::Folder(f) if f == path).then_some(*open))
+        .unwrap_or(if collapsed.iter().any(|c| c == path) {
+            0.
+        } else {
+            1.
+        })
+}
+
+/// How much of a line inside `folder` is drawn: the openness of every folder around it.
+fn inside(folds: &[(Fold, f32)], collapsed: &[Vec<String>], folder: &[String]) -> f32 {
+    (1..=folder.len())
+        .map(|n| folder_open(folds, collapsed, &folder[..n]))
+        .product()
+}
+
+/// How far a folder drawn `open` shows its closed tile, which fades in only at the end of a close.
+fn tile_shown(open: f32) -> f32 {
+    (1. - open / TILE_FADE).clamp(0., 1.)
+}
+
+/// Each line's laid-out heights: the block spacer above it, then its own box with the gap below.
+/// The list has no flex gap, so these alone stack the lines.
+fn list_boxes(shown: &[f32], spaced: &[f32], wide: bool) -> Vec<(f32, f32)> {
+    let (row_h, gap) = line_size(wide);
+    shown
+        .iter()
+        .zip(spaced)
+        .map(|(shown, space)| (space * (BLOCK_SPACER + gap), shown * (row_h + gap)))
+        .collect()
+}
+
+/// Where an open folder's tray ends below its last line, `shown` of which is drawn: always around
+/// what is drawn of that line, and never past the next, as a pad fits within a gap.
+fn tray_bottom(last_top: f32, shown: f32, wide: bool, pad: f32) -> f32 {
+    let (row_h, _) = line_size(wide);
+    last_top + shown * (row_h + pad)
+}
+
+/// A line's box, `height` tall as `list_boxes` gives it, so the column can only stack lines where
+/// `line_tops` puts them. Part-drawn, its row is clipped and faded, settling into place.
+fn line_box(t: &Theme, item: AnyElement, height: f32, shown: f32, wide: bool) -> AnyElement {
+    let (row_h, _) = line_size(wide);
+    let line = div()
+        .flex_none()
+        .when(!wide, |el| el.w(t.ui(RAIL_ITEM)))
+        .h(t.ui(height));
+    if shown >= 1. {
+        return line.child(item).into_any_element();
+    }
+    line.child(
+        div()
+            .h(t.ui(shown * row_h))
+            .overflow_hidden()
+            .opacity(shown)
+            .child(
+                div()
+                    .relative()
+                    .top(-t.ui(SETTLE * (1. - shown)))
+                    .child(item),
+            ),
+    )
+    .into_any_element()
+}
+
+/// The top-level blocks starting at `starts` that get a divider above them, and how strongly:
+/// those beside a block of more than one line, so lone projects stay undivided, fading as a block
+/// eases down to one. `shown` is how much of each line is drawn.
+fn divider_lines(starts: &[usize], shown: &[f32]) -> Vec<(usize, f32)> {
+    let size = |k: usize| -> f32 {
+        let end = starts.get(k + 1).copied().unwrap_or(shown.len());
+        shown[starts[k]..end].iter().sum()
+    };
     (1..starts.len())
-        .filter(|&k| size(k - 1) > 1 || size(k) > 1)
-        .map(|k| starts[k])
+        .filter_map(|k| {
+            let strength = (size(k - 1).max(size(k)) - 1.).clamp(0., 1.);
+            (strength > 0.).then_some((starts[k], strength))
+        })
         .collect()
 }
 
@@ -419,24 +603,143 @@ fn fold_tip(folded: bool, worktrees: usize) -> String {
 
 impl Shell {
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let motion = &cx.theme().motion;
+        let (reduced, base) = (motion.reduced, motion.base);
+        let from = self.sidebar_spread(Instant::now(), base);
         let ui = &mut self.workspace.ui;
         ui.sidebar_expanded = !ui.sidebar_expanded;
+        self.sidebar_width = Tween::start(reduced, ui.sidebar_expanded, from);
         self.schedule_save(cx);
         cx.notify();
     }
 
     pub(super) fn toggle_folder(&mut self, path: &[String], cx: &mut Context<Self>) {
+        let fold = Fold::Folder(path.to_vec());
+        let from = self.fold_drawn(&fold, cx.theme().motion.base);
         self.workspace.toggle_folder(path);
+        self.start_fold(fold, from, cx);
         self.schedule_save(cx);
         cx.notify();
     }
 
     pub(super) fn toggle_worktrees(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(project) = self.workspace.projects.get_mut(index) {
-            project.worktrees_collapsed = !project.worktrees_collapsed;
-            self.schedule_save(cx);
-            cx.notify();
+        let Some(root) = self.workspace.projects.get(index).map(|p| p.root.clone()) else {
+            return;
+        };
+        let fold = Fold::Worktrees(root);
+        let from = self.fold_drawn(&fold, cx.theme().motion.base);
+        let project = &mut self.workspace.projects[index];
+        project.worktrees_collapsed = !project.worktrees_collapsed;
+        self.start_fold(fold, from, cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Opens the folders around the project at `index`, easing each one it opens from where it
+    /// is drawn.
+    pub(super) fn reveal_project(&mut self, index: usize, cx: &Context<Self>) {
+        let base = cx.theme().motion.base;
+        let Some(folder) = self.workspace.projects.get(index).map(|p| p.folder.clone()) else {
+            return;
+        };
+        let opening: Vec<(Fold, f32)> = self
+            .workspace
+            .collapsed
+            .iter()
+            .filter(|path| folder.starts_with(path))
+            .map(|path| {
+                let fold = Fold::Folder(path.clone());
+                let from = self.fold_drawn(&fold, base);
+                (fold, from)
+            })
+            .collect();
+        self.workspace.reveal(index);
+        for (fold, from) in opening {
+            self.start_fold(fold, from, cx);
         }
+    }
+
+    /// How far the sidebar is drawn toward its wide layout at `now`, 1 being wide.
+    fn sidebar_spread(&self, now: Instant, base: Duration) -> f32 {
+        let wide = self.workspace.ui.sidebar_expanded;
+        self.sidebar_width
+            .filter(|tween| tween.open == wide)
+            .map_or(if wide { 1. } else { 0. }, |tween| {
+                tween.at(now, base, motion::ease_exit())
+            })
+    }
+
+    /// Whether `fold` is open in the workspace; None once it is gone.
+    fn fold_open(&self, fold: &Fold) -> Option<bool> {
+        match fold {
+            Fold::Folder(path) => Some(!self.workspace.collapsed.contains(path)),
+            Fold::Worktrees(root) => self
+                .workspace
+                .projects
+                .iter()
+                .find(|p| p.root == *root)
+                .map(|p| !p.worktrees_collapsed),
+        }
+    }
+
+    /// How open each fold still easing toward the workspace's state is drawn at `now`; one the
+    /// workspace has moved past, as when a switch opens a folder that was closing, drops out.
+    fn fold_progress(&self, now: Instant, base: Duration) -> Vec<(Fold, f32)> {
+        self.sidebar_folds
+            .iter()
+            .filter(|(fold, tween)| self.fold_open(fold) == Some(tween.open))
+            .map(|(fold, tween)| (fold.clone(), tween.at(now, base, motion::ease_exit())))
+            .collect()
+    }
+
+    /// How open `fold` is drawn now.
+    fn fold_drawn(&self, fold: &Fold, base: Duration) -> f32 {
+        self.fold_progress(Instant::now(), base)
+            .into_iter()
+            .find(|(f, _)| f == fold)
+            .map_or(
+                if self.fold_open(fold) == Some(true) {
+                    1.
+                } else {
+                    0.
+                },
+                |(_, open)| open,
+            )
+    }
+
+    /// Eases `fold` from `from` toward the state the workspace now gives it.
+    fn start_fold(&mut self, fold: Fold, from: f32, cx: &Context<Self>) {
+        let reduced = cx.theme().motion.reduced;
+        self.sidebar_folds.retain(|(f, _)| *f != fold);
+        if let Some(open) = self.fold_open(&fold)
+            && let Some(tween) = Tween::start(reduced, open, from)
+        {
+            self.sidebar_folds.push((fold, tween));
+        }
+    }
+
+    /// Drops finished sidebar eases and keeps frames coming while any still run.
+    pub(super) fn sync_sidebar_motion(&mut self, window: &mut Window, cx: &Context<Self>) {
+        let base = cx.theme().motion.base;
+        let now = Instant::now();
+        self.sidebar_folds
+            .retain(|(_, tween)| tween.running(now, base));
+        self.sidebar_width = self.sidebar_width.filter(|tween| tween.running(now, base));
+        if !self.sidebar_folds.is_empty() || self.sidebar_width.is_some() {
+            window.request_animation_frame();
+        }
+    }
+
+    /// The room the sidebar takes from the content: its final width from the toggle on, so the
+    /// panes resize once rather than every frame.
+    pub(super) fn render_sidebar_slot(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let wide = self.workspace.ui.sidebar_expanded;
+        // Widening, the sidebar slides into this room over a band that matches the panes.
+        div()
+            .flex_none()
+            .w(t.ui(if wide { SIDEBAR_WIDTH } else { RAIL_WIDTH }))
+            .bg(t.color.surface_sunken)
     }
 
     /// Opens or closes the folder holding the active project.
@@ -466,7 +769,21 @@ impl Shell {
     }
 
     pub(super) fn collapse_all_folders(&mut self, cx: &mut Context<Self>) {
-        self.workspace.collapsed = self.workspace.folders();
+        let base = cx.theme().motion.base;
+        let folders = self.workspace.folders();
+        let closing: Vec<(Fold, f32)> = folders
+            .iter()
+            .filter(|path| !self.workspace.collapsed.contains(path))
+            .map(|path| {
+                let fold = Fold::Folder(path.clone());
+                let from = self.fold_drawn(&fold, base);
+                (fold, from)
+            })
+            .collect();
+        self.workspace.collapsed = folders;
+        for (fold, from) in closing {
+            self.start_fold(fold, from, cx);
+        }
         self.schedule_save(cx);
         cx.notify();
     }
@@ -736,20 +1053,33 @@ impl Shell {
         self.open_context_menu(position, items, window, cx);
     }
 
-    pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = cx.theme().clone();
-        let wide = self.workspace.ui.sidebar_expanded;
-        let (row_h, gap) = if wide {
-            (ROW, ROW_GAP)
-        } else {
-            (RAIL_ITEM, RAIL_GAP)
-        };
-        let rows = self.workspace.sidebar_rows();
+        let now = Instant::now();
+        let spread = self.sidebar_spread(now, t.motion.base);
+        // The layouts swap halfway, each fading out before the other fades in.
+        let wide = spread > 0.5;
+        let fade = ((spread - 0.5).abs() * 2.).min(1.);
+        let (row_h, gap) = line_size(wide);
+        let folds = self.fold_progress(now, t.motion.base);
+        let collapsed = &self.workspace.collapsed;
+        let closing: Vec<Vec<String>> = folds
+            .iter()
+            .filter_map(|(fold, _)| match fold {
+                Fold::Folder(path) if collapsed.contains(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let rows = self.workspace.sidebar_rows_opening(&closing);
         let monograms = self.workspace.monograms();
         let groups = Rc::new(self.rail_groups());
         let mut items: Vec<AnyElement> = Vec::with_capacity(rows.len());
         // Each row's line, None when hidden; unopened worktrees add lines of their own when wide.
         let mut line_of_row = Vec::with_capacity(rows.len());
+        // How much of each line is drawn, below 1 while a fold eases it in or out.
+        let mut shown: Vec<f32> = Vec::with_capacity(rows.len());
+        // How much of each line is drawn once every fold is done.
+        let mut settled: Vec<f32> = Vec::with_capacity(rows.len());
         // Lines where a top-level folder, repository with its worktrees, or lone project begins.
         let mut block_starts = Vec::new();
         for row in &rows {
@@ -757,38 +1087,76 @@ impl Shell {
                 SidebarRow::Folder {
                     path,
                     depth,
-                    collapsed,
                     projects,
+                    ..
                 } => {
                     line_of_row.push(Some(items.len()));
                     if *depth == 0 {
                         block_starts.push(items.len());
                     }
-                    items.push(
-                        self.render_folder_row(path, *depth, *collapsed, *projects, &groups, cx),
-                    )
+                    shown.push(inside(&folds, collapsed, &path[..*depth]));
+                    settled.push(inside(&[], collapsed, &path[..*depth]));
+                    let closed = tile_shown(folder_open(&folds, collapsed, path));
+                    items.push(self.render_folder_row(
+                        path,
+                        *depth,
+                        collapsed.contains(path),
+                        closed,
+                        *projects,
+                        wide,
+                        &groups,
+                        cx,
+                    ))
                 }
                 SidebarRow::Project { index, depth } => {
-                    if self.worktree_hidden(*index, &groups) {
+                    let project = &self.workspace.projects[*index];
+                    let group = groups.group_of(&project.root);
+                    let linked = group
+                        .as_ref()
+                        .is_some_and(|(from, group)| *from != group.start);
+                    let folding = group.as_ref().and_then(|(_, group)| {
+                        let main = &self.workspace.projects[group.start].root;
+                        folds.iter().find_map(|(fold, open)| {
+                            matches!(fold, Fold::Worktrees(r) if r == main).then_some(*open)
+                        })
+                    });
+                    if self.worktree_hidden(*index, &groups) && folding.is_none() {
                         line_of_row.push(None);
                         continue;
                     }
                     line_of_row.push(Some(items.len()));
-                    let linked = groups
-                        .group_of(&self.workspace.projects[*index].root)
-                        .is_some_and(|(from, group)| from != group.start);
                     if *depth == 0 && !linked {
                         block_starts.push(items.len());
+                    }
+                    let within = inside(&folds, collapsed, &project.folder);
+                    let worktrees = within * folding.unwrap_or(1.);
+                    let settled_within = inside(&[], collapsed, &project.folder);
+                    let folded = group.as_ref().is_some_and(|(_, group)| {
+                        self.workspace.projects[group.start].worktrees_collapsed
+                    });
+                    let settled_worktrees = if folded { 0. } else { settled_within };
+                    // The active worktree stays shown whatever its repository's fold does.
+                    if linked && Some(*index) != self.workspace.active {
+                        shown.push(worktrees);
+                        settled.push(settled_worktrees);
+                    } else {
+                        shown.push(within);
+                        settled.push(settled_within);
                     }
                     items.push(self.render_project_row(
                         *index,
                         *depth,
                         monograms[*index].clone(),
+                        wide,
                         &groups,
                         cx,
                     ));
                     if wide {
-                        items.extend(self.render_unopened(*index, *depth, &groups, cx));
+                        let unopened =
+                            self.render_unopened(*index, *depth, folding.is_some(), &groups, cx);
+                        shown.extend(std::iter::repeat_n(worktrees, unopened.len()));
+                        settled.extend(std::iter::repeat_n(settled_worktrees, unopened.len()));
+                        items.extend(unopened);
                     }
                 }
             }
@@ -796,17 +1164,36 @@ impl Shell {
 
         let pitch = row_h + gap;
         let extra = BLOCK_SPACER + gap;
+        let inset = list_inset(wide);
         let spans = open_folder_spans(&rows, &line_of_row, items.len());
-        let breaks = block_breaks(&spans, items.len());
-        let top_of = |line: usize| line_top(line, &breaks, pitch, extra);
+        let open_at = |folds: &[(Fold, f32)], r: usize| match &rows[r] {
+            SidebarRow::Folder { path, .. } => folder_open(folds, collapsed, path),
+            SidebarRow::Project { .. } => 1.,
+        };
+        let tops_for = |folds: &[(Fold, f32)], shown: &[f32]| {
+            let ends: Vec<(usize, f32)> = spans
+                .iter()
+                .map(|(r, span)| (span.end, shown[span.start] * open_at(folds, *r)))
+                .collect();
+            let spaced = block_breaks(&ends, shown.len());
+            let mut tops = line_tops(shown, &spaced, pitch, extra);
+            // Overlays are placed from the list's top edge, above its inset.
+            tops.iter_mut().for_each(|top| *top += inset);
+            (spaced, tops)
+        };
+        let (spaced, tops) = tops_for(&folds, &shown);
+        let bar_top = |line: usize| bar_top_of(&shown, &tops, line);
         let line =
             |index: usize| row_of(&rows, &self.workspace, index).and_then(|r| line_of_row[r]);
         let active_row = self.workspace.active.and_then(line);
+        let from_row = line(self.rail_from).or(active_row);
         if self.rail_revealed != self.switch_count
             && let Some(row) = active_row
         {
             let s = t.ui_scale;
-            let top = s * top_of(row);
+            // Where the row will rest, so a fold still easing cannot leave it scrolled part-way.
+            let (_, settled_tops) = tops_for(&[], &settled);
+            let top = s * bar_top_of(&settled, &settled_tops, row);
             if reveal_line(&self.rail_scroll, top, s * row_h) {
                 self.rail_revealed = self.switch_count;
             } else {
@@ -814,10 +1201,9 @@ impl Shell {
                 cx.defer(move |cx| cx.notify(shell));
             }
         }
-        let from_row = line(self.rail_from).or(active_row);
         let indicator = active_row.map(|to| {
             let s = t.ui_scale;
-            let y = |r: usize| s * (top_of(r) + (row_h - 20.) / 2.);
+            let y = |r: usize| s * (bar_top(r) + (row_h - 20.) / 2.);
             let (from_y, to_y) = (y(from_row.unwrap_or(to)), y(to));
             let bar = div()
                 .absolute()
@@ -845,32 +1231,29 @@ impl Shell {
                     return None;
                 };
                 let color = folder_color(&t, self.workspace.folder_look(path).1);
-                let pad = match (wide, depth) {
-                    (false, 0) => 4.,
-                    (false, 1) => 2.,
-                    (false, _) => 1.,
-                    (true, 0) => 2.,
-                    (true, _) => 1.,
-                };
+                let pad = tray_pad(wide, *depth);
                 let (left, width) = if wide {
                     let inset = INDENT * *depth as f32;
                     (6. + inset, SIDEBAR_WIDTH - 12. - inset)
                 } else {
                     (mid - RAIL_ITEM / 2. - pad, RAIL_ITEM + 2. * pad)
                 };
-                let top = top_of(span.start) - pad;
-                let bottom = top_of(span.end - 1) + row_h + pad;
+                let last = span.end - 1;
+                let top = tops[span.start] - pad;
+                let bottom = tray_bottom(tops[last], shown[last], wide, pad);
+                // Gives way to the closed tile, and goes with the lines of a folder around it.
+                let strength = shown[span.start] * (1. - tile_shown(open_at(&folds, *r)));
                 Some(
                     div()
                         .absolute()
                         .top(px(s * top))
-                        .h(px(s * (bottom - top)))
+                        .h(px(s * (bottom - top).max(0.)))
                         .left(px(s * left))
                         .w(px(s * width))
                         .rounded(t.shape.radius_control)
                         .border_1()
-                        .border_color(color.opacity(TRAY_EDGE))
-                        .bg(color.opacity(TRAY_TINT))
+                        .border_color(color.opacity(TRAY_EDGE * strength))
+                        .bg(color.opacity(TRAY_TINT * strength))
                         .into_any_element(),
                 )
             })
@@ -878,29 +1261,31 @@ impl Shell {
         let dividers: Vec<AnyElement> = if wide {
             Vec::new()
         } else {
-            divider_lines(&block_starts, items.len())
+            divider_lines(&block_starts, &shown)
                 .into_iter()
-                .map(|line| {
-                    let above = if breaks.contains(&line) { extra } else { 0. };
+                .map(|(line, strength)| {
+                    let above = spaced[line] * extra;
                     div()
                         .absolute()
-                        .top(px(s * (top_of(line) - (gap + above) / 2.)))
+                        .top(px(s * (tops[line] - (gap + above) / 2.)))
                         .left(px(s * (mid - 10.)))
                         .w(px(s * 20.))
                         .h(px(1.))
-                        .bg(t.color.border)
+                        .bg(t.color.border.opacity(strength))
                         .into_any_element()
                 })
                 .collect()
         };
         let rows_and_spacers: Vec<AnyElement> = items
             .into_iter()
+            .zip(list_boxes(&shown, &spaced, wide))
             .enumerate()
-            .flat_map(|(line, item)| {
-                let spacer = breaks
-                    .contains(&line)
-                    .then(|| div().h(t.ui(BLOCK_SPACER)).flex_none().into_any_element());
-                spacer.into_iter().chain([item])
+            .flat_map(|(line, (item, (spacer, height)))| {
+                let spacer =
+                    (spacer > 0.).then(|| div().h(t.ui(spacer)).flex_none().into_any_element());
+                spacer
+                    .into_iter()
+                    .chain([line_box(&t, item, height, shown[line], wide)])
             })
             .collect();
 
@@ -950,47 +1335,66 @@ impl Shell {
                 .child(toggle)
         };
 
+        // The layout keeps its own width inside a clip that eases, so nothing wraps on the way.
         div()
-            .w(t.ui(if wide { SIDEBAR_WIDTH } else { RAIL_WIDTH }))
-            .flex_none()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(t.ui(RAIL_WIDTH + (SIDEBAR_WIDTH - RAIL_WIDTH) * spread))
+            // Only while it narrows over the panes: occluding hides it from the shell's drop and mouse-up.
+            .when(self.sidebar_width.is_some_and(|tween| !tween.open), |el| {
+                el.occlude()
+            })
+            .overflow_hidden()
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_tint))
-            .flex()
-            .flex_col()
-            .justify_between()
-            .py(t.ui(TOP))
             .bg(t.color.surface)
             .border_r_1()
             .border_color(t.color.border)
             .child(
                 div()
-                    .id("sidebar-rows")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.rail_scroll)
+                    .w(t.ui(if wide { SIDEBAR_WIDTH } else { RAIL_WIDTH }) - px(1.))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .justify_between()
+                    // The list's inset makes up the rest, so the first line stays TOP down.
+                    .pt(t.ui(TOP - inset))
+                    .pb(t.ui(TOP))
+                    .opacity(fade)
                     .child(
                         div()
-                            .relative()
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .when(!wide, |el| el.items_center())
-                            .when(wide, |el| el.px(t.ui(6.)))
-                            .gap(t.ui(gap))
-                            .children(trays)
-                            .children(dividers)
-                            .children(rows_and_spacers)
-                            .children(indicator),
-                    ),
+                            .id("sidebar-rows")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.rail_scroll)
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .flex()
+                                    .flex_col()
+                                    .when(!wide, |el| el.items_center())
+                                    .when(wide, |el| el.px(t.ui(6.)))
+                                    .pt(t.ui(inset))
+                                    .children(trays)
+                                    .children(dividers)
+                                    .children(rows_and_spacers)
+                                    .children(indicator),
+                            ),
+                    )
+                    .child(footer),
             )
-            .child(footer)
     }
 
-    /// After the last project of a repository's group, its worktrees that are not open, dimmed.
+    /// After the last project of a repository's group, its worktrees that are not open, dimmed;
+    /// `folding` keeps them while the group eases shut.
     fn render_unopened(
         &self,
         index: usize,
         depth: usize,
+        folding: bool,
         groups: &Rc<RailGroups>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -999,7 +1403,7 @@ impl Shell {
             return Vec::new();
         };
         let main = &self.workspace.projects[group.start];
-        if group.end != index + 1 || main.worktrees_collapsed {
+        if group.end != index + 1 || (main.worktrees_collapsed && !folding) {
             return Vec::new();
         }
         let main = &main.root;
@@ -1047,22 +1451,25 @@ impl Shell {
             .collect()
     }
 
+    /// A folder heading, its closed tile and marks drawn `closed` of the way in.
+    #[allow(clippy::too_many_arguments)]
     fn render_folder_row(
         &self,
         path: &[String],
         depth: usize,
         collapsed: bool,
+        closed: f32,
         projects: usize,
+        wide: bool,
         groups: &Rc<RailGroups>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
-        let wide = self.workspace.ui.sidebar_expanded;
         let name = path.last().cloned().unwrap_or_default();
         let (icon, color) = self.workspace.folder_look(path);
         let color = folder_color(&t, color);
         let inside = self.workspace.folder_range(path);
-        let mark = if collapsed {
+        let mark = if closed > 0. {
             let roots: Vec<&Path> = self.workspace.projects[inside.clone()]
                 .iter()
                 .map(|p| p.root.as_path())
@@ -1071,8 +1478,8 @@ impl Shell {
         } else {
             ClaudeMark::default()
         };
-        let claude = claude_dot(&t, mark);
-        let awake = awake_mark(&t, mark);
+        let claude = claude_dot(&t, mark).map(|dot| dot.opacity(closed));
+        let awake = awake_mark(&t, mark).map(|cup| cup.opacity(closed));
         let drop_tint = t.color.surface_accent;
         let drag = FolderDrag {
             path: path.to_vec(),
@@ -1156,22 +1563,24 @@ impl Shell {
                 .child(if collapsed { "▸" } else { "▾" })
                 .when(collapsed, |el| el.child(projects.to_string()))
                 .into_any_element()
-        } else if collapsed {
-            el.size(t.ui(RAIL_ITEM))
-                .justify_center()
-                .border_1()
-                .border_color(color.opacity(TRAY_EDGE))
-                .bg(color.opacity(TILE_TINT))
-                .hover(|s| s.bg(color.opacity(TILE_TINT * 1.6)))
-                .child(folder_icon(&t, icon, color, FOLDER_ICON))
-                .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
-                .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
-                .into_any_element()
         } else {
             el.size(t.ui(RAIL_ITEM))
                 .justify_center()
-                .hover(|s| s.bg(t.color.surface_hover))
+                .when(closed > 0., |el| {
+                    el.border_1()
+                        .border_color(color.opacity(TRAY_EDGE * closed))
+                        .bg(color.opacity(TILE_TINT * closed))
+                })
+                .hover(|s| {
+                    s.bg(if collapsed {
+                        color.opacity(TILE_TINT * 1.6)
+                    } else {
+                        t.color.surface_hover
+                    })
+                })
                 .child(folder_icon(&t, icon, color, FOLDER_ICON))
+                .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
+                .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
                 .into_any_element()
         }
     }
@@ -1181,11 +1590,11 @@ impl Shell {
         i: usize,
         depth: usize,
         monogram: String,
+        wide: bool,
         groups: &Rc<RailGroups>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
-        let wide = self.workspace.ui.sidebar_expanded;
         let gap = if wide { ROW_GAP } else { RAIL_GAP };
         let project = &self.workspace.projects[i];
         let selected = Some(i) == self.workspace.active;
@@ -1478,16 +1887,131 @@ mod tests {
     #[test]
     fn blocks_are_set_apart_from_what_follows_them_and_lines_shift_to_match() {
         // work holds a nested folder that ends with it, then a project follows both.
-        let spans = [(0, 0..5), (2, 2..5), (6, 6..7)];
-        let breaks = block_breaks(&spans, 9);
-        assert_eq!(breaks, [5, 7]);
-        assert!(
-            block_breaks(&[(0, 0..3)], 3).is_empty(),
+        let spaced = block_breaks(&[(5, 1.), (5, 1.), (7, 1.)], 9);
+        assert_eq!(spaced, [0., 0., 0., 0., 0., 1., 0., 1., 0.]);
+        assert_eq!(
+            block_breaks(&[(3, 1.)], 3),
+            [0.; 3],
             "nothing follows the last block"
         );
-        assert_eq!(line_top(4, &breaks, 40., 10.), 160.);
-        assert_eq!(line_top(5, &breaks, 40., 10.), 210.);
-        assert_eq!(line_top(7, &breaks, 40., 10.), 300.);
+        let tops = line_tops(&[1.; 9], &spaced, 40., 10.);
+        assert_eq!(tops[4], 160.);
+        assert_eq!(tops[5], 210.);
+        assert_eq!(tops[7], 300.);
+    }
+
+    #[test]
+    fn the_boxes_the_list_lays_out_stack_each_line_where_the_overlays_put_it() {
+        // The rail steps 40 with a 10 spacer, the wide list 30 with a 4 spacer.
+        let shown = [1., 0.5, 0.25, 1., 0.75, 1.];
+        let spaced = [0., 0., 0., 0.5, 0., 1.];
+        for (wide, pitch, extra) in [(false, 40., 10.), (true, 30., 4.)] {
+            let inset = list_inset(wide);
+            let tops = line_tops(&shown, &spaced, pitch, extra);
+            let mut y = inset;
+            for (line, (spacer, height)) in
+                list_boxes(&shown, &spaced, wide).into_iter().enumerate()
+            {
+                y += spacer;
+                assert!(
+                    (y - (inset + tops[line])).abs() < 1e-4,
+                    "line {line}, wide: {wide}"
+                );
+                y += height;
+            }
+        }
+    }
+
+    #[test]
+    fn a_closing_folders_tray_never_reaches_past_the_line_after_it() {
+        for (wide, pitch, extra) in [(false, 40., 10.), (true, 30., 4.)] {
+            let (row, _) = line_size(wide);
+            for depth in 0..3 {
+                let pad = tray_pad(wide, depth);
+                for step in 0..=20 {
+                    // A folder with two lines easing shut, then the line after its block.
+                    let open = step as f32 / 20.;
+                    let shown = [1., open, open, 1.];
+                    let tops = line_tops(&shown, &block_breaks(&[(3, open)], 4), pitch, extra);
+                    let bottom = tray_bottom(tops[2], open, wide, pad);
+                    let case = format!("open {open}, depth {depth}, wide: {wide}");
+                    assert!(bottom <= tops[3] + 1e-4, "passes the next line, {case}");
+                    assert!(bottom >= tops[2] + open * row, "cuts the last line, {case}");
+                }
+                let open = line_tops(&[1.; 4], &[0.; 4], pitch, extra);
+                assert_eq!(tray_bottom(open[2], 1., wide, pad), open[2] + row + pad);
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_and_last_trays_draw_whole_inside_the_scrolled_list() {
+        for wide in [false, true] {
+            let (_, gap) = line_size(wide);
+            for depth in 0..3 {
+                let pad = tray_pad(wide, depth);
+                assert!(list_inset(wide) >= pad, "room above, wide: {wide}");
+                assert!(
+                    gap >= pad,
+                    "the last line's gap leaves room below, wide: {wide}"
+                );
+            }
+            assert!(list_inset(wide) <= TOP, "the first line stays where it was");
+        }
+    }
+
+    #[test]
+    fn lines_easing_in_or_out_take_their_share_of_the_space_and_overlays_follow() {
+        // A folder at line 0 half shut: its two lines are half drawn, as is the spacer after it.
+        let spaced = block_breaks(&[(3, 0.5)], 4);
+        let tops = line_tops(&[1., 0.5, 0.5, 1.], &spaced, 40., 10.);
+        assert_eq!(tops, [0., 40., 60., 85.]);
+        let shut = line_tops(&[1., 0., 0., 1.], &block_breaks(&[(3, 0.)], 4), 40., 10.);
+        assert_eq!(
+            shut[3], 40.,
+            "the next line sits where it will once the fold is done"
+        );
+        assert_eq!(tile_shown(1.), 0.);
+        assert_eq!(tile_shown(0.5), 0.);
+        assert_eq!(tile_shown(0.), 1.);
+    }
+
+    #[test]
+    fn the_bar_rides_a_line_easing_out_and_rests_on_its_heading() {
+        let tops = line_tops(&[1., 0.5, 0.5, 1.], &[0.; 4], 40., 10.);
+        assert_eq!(bar_top_of(&[1., 0.5, 0.5, 1.], &tops, 2), 30.);
+        assert_eq!(bar_top_of(&[1., 0.5, 0.5, 1.], &tops, 3), tops[3]);
+        // Settled, the folder is shut: its last line rests on the heading, the next line below it.
+        let settled = [1., 0., 0., 1.];
+        let tops = line_tops(&settled, &[0.; 4], 40., 10.);
+        assert_eq!(bar_top_of(&settled, &tops, 2), 0.);
+        assert_eq!(bar_top_of(&settled, &tops, 3), 40.);
+    }
+
+    #[test]
+    fn a_reversal_eases_back_from_where_the_fold_is_drawn() {
+        let base = Duration::from_millis(200);
+        let opening = Tween::start(false, true, 0.).unwrap();
+        let halfway = opening.since + base / 2;
+        let drawn = opening.at(halfway, base, motion::ease_exit());
+        assert!(drawn > 0. && drawn < 1.);
+        let closing = Tween {
+            since: halfway,
+            ..Tween::start(false, false, drawn).unwrap()
+        };
+        assert!((closing.at(halfway, base, motion::ease_exit()) - drawn).abs() < 1e-4);
+        assert!(closing.running(halfway, base));
+        let done = halfway + closing.duration(base);
+        assert!(closing.duration(base) < base);
+        assert!(closing.at(done, base, motion::ease_exit()).abs() < 1e-4);
+        assert!(!closing.running(done, base));
+    }
+
+    #[test]
+    fn reduced_motion_or_nothing_to_move_lands_at_once() {
+        assert!(Tween::start(true, true, 0.).is_none());
+        assert!(Tween::start(false, false, 0.).is_none());
+        assert!(Tween::start(false, false, 1.).is_some());
     }
 
     #[test]
@@ -1543,8 +2067,17 @@ mod tests {
 
     #[test]
     fn dividers_only_border_blocks_of_more_than_one_line() {
-        assert_eq!(divider_lines(&[0, 1, 2, 5, 6], 7), [2, 5]);
-        assert!(divider_lines(&[0, 1, 2], 3).is_empty());
-        assert!(divider_lines(&[], 0).is_empty());
+        assert_eq!(
+            divider_lines(&[0, 1, 2, 5, 6], &[1.; 7]),
+            [(2, 1.), (5, 1.)]
+        );
+        assert!(divider_lines(&[0, 1, 2], &[1.; 3]).is_empty());
+        assert!(divider_lines(&[], &[]).is_empty());
+        // The block at line 2 easing down to its heading fades the dividers beside it.
+        let closing = [1., 1., 1., 0.25, 0.25, 1., 1.];
+        assert_eq!(
+            divider_lines(&[0, 1, 2, 5, 6], &closing),
+            [(2, 0.5), (5, 0.5)]
+        );
     }
 }
