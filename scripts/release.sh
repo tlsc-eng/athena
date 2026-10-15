@@ -19,7 +19,9 @@ git push origin main "v$version"
 # The run appears a few seconds after the tag lands.
 run=""
 for _ in {1..30}; do
-  run=$(gh run list --workflow release.yml --branch "v$version" --limit 1 --json databaseId -q '.[0].databaseId')
+  # Matched by commit so an earlier failed run of a re-pushed tag is not picked up.
+  run=$(gh run list --workflow release.yml --branch "v$version" --commit "$(git rev-parse HEAD)" \
+    --limit 1 --json databaseId -q '.[0].databaseId')
   [[ -n $run ]] && break
   sleep 2
 done
