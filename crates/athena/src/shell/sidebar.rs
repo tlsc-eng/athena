@@ -454,11 +454,11 @@ fn list_boxes(shown: &[f32], spaced: &[f32], wide: bool) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// Where an open folder's tray ends below its last line, `shown` of which is drawn: the line's
-/// foot when whole, the heading's foot once the lines have gone.
+/// Where an open folder's tray ends below its last line, `shown` of which is drawn: always around
+/// what is drawn of that line, and never past the next, as a pad fits within a gap.
 fn tray_bottom(last_top: f32, shown: f32, wide: bool, pad: f32) -> f32 {
-    let (row_h, gap) = line_size(wide);
-    last_top + shown * (row_h + gap) - gap + pad
+    let (row_h, _) = line_size(wide);
+    last_top + shown * (row_h + pad)
 }
 
 /// A line's box, `height` tall as `list_boxes` gives it, so the column can only stack lines where
@@ -1247,7 +1247,7 @@ impl Shell {
                     div()
                         .absolute()
                         .top(px(s * top))
-                        .h(px(s * (bottom - top)))
+                        .h(px(s * (bottom - top).max(0.)))
                         .left(px(s * left))
                         .w(px(s * width))
                         .rounded(t.shape.radius_control)
@@ -1925,18 +1925,22 @@ mod tests {
     #[test]
     fn a_closing_folders_tray_never_reaches_past_the_line_after_it() {
         for (wide, pitch, extra) in [(false, 40., 10.), (true, 30., 4.)] {
-            let pad = tray_pad(wide, 0);
-            for step in 0..=20 {
-                // A folder with two lines easing shut, then the line after its block.
-                let open = step as f32 / 20.;
-                let shown = [1., open, open, 1.];
-                let tops = line_tops(&shown, &block_breaks(&[(3, open)], 4), pitch, extra);
-                let bottom = tray_bottom(tops[2], open, wide, pad);
-                assert!(bottom <= tops[3] + 1e-4, "open {open}, wide: {wide}");
-            }
             let (row, _) = line_size(wide);
-            let tops = line_tops(&[1., 0., 0., 1.], &[0.; 4], pitch, extra);
-            assert_eq!(tray_bottom(tops[2], 0., wide, pad), row + pad);
+            for depth in 0..3 {
+                let pad = tray_pad(wide, depth);
+                for step in 0..=20 {
+                    // A folder with two lines easing shut, then the line after its block.
+                    let open = step as f32 / 20.;
+                    let shown = [1., open, open, 1.];
+                    let tops = line_tops(&shown, &block_breaks(&[(3, open)], 4), pitch, extra);
+                    let bottom = tray_bottom(tops[2], open, wide, pad);
+                    let case = format!("open {open}, depth {depth}, wide: {wide}");
+                    assert!(bottom <= tops[3] + 1e-4, "passes the next line, {case}");
+                    assert!(bottom >= tops[2] + open * row, "cuts the last line, {case}");
+                }
+                let open = line_tops(&[1.; 4], &[0.; 4], pitch, extra);
+                assert_eq!(tray_bottom(open[2], 1., wide, pad), open[2] + row + pad);
+            }
         }
     }
 
