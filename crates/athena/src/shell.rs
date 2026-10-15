@@ -645,7 +645,7 @@ impl Render for Shell {
         self.sync_sidebar_motion(window, cx);
         let t = cx.theme().clone();
         let sidebar = self.render_sidebar(cx);
-        // The sidebar draws over its slot, so it paints above the content as it widens.
+        // The sidebar draws over its slot, so it paints above the content as it narrows.
         let body = div()
             .relative()
             .flex_1()

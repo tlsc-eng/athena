@@ -687,13 +687,16 @@ impl Shell {
         }
     }
 
-    /// The room the sidebar takes from the content: the rail's while it eases, so the panes
-    /// resize once rather than every frame.
+    /// The room the sidebar takes from the content: its final width from the toggle on, so the
+    /// panes resize once rather than every frame.
     pub(super) fn render_sidebar_slot(&self, cx: &Context<Self>) -> impl IntoElement {
-        let wide = self.workspace.ui.sidebar_expanded && self.sidebar_width.is_none();
+        let t = cx.theme();
+        let wide = self.workspace.ui.sidebar_expanded;
+        // Widening, the sidebar slides into this room over a band that matches the panes.
         div()
             .flex_none()
-            .w(cx.theme().ui(if wide { SIDEBAR_WIDTH } else { RAIL_WIDTH }))
+            .w(t.ui(if wide { SIDEBAR_WIDTH } else { RAIL_WIDTH }))
+            .bg(t.color.surface_sunken)
     }
 
     /// Opens or closes the folder holding the active project.
@@ -1311,8 +1314,10 @@ impl Shell {
             .bottom_0()
             .left_0()
             .w(t.ui(RAIL_WIDTH + (SIDEBAR_WIDTH - RAIL_WIDTH) * spread))
-            // Only while it overhangs the panes: occluding hides it from the shell's drop and mouse-up.
-            .when(self.sidebar_width.is_some(), |el| el.occlude())
+            // Only while it narrows over the panes: occluding hides it from the shell's drop and mouse-up.
+            .when(self.sidebar_width.is_some_and(|tween| !tween.open), |el| {
+                el.occlude()
+            })
             .overflow_hidden()
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_tint))
             .bg(t.color.surface)
