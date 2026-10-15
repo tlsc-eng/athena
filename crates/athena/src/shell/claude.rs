@@ -8,12 +8,44 @@ use gpui::{Context, PromptLevel, Window};
 use super::Shell;
 use super::item::ItemView;
 use super::palette::Mode;
-use crate::claude_hooks;
+use crate::{claude_hooks, transcripts};
 
 impl Shell {
     /// Opens a terminal tab running `claude`; any per-folder profile choice is left to the user's shell.
     pub(super) fn new_claude_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.run_in_new_terminal("claude".into(), window, cx);
+    }
+
+    /// Resumes the project's most recent session, in whichever profile wrote it, in a new tab.
+    pub(super) fn continue_claude_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(root), Some(home)) = (
+            self.workspace.active_project().map(|p| p.root.clone()),
+            std::env::home_dir(),
+        ) else {
+            return;
+        };
+        let task_root = root.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { transcripts::latest_session(&home, &task_root) });
+        cx.spawn_in(window, async move |this, cx| {
+            let latest = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match latest {
+                // The tab would open in whichever project is active now, where the id is unknown.
+                _ if this.workspace.active_project().map(|p| &p.root) != Some(&root) => {}
+                Some((id, profile)) => {
+                    this.resume_claude_session(&id, profile.config_dir.as_deref(), window, cx)
+                }
+                None => this.local_notice(
+                    NoticeKind::Message {
+                        title: "No Claude session to continue".into(),
+                        body: "This project has no Claude Code transcript yet.".into(),
+                    },
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     pub(super) fn change_claude_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {

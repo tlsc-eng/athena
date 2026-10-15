@@ -42,6 +42,7 @@ actions!(
         ToggleNotifications,
         ShowContainers,
         NewClaudeSession,
+        ContinueClaudeSession,
         ChangeClaudeCommand,
         DisableClaudeHooks,
         ShowPlaywright,
@@ -202,6 +203,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-~", NewPanelTerminal, None),
         KeyBinding::new("ctrl-shift-`", NewPanelTerminal, None),
         KeyBinding::new("cmd-shift-t", NewClaudeSession, None),
+        KeyBinding::new("cmd-alt-shift-t", ContinueClaudeSession, None),
         KeyBinding::new("cmd-shift-v", TogglePreview, None),
         KeyBinding::new("cmd-shift-s", SaveAs, None),
         KeyBinding::new("cmd-shift-f", FindInProject, None),
@@ -320,6 +322,7 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
             items: vec![
                 MenuItem::action("New Terminal", NewTerminal),
                 MenuItem::action("New Claude Session", NewClaudeSession),
+                MenuItem::action("Continue Last Claude Session", ContinueClaudeSession),
                 MenuItem::action("New Window", NewWindow),
                 MenuItem::action("Open Project…", AddProject),
                 MenuItem::action("Open Project in New Window…", OpenProjectInNewWindow),

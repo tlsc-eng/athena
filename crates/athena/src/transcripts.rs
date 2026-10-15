@@ -477,6 +477,11 @@ fn project_dirs(home: &Path, root: &Path) -> Vec<(Profile, PathBuf)> {
 
 /// The profile holding the project's most recently written transcript, from file times alone.
 pub fn latest_profile(home: &Path, root: &Path) -> Option<Profile> {
+    latest_session(home, root).map(|(_, profile)| profile)
+}
+
+/// The id and profile of the project's most recently written transcript, from file times alone.
+pub fn latest_session(home: &Path, root: &Path) -> Option<(String, Profile)> {
     project_dirs(home, root)
         .into_iter()
         .flat_map(|(profile, dir)| {
@@ -484,12 +489,21 @@ pub fn latest_profile(home: &Path, root: &Path) -> Option<Profile> {
                 .into_iter()
                 .flatten()
                 .flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-                .filter_map(|e| e.metadata().ok()?.modified().ok())
-                .map(move |modified| (modified, profile.clone()))
+                .filter_map(move |e| {
+                    let path = e.path();
+                    if path.extension().is_none_or(|x| x != "jsonl") {
+                        return None;
+                    }
+                    let id = path.file_stem()?.to_string_lossy().into_owned();
+                    if !crate::snapshots::valid_session(&id) {
+                        return None;
+                    }
+                    let modified = e.metadata().ok()?.modified().ok()?;
+                    Some((modified, id, profile.clone()))
+                })
         })
-        .max_by_key(|(modified, _)| *modified)
-        .map(|(_, profile)| profile)
+        .max_by_key(|(modified, ..)| *modified)
+        .map(|(_, id, profile)| (id, profile))
 }
 
 /// The `limit` most recently active sessions of the project at `root`, newest first.
@@ -848,6 +862,10 @@ mod tests {
             Some("claude-work".into())
         );
         assert_eq!(latest_profile(&home, Path::new("/work/other")), None);
+        assert_eq!(
+            latest_session(&home, root).map(|(id, p)| (id, p.name)),
+            Some((new.into(), "claude-work".into()))
+        );
         fs::remove_dir_all(home).unwrap();
     }
 

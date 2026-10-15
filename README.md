@@ -630,7 +630,9 @@ information rather than triggering the install dialog).
 **Claude Code**
 
 - A new Claude session (`cmd-shift-t`) opens in its own terminal tab running `claude`; **Start
-  Claude with another command…** in the palette runs a different one once. A command saved
+  Claude with another command…** in the palette runs a different one once. **Continue Last
+  Claude Session** (`cmd-alt-shift-t`, File menu, palette) opens a terminal resuming the
+  project's most recent session, in whichever profile wrote it. A command saved
   per project by older versions is no longer used.
 - Tabs show **running** while Claude works, **needs input** while it waits on a permission, a
   question or a plan, and **done** when it finishes, until you look at the tab. A session whose
@@ -966,6 +968,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `ctrl-cmd-p` | Switch project by name |
 | `cmd-t` | New terminal |
 | `cmd-shift-t` | New Claude session |
+| `cmd-alt-shift-t` | Continue the project's last Claude session in a new terminal |
 | `cmd-w` | Close tab (with a panel terminal focused: close that terminal) |
 | `cmd-{` | Previous tab |
 | `cmd-}` | Next tab |

@@ -781,6 +781,11 @@ impl Render for Shell {
                 cx.listener(|this, _: &NewClaudeSession, w, cx| this.new_claude_session(w, cx)),
             )
             .on_action(
+                cx.listener(|this, _: &crate::actions::ContinueClaudeSession, w, cx| {
+                    this.continue_claude_session(w, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &ChangeClaudeCommand, w, cx| {
                     this.change_claude_command(w, cx)
                 }),
