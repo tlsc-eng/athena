@@ -25,7 +25,9 @@ use crate::keys;
 use crate::links;
 use crate::mouse::{self, MouseEvent};
 use crate::search::{Search, Span};
-use crate::terminal::{GridSize, Link, NoOutput, PaneEvent, SCROLLBACK_LINES, Terminal, Transport};
+use crate::terminal::{
+    GridSize, Link, NoOutput, PaneEvent, SCROLLBACK_LINES, Terminal, Transport, submitted_cleanly,
+};
 
 actions!(
     terminal,
@@ -1694,12 +1696,6 @@ fn draft_possible(cleared: Option<Instant>, last_input: Option<Instant>) -> bool
     }
 }
 
-/// Whether a prompt-submit hook left the prompt box empty: the user pressed Enter and has typed
-/// nothing since, which the hook's delay would otherwise hide.
-fn submitted_cleanly(last_enter: Option<Instant>, last_input: Option<Instant>) -> bool {
-    last_enter.is_some_and(|enter| last_input.is_none_or(|key| key <= enter))
-}
-
 /// Whether the user typed an answer to a question Claude asked, which has now been dealt with.
 fn answered_question(
     before: Option<ClaudeState>,
@@ -2101,22 +2097,6 @@ mod tests {
             draft_possible(later(2.), later(3.)),
             "typed after the submit"
         );
-    }
-
-    #[test]
-    fn a_submit_hook_empties_the_prompt_only_if_nothing_was_typed_after_the_enter() {
-        let t0 = Instant::now();
-        let at = |s| Some(t0 + secs(s));
-        assert!(
-            submitted_cleanly(at(1.), at(1.)),
-            "Enter was the last input"
-        );
-        assert!(
-            !submitted_cleanly(at(1.), at(1.05)),
-            "typed before the hook came"
-        );
-        assert!(!submitted_cleanly(None, at(1.)), "no Enter seen");
-        assert!(!submitted_cleanly(None, None));
     }
 
     #[test]

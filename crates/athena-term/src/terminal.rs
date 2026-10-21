@@ -76,7 +76,7 @@ pub struct Terminal {
     /// Last live output that was not the echo of the user's own typing.
     pub last_activity: Instant,
     pub last_input: Option<Instant>,
-    /// Last time the user sent Enter; pastes and `submit` do not count.
+    /// Last time Enter was sent, by the user or `submit`; pastes do not count.
     pub last_enter: Option<Instant>,
     pub clipboard_write: Option<String>,
     marks: Scanner,
@@ -649,7 +649,7 @@ impl Terminal {
 
     /// Presses Enter.
     pub fn submit(&mut self) {
-        self.send(b"\r".to_vec());
+        self.input(b"\r".to_vec());
     }
 
     pub fn scroll(&mut self, lines: i32) {
@@ -755,6 +755,12 @@ fn strip_tags(text: &str) -> String {
     text.chars().filter(|&c| !marks::is_athenas(c)).collect()
 }
 
+/// Whether a prompt-submit hook left the prompt box empty: the user pressed Enter and has typed
+/// nothing since, which the hook's delay would otherwise hide.
+pub(crate) fn submitted_cleanly(last_enter: Option<Instant>, last_input: Option<Instant>) -> bool {
+    last_enter.is_some_and(|enter| last_input.is_none_or(|key| key <= enter))
+}
+
 fn sanitize_title(title: &str) -> String {
     title
         .chars()
@@ -834,15 +840,42 @@ mod tests {
     }
 
     #[test]
-    fn only_the_users_own_enter_counts_as_one() {
+    fn only_enter_keys_and_submit_count_as_an_enter_not_pastes() {
         let (mut t, _) = terminal();
         t.input(b"a".to_vec());
         t.paste("a\nb");
-        t.submit();
         assert!(t.last_enter.is_none());
         t.input(b"\r".to_vec());
         assert!(t.last_enter.is_some());
         assert_eq!(t.last_enter, t.last_input);
+        let (mut t, _) = terminal();
+        t.submit();
+        assert!(t.last_enter.is_some());
+    }
+
+    fn after_a_tick(t: &mut Terminal, bytes: &[u8]) {
+        std::thread::sleep(Duration::from_millis(2));
+        t.input(bytes.to_vec());
+    }
+
+    #[test]
+    fn a_submit_hook_empties_the_prompt_only_if_nothing_was_typed_after_the_enter() {
+        let cleared = |t: &Terminal| submitted_cleanly(t.last_enter, t.last_input);
+        let (mut t, _) = terminal();
+        t.input(b"draft".to_vec());
+        assert!(!cleared(&t), "no Enter seen");
+        t.input(b"\r".to_vec());
+        assert!(cleared(&t), "the user's Enter, then nothing");
+        after_a_tick(&mut t, b"x");
+        assert!(!cleared(&t), "typed before the hook came");
+
+        let (mut t, _) = terminal();
+        t.paste("a comment");
+        std::thread::sleep(Duration::from_millis(2));
+        t.submit();
+        assert!(cleared(&t), "paste, our submit, then nothing");
+        after_a_tick(&mut t, b"x");
+        assert!(!cleared(&t), "paste, our submit, then the user typed");
     }
 
     #[test]
