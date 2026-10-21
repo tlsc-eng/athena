@@ -99,6 +99,10 @@ pub(super) enum Mode {
     NewTag,
     /// The repository's recent history.
     Log,
+    /// The message a worktree's pending changes are committed with before it is brought back.
+    BringCommit,
+    /// Squash or merge, for bringing a worktree back.
+    BringBack,
 }
 
 fn now_secs() -> i64 {
@@ -135,6 +139,8 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::RenameBranch => "Type the branch's new name",
         Mode::NewTag => "Type a name for the tag",
         Mode::Log => "No matching commits",
+        Mode::BringCommit => "Type a commit message",
+        Mode::BringBack => "No matching choices",
         _ => "No matching commands",
     }
 }
@@ -207,6 +213,9 @@ pub(super) struct Palette {
     symbols_task: Option<Task<()>>,
     _subscription: Subscription,
 }
+
+/// Only a linked worktree has changes to bring back, so the palette hides it elsewhere.
+const BRING_BACK: &str = "Git: Bring Worktree Changes Back…";
 
 /// Commands offered in the palette, in the order shown before any typing.
 pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
@@ -360,6 +369,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Git: Finish worktree…",
             Box::new(super::worktrees::GitFinishWorktree),
         ),
+        (BRING_BACK, Box::new(super::worktrees::GitBringWorktreeBack)),
         (
             "Git: Prune worktrees",
             Box::new(super::worktrees::GitPruneWorktrees),
@@ -633,6 +643,8 @@ impl Shell {
             Mode::RenameBranch => "New name for the current branch…",
             Mode::NewTag => "Tag the current commit as…",
             Mode::Log => "Search history; pick a commit to copy its id…",
+            Mode::BringCommit => "Commit message for the worktree's changes…",
+            Mode::BringBack => "Bring the worktree's changes back as…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -665,6 +677,8 @@ impl Shell {
             | Mode::RenameBranch
             | Mode::NewTag
             | Mode::Log
+            | Mode::BringCommit
+            | Mode::BringBack
             | Mode::Symbols
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
@@ -709,6 +723,7 @@ impl Shell {
         });
         let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
         let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
+        let linked = root.is_some_and(|r| athena_workspace::git::main_worktree(r).is_some());
         let mut commands = commands();
         // The editor's own actions, so they only mean something with an editor focused.
         if self.focused_editor().is_some() {
@@ -735,7 +750,8 @@ impl Shell {
                 !(label.starts_with("Remove Athena's old Claude Code hooks") && !hooks_any
                     || label.starts_with("Enable Playwright MCP") && (mcp_on || !playwright)
                     || label.starts_with("Disable Playwright MCP") && !mcp_on
-                    || *label == "Run Playwright tests" && !playwright)
+                    || *label == "Run Playwright tests" && !playwright
+                    || *label == BRING_BACK && !linked)
             })
             .map(|(label, action)| Entry {
                 kind: None,
@@ -1160,6 +1176,12 @@ impl Shell {
                 ))
             }
             Mode::Log => Some(super::branches::log_entries(&self.git.commits, now_secs())),
+            Mode::BringCommit => Some(super::worktrees::commit_entries(&query)),
+            Mode::BringBack => self
+                .git
+                .bring
+                .as_ref()
+                .map(|b| super::worktrees::bring_entries(&b.main)),
             _ => None,
         };
         let folder_rows = match (palette.mode, &self.sidebar_subject) {

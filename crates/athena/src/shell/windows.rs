@@ -1101,6 +1101,16 @@ impl Shell {
             }));
         }
         items.push(athena_ui::MenuItem::separator());
+        if worktree {
+            items.push(super::menus::shell_item(
+                "Bring Changes Back…",
+                cx,
+                move |this, w, cx| {
+                    this.switch_to(index, cx);
+                    this.bring_back(w, cx)
+                },
+            ));
+        }
         items.push(match worktree {
             true => super::menus::shell_item("Finish Worktree…", cx, move |this, w, cx| {
                 this.switch_to(index, cx);

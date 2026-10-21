@@ -1519,11 +1519,12 @@ pub fn remove_worktree(root: &Path, path: &Path, force: bool) -> Result<()> {
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
-/// A merge or rebase that stopped part way, waiting on conflicts.
+/// A merge, rebase or squash that stopped part way, waiting on conflicts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Underway {
     Merge,
     Rebase,
+    Squash,
 }
 
 impl Underway {
@@ -1531,11 +1532,12 @@ impl Underway {
         match self {
             Self::Merge => "merge",
             Self::Rebase => "rebase",
+            Self::Squash => "squash",
         }
     }
 }
 
-/// The merge or rebase under way in the work tree holding `root`, read from its git folder.
+/// The merge, rebase or squash under way in the work tree holding `root`, read from its git folder.
 pub fn underway(root: &Path) -> Option<Underway> {
     let dir = git_dirs(root)?.git_dir;
     // `git am` uses rebase-apply too, without the `rebasing` marker.
@@ -1543,9 +1545,18 @@ pub fn underway(root: &Path) -> Option<Underway> {
         Some(Underway::Rebase)
     } else if dir.join("MERGE_HEAD").exists() {
         Some(Underway::Merge)
+    } else if dir.join("SQUASH_MSG").exists() && has_unmerged(root) {
+        // A squash leaves no MERGE_HEAD, and one that applied cleanly is only staged changes.
+        Some(Underway::Squash)
     } else {
         None
     }
+}
+
+fn has_unmerged(root: &Path) -> bool {
+    let mut cmd = filtering_git(root);
+    cmd.args(["ls-files", "--unmerged"]);
+    run(cmd, None).is_ok_and(|out| !out.is_empty())
 }
 
 /// A command that may want a commit message, which takes git's own instead of opening an editor.
@@ -1563,6 +1574,57 @@ pub fn merge(root: &Path, branch: &str) -> Result<()> {
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
+/// `git merge --squash`: stages `branch`'s changes without committing; conflicts leave the squash
+/// [`underway`] and come back as an error.
+pub fn merge_squash(root: &Path, branch: &str) -> Result<()> {
+    refuse_dash(branch)?;
+    let mut cmd = filtering_git(root);
+    cmd.args(["merge", "--squash", branch]);
+    run_within(cmd, None, WRITE_TIMEOUT).map(drop)
+}
+
+/// Stages everything, new files included, and commits it with `message`.
+pub fn commit_all(root: &Path, message: &str) -> Result<()> {
+    let mut cmd = filtering_git(root);
+    cmd.args(["add", "-A"]);
+    run_within(cmd, None, WRITE_TIMEOUT)?;
+    commit(root, message, false)
+}
+
+/// Commits on `branch` that the checkout at `root` does not have.
+pub fn commits_missing(root: &Path, branch: &str) -> Result<u32> {
+    refuse_dash(branch)?;
+    let mut cmd = git(root);
+    cmd.args(["rev-list", "--count"])
+        .arg(format!("HEAD..refs/heads/{branch}"));
+    Ok(String::from_utf8_lossy(&run(cmd, None)?).trim().parse()?)
+}
+
+/// What keeps `branch` from being brought into the main checkout at `main`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BringStop {
+    /// Staged or unstaged changes; untracked files do not count.
+    Dirty,
+    /// A merge, rebase, squash or cherry-pick, by name.
+    Busy(&'static str),
+    /// The branch has no commits `main` lacks.
+    Nothing,
+}
+
+/// The first reason `branch` cannot be brought into `main` now, `None` when it can.
+pub fn bring_stop(main: &Path, branch: &str) -> Result<Option<BringStop>> {
+    if let Some(what) = underway(main) {
+        return Ok(Some(BringStop::Busy(what.name())));
+    }
+    if git_dirs(main).is_some_and(|d| d.git_dir.join("CHERRY_PICK_HEAD").exists()) {
+        return Ok(Some(BringStop::Busy("cherry-pick")));
+    }
+    if summary(main, false)?.dirty {
+        return Ok(Some(BringStop::Dirty));
+    }
+    Ok((commits_missing(main, branch)? == 0).then_some(BringStop::Nothing))
+}
+
 /// `git rebase` of the current branch onto `onto`; conflicts leave it [`underway`].
 pub fn rebase(root: &Path, onto: &str) -> Result<()> {
     refuse_dash(onto)?;
@@ -1573,7 +1635,11 @@ pub fn rebase(root: &Path, onto: &str) -> Result<()> {
 
 pub fn abort(root: &Path, what: Underway) -> Result<()> {
     let mut cmd = filtering_git(root);
-    cmd.args([what.name(), "--abort"]);
+    match what {
+        // A squash has no `--abort`; it only starts on a clean tree, so this restores that state.
+        Underway::Squash => cmd.args(["reset", "--merge"]),
+        _ => cmd.args([what.name(), "--abort"]),
+    };
     run_within(cmd, None, WRITE_TIMEOUT).map(drop)
 }
 
@@ -2311,6 +2377,175 @@ mod tests {
         merge(&dir, "clean").unwrap();
         assert!(dir.join("g.txt").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A repository and a linked worktree on `claude/task` holding one commit of `g.txt`.
+    fn repo_with_task(name: &str) -> (PathBuf, PathBuf) {
+        let main = committed_repo(name, "a\n");
+        let task = main.with_extension("task");
+        let _ = std::fs::remove_dir_all(&task);
+        add_worktree(&main, &task, &NewWorktree::Create("claude/task".into())).unwrap();
+        std::fs::write(task.join("g.txt"), "g\n").unwrap();
+        repo_git(&task, &["add", "-A"]);
+        repo_git(&task, &["commit", "-qm", "add g"]);
+        (main, task)
+    }
+
+    fn cleanup(main: &Path, task: &Path) {
+        std::fs::remove_dir_all(task).unwrap();
+        std::fs::remove_dir_all(main).unwrap();
+    }
+
+    #[test]
+    fn a_clean_squash_stages_the_changes_and_is_not_underway() {
+        if !available() {
+            return;
+        }
+        let (main, task) = repo_with_task("squash-clean");
+        let head = head_sha(&main).unwrap();
+        assert_eq!(bring_stop(&main, "claude/task").unwrap(), None);
+
+        merge_squash(&main, "claude/task").unwrap();
+        assert_eq!(head_sha(&main).unwrap(), head);
+        assert_eq!(
+            git_out(&main, &["diff", "--cached", "--name-only"]),
+            "g.txt\n"
+        );
+        assert!(git_dirs(&main).unwrap().git_dir.join("SQUASH_MSG").exists());
+        assert_eq!(underway(&main), None);
+        cleanup(&main, &task);
+    }
+
+    #[test]
+    fn a_conflicting_squash_is_underway_until_aborted() {
+        if !available() {
+            return;
+        }
+        let (main, task) = repo_with_task("squash-conflict");
+        std::fs::write(task.join("f.txt"), "theirs\n").unwrap();
+        repo_git(&task, &["commit", "-qam", "theirs"]);
+        std::fs::write(main.join("f.txt"), "ours\n").unwrap();
+        repo_git(&main, &["commit", "-qam", "ours"]);
+        let head = head_sha(&main).unwrap();
+
+        assert!(merge_squash(&main, "claude/task").is_err());
+        assert_eq!(underway(&main), Some(Underway::Squash));
+        assert_eq!(
+            git_out(&main, &["diff", "--name-only", "--diff-filter=U"]),
+            "f.txt\n"
+        );
+        assert_eq!(
+            bring_stop(&main, "claude/task").unwrap(),
+            Some(BringStop::Busy("squash"))
+        );
+
+        abort(&main, Underway::Squash).unwrap();
+        assert_eq!(underway(&main), None);
+        assert_eq!(head_sha(&main).unwrap(), head);
+        assert!(!git_dirs(&main).unwrap().git_dir.join("SQUASH_MSG").exists());
+        assert_eq!(git_out(&main, &["status", "--porcelain"]), "");
+        assert_eq!(
+            std::fs::read_to_string(main.join("f.txt")).unwrap(),
+            "ours\n"
+        );
+        cleanup(&main, &task);
+    }
+
+    #[test]
+    fn a_main_checkout_with_changes_or_a_merge_under_way_takes_nothing() {
+        if !available() {
+            return;
+        }
+        let (main, task) = repo_with_task("bring-stop");
+        std::fs::write(main.join("new.txt"), "untracked\n").unwrap();
+        assert_eq!(bring_stop(&main, "claude/task").unwrap(), None);
+
+        std::fs::write(main.join("f.txt"), "edited\n").unwrap();
+        assert_eq!(
+            bring_stop(&main, "claude/task").unwrap(),
+            Some(BringStop::Dirty)
+        );
+        repo_git(&main, &["add", "f.txt"]);
+        assert_eq!(
+            bring_stop(&main, "claude/task").unwrap(),
+            Some(BringStop::Dirty)
+        );
+        repo_git(&main, &["commit", "-qm", "edited"]);
+
+        std::fs::write(task.join("f.txt"), "theirs\n").unwrap();
+        repo_git(&task, &["commit", "-qam", "theirs"]);
+        assert!(merge(&main, "claude/task").is_err());
+        assert_eq!(
+            bring_stop(&main, "claude/task").unwrap(),
+            Some(BringStop::Busy("merge"))
+        );
+        cleanup(&main, &task);
+    }
+
+    #[test]
+    fn a_branch_main_already_has_is_nothing_to_bring() {
+        if !available() {
+            return;
+        }
+        let (main, task) = repo_with_task("bring-nothing");
+        repo_git(
+            &task,
+            &["push", "-q", ".", "claude/task:refs/remotes/origin/task"],
+        );
+        // Another ref holding the commits leaves `unique_commits` at 0 though main lacks them.
+        assert_eq!(unique_commits(&main, "claude/task").unwrap(), 0);
+        assert_eq!(bring_stop(&main, "claude/task").unwrap(), None);
+
+        merge(&main, "claude/task").unwrap();
+        assert_eq!(
+            bring_stop(&main, "claude/task").unwrap(),
+            Some(BringStop::Nothing)
+        );
+        cleanup(&main, &task);
+    }
+
+    #[test]
+    fn pending_changes_are_committed_with_the_message_before_squashing() {
+        if !available() {
+            return;
+        }
+        let (main, task) = repo_with_task("commit-all");
+        std::fs::write(task.join("g.txt"), "edited\n").unwrap();
+        std::fs::write(task.join("h.txt"), "new\n").unwrap();
+        assert!(summary(&task, true).unwrap().dirty);
+
+        commit_all(&task, "tidy the task").unwrap();
+        assert!(!summary(&task, true).unwrap().dirty);
+        assert_eq!(
+            git_out(&task, &["log", "-1", "--format=%s"]),
+            "tidy the task\n"
+        );
+
+        merge_squash(&main, "claude/task").unwrap();
+        assert_eq!(
+            git_out(&main, &["diff", "--cached", "--name-only"]),
+            "g.txt\nh.txt\n"
+        );
+        cleanup(&main, &task);
+    }
+
+    #[test]
+    fn merging_keeps_the_branch_commits_under_a_merge_commit() {
+        if !available() {
+            return;
+        }
+        let (main, task) = repo_with_task("merge-keep");
+        std::fs::write(main.join("f.txt"), "ahead\n").unwrap();
+        repo_git(&main, &["commit", "-qam", "main moves on"]);
+
+        merge(&main, "claude/task").unwrap();
+        assert_eq!(
+            git_out(&main, &["rev-list", "--merges", "--count", "HEAD"]),
+            "1\n"
+        );
+        assert!(git_out(&main, &["log", "--format=%s"]).contains("add g\n"));
+        assert_eq!(underway(&main), None);
+        cleanup(&main, &task);
     }
 
     fn committed_repo(name: &str, contents: &str) -> PathBuf {
