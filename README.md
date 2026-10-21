@@ -662,8 +662,8 @@ information rather than triggering the install dialog).
   (palette: **Claude: Review next/previous changed file**), or **Revert** one file to before the
   session (a copy of the current file is kept in `discarded/` for 30 days). Revert is refused
   while an editor of that file (opened through a link or not) has unsaved changes, since saving
-  them would undo it; a clean editor reloads. The newest session starts expanded, and **Claude:
-  Review next changed file** starts a review of it from the keyboard. **Resume** opens a terminal
+  them would undo it; a clean editor reloads. **Claude: Review next changed file** starts a review
+  of the newest session from the keyboard. **Resume** opens a terminal
   running `claude --resume <id>` in the project folder, with `CLAUDE_CONFIG_DIR` set for a
   profile other than `~/.claude`.
 - Optional title-bar indicator for Claude plan usage (5-hour and weekly windows).
