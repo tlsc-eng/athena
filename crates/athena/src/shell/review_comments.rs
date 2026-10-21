@@ -1,7 +1,7 @@
 //! Review comments in the window: which Claude session a file's comments belong to, the store
 //! round trips, and keeping the editors and diffs that show them in step.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +19,8 @@ actions!(athena, [ClaudeReviewComments]);
 #[derive(Default)]
 pub(super) struct CommentsState {
     watched: HashMap<EntityId, Watched>,
+    /// Terminals whose raw Claude state is `Some`, so only a first one asks for the column.
+    claude_terminals: HashSet<EntityId>,
 }
 
 struct Watched {
@@ -224,6 +226,26 @@ impl Shell {
             .collect();
         for editor in editors {
             self.watch_editor_comments(&editor, cx);
+        }
+    }
+
+    /// A terminal's Claude state changed; the first time it is `Some`, editors get the column.
+    pub(super) fn note_claude_terminal(
+        &mut self,
+        terminal: EntityId,
+        running: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let terminals = &mut self.review.comments.claude_terminals;
+        let started = match running {
+            true => terminals.insert(terminal),
+            false => {
+                terminals.remove(&terminal);
+                false
+            }
+        };
+        if started {
+            self.sync_review_columns(cx);
         }
     }
 

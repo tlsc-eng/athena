@@ -1629,32 +1629,48 @@ impl Render for DiffView {
             .bg(t.color.surface_sunken)
             .track_focus(&self.focus)
             .key_context("DiffView")
-            .on_action(
-                cx.listener(|this, _: &NextChange, window, cx| this.step_change(true, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &PrevChange, window, cx| this.step_change(false, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &NextChange, window, cx| {
+                if this.focus.is_focused(window) {
+                    this.step_change(true, window, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PrevChange, window, cx| {
+                if this.focus.is_focused(window) {
+                    this.step_change(false, window, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleInline, _, cx| this.toggle_inline(cx)))
-            .on_action(cx.listener(|this, _: &LineUp, window, cx| this.scroll_rows(-1, window, cx)))
-            .on_action(
-                cx.listener(|this, _: &LineDown, window, cx| this.scroll_rows(1, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &LineUp, window, cx| {
+                if this.focus.is_focused(window) {
+                    this.scroll_rows(-1, window, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &LineDown, window, cx| {
+                if this.focus.is_focused(window) {
+                    this.scroll_rows(1, window, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &PageUp, window, cx| {
-                let n = this.page_rows(cx);
-                this.scroll_rows(-n, window, cx)
+                if this.focus.is_focused(window) {
+                    let n = this.page_rows(cx);
+                    this.scroll_rows(-n, window, cx)
+                }
             }))
             .on_action(cx.listener(|this, _: &PageDown, window, cx| {
-                let n = this.page_rows(cx);
-                this.scroll_rows(n, window, cx)
+                if this.focus.is_focused(window) {
+                    let n = this.page_rows(cx);
+                    this.scroll_rows(n, window, cx)
+                }
             }))
-            .on_action(
-                cx.listener(|this, _: &Top, window, cx| {
+            .on_action(cx.listener(|this, _: &Top, window, cx| {
+                if this.focus.is_focused(window) {
                     this.scroll_rows(isize::MIN / 2, window, cx)
-                }),
-            )
+                }
+            }))
             .on_action(cx.listener(|this, _: &Bottom, window, cx| {
-                this.scroll_rows(isize::MAX / 2, window, cx)
+                if this.focus.is_focused(window) {
+                    this.scroll_rows(isize::MAX / 2, window, cx)
+                }
             }))
             .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.decide(true, cx)))
             .on_action(cx.listener(|this, _: &RejectProposal, _, cx| this.decide(false, cx)))
