@@ -1637,7 +1637,7 @@ impl Shell {
         let insertion = div()
             .absolute()
             .left_0()
-            .top(-t.ui(gap / 2.) - px(1.))
+            .top(-t.ui(gap / 2.) - t.ui(1.))
             .when(wide, |el| el.w_full())
             .when(!wide, |el| el.w(t.ui(RAIL_ITEM)))
             .h(t.ui(2.))

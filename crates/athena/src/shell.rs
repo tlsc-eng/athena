@@ -560,7 +560,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(24.))
+                .gap(t.space(Space::Xxl))
                 .child(Lockup::new(t.typography.display))
                 .child(empty_state(
                     "No projects open",

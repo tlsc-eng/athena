@@ -544,8 +544,8 @@ impl Shell {
                 .id(("tab-badge", item.id.0))
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .child(div().size(px(6.)).bg(color))
+                .gap(t.space(Space::Sm))
+                .child(div().size(t.ui(6.)).bg(color))
                 .children(word.map(|w| div().text_color(color).child(w)))
                 .when_some(todos, |el, (done, list)| {
                     el.child(div().text_color(t.color.content_muted).child(done))
