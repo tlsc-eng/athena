@@ -12,16 +12,19 @@ const MAX_LINES: u32 = 2000;
 const MAX_SELECTION: usize = 64 * 1024;
 const MAX_RUN: usize = 4096;
 const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(60);
-/// How far up the hook client's ancestry the pane's foreground program may be: the client, the
-/// shell Claude runs hooks in, Claude, and a launcher script around it. A `claude -p` started
-/// by Claude's Bash tool puts its own process and the tool's shell in between, so it is farther.
-const HOOK_DEPTH: usize = 3;
 
-fn runs_hook_of(lineage: &[i32], foreground: i32) -> bool {
+/// Whether the Claude that ran a hook, third from the client (client, hook shell, claude), is in
+/// its terminal's foreground group. A nested `claude -p` has its own group or no terminal, and
+/// the polled foreground program lags a launcher, so neither is asked.
+pub(super) fn hook_claude_holds_terminal(lineage: &[i32]) -> bool {
+    crate::procinfo::groups(&lineage[..lineage.len().min(3)])
+        .is_some_and(|groups| runs_hook_of(&groups))
+}
+
+fn runs_hook_of(lineage: &[(i32, i32, i32)]) -> bool {
     lineage
-        .iter()
-        .position(|&p| p == foreground)
-        .is_some_and(|at| at <= HOOK_DEPTH)
+        .get(2)
+        .is_some_and(|&(_, pgid, tpgid)| tpgid > 0 && pgid == tpgid)
 }
 
 impl Shell {
@@ -143,17 +146,6 @@ impl Shell {
         let session = claimed?;
         let foreground = self.foreground_pid(session, cx)?;
         lineage.contains(&foreground).then_some(session)
-    }
-
-    /// Like `verify_caller`, for a hook: Claude itself must be the pane's foreground program.
-    pub(super) fn verify_hook_caller(
-        &self,
-        claimed: PaneId,
-        lineage: &[i32],
-        cx: &gpui::App,
-    ) -> Option<PaneId> {
-        let foreground = self.foreground_pid(claimed, cx)?;
-        runs_hook_of(lineage, foreground).then_some(claimed)
     }
 
     fn foreground_pid(&self, session: PaneId, cx: &gpui::App) -> Option<i32> {
@@ -366,16 +358,68 @@ impl Shell {
 mod tests {
     use super::*;
 
+    // (pid, process group, terminal's foreground group), nearest first
+    const SHELL: (i32, i32, i32) = (20, 20, 30);
+
     #[test]
-    fn a_hook_belongs_to_the_foreground_program_not_to_a_nested_claude() {
-        // hook client, its shell, claude, then the pane's shell
-        assert!(runs_hook_of(&[40, 35, 30, 20], 30));
-        assert!(
-            runs_hook_of(&[40, 35, 31, 30, 20], 30),
-            "a launcher around claude"
-        );
-        // `claude -p` under claude's Bash tool: client, shell, nested claude, tool shell, claude
-        assert!(!runs_hook_of(&[40, 35, 33, 32, 30, 20], 30));
-        assert!(!runs_hook_of(&[40, 35, 30], 99), "not an ancestor at all");
+    fn a_native_claude_in_the_foreground_binds() {
+        assert!(runs_hook_of(&[
+            (40, 35, 30),
+            (35, 35, 30),
+            (30, 30, 30),
+            SHELL
+        ]));
+    }
+
+    #[test]
+    fn a_launcher_chain_shares_the_jobs_group_with_claude() {
+        // wrapper script (30) runs node (31) without exec; the job's group is the wrapper's
+        assert!(runs_hook_of(&[
+            (40, 35, 30),
+            (35, 35, 30),
+            (31, 30, 30),
+            (30, 30, 30),
+            SHELL
+        ]));
+    }
+
+    #[test]
+    fn the_polled_foreground_program_is_not_consulted() {
+        // zsh is still what the daemon last reported, yet claude already holds the terminal
+        assert!(runs_hook_of(&[
+            (40, 35, 30),
+            (35, 35, 30),
+            (30, 30, 30),
+            (20, 20, 30)
+        ]));
+    }
+
+    #[test]
+    fn a_bash_tool_claude_has_its_own_group_and_no_terminal() {
+        assert!(!runs_hook_of(&[
+            (40, 36, 0),
+            (36, 36, 0),
+            (33, 33, 0),
+            (32, 32, 0),
+            (30, 30, 30)
+        ]));
+        assert!(!runs_hook_of(&[(40, 36, -1), (36, 36, -1), (33, 33, -1)]));
+    }
+
+    #[test]
+    fn a_claude_started_by_a_hook_is_in_the_hook_shells_group() {
+        // the hook shell (31) is a job of its own; claude replaced the shell that ran it
+        assert!(!runs_hook_of(&[
+            (40, 36, 30),
+            (36, 31, 30),
+            (31, 31, 30),
+            (30, 30, 30)
+        ]));
+    }
+
+    #[test]
+    fn too_short_a_lineage_binds_nothing() {
+        assert!(!runs_hook_of(&[(40, 30, 30), (35, 30, 30)]));
+        assert!(!runs_hook_of(&[]));
     }
 }

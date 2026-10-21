@@ -14,6 +14,7 @@ use gpui::{
 };
 
 use super::Shell;
+use super::bridge::hook_claude_holds_terminal;
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
@@ -778,13 +779,7 @@ fn serve(request: Request, cx: &mut App) {
             | AppMsg::ClaudeTodos { .. }
             | AppMsg::ClaudePlan { .. }
     );
-    let caller = match (caller, caller_at) {
-        (Some(pane), Some(at)) if binds => windows[at]
-            .read(cx)
-            .ok()
-            .and_then(|shell| shell.verify_hook_caller(pane, &request.lineage, cx)),
-        _ => caller,
-    };
+    let caller = caller.filter(|_| !binds || hook_claude_holds_terminal(&request.lineage));
     let path_holder = |path: &Path| {
         windows
             .iter()
