@@ -375,7 +375,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
         ("Open file to the side", Box::new(actions::QuickOpenBeside)),
         ("New Claude session", Box::new(actions::NewClaudeSession)),
         (
-            "Continue last Claude session",
+            "Resume Claude session…",
             Box::new(actions::ContinueClaudeSession),
         ),
         (
