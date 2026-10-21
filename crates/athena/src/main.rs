@@ -13,6 +13,7 @@ mod snapshots;
 mod system_notify;
 mod transcripts;
 mod usage;
+mod worktree_forks;
 
 use std::path::PathBuf;
 

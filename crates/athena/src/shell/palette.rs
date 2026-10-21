@@ -543,9 +543,67 @@ fn project_files(root: &Path) -> Vec<String> {
     out
 }
 
+/// The entries matching `query`, best first, as (score, entry index, matched positions). The
+/// Claude worktree picker then has its Claude row pinned.
+fn rank_entries(
+    entries: &[Entry],
+    query: &str,
+    mode: Mode,
+    claude_picker: bool,
+) -> Vec<(i32, usize, Vec<usize>)> {
+    let mut hits: Vec<(i32, usize, Vec<usize>)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| fuzzy::score(query, &e.key).map(|(s, pos)| (s, i, pos)))
+        .collect();
+    if !query.is_empty() {
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    }
+    if mode == Mode::NewWorktree && claude_picker {
+        let picks: Vec<_> = hits
+            .iter()
+            .map(|(_, i, _)| match &entries[*i].target {
+                Target::Branch(pick) => Some(pick),
+                _ => None,
+            })
+            .collect();
+        if let Some((from, to)) = super::worktrees::claude_row_move(&picks, query) {
+            let row = hits.remove(from);
+            hits.insert(to, row);
+        }
+    }
+    hits
+}
+
+/// The picks the New Worktree picker lists for `query`, through the same ranking the palette uses.
+#[cfg(test)]
+pub(super) fn listed_worktree_picks(
+    rows: &[super::branches::BranchEntry],
+    query: &str,
+    claude_picker: bool,
+) -> Vec<super::branches::BranchPick> {
+    let entries: Vec<Entry> = rows
+        .iter()
+        .map(|b| Entry {
+            kind: None,
+            label: b.label.clone(),
+            detail: b.detail.clone(),
+            key: b.key.clone(),
+            target: Target::Branch(b.pick.clone()),
+        })
+        .collect();
+    rank_entries(&entries, query, Mode::NewWorktree, claude_picker)
+        .into_iter()
+        .map(|(_, i, _)| rows[i].pick.clone())
+        .collect()
+}
+
 impl Shell {
     pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
-        self.git.claude_in_new_worktree = false;
+        // open_worktrees sets the flag for the one palette it is about to open.
+        if mode != Mode::NewWorktree {
+            self.git.claude_in_new_worktree = false;
+        }
         let placeholder = match mode {
             Mode::Files => "Go to file…  (@ symbol, # workspace symbol, > command)",
             Mode::FilesBeside => "Open to the side…",
@@ -559,6 +617,9 @@ impl Shell {
             Mode::Stashes => "Pop a stash…",
             Mode::Tasks => "Select the task to run…",
             Mode::Worktrees => "Open a worktree…",
+            Mode::NewWorktree if self.git.claude_in_new_worktree => {
+                "Describe the task (optional), or pick an existing branch…"
+            }
             Mode::NewWorktree => "Pick a branch for the new worktree, or type a new branch name…",
             Mode::RemoveWorktree => "Delete a worktree…",
             Mode::Checks => "Open a pull request check…",
@@ -1060,6 +1121,7 @@ impl Shell {
             return;
         };
         let query = Self::palette_needle(palette, cx);
+        let claude_picker = self.git.claude_in_new_worktree;
         if palette.mode == Mode::Claude {
             palette.entries = claude_entries(&query);
         }
@@ -1076,6 +1138,10 @@ impl Shell {
                 &self.git.branches,
                 &self.git.worktrees,
                 &query,
+                self.git
+                    .claude_in_new_worktree
+                    .then(super::worktrees::local_stamp)
+                    .as_deref(),
             )),
             Mode::RemoveWorktree => Some(super::worktrees::remove_entries(&self.git.worktrees)),
             Mode::MergeBranch | Mode::RebaseOnto | Mode::DeleteBranch => {
@@ -1141,15 +1207,7 @@ impl Shell {
             Mode::Symbols | Mode::WorkspaceSymbols => MAX_SYMBOL_ROWS,
             _ => MAX_ROWS,
         };
-        let mut hits: Vec<(i32, usize, Vec<usize>)> = palette
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| fuzzy::score(&query, &e.key).map(|(s, pos)| (s, i, pos)))
-            .collect();
-        if !query.is_empty() {
-            hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        }
+        let hits = rank_entries(&palette.entries, &query, palette.mode, claude_picker);
         palette.hits = hits
             .into_iter()
             .take(limit)
