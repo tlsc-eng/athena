@@ -543,6 +543,24 @@ fn project_files(root: &Path) -> Vec<String> {
     out
 }
 
+/// Byte ranges in `label` for the matched `positions` of `key`, which the label ends (files)
+/// or equals. A label longer than its key can't be a suffix, so nothing is highlighted.
+fn label_highlights(key: &str, label: &str, positions: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let Some(offset) = key.chars().count().checked_sub(label.chars().count()) else {
+        return Vec::new();
+    };
+    let label_bytes: Vec<usize> = label.char_indices().map(|(b, _)| b).collect();
+    positions
+        .iter()
+        .filter(|&&p| p >= offset)
+        .filter_map(|&p| {
+            let b = *label_bytes.get(p - offset)?;
+            let len = label[b..].chars().next()?.len_utf8();
+            Some(b..b + len)
+        })
+        .collect()
+}
+
 /// The entries matching `query`, best first, as (score, entry index, matched positions). The
 /// Claude worktree picker then has its Claude row pinned.
 fn rank_entries(
@@ -834,15 +852,12 @@ impl Shell {
                     (Some(place), Some(caption)) => Some(format!("{place} · {caption}")),
                     (place, caption) => place.or(caption),
                 };
+                let label = if linked { format!("↳ {name}") } else { name };
                 let entry = Entry {
-                    label: if linked {
-                        format!("↳ {name}")
-                    } else {
-                        name.clone()
-                    },
+                    key: label.clone(),
+                    label,
                     detail,
                     kind,
-                    key: name,
                     target: Target::Project(project.root.clone()),
                 };
                 (urgency, entry)
@@ -1325,26 +1340,20 @@ impl Shell {
             .map(|(row, (index, positions))| {
                 let entry = &palette.entries[*index];
                 let selected = row == palette.selected;
-                // Positions index `key`; for files the label is the name at the end of it.
-                let offset = entry.key.chars().count() - entry.label.chars().count();
-                let label_bytes: Vec<usize> = entry.label.char_indices().map(|(b, _)| b).collect();
                 let preview = match &entry.target {
                     Target::SidebarFolder(pick) => self.folder_pick_preview(pick, &t),
                     _ => None,
                 };
-                let bold: Vec<_> = positions
-                    .iter()
-                    .filter(|&&p| p >= offset)
-                    .filter_map(|&p| {
-                        let b = *label_bytes.get(p - offset)?;
-                        let len = entry.label[b..].chars().next()?.len_utf8();
-                        Some((
-                            b..b + len,
+                let bold: Vec<_> = label_highlights(&entry.key, &entry.label, positions)
+                    .into_iter()
+                    .map(|range| {
+                        (
+                            range,
                             HighlightStyle {
                                 font_weight: Some(FontWeight::SEMIBOLD),
                                 ..Default::default()
                             },
-                        ))
+                        )
                     })
                     .collect();
                 div()
@@ -1569,6 +1578,43 @@ fn claude_entries(query: &str) -> Vec<Entry> {
 mod tests {
     use super::*;
     use athena_lsp::Range;
+
+    #[test]
+    fn highlights_land_on_the_label_characters_the_key_matched() {
+        let key = "src/main.rs";
+        let (_, positions) = fuzzy::score("mn", key).unwrap();
+        assert_eq!(
+            label_highlights(key, "main.rs", &positions),
+            vec![0..1, 3..4]
+        );
+    }
+
+    #[test]
+    fn a_label_longer_than_its_key_highlights_nothing_instead_of_underflowing() {
+        assert!(label_highlights("name", "↳ name", &[0, 1]).is_empty());
+    }
+
+    #[test]
+    fn a_linked_project_row_highlights_the_name_after_the_arrow() {
+        let entry = |label: &str| Entry {
+            label: label.into(),
+            detail: None,
+            kind: None,
+            key: label.into(),
+            target: Target::Project(std::path::PathBuf::from("/p")),
+        };
+        let entries = [entry("other"), entry("↳ feature")];
+        let (_, index, positions) = rank_entries(&entries, "fea", Mode::Projects, false)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(index, 1);
+        // The arrow is three bytes and the space one, so the name starts at byte 4.
+        assert_eq!(
+            label_highlights(&entries[1].key, &entries[1].label, &positions),
+            vec![4..5, 5..6, 6..7]
+        );
+    }
 
     #[test]
     fn multi_cursor_and_wrap_commands_name_real_editor_actions() {
