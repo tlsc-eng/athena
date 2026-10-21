@@ -8,7 +8,7 @@ use athena_workspace::ItemId;
 use athena_workspace::git;
 use gpui::App;
 
-use super::{SessionRow, SessionsState, short_id};
+use super::{SessionRow, SessionsState, pick_row, short_id};
 use crate::shell::Shell;
 use crate::shell::item::ItemView;
 use crate::transcripts::Tokens;
@@ -31,17 +31,12 @@ pub(crate) struct LiveSession {
     /// Todos done out of all of them.
     pub todos: Option<(usize, usize)>,
     pub files: usize,
-    /// By model, for pricing; `tokens()` sums them.
+    /// By model, for pricing.
     pub usage: BTreeMap<String, Tokens>,
     pub modified: SystemTime,
 }
 
 impl LiveSession {
-    #[allow(dead_code)] // No caller yet; the list shows cost, not a token count.
-    pub fn tokens(&self) -> u64 {
-        self.usage.values().map(Tokens::total).sum()
-    }
-
     pub fn cost_label(&self, prices: &HashMap<String, crate::transcripts::Price>) -> String {
         super::cost_label(&self.usage, prices)
     }
@@ -105,13 +100,22 @@ pub(super) fn row_roots(
         .collect()
 }
 
-/// Sessions that need the user: waiting for an answer, or finished and not yet seen.
-#[allow(dead_code)] // The windows count from their terminals instead; this one defines the rule over a list.
-pub(crate) fn attention_count(sessions: &[LiveSession]) -> usize {
-    sessions
-        .iter()
-        .filter(|s| needs_you(s.state, s.unread))
-        .count()
+/// How urgently a terminal wants you: 2 while it asks, 1 once it has finished unseen.
+fn urgency(state: Option<ClaudeState>, bell: bool) -> Option<u8> {
+    match state {
+        Some(ClaudeState::NeedsInput) => Some(2),
+        _ => needs_you(state, unread(state, bell)).then_some(1),
+    }
+}
+
+/// The terminals, as (project root, tab, Claude state, bell), that need you; bound to a session or not.
+fn needing(
+    terminals: impl IntoIterator<Item = (PathBuf, ItemId, Option<ClaudeState>, bool)>,
+) -> Vec<(PathBuf, ItemId, u8)> {
+    terminals
+        .into_iter()
+        .filter_map(|(root, item, state, bell)| Some((root, item, urgency(state, bell)?)))
+        .collect()
 }
 
 /// A session stopped or asked while nobody looked, and the terminal has not been looked at since;
@@ -165,18 +169,18 @@ struct Running {
     bell: bool,
 }
 
-impl SessionsState {
-    pub(in crate::shell) fn forget_places(&mut self) {
-        self.places.get_mut().clear();
-    }
+/// `locate` for each of `cwds`, which reads the disk and so is for a background thread.
+pub(super) fn locate_all(cwds: &BTreeSet<PathBuf>) -> HashMap<PathBuf, (PathBuf, Option<String>)> {
+    cwds.iter().map(|cwd| (cwd.clone(), locate(cwd))).collect()
+}
 
-    /// `locate(cwd)`, remembered until a hook or a reload clears it.
+impl SessionsState {
+    /// Where `cwd` was last found to belong; until a load has looked, it is its own main checkout.
     pub(super) fn place(&self, cwd: &Path) -> (PathBuf, Option<String>) {
-        let mut places = self.places.borrow_mut();
-        places
-            .entry(cwd.to_path_buf())
-            .or_insert_with(|| locate(cwd))
-            .clone()
+        self.places
+            .get(cwd)
+            .cloned()
+            .unwrap_or_else(|| (cwd.to_path_buf(), None))
     }
 }
 
@@ -188,36 +192,39 @@ impl Shell {
         matches!(view, ItemView::Terminal(_)).then_some((root, item, view))
     }
 
-    /// This window's sessions that need you, from its terminals alone so it is cheap per frame.
-    fn needing_you<'a>(&'a self, cx: &'a App) -> impl Iterator<Item = (PathBuf, ItemId, u8)> + 'a {
-        self.review
-            .sessions
-            .panes
-            .keys()
-            .filter_map(|pane| self.pane_view(*pane))
-            .filter_map(|(root, item, view)| {
-                let state = view.claude_state(cx);
-                let urgency = match state {
-                    Some(ClaudeState::NeedsInput) => 2,
-                    _ if needs_you(state, unread(state, view.has_bell(cx))) => 1,
-                    _ => return None,
-                };
-                Some((root, item, urgency))
-            })
+    /// This window's terminals that need you, whether or not a session is bound to them, so it is
+    /// cheap per frame; bindings are lost with Athena, and the shells outlive it.
+    fn needing_you(&self, cx: &App) -> Vec<(PathBuf, ItemId, u8)> {
+        let terminals = self
+            .items
+            .iter()
+            .filter(|(_, view)| matches!(view, ItemView::Terminal(_)));
+        needing(terminals.map(|((root, item), view)| {
+            (
+                root.clone(),
+                *item,
+                view.claude_state(cx),
+                view.has_bell(cx),
+            )
+        }))
     }
 
     pub(crate) fn attention_here(&self, cx: &App) -> usize {
-        self.needing_you(cx).count()
+        self.needing_you(cx).len()
     }
 
     /// The project roots of this window's sessions that need you, one per session.
     pub(in crate::shell) fn attention_roots(&self, cx: &App) -> Vec<PathBuf> {
-        self.needing_you(cx).map(|(root, ..)| root).collect()
+        self.needing_you(cx)
+            .into_iter()
+            .map(|(root, ..)| root)
+            .collect()
     }
 
     /// This window's sessions that need you, as window number `window` of those open.
     pub(in crate::shell) fn waiting_here(&self, window: usize, cx: &App) -> Vec<Waiting> {
         self.needing_you(cx)
+            .into_iter()
             .filter_map(|(root, item, urgency)| {
                 let project = self
                     .workspace
@@ -235,14 +242,14 @@ impl Shell {
             .collect()
     }
 
-    /// The project roots to read sessions for: the active one and each a bound session runs in.
+    /// The project roots to read sessions for: the active one and each folder a bound session ran
+    /// in, as Claude files its transcripts by that.
     pub(in crate::shell) fn session_row_roots(&self) -> BTreeSet<PathBuf> {
-        let bound = self
-            .review
-            .sessions
-            .panes
-            .keys()
-            .filter_map(|pane| self.find_session(*pane).map(|(root, _)| root));
+        let state = &self.review.sessions;
+        let bound = state.panes.iter().filter_map(|(pane, id)| {
+            let terminal = || self.find_session(*pane).map(|(root, _)| root);
+            state.cwds.get(id).cloned().or_else(terminal)
+        });
         row_roots(
             self.workspace.active_project().map(|p| p.root.as_path()),
             bound,
@@ -267,14 +274,10 @@ impl Shell {
                 },
             );
         }
-        // The other projects' rows come last, so a session's own project wins over one that only
-        // left edits under another's folder.
-        let rows: HashMap<&str, &SessionRow> = state
-            .rows
-            .iter()
-            .chain(state.elsewhere.iter())
-            .map(|r| (r.id.as_str(), r))
-            .collect();
+        let mut rows: HashMap<&str, Vec<&SessionRow>> = HashMap::new();
+        for row in state.rows.iter().chain(state.elsewhere.iter()) {
+            rows.entry(row.id.as_str()).or_default().push(row);
+        }
         let ids = running
             .keys()
             .copied()
@@ -282,11 +285,12 @@ impl Shell {
         let now = SystemTime::now();
         let mut out: Vec<LiveSession> = ids
             .map(|id| {
-                let (row, term) = (rows.get(id), running.get(id));
-                let cwd = state
-                    .cwds
-                    .get(id)
-                    .or(term.map(|t| &t.root))
+                let term = running.get(id);
+                let started_in = state.cwds.get(id).or(term.map(|t| &t.root));
+                let row = rows.get(id).and_then(|found| {
+                    pick_row(found.iter().copied(), started_in.map(PathBuf::as_path))
+                });
+                let cwd = started_in
                     .or(row.map(|r| &r.root))
                     .or(state.root.as_ref())
                     .cloned()
@@ -368,14 +372,27 @@ mod tests {
 
     #[test]
     fn attention_counts_questions_and_unseen_finishes_only() {
-        assert_eq!(attention_count(&mixed()), 3);
-        assert_eq!(attention_count(&[]), 0);
+        let count =
+            |all: &[LiveSession]| all.iter().filter(|s| needs_you(s.state, s.unread)).count();
+        assert_eq!(count(&mixed()), 3);
+        assert_eq!(count(&[]), 0);
         let quiet = [session("r", Some(ClaudeState::Running), true, 0)];
-        assert_eq!(
-            attention_count(&quiet),
-            0,
-            "a running session is never unread"
-        );
+        assert_eq!(count(&quiet), 0, "a running session is never unread");
+    }
+
+    #[test]
+    fn a_waiting_terminal_counts_with_no_session_bound_to_it() {
+        use ClaudeState::*;
+        let terminal = |item: u64, state, bell| (PathBuf::from("/a"), ItemId(item), state, bell);
+        let found = needing([
+            terminal(1, Some(NeedsInput), false),
+            terminal(2, Some(Finished), true),
+            terminal(3, Some(Finished), false),
+            terminal(4, Some(Running), true),
+            terminal(5, None, true),
+        ]);
+        let found: Vec<(u64, u8)> = found.into_iter().map(|(_, item, u)| (item.0, u)).collect();
+        assert_eq!(found, [(1, 2), (2, 1)]);
     }
 
     #[test]

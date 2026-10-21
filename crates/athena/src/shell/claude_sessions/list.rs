@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
@@ -7,8 +8,8 @@ use athena_ui::{
 };
 use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*, px};
 
-use super::Shell;
 use super::live::LiveSession;
+use super::{SessionRow, Shell};
 use crate::transcripts::Price;
 
 /// What a row says besides its label, as shown in its detail line.
@@ -44,6 +45,30 @@ fn dot_state(state: Option<ClaudeState>) -> DotState {
     }
 }
 
+/// Whether a session shows in the project at `root`, whose repository's main checkout is `main`:
+/// it ran under the project or in a linked worktree of the repository, so a monorepo's other
+/// packages are left out.
+fn in_project(session: &LiveSession, root: &Path, main: &Path) -> bool {
+    session.main_root == main
+        && (session.cwd.starts_with(root)
+            || session.branch.is_some()
+            || !session.cwd.starts_with(main))
+}
+
+/// What a session with no row read yet offers a menu: its id.
+fn bare_row(session: &LiveSession) -> SessionRow {
+    SessionRow {
+        id: session.id.clone(),
+        root: session.cwd.clone(),
+        label: session.label.clone(),
+        profile: None,
+        modified: session.modified,
+        messages: 0,
+        tokens: BTreeMap::new(),
+        files: Vec::new(),
+    }
+}
+
 fn centered(el: impl IntoElement) -> AnyElement {
     div()
         .size_full()
@@ -71,7 +96,7 @@ impl Shell {
         let sessions: Vec<LiveSession> = self
             .live_sessions(cx)
             .into_iter()
-            .filter(|s| s.main_root == main_root)
+            .filter(|s| in_project(s, &root, &main_root))
             .collect();
         if sessions.is_empty() {
             if self.review.sessions.loading.is_some() {
@@ -141,8 +166,8 @@ impl Shell {
         let text = row_text(session, prices);
         let expandable = session.files > 0;
         let open = expandable && self.review.sessions.expanded.contains(&session.id);
-        let (toggle_id, open_id, menu_id) =
-            (session.id.clone(), session.id.clone(), session.id.clone());
+        let (toggle_id, open_id) = (session.id.clone(), session.id.clone());
+        let menu_for = session.clone();
         let pane = session.pane;
         let chevron = div()
             .id(("session-chevron", i))
@@ -198,9 +223,9 @@ impl Shell {
                 this.open_live_session(&open_id, pane, window, cx)
             }))
             .on_context_menu(cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                if let Some(row) = this.review.sessions.row(&menu_id).cloned() {
-                    this.open_session_menu(row, ev.position, window, cx)
-                }
+                let row = this.review.sessions.row(&menu_for.id).cloned();
+                let row = row.unwrap_or_else(|| bare_row(&menu_for));
+                this.open_session_menu(row, ev.position, window, cx)
             }))
             .when_some(text.todos, |row, todos| row.meta(todos))
             .when_some(detail, |row, detail| row.detail(detail))
@@ -249,6 +274,33 @@ mod tests {
             usage: BTreeMap::new(),
             modified: SystemTime::UNIX_EPOCH,
         }
+    }
+
+    #[test]
+    fn a_monorepo_package_lists_its_own_sessions_and_its_worktrees_only() {
+        let (root, main) = (Path::new("/repo/pkg-a"), Path::new("/repo"));
+        let at = |cwd: &str, main: &str, branch: Option<&str>| {
+            let mut s = session();
+            s.cwd = cwd.into();
+            s.main_root = main.into();
+            s.branch = branch.map(String::from);
+            s
+        };
+        let shown = |s: &LiveSession| in_project(s, root, main);
+        assert!(shown(&at("/repo/pkg-a", "/repo", None)));
+        assert!(shown(&at("/repo/pkg-a/src", "/repo", None)));
+        assert!(!shown(&at("/repo/pkg-b", "/repo", None)));
+        assert!(!shown(&at("/repo", "/repo", None)));
+        assert!(shown(&at("/repo-wt/fix", "/repo", Some("fix"))));
+        assert!(shown(&at("/repo-wt/detached", "/repo", None)));
+        assert!(!shown(&at("/other", "/other", None)));
+        assert!(!shown(&at("/other-wt", "/other", Some("x"))));
+    }
+
+    #[test]
+    fn a_session_with_no_row_still_has_an_id_to_copy() {
+        let row = bare_row(&session());
+        assert_eq!((row.id.as_str(), row.profile.is_none()), ("s", true));
     }
 
     #[test]

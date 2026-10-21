@@ -132,7 +132,7 @@ impl Shell {
 
     /// A branch moved or a worktree came or went in the repository whose common git folder is `common`.
     fn git_dirs_changed(&mut self, common: &Path, paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.review.sessions.forget_places();
+        self.claude_sessions_stale(cx);
         let everything = paths.iter().any(|p| p == common);
         let repos: Vec<(PathBuf, GitDirs)> = self
             .git

@@ -615,6 +615,15 @@ pub(super) fn focus_item_in(window: usize, root: PathBuf, item: ItemId, cx: &mut
     });
 }
 
+/// Redraws every window but `except`, whose title bar counts the sessions needing you in all.
+pub(super) fn notify_others(except: AnyWindowHandle, cx: &mut App) {
+    for handle in handles(cx) {
+        if AnyWindowHandle::from(handle) != except {
+            let _ = handle.update(cx, |_, _, cx| cx.notify());
+        }
+    }
+}
+
 /// Sessions needing you in every window but `except`; that window cannot be read mid-update.
 pub(super) fn attention_elsewhere(except: AnyWindowHandle, cx: &App) -> usize {
     handles(cx)
