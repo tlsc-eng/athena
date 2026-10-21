@@ -1324,9 +1324,14 @@ impl DiffView {
     }
 
     /// The comments on the new side, placed on the lines they belong to now.
-    pub fn set_review_comments(&mut self, marks: Vec<ReviewMark>, cx: &mut Context<Self>) {
+    pub fn set_review_comments(
+        &mut self,
+        marks: Vec<ReviewMark>,
+        unsent: usize,
+        cx: &mut Context<Self>,
+    ) {
         if self.review.enabled {
-            self.review.set_marks(marks, cx);
+            self.review.set_marks(marks, unsent, cx);
             cx.notify();
         }
     }

@@ -631,6 +631,11 @@ impl Terminal {
         self.input(bytes);
     }
 
+    /// Presses Enter.
+    pub fn submit(&mut self) {
+        self.input(b"\r".to_vec());
+    }
+
     pub fn scroll(&mut self, lines: i32) {
         self.term.scroll_display(Scroll::Delta(lines));
     }
@@ -789,6 +794,24 @@ mod tests {
         t.last_input = t.last_input.map(|at| at - ECHO * 2);
         feed(&mut t, b"working");
         assert!(t.last_activity > quiet_since);
+    }
+
+    #[test]
+    fn a_paste_is_bracketed_only_when_the_program_asked_for_it() {
+        let (mut t, sent) = terminal();
+        t.paste("a\nb");
+        assert_eq!(sent.0.borrow().as_slice(), b"a\rb");
+        sent.0.borrow_mut().clear();
+        feed(&mut t, b"\x1b[?2004h");
+        t.paste("a\r\nb\x1b[201~c");
+        assert_eq!(sent.0.borrow().as_slice(), b"\x1b[200~a\rbc\x1b[201~");
+    }
+
+    #[test]
+    fn submit_sends_enter() {
+        let (mut t, sent) = terminal();
+        t.submit();
+        assert_eq!(sent.0.borrow().as_slice(), b"\r");
     }
 
     #[test]

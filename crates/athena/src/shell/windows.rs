@@ -585,6 +585,15 @@ pub(super) fn unbind_elsewhere(session: String, except: AnyWindowHandle, cx: &mu
     }
 }
 
+/// Whether a window other than `except` runs `session` in one of its panes.
+pub(super) fn session_bound_elsewhere(session: &str, except: AnyWindowHandle, cx: &App) -> bool {
+    handles(cx)
+        .into_iter()
+        .filter(|h| AnyWindowHandle::from(*h) != except)
+        .filter_map(|h| h.read(cx).ok())
+        .any(|shell| shell.review.sessions.pane_of(session).is_some())
+}
+
 /// Sessions needing you in every window but `except`; that window cannot be read mid-update.
 #[allow(dead_code)] // The title chip, which is not built yet, adds its own window's count.
 pub(super) fn attention_elsewhere(except: AnyWindowHandle, cx: &App) -> usize {

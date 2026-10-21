@@ -336,6 +336,35 @@ impl TerminalView {
         }
     }
 
+    /// Pastes `text` as the terminal's own Paste does, bracketed when the program asked for it.
+    pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.paste(text);
+            cx.notify();
+        }
+    }
+
+    /// Presses Enter.
+    pub fn submit(&mut self, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.submit();
+            cx.notify();
+        }
+    }
+
+    /// When the user last typed or pasted into this terminal.
+    pub fn last_input(&self) -> Option<Instant> {
+        self.terminal.as_ref().and_then(|t| t.last_input)
+    }
+
+    /// Something was typed since the last Claude hook, so Claude's prompt box may hold text.
+    pub fn typed_since_hook(&self) -> bool {
+        matches!(
+            (self.claude_hook, self.last_input()),
+            (Some((_, at)), Some(key)) if key > at
+        )
+    }
+
     /// Types `text` into the shell as soon as it is attached.
     pub fn run_on_start(&mut self, text: impl Into<String>) {
         self.pending_input = Some(text.into().into_bytes());
@@ -352,8 +381,14 @@ impl TerminalView {
         };
         let news =
             !matches!(self.claude_hook, Some((last, at)) if last == state && !typed_since(at));
+        let typed = self.typed_since_hook();
+        let before = self.claude_state;
         self.claude_hook = Some((state, Instant::now()));
         self.refresh_claude(cx);
+        // The prompt box is empty again, which changes whether a comment batch may be sent.
+        if typed && self.claude_state == before {
+            cx.emit(TerminalEvent::Changed);
+        }
         cx.notify();
         news
     }

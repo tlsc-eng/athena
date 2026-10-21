@@ -160,7 +160,6 @@ pub fn unsent(store: &Path, session: &str) -> Result<Vec<ReviewComment>> {
     Ok(found)
 }
 
-#[allow(dead_code)] // Called by delivery to the session, which is not built yet.
 pub fn mark_sent(store: &Path, session: &str, ids: &[u64]) -> Result<()> {
     let mut data = read(store, session)?;
     for comment in data.comments.iter_mut().filter(|c| ids.contains(&c.id)) {

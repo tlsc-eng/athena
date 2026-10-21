@@ -421,6 +421,14 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::review_comments::ClaudeReviewComments),
         ),
         (
+            "Claude: Send Review Comments",
+            Box::new(super::review_comments::ClaudeSendReviewComments),
+        ),
+        (
+            "Claude: Cancel Queued Review Comments",
+            Box::new(super::review_comments::ClaudeCancelQueuedComments),
+        ),
+        (
             "Allow project code (linters, TypeScript, project settings)",
             Box::new(super::lsp::AllowProjectLinters),
         ),
