@@ -366,6 +366,15 @@ impl TerminalView {
         self.terminal.as_ref().and_then(|t| t.last_input)
     }
 
+    /// When the user last typed, or the program last wrote something other than an echo.
+    pub fn last_activity(&self) -> Option<Instant> {
+        let t = self.terminal.as_ref()?;
+        Some(
+            t.last_input
+                .map_or(t.last_activity, |i| i.max(t.last_activity)),
+        )
+    }
+
     /// Claude's prompt box may hold text the user typed, or it is not known to be empty.
     pub fn prompt_may_have_text(&self) -> bool {
         draft_possible(self.prompt_cleared, self.last_input())

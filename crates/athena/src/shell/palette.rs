@@ -828,6 +828,37 @@ impl Shell {
             .is_some_and(|view| matches!(view, super::item::ItemView::Terminal(_)))
     }
 
+    /// Lists the Claude terminals again once the session load lands, with the same one selected.
+    pub(super) fn refresh_send_palette(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self
+            .palette
+            .as_ref()
+            .filter(|p| p.mode == Mode::SendSelection)
+        else {
+            return;
+        };
+        let chosen = palette.hits.get(palette.selected).and_then(|(i, _)| {
+            match &palette.entries[*i].target {
+                Target::Send(to, _) => Some(to.clone()),
+                _ => None,
+            }
+        });
+        let entries = self.send_selection_entries(cx);
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        palette.entries = entries;
+        self.filter_palette(cx);
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        let at = palette
+            .hits
+            .iter()
+            .position(|(i, _)| matches!(&palette.entries[*i].target, Target::Send(to, _) if Some(to) == chosen.as_ref()));
+        palette.selected = at.unwrap_or(0);
+    }
+
     fn send_selection_entries(&mut self, cx: &mut Context<Self>) -> Vec<Entry> {
         self.send_rows(cx)
             .into_iter()

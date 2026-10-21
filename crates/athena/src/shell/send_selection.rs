@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use athena_term::ClaudeState;
+use athena_proto::PaneId;
+use athena_term::{ClaudeState, TerminalView};
 use athena_workspace::{ItemId, git};
 use gpui::{Context, Task, Window};
 use serde_json::{Value, json};
@@ -16,6 +17,7 @@ use super::windows;
 /// How long a mention waits for a new session to come up before it is dropped.
 const PENDING_FOR: Duration = Duration::from_secs(30);
 const RETRY: Duration = Duration::from_millis(500);
+const COMPARE_UP_TO: u64 = 2 * 1024 * 1024;
 
 /// Lines of a file to hand to a Claude session, 1-based and inclusive.
 #[derive(Clone, Debug, PartialEq)]
@@ -79,16 +81,73 @@ fn shown(cwd: &Path, file: &Path) -> String {
         .into_owned()
 }
 
-/// Whether `moved` is missing or a different size from `file`; a size is all that is compared, so a
-/// same-length edit goes unnoticed.
+/// Whether `moved` is missing or unlike `file`: by contents up to `COMPARE_UP_TO` bytes, by size above.
 fn differs(file: &Path, moved: &Path) -> bool {
     let size = |p: &Path| std::fs::metadata(p).ok().map(|m| m.len());
-    size(moved).is_none() || size(moved) != size(file)
+    let (Some(a), Some(b)) = (size(file), size(moved)) else {
+        return true;
+    };
+    if a != b {
+        return true;
+    }
+    if a > COMPARE_UP_TO {
+        return false;
+    }
+    match (std::fs::read(file), std::fs::read(moved)) {
+        (Ok(x), Ok(y)) => x != y,
+        _ => true,
+    }
+}
+
+/// Why Claude's prompt cannot take pasted text now.
+#[derive(Debug, PartialEq)]
+enum Refusal {
+    NotClaude,
+    Asking,
+    NoBracketedPaste,
+}
+
+impl Refusal {
+    fn why(&self) -> &'static str {
+        match self {
+            Self::NotClaude => "Claude is no longer running in that terminal.",
+            Self::Asking => "It is asking a question; answer it, then send again.",
+            Self::NoBracketedPaste => {
+                "Its terminal is not taking pasted text; connect Claude Code with /ide, then send again."
+            }
+        }
+    }
+}
+
+/// What stops a paste into a terminal: a plain shell would run it, a dialog would take it as an
+/// answer, and without bracketed paste it would be typed.
+fn paste_refusal(
+    is_claude: bool,
+    state: Option<ClaudeState>,
+    bracketed_paste: bool,
+) -> Option<Refusal> {
+    if !is_claude {
+        Some(Refusal::NotClaude)
+    } else if state == Some(ClaudeState::NeedsInput) {
+        Some(Refusal::Asking)
+    } else if !bracketed_paste {
+        Some(Refusal::NoBracketedPaste)
+    } else {
+        None
+    }
+}
+
+fn terminal_refusal(view: &TerminalView) -> Option<Refusal> {
+    paste_refusal(
+        view.is_claude(),
+        view.claude_state(),
+        view.bracketed_paste(),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SendTo {
-    Session(String),
+    Terminal(PaneId),
     New,
     NewInWorktree,
 }
@@ -113,20 +172,31 @@ fn state_word(state: Option<ClaudeState>) -> &'static str {
 /// The running sessions, most recently active first, then the two ways to start one.
 fn picker_rows(mut sessions: Vec<LiveSession>) -> Vec<SendRow> {
     sessions.retain(|s| s.pane.is_some());
-    sessions.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.id.cmp(&b.id)));
-    let mut rows: Vec<SendRow> = sessions
-        .into_iter()
-        .map(|s| SendRow {
-            key: match &s.branch {
-                Some(branch) => format!("{branch} {}", s.label),
+    sessions.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.pane.cmp(&b.pane))
+    });
+    let mut rows: Vec<SendRow> = Vec::new();
+    for s in sessions {
+        let Some(pane) = s.pane else {
+            continue;
+        };
+        // A terminal no hook has named is told apart by its project.
+        let detail = s
+            .branch
+            .or_else(|| s.id.is_empty().then(|| file_label(&s.cwd)));
+        rows.push(SendRow {
+            key: match &detail {
+                Some(detail) => format!("{detail} {}", s.label),
                 None => s.label.clone(),
             },
             kind: Some(state_word(s.state)),
-            detail: s.branch,
+            detail,
             label: s.label,
-            to: SendTo::Session(s.id),
-        })
-        .collect();
+            to: SendTo::Terminal(pane),
+        });
+    }
     for (label, to) in [
         ("New Claude Session", SendTo::New),
         ("New Claude Session in Worktree…", SendTo::NewInWorktree),
@@ -154,10 +224,12 @@ fn client_for<T: PartialEq>(
         .find_map(|(id, pid)| (terminal_of((*pid)?).as_ref() == Some(target)).then_some(*id))
 }
 
-/// A mention waiting for the terminal of a session that is still starting.
+/// A mention waiting for the terminal of a session that is still starting; the pane, once the
+/// terminal has one, finds it again if its tab moves.
 struct Pending {
     root: PathBuf,
     item: ItemId,
+    pane: Option<PaneId>,
     mention: Mention,
     text: String,
     expires: Instant,
@@ -221,7 +293,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match to {
-            SendTo::Session(id) => self.send_to_session(&id, &mention, window, cx),
+            SendTo::Terminal(pane) => self.send_to_terminal(pane, &mention, window, cx),
             SendTo::New => self.send_to_new_session(mention, window, cx),
             SendTo::NewInWorktree => {
                 self.open_worktrees(Mode::NewWorktree, true, window, cx);
@@ -251,9 +323,9 @@ impl Shell {
         (moved, warning)
     }
 
-    fn send_to_session(
+    fn send_to_terminal(
         &mut self,
-        id: &str,
+        pane: PaneId,
         mention: &Mention,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -264,18 +336,17 @@ impl Shell {
         let running = self
             .project_sessions(&root, cx)
             .into_iter()
-            .find(|s| s.id == id);
-        let terminal = running
-            .as_ref()
-            .and_then(|s| self.find_session(s.pane?))
-            .and_then(|(root, item)| match self.items.get(&(root.clone(), item)) {
+            .find(|s| s.pane == Some(pane));
+        let terminal = self.find_session(pane).and_then(|(root, item)| {
+            match self.items.get(&(root.clone(), item)) {
                 Some(ItemView::Terminal(view)) => Some((root, item, view.clone())),
                 _ => None,
-            });
+            }
+        });
         let (Some(session), Some((troot, item, view))) = (running, terminal) else {
             return self.transient_notice(
-                "That session is not running",
-                "Its terminal was closed; pick another one.",
+                "Claude is not running there",
+                "Its terminal was closed or left Claude; pick another one.",
                 cx,
             );
         };
@@ -297,18 +368,10 @@ impl Shell {
                 }
             }
             None => {
-                let asking = view.read(cx).claude_state() == Some(ClaudeState::NeedsInput);
-                if asking || !view.read(cx).bracketed_paste() {
-                    let why = match asking {
-                        true => "It is asking a question; answer it, then send again.",
-                        false => {
-                            "Its terminal is not taking pasted text; connect Claude Code \
-                                  with /ide, then send again."
-                        }
-                    };
+                if let Some(refusal) = terminal_refusal(view.read(cx)) {
                     return self.transient_notice(
                         format!("Could not send the selection to {}", session.label),
-                        why,
+                        refusal.why(),
                         cx,
                     );
                 }
@@ -346,6 +409,7 @@ impl Shell {
         self.ide.send.pending.push(Pending {
             root,
             item,
+            pane: None,
             mention,
             text,
             expires: Instant::now() + PENDING_FOR,
@@ -357,15 +421,22 @@ impl Shell {
     /// its session has started, and drops those that waited too long.
     pub(super) fn deliver_pending(&mut self, cx: &mut Context<Self>) {
         let mut waiting = Vec::new();
-        for pending in std::mem::take(&mut self.ide.send.pending) {
-            match self.try_deliver(&pending, cx) {
+        for mut pending in std::mem::take(&mut self.ide.send.pending) {
+            match self.try_deliver(&mut pending, cx) {
                 Outcome::Sent => self.transient_notice(
                     "Sent selection to the new session",
                     pending.text.trim_end().to_string(),
                     cx,
                 ),
                 Outcome::Waiting => waiting.push(pending),
-                Outcome::Closed => {}
+                Outcome::Closed => self.transient_notice(
+                    "Selection not sent",
+                    format!(
+                        "The new Claude session's terminal was closed; send {} again.",
+                        file_label(&pending.mention.path)
+                    ),
+                    cx,
+                ),
             }
         }
         for gone in take_expired(&mut waiting, Instant::now()) {
@@ -397,12 +468,21 @@ impl Shell {
         }
     }
 
-    fn try_deliver(&self, pending: &Pending, cx: &mut Context<Self>) -> Outcome {
-        let Some(ItemView::Terminal(view)) = self.items.get(&(pending.root.clone(), pending.item))
-        else {
+    fn try_deliver(&self, pending: &mut Pending, cx: &mut Context<Self>) -> Outcome {
+        let here = (pending.root.clone(), pending.item);
+        let found = match self.items.get(&here) {
+            Some(_) => Some(here),
+            None => pending.pane.and_then(|pane| self.find_session(pane)),
+        };
+        let Some((root, item)) = found else {
             return Outcome::Closed;
         };
-        let target = (pending.root.clone(), pending.item);
+        let Some(ItemView::Terminal(view)) = self.items.get(&(root.clone(), item)) else {
+            return Outcome::Closed;
+        };
+        (pending.root, pending.item) = (root.clone(), item);
+        pending.pane = view.read(cx).session().or(pending.pane);
+        let target = (root, item);
         let client = windows::ide(cx).and_then(|_| {
             client_for(
                 &windows::ide_clients(cx),
@@ -420,10 +500,7 @@ impl Shell {
             .read(cx)
             .session()
             .is_some_and(|pane| self.review.sessions.session_of(pane).is_some());
-        let ready = started
-            && view.read(cx).claude_state() != Some(ClaudeState::NeedsInput)
-            && view.read(cx).bracketed_paste();
-        if !ready {
+        if !started || terminal_refusal(view.read(cx)).is_some() {
             return Outcome::Waiting;
         }
         view.clone()
@@ -457,9 +534,13 @@ mod tests {
 
     #[test]
     fn the_picker_lists_running_sessions_newest_first_then_the_two_new_ones() {
+        let mut unbound = session("", Some(3), None, 20);
+        unbound.label = "Claude".into();
+        unbound.cwd = PathBuf::from("/code/athena");
         let rows = picker_rows(vec![
             session("old", Some(1), None, 50),
             session("closed", None, None, 0),
+            unbound,
             session("new", Some(2), Some("claude/fix"), 5),
         ]);
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
@@ -467,13 +548,20 @@ mod tests {
             labels,
             [
                 "label new",
+                "Claude",
                 "label old",
                 "New Claude Session",
                 "New Claude Session in Worktree…"
             ],
             "the newest comes first, where the palette preselects, and one with no terminal is left out"
         );
-        assert_eq!(rows[0].to, SendTo::Session("new".into()));
+        assert_eq!(rows[1].to, SendTo::Terminal(3));
+        assert_eq!(
+            rows[1].detail.as_deref(),
+            Some("athena"),
+            "an unbound Claude is told apart by its project"
+        );
+        assert_eq!(rows[0].to, SendTo::Terminal(2));
         assert_eq!(rows[0].detail.as_deref(), Some("claude/fix"));
         assert_eq!(rows[0].kind, Some("running"));
         for row in &rows {
@@ -525,17 +613,48 @@ mod tests {
     }
 
     #[test]
-    fn a_moved_file_differs_when_missing_or_another_size() {
+    fn a_moved_file_differs_when_missing_or_unlike_by_contents_up_to_a_size() {
         let dir = std::env::temp_dir().join(format!("athena-send-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (a, same, longer) = (dir.join("a"), dir.join("same"), dir.join("longer"));
-        std::fs::write(&a, "abc").unwrap();
-        std::fs::write(&same, "xyz").unwrap();
-        std::fs::write(&longer, "abcd").unwrap();
-        assert!(!differs(&a, &same));
-        assert!(differs(&a, &longer));
+        let file = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let a = file("a", b"abc");
+        assert!(!differs(&a, &file("copy", b"abc")));
+        assert!(differs(&a, &file("same-size", b"abd")));
+        assert!(differs(&a, &file("longer", b"abcd")));
         assert!(differs(&a, &dir.join("missing")));
+        let big = |last: u8| {
+            let mut bytes = vec![b'x'; COMPARE_UP_TO as usize + 1];
+            bytes[0] = last;
+            bytes
+        };
+        assert!(
+            !differs(&file("big", &big(b'a')), &file("big-same-size", &big(b'b'))),
+            "above the cap only the size is compared"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_paste_is_refused_for_a_shell_a_question_or_a_terminal_that_would_type_it() {
+        use ClaudeState::*;
+        let refusal = paste_refusal;
+        assert_eq!(refusal(false, None, true), Some(Refusal::NotClaude));
+        assert_eq!(
+            refusal(false, Some(NeedsInput), false),
+            Some(Refusal::NotClaude),
+            "a plain shell is the first thing checked"
+        );
+        assert_eq!(refusal(true, Some(NeedsInput), true), Some(Refusal::Asking));
+        assert_eq!(
+            refusal(true, Some(Running), false),
+            Some(Refusal::NoBracketedPaste)
+        );
+        assert_eq!(refusal(true, None, true), None, "an idle Claude takes it");
+        assert_eq!(refusal(true, Some(Finished), true), None);
     }
 
     #[test]
@@ -562,6 +681,7 @@ mod tests {
         let pending = |item: u64, left: u64| Pending {
             root: PathBuf::from("/p"),
             item: ItemId(item),
+            pane: None,
             mention: Mention::from_selection(Path::new("/p/a.rs"), (0, 0), (0, 0)),
             text: String::new(),
             expires: now + Duration::from_secs(left),

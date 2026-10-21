@@ -564,6 +564,7 @@ impl Shell {
                     if *state.rows != rows {
                         state.rows = Rc::new(rows);
                     }
+                    this.refresh_send_palette(cx);
                     cx.notify();
                 }
             });
