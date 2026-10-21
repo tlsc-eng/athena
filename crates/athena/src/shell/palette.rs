@@ -1066,6 +1066,7 @@ impl Shell {
             return;
         };
         let query = Self::palette_needle(palette, cx);
+        let claude_picker = self.git.claude_in_new_worktree;
         if palette.mode == Mode::Claude {
             palette.entries = claude_entries(&query);
         }
@@ -1157,11 +1158,21 @@ impl Shell {
             .enumerate()
             .filter_map(|(i, e)| fuzzy::score(&query, &e.key).map(|(s, pos)| (s, i, pos)))
             .collect();
-        // new_entries orders the Claude picker so Enter does what the query says; a fuzzy score
-        // would let a branch that merely resembles the task description outrank it.
-        let listed = palette.mode == Mode::NewWorktree && self.git.claude_in_new_worktree;
-        if !query.is_empty() && !listed {
+        if !query.is_empty() {
             hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        }
+        if palette.mode == Mode::NewWorktree && claude_picker {
+            let picks: Vec<_> = hits
+                .iter()
+                .map(|(_, i, _)| match &palette.entries[*i].target {
+                    Target::Branch(pick) => Some(pick),
+                    _ => None,
+                })
+                .collect();
+            if let Some((from, to)) = super::worktrees::claude_row_move(&picks, &query) {
+                let row = hits.remove(from);
+                hits.insert(to, row);
+            }
         }
         palette.hits = hits
             .into_iter()

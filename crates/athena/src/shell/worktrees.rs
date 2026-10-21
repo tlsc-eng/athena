@@ -265,22 +265,32 @@ pub(super) fn new_entries(
             pick: BranchPick::AddWorktree(pick),
         });
     }
-    if let Some(row) = claude_row {
-        // Typing a branch's exact name means opening it; Claude's new branch comes after.
-        let exact = out.iter().position(|e| match &e.pick {
-            BranchPick::AddWorktree(NewWorktree::Existing(n)) => n == typed,
-            BranchPick::AddWorktree(NewWorktree::Track(r)) => short_name(r) == typed,
-            _ => false,
-        });
-        match exact {
-            Some(i) => {
-                let found = out.remove(i);
-                out.splice(0..0, [found, row]);
-            }
-            None => out.insert(0, row),
-        }
-    }
+    out.splice(0..0, claude_row);
     out
+}
+
+/// Where the Claude row of the picker's sorted `picks` moves to, as (from, to): the top, or just
+/// below the branch the query names exactly, so Enter on a branch's own name opens that branch.
+pub(super) fn claude_row_move(
+    picks: &[Option<&BranchPick>],
+    query: &str,
+) -> Option<(usize, usize)> {
+    let from = picks
+        .iter()
+        .position(|p| matches!(p, Some(BranchPick::AddWorktree(NewWorktree::Create(_)))))?;
+    let query = query.trim();
+    let named = picks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != from)
+        .find(|(_, p)| match p {
+            Some(BranchPick::AddWorktree(NewWorktree::Existing(n))) => n == query,
+            Some(BranchPick::AddWorktree(NewWorktree::Track(r))) => short_name(r) == query,
+            _ => false,
+        })
+        .map(|(i, _)| i);
+    // `to` is an index once the row is taken out, which shifts every later one down by one.
+    Some((from, named.map_or(0, |i| if i > from { i } else { i + 1 })))
 }
 
 /// `x` for the remote branch `origin/x`.
@@ -1177,11 +1187,35 @@ mod tests {
         assert!(stamp.bytes().all(|b| b.is_ascii_digit() || b == b'-'));
     }
 
-    /// The rows the Claude picker shows for `query`, in order: filtered, never re-ranked.
-    fn ranked(rows: &[BranchEntry], query: &str) -> Vec<usize> {
-        (0..rows.len())
-            .filter(|&i| crate::shell::fuzzy::score(query, &rows[i].key).is_some())
-            .collect()
+    /// The picks the Claude picker lists for `query`: fuzzy-sorted as `filter_palette` does,
+    /// then the Claude row pinned.
+    fn shown(rows: &[BranchEntry], query: &str) -> Vec<BranchPick> {
+        let mut hits: Vec<(i32, usize)> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| crate::shell::fuzzy::score(query, &e.key).map(|(s, _)| (s, i)))
+            .collect();
+        if !query.is_empty() {
+            hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        }
+        let mut picks: Vec<BranchPick> = hits
+            .into_iter()
+            .map(|(_, i)| rows[i].pick.clone())
+            .collect();
+        let moved = claude_row_move(&picks.iter().map(Some).collect::<Vec<_>>(), query);
+        if let Some((from, to)) = moved {
+            let row = picks.remove(from);
+            picks.insert(to, row);
+        }
+        picks
+    }
+
+    fn create(name: &str) -> BranchPick {
+        BranchPick::AddWorktree(NewWorktree::Create(name.into()))
+    }
+
+    fn existing(name: &str) -> BranchPick {
+        BranchPick::AddWorktree(NewWorktree::Existing(name.into()))
     }
 
     #[test]
@@ -1224,47 +1258,55 @@ mod tests {
             BranchPick::AddWorktree(NewWorktree::Create("claude/fix-it".into()))
         );
         assert!(rows[0].key.starts_with("fix it! "));
-        assert_eq!(ranked(&rows, "fix it!"), [0]);
+        assert_eq!(shown(&rows, "fix it!"), [create("claude/fix-it")]);
         let blank = new_entries(&branches, &worktrees, "", Some("20260102-0304"));
         assert_eq!(
             blank[0].pick,
             BranchPick::AddWorktree(NewWorktree::Create("claude/20260102-0304".into()))
         );
-        assert_eq!(ranked(&blank, ""), [0, 1]);
+        assert_eq!(shown(&blank, "").len(), 2);
     }
 
     #[test]
-    fn typing_an_existing_branch_name_ranks_that_branch_before_the_claude_row() {
+    fn the_claude_row_is_pinned_while_branches_keep_their_fuzzy_order() {
         let branches = [
             branch("main", false),
             branch("free", false),
             branch("feature/x", false),
+            branch("xfeature", false),
             branch("origin/remote-only", true),
         ];
         let worktrees = [worktree("/r", Some("main"))];
-        for (typed, wanted) in [
-            ("free", NewWorktree::Existing("free".into())),
-            ("feature/x", NewWorktree::Existing("feature/x".into())),
-            (
-                "remote-only",
-                NewWorktree::Track("origin/remote-only".into()),
-            ),
-        ] {
-            let rows = new_entries(&branches, &worktrees, typed, Some("t"));
-            assert_eq!(rows[0].pick, BranchPick::AddWorktree(wanted), "{typed}");
-            assert!(matches!(
-                rows[1].pick,
-                BranchPick::AddWorktree(NewWorktree::Create(_))
-            ));
-            let first = ranked(&rows, typed)[0];
-            assert_eq!(first, 0, "{typed} must open the branch on Enter");
-        }
-        let partial = new_entries(&branches, &worktrees, "fre", Some("t"));
-        assert!(matches!(
-            partial[0].pick,
-            BranchPick::AddWorktree(NewWorktree::Create(_))
-        ));
-        assert_eq!(ranked(&partial, "fre")[0], 0);
+        let at = |q: &str| new_entries(&branches, &worktrees, q, Some("t"));
+
+        let partial = shown(&at("fre"), "fre");
+        assert_eq!(partial[0], create("claude/fre"));
+        assert_eq!(partial[1], existing("free"));
+
+        let exact = shown(&at("feature/x"), "feature/x");
+        assert_eq!(exact[0], existing("feature/x"));
+        assert_eq!(exact[1], create("claude/feature-x"));
+
+        let short = shown(&at("remote-only"), "remote-only");
+        assert_eq!(
+            short[..2],
+            [
+                BranchPick::AddWorktree(NewWorktree::Track("origin/remote-only".into())),
+                create("claude/remote-only")
+            ]
+        );
+
+        let blank = shown(&at(""), "");
+        assert_eq!(blank[0], create("claude/t"));
+        assert_eq!(
+            blank[1..],
+            [
+                existing("free"),
+                existing("feature/x"),
+                existing("xfeature"),
+                BranchPick::AddWorktree(NewWorktree::Track("origin/remote-only".into())),
+            ]
+        );
     }
 
     #[test]
