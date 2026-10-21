@@ -363,16 +363,15 @@ impl Shell {
 
     /// Pastes what the session has unsent without pressing Enter, for the user to send.
     fn paste_queued(&mut self, session: &str, cx: &mut Context<Self>) {
-        let Some(pending) = self.review.comments.queue.cancel(session) else {
-            return;
-        };
-        match self.session_terminal(session) {
-            Some((_, view)) => self.deliver(pending, view, false, cx),
-            None => self.transient_notice(
+        let Some((_, view)) = self.session_terminal(session) else {
+            return self.transient_notice(
                 "Comments not sent",
-                "That session is no longer in a terminal here. The comments stay unsent.",
+                "That session is no longer in a terminal here. They stay queued.",
                 cx,
-            ),
+            );
+        };
+        if let Some(pending) = self.review.comments.queue.cancel(session) {
+            self.deliver(pending, view, false, cx);
         }
     }
 

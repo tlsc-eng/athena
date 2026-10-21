@@ -483,7 +483,7 @@ impl Terminal {
 
     /// Sends user input, snapping the view back to the live screen first.
     pub fn input(&mut self, bytes: Vec<u8>) {
-        let enter = bytes.contains(&b'\r');
+        let enter = bytes == b"\r";
         self.send(bytes);
         if enter && self.exit.is_none() {
             self.last_enter = self.last_input;
@@ -845,6 +845,12 @@ mod tests {
         t.input(b"a".to_vec());
         t.paste("a\nb");
         assert!(t.last_enter.is_none());
+        t.input(b"\x1b\r".to_vec());
+        t.input(b"a\r".to_vec());
+        assert!(
+            t.last_enter.is_none(),
+            "Alt+Enter and text with a CR are not a submit"
+        );
         t.input(b"\r".to_vec());
         assert!(t.last_enter.is_some());
         assert_eq!(t.last_enter, t.last_input);

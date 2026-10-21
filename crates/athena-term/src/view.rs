@@ -200,8 +200,8 @@ pub struct TerminalView {
     /// When Claude's prompt box was last known empty: a prompt was submitted, or a question the
     /// user was typing an answer to was answered. `None` means unknown.
     prompt_cleared: Option<Instant>,
-    /// When the state last became `NeedsInput`.
-    asked_at: Option<Instant>,
+    /// Whether the prompt box was known empty when the last hook-reported question came up.
+    empty_before_question: Option<bool>,
     /// Typed into the shell once it is ready, for tabs opened to run a command.
     pending_input: Option<Vec<u8>>,
     grid: GridSize,
@@ -255,7 +255,7 @@ impl TerminalView {
             claude_state: None,
             claude_hook: None,
             prompt_cleared: None,
-            asked_at: None,
+            empty_before_question: None,
             pending_input: None,
             scroll_remainder: 0.,
             find: None,
@@ -371,7 +371,8 @@ impl TerminalView {
         draft_possible(self.prompt_cleared, self.last_input())
     }
 
-    /// A UserPromptSubmit hook reported: the prompt box is empty.
+    /// A UserPromptSubmit hook reported; the box is marked empty only if nothing was typed
+    /// after the Enter that submitted it.
     pub fn note_prompt_submit(&mut self, cx: &mut Context<Self>) {
         let enter = self.terminal.as_ref().and_then(|t| t.last_enter);
         if !submitted_cleanly(enter, self.last_input()) {
@@ -408,7 +409,14 @@ impl TerminalView {
         };
         let news =
             !matches!(self.claude_hook, Some((last, at)) if last == state && !typed_since(at));
+        let empty_now = !self.prompt_may_have_text();
+        let before = self.claude_hook_state();
+        let (asked, cleared) = hook_question(before, state, self.empty_before_question, empty_now);
+        self.empty_before_question = asked;
         self.claude_hook = Some((state, Instant::now()));
+        if cleared {
+            self.prompt_cleared = Some(Instant::now());
+        }
         self.refresh_claude(cx);
         cx.notify();
         news
@@ -448,13 +456,6 @@ impl TerminalView {
     fn refresh_claude(&mut self, cx: &mut Context<Self>) {
         let state = self.current_claude_state();
         if state != self.claude_state {
-            let now = Instant::now();
-            if answered_question(self.claude_state, state, self.asked_at, self.last_input()) {
-                self.prompt_cleared = Some(now);
-            }
-            if state == Some(ClaudeState::NeedsInput) {
-                self.asked_at = Some(now);
-            }
             self.claude_state = state;
             cx.emit(TerminalEvent::Changed);
         }
@@ -780,6 +781,7 @@ impl TerminalView {
                 self.foreground = process;
                 if !self.is_claude() {
                     self.claude_hook = None;
+                    self.empty_before_question = None;
                 }
                 if !self.is_claude() || was.is_some() && was != self.foreground_pid() {
                     self.prompt_cleared = None;
@@ -1696,16 +1698,21 @@ fn draft_possible(cleared: Option<Instant>, last_input: Option<Instant>) -> bool
     }
 }
 
-/// Whether the user typed an answer to a question Claude asked, which has now been dealt with.
-fn answered_question(
+/// What a hook-reported state does about the prompt box around a question: when one comes up,
+/// whether the box was empty then (`empty_now`); when it is dealt with, whether the box is empty
+/// again, which holds only if it was before. Returns the new snapshot and that verdict.
+fn hook_question(
     before: Option<ClaudeState>,
-    after: Option<ClaudeState>,
-    asked_at: Option<Instant>,
-    last_input: Option<Instant>,
-) -> bool {
-    before == Some(ClaudeState::NeedsInput)
-        && after != Some(ClaudeState::NeedsInput)
-        && matches!((asked_at, last_input), (Some(asked), Some(key)) if key > asked)
+    after: ClaudeState,
+    empty_before: Option<bool>,
+    empty_now: bool,
+) -> (Option<bool>, bool) {
+    let asked = |state| state == Some(ClaudeState::NeedsInput);
+    match (asked(before), asked(Some(after))) {
+        (false, true) => (Some(empty_now), false),
+        (true, false) => (None, empty_before == Some(true)),
+        _ => (empty_before, false),
+    }
 }
 
 /// What a Claude Code tab shows, from its last hook report and when the user last typed and the
@@ -2100,26 +2107,26 @@ mod tests {
     }
 
     #[test]
-    fn answering_a_question_clears_the_prompt_but_other_state_changes_do_not() {
+    fn a_question_clears_the_prompt_only_if_it_was_empty_before_and_a_hook_ended_it() {
         use ClaudeState::*;
-        let t0 = Instant::now();
-        let at = |s| Some(t0 + secs(s));
-        let answered = |before, after, input| answered_question(before, after, at(1.), input);
-        assert!(answered(Some(NeedsInput), Some(Running), at(2.)));
-        assert!(answered(Some(NeedsInput), Some(Finished), at(2.)));
-        assert!(
-            !answered(Some(NeedsInput), Some(Running), at(0.5)),
-            "typed before it asked"
+        let ask = |empty_now| hook_question(Some(Running), NeedsInput, None, empty_now);
+        assert_eq!(ask(true), (Some(true), false));
+        assert_eq!(ask(false), (Some(false), false));
+        let answer = |empty_before| hook_question(Some(NeedsInput), Running, empty_before, false);
+        assert_eq!(answer(Some(true)), (None, true), "empty before, answered");
+        assert_eq!(
+            answer(Some(false)),
+            (None, false),
+            "a draft stays after the answer"
         );
-        assert!(!answered(Some(NeedsInput), Some(Running), None));
-        assert!(
-            !answered(Some(Running), Some(Finished), at(2.)),
-            "a stop leaves the draft"
+        assert_eq!(answer(None), (None, false), "unknown stays unknown");
+        let again = hook_question(Some(NeedsInput), NeedsInput, Some(true), false);
+        assert_eq!(
+            again,
+            (Some(true), false),
+            "a second question hook changes nothing"
         );
-        assert!(
-            !answered(Some(Finished), Some(Running), at(2.)),
-            "a tool call leaves it too"
-        );
-        assert!(!answered(Some(NeedsInput), Some(NeedsInput), at(2.)));
+        let other = hook_question(Some(Running), Finished, Some(true), true);
+        assert_eq!(other, (Some(true), false), "other hooks never clear");
     }
 }
