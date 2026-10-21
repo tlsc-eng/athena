@@ -118,7 +118,7 @@ impl Shell {
         }
         let prices = self.settings.file.claude_prices.clone();
         let mut out: Vec<AnyElement> = Vec::new();
-        if let Some(bar) = self.render_review_bar(true, &t, cx) {
+        if let Some(bar) = self.render_review_bar(&t, cx) {
             out.push(bar);
         }
         for (i, session) in sessions.iter().enumerate() {
@@ -131,15 +131,7 @@ impl Shell {
             };
             out.extend(self.render_live_plan(i, &row, &t));
             for (j, file) in row.files.iter().enumerate() {
-                out.push(self.render_file_row(
-                    i * 10_000 + j,
-                    &row.id,
-                    file,
-                    &row.root,
-                    true,
-                    &t,
-                    cx,
-                ));
+                out.push(self.render_file_row(i * 10_000 + j, &row.id, file, &row.root, &t, cx));
             }
         }
         div()

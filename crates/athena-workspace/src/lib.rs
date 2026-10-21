@@ -113,6 +113,31 @@ pub struct UiState {
     /// A workspace saved before this field existed keeps showing the file tree.
     #[serde(default = "legacy_side_mode", deserialize_with = "lenient_side_mode")]
     pub side_mode: SideMode,
+    /// The drawer tab shown last, which Cmd+J reopens after a launch.
+    #[serde(deserialize_with = "lenient_drawer_tab")]
+    pub drawer_tab: Option<DrawerTabName>,
+}
+
+/// A bottom-drawer tab, by the name workspace.json stores it under.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawerTabName {
+    Terminal,
+    Problems,
+    Tests,
+    Debug,
+    Search,
+    References,
+    Containers,
+    Playwright,
+}
+
+/// Anything but a known tab name, whatever its shape, reads as unset, so a tab another build
+/// does not have cannot make the file unreadable.
+fn lenient_drawer_tab<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<DrawerTabName>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or(None))
 }
 
 /// What the side panel lists.
@@ -154,6 +179,7 @@ impl Default for UiState {
             zoom_level: 0,
             sidebar_expanded: false,
             side_mode: SideMode::Sessions,
+            drawer_tab: None,
         }
     }
 }

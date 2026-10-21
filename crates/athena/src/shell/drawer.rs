@@ -1,12 +1,13 @@
 use athena_ui::motion::{self, Closing, Opening};
-use athena_ui::{ActiveTheme, ButtonKind};
-use athena_workspace::{Axis, UiState};
+use athena_ui::{ActiveTheme, MenuItem, Size, Tab, TabBar};
+use athena_workspace::{Axis, DrawerTabName, UiState};
 use gpui::{
-    Animation, AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, Window, div,
+    Animation, AnyElement, ClickEvent, Context, MouseButton, MouseDownEvent, Window, div,
     prelude::*, px,
 };
 
 use super::Shell;
+use super::menus::shell_item;
 use super::panes::{DIVIDER_HIT, Drag, clamp_drawer_height, resize_handle};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -15,15 +16,23 @@ pub(super) enum DrawerTab {
     Containers,
     Playwright,
     Tests,
-    Notifications,
     References,
-    Changes,
     Search,
     Problems,
-    Timeline,
-    Claude,
     Debug,
 }
+
+/// The tabs the bar lists; Containers and Playwright sit behind its Tools menu.
+const BAR_TABS: [DrawerTab; 6] = [
+    DrawerTab::Terminal,
+    DrawerTab::Problems,
+    DrawerTab::Tests,
+    DrawerTab::Debug,
+    DrawerTab::Search,
+    DrawerTab::References,
+];
+
+const TOOLS: [DrawerTab; 2] = [DrawerTab::Containers, DrawerTab::Playwright];
 
 impl DrawerTab {
     fn label(self) -> &'static str {
@@ -32,14 +41,37 @@ impl DrawerTab {
             Self::Containers => "Containers",
             Self::Playwright => "Playwright",
             Self::Tests => "Tests",
-            Self::Notifications => "Notifications",
             Self::References => "References",
-            Self::Changes => "Changes",
             Self::Search => "Search",
             Self::Problems => "Problems",
-            Self::Timeline => "Timeline",
-            Self::Claude => "Claude",
             Self::Debug => "Debug",
+        }
+    }
+
+    fn name(self) -> DrawerTabName {
+        match self {
+            Self::Terminal => DrawerTabName::Terminal,
+            Self::Containers => DrawerTabName::Containers,
+            Self::Playwright => DrawerTabName::Playwright,
+            Self::Tests => DrawerTabName::Tests,
+            Self::References => DrawerTabName::References,
+            Self::Search => DrawerTabName::Search,
+            Self::Problems => DrawerTabName::Problems,
+            Self::Debug => DrawerTabName::Debug,
+        }
+    }
+
+    /// The tab Cmd+J opens first: the one saved at the last quit, or the terminal.
+    pub(super) fn restored(saved: Option<DrawerTabName>) -> Self {
+        match saved {
+            Some(DrawerTabName::Containers) => Self::Containers,
+            Some(DrawerTabName::Playwright) => Self::Playwright,
+            Some(DrawerTabName::Tests) => Self::Tests,
+            Some(DrawerTabName::References) => Self::References,
+            Some(DrawerTabName::Search) => Self::Search,
+            Some(DrawerTabName::Problems) => Self::Problems,
+            Some(DrawerTabName::Debug) => Self::Debug,
+            Some(DrawerTabName::Terminal) | None => Self::Terminal,
         }
     }
 }
@@ -58,11 +90,6 @@ impl Shell {
     pub(super) fn show_drawer_tab(&mut self, tab: DrawerTab, cx: &mut Context<Self>) {
         self.drawer = Some(tab);
         self.drawer_changed(cx);
-    }
-
-    /// Shows the changes view, unlike ShowChanges, which closes it when it is already showing.
-    pub(super) fn show_changes(&mut self, cx: &mut Context<Self>) {
-        self.show_drawer_tab(DrawerTab::Changes, cx);
     }
 
     /// Cmd+J: reopens the last tab, or closes the drawer.
@@ -106,9 +133,10 @@ impl Shell {
         }
         if let Some(tab) = self.drawer {
             self.last_drawer_tab = tab;
-        }
-        if self.drawer == Some(DrawerTab::Notifications) {
-            self.mark_all_read(cx);
+            if self.workspace.ui.drawer_tab != Some(tab.name()) {
+                self.workspace.ui.drawer_tab = Some(tab.name());
+                self.schedule_save(cx);
+            }
         }
         self.containers_visible(self.drawer == Some(DrawerTab::Containers), cx);
         self.note_terminal_panel(cx);
@@ -131,92 +159,63 @@ impl Shell {
             (None, None) => return None,
         };
         let t = cx.theme().clone();
-        let tabs = [
-            DrawerTab::Problems,
-            DrawerTab::Terminal,
-            DrawerTab::Debug,
-            DrawerTab::Containers,
-            DrawerTab::Playwright,
-            DrawerTab::Tests,
-            DrawerTab::Notifications,
-            DrawerTab::References,
-            DrawerTab::Changes,
-            DrawerTab::Timeline,
-            DrawerTab::Search,
-            DrawerTab::Claude,
-        ]
-        .map(|candidate| {
-            let active = candidate == tab;
-            div()
-                .id(candidate.label())
-                .relative()
-                .h_full()
-                .px(t.ui(12.))
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if active {
-                    t.color.content
-                } else {
-                    t.color.content_muted
-                })
-                .when(!active, |el| {
-                    el.hover(|s| s.text_color(t.color.content_secondary))
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if candidate == DrawerTab::Terminal {
-                        return this.show_terminal_panel(window, cx);
-                    }
-                    this.drawer = Some(candidate);
-                    this.drawer_changed(cx);
+        let problems = self.problems_total();
+        let mut tabs: Vec<AnyElement> = BAR_TABS
+            .map(|candidate| {
+                let entry = Tab::new(candidate.label(), candidate.label())
+                    .active(candidate == tab)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if candidate == DrawerTab::Terminal {
+                            return this.show_terminal_panel(window, cx);
+                        }
+                        this.show_drawer_tab(candidate, cx);
+                    }));
+                match candidate {
+                    DrawerTab::Problems => entry.badge(problems),
+                    _ => entry,
+                }
+                .into_any_element()
+            })
+            .into();
+        let tools_open = TOOLS.contains(&tab);
+        let tools_label = match tools_open {
+            true => format!("{} ▾", tab.label()),
+            false => "Tools ▾".to_string(),
+        };
+        tabs.push(
+            Tab::new("drawer-tools", tools_label)
+                .active(tools_open)
+                .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                    let items: Vec<MenuItem> = TOOLS
+                        .iter()
+                        .map(|&tool| {
+                            shell_item(tool.label(), cx, move |this, _, cx| {
+                                this.show_drawer_tab(tool, cx)
+                            })
+                        })
+                        .collect();
+                    this.open_context_menu(event.position(), items, window, cx);
                 }))
-                .child(candidate.label())
-                .when(candidate == DrawerTab::Problems, |el| {
-                    el.children(self.render_problems_badge(cx))
-                })
-                .when(active, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(1.))
-                            .bg(t.color.accent),
-                    )
-                })
-        });
+                .into_any_element(),
+        );
         let action: Option<AnyElement> = match tab {
-            DrawerTab::Notifications => Some(
-                athena_ui::Button::new("notices-clear", "Clear", ButtonKind::Ghost)
-                    .on_click(cx.listener(|this, _, _, cx| this.clear_notifications(cx)))
-                    .into_any_element(),
-            ),
             DrawerTab::Containers => self.render_containers_action(cx),
             DrawerTab::Playwright => self.render_playwright_action(cx),
             DrawerTab::Tests => self.render_tests_action(cx),
             DrawerTab::References => self.render_references_count(cx),
-            DrawerTab::Changes => self.render_changes_count(cx),
             DrawerTab::Search => self.render_search_status(cx),
             DrawerTab::Problems => None,
             DrawerTab::Terminal => self.render_terminal_panel_actions(cx),
-            DrawerTab::Timeline => self.render_timeline_title(cx),
-            DrawerTab::Claude => self.render_claude_sessions_action(cx),
             DrawerTab::Debug => self.render_debug_action(cx),
         };
         let content = match tab {
-            DrawerTab::Notifications => self.render_notifications(cx),
             DrawerTab::Containers => self.render_containers(cx),
             DrawerTab::Playwright => self.render_playwright(cx),
             DrawerTab::Tests => self.render_tests(cx),
             DrawerTab::References => self.render_references(cx),
-            DrawerTab::Changes => self.render_changes(cx),
             DrawerTab::Search => self.render_search(cx),
             DrawerTab::Problems => self.render_problems(cx),
             DrawerTab::Terminal => self.render_terminal_panel(cx),
-            DrawerTab::Timeline => self.render_timeline(cx),
-            DrawerTab::Claude => self.render_claude_sessions(false, cx),
             DrawerTab::Debug => self.render_debug(window, cx),
         };
         // Only the search field, panel terminal and Debug fields take focus; once hidden, none can.
@@ -243,15 +242,11 @@ impl Shell {
             })
             .child(
                 div()
-                    .h(t.ui(32.))
+                    .h(t.size(Size::TabBar))
                     .flex_none()
-                    .pr(px(8.))
                     .flex()
                     .items_center()
-                    .justify_between()
                     .bg(t.color.surface)
-                    .border_b_1()
-                    .border_color(t.color.border)
                     .text_size(t.typography.caption)
                     // Tabs give way to the tab's own buttons when a zoomed interface runs out of room.
                     .child(
@@ -260,10 +255,20 @@ impl Shell {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .flex()
-                            .children(tabs),
+                            .child(TabBar::new().children(tabs)),
                     )
-                    .children(action.map(|a| div().flex_none().child(a))),
+                    // Carries the hairline the tab bar draws under the tabs on to the window's edge.
+                    .child(
+                        div()
+                            .h_full()
+                            .flex_none()
+                            .pr(px(8.))
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(t.color.border)
+                            .children(action),
+                    ),
             )
             .child(div().flex_1().min_h_0().child(content));
         // The box keeps its full height throughout, so the panes above resize once, not per frame.

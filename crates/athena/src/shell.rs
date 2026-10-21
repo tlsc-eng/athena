@@ -79,8 +79,8 @@ use crate::actions::{
     DisablePlaywrightMcp, EnablePlaywrightMcp, FocusPaneDown, FocusPaneLeft, FocusPaneRight,
     FocusPaneUp, Minimize, MoveProjectToFolder, NewClaudeSession, NewPreview, NewTerminal,
     NextProject, NextTab, PrevProject, PrevTab, QuickOpen, QuickOpenBeside, Quit, RunPlaywright,
-    SaveAs, SelectProject, SelectTab, ShowContainers, ShowPlaywright, SplitDown, SplitRight,
-    ToggleAutoSave, ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen, ToggleNotifications,
+    SaveAs, SelectProject, SelectTab, ShowContainers, ShowNotifications, ShowPlaywright, SplitDown,
+    SplitRight, ToggleAutoSave, ToggleDrawer, ToggleFileTree, ToggleFormatOnSave, ToggleFullScreen,
     TogglePaneZoom, TogglePreview, ToggleSidebar, ToggleWordWrapDefault, Zoom,
 };
 use crate::actions::{
@@ -233,6 +233,7 @@ impl Shell {
         ];
         let roots: Vec<PathBuf> = workspace.projects.iter().map(|p| p.root.clone()).collect();
         let debug = debug::DebugState::load(&windows::workspace_path(cx), &roots);
+        let last_drawer_tab = drawer::DrawerTab::restored(workspace.ui.drawer_tab);
         let mut shell = Self {
             rail_from: workspace.active.unwrap_or(0),
             rail_scroll: gpui::ScrollHandle::new(),
@@ -263,7 +264,7 @@ impl Shell {
             drawer_shown: None,
             drawer_opening: None,
             drawer_closing: None,
-            last_drawer_tab: drawer::DrawerTab::Notifications,
+            last_drawer_tab,
             containers: containers_view::ContainersState::default(),
             playwright: playwright_view::PlaywrightState::default(),
             tests: tests_view::TestsState::default(),
@@ -726,7 +727,8 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &CommandPalette, w, cx| {
                 this.open_palette(palette::Mode::Commands, w, cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleNotifications, _, cx| this.toggle_drawer(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDrawer, _, cx| this.toggle_drawer(cx)))
+            .on_action(cx.listener(|this, _: &ShowNotifications, w, cx| this.open_bell(w, cx)))
             .on_action(
                 cx.listener(|this, _: &crate::actions::ToggleTerminalPanel, w, cx| {
                     this.toggle_terminal_panel(w, cx)
@@ -816,9 +818,7 @@ impl Render for Shell {
                 this.show_side_mode(SideMode::Git, w, cx)
             }))
             .on_action(cx.listener(|this, _: &FindInProject, w, cx| this.find_in_project(w, cx)))
-            .on_action(cx.listener(|this, _: &ShowChanges, _, cx| {
-                this.toggle_drawer_tab(drawer::DrawerTab::Changes, cx)
-            }))
+            .on_action(cx.listener(|this, _: &ShowChanges, _, cx| this.toggle_changes(cx)))
             .on_action(cx.listener(|this, _: &ToggleBlame, _, cx| this.toggle_blame(cx)))
             .on_action(cx.listener(|this, _: &FontZoomIn, _, cx| this.zoom_font(Some(1), cx)))
             .on_action(cx.listener(|this, _: &FontZoomOut, _, cx| this.zoom_font(Some(-1), cx)))

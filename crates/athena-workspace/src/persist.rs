@@ -77,8 +77,8 @@ pub fn set_aside(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::{
-        FolderIcon, FolderStyle, ItemId, ItemKind, PaneId, SideMode, UiState, ViewState,
-        WindowMode, WindowState,
+        DrawerTabName, FolderIcon, FolderStyle, ItemId, ItemKind, PaneId, SideMode, UiState,
+        ViewState, WindowMode, WindowState,
     };
 
     #[test]
@@ -107,6 +107,7 @@ mod tests {
             zoom_level: 3,
             sidebar_expanded: true,
             side_mode: SideMode::Git,
+            drawer_tab: Some(DrawerTabName::Tests),
         };
         w.projects[0].folder = vec!["work".into(), "clients".into()];
         w.collapsed = vec![vec!["work".into()]];
@@ -467,6 +468,58 @@ mod tests {
             .unwrap();
             let w = load(&path).unwrap();
             assert_eq!(w.ui.side_mode, SideMode::Files, "{value}");
+            assert_eq!(w.ui.tree_width, 300., "{value}");
+            assert!(w.word_wrap, "{value}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_drawer_tab_survives_a_round_trip() {
+        for tab in [
+            DrawerTabName::Terminal,
+            DrawerTabName::Problems,
+            DrawerTabName::Tests,
+            DrawerTabName::Debug,
+            DrawerTabName::Search,
+            DrawerTabName::References,
+            DrawerTabName::Containers,
+            DrawerTabName::Playwright,
+        ] {
+            let ui = UiState {
+                drawer_tab: Some(tab),
+                ..UiState::default()
+            };
+            let back: UiState = serde_json::from_str(&serde_json::to_string(&ui).unwrap()).unwrap();
+            assert_eq!(back.drawer_tab, Some(tab));
+        }
+    }
+
+    #[test]
+    fn a_workspace_saved_without_a_drawer_tab_has_none() {
+        let old: Workspace = serde_json::from_str(
+            r#"{"projects":[],"active":null,"window":null,"ui":{"tree_width":320}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.ui.drawer_tab, None);
+        assert_eq!(UiState::default().drawer_tab, None);
+    }
+
+    #[test]
+    fn a_removed_or_malformed_drawer_tab_reads_as_none_without_losing_the_workspace() {
+        let dir = std::env::temp_dir().join(format!("athena-drawertab-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        for value in [r#""Claude""#, r#""Changes""#, "null", "7", r#"{"Tests":1}"#] {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"projects":[],"active":null,"window":null,"word_wrap":true,"ui":{{"drawer_tab":{value},"tree_width":300}}}}"#
+                ),
+            )
+            .unwrap();
+            let w = load(&path).unwrap();
+            assert_eq!(w.ui.drawer_tab, None, "{value}");
             assert_eq!(w.ui.tree_width, 300., "{value}");
             assert!(w.word_wrap, "{value}");
         }

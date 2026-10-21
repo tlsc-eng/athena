@@ -489,7 +489,7 @@ impl Shell {
             review_all,
             &t,
         ));
-        if reviewing && let Some(bar) = self.render_review_bar(true, &t, cx) {
+        if reviewing && let Some(bar) = self.render_review_bar(&t, cx) {
             out.push(bar);
         }
         if row.files.is_empty() {
@@ -497,7 +497,7 @@ impl Shell {
             out.push(detail_line(("session-changes-none", 0), hint, &t).into_any_element());
         }
         for (j, file) in row.files.iter().enumerate() {
-            out.push(self.render_file_row(ID_BASE + j, &row.id, file, &session.cwd, true, &t, cx));
+            out.push(self.render_file_row(ID_BASE + j, &row.id, file, &session.cwd, &t, cx));
         }
         if more > 0 {
             let text = format!("… {more} more files");

@@ -18,6 +18,11 @@ pub(super) struct SidePanelState {
     timeline_collapsed: bool,
 }
 
+/// Whether ShowChanges hides the panel: only when Git is showing with Changes open.
+fn hides_git_panel(panel_visible: bool, mode: SideMode, changes_collapsed: bool) -> bool {
+    panel_visible && mode == SideMode::Git && !changes_collapsed
+}
+
 impl Shell {
     /// Switches the side panel to `mode`, showing the panel first if it was hidden.
     pub(super) fn select_side_mode(&mut self, mode: SideMode, cx: &mut Context<Self>) {
@@ -29,6 +34,31 @@ impl Shell {
             self.schedule_save(cx);
         }
         cx.notify();
+    }
+
+    /// Shows Git mode with Changes open, unlike ShowChanges, which hides the panel when it is already there.
+    pub(super) fn show_changes(&mut self, cx: &mut Context<Self>) {
+        self.side_panel.changes_collapsed = false;
+        self.select_side_mode(SideMode::Git, cx);
+    }
+
+    /// Shows Git mode with Timeline open.
+    pub(super) fn show_timeline(&mut self, cx: &mut Context<Self>) {
+        self.side_panel.timeline_collapsed = false;
+        self.select_side_mode(SideMode::Git, cx);
+    }
+
+    pub(super) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
+        let ui = &self.workspace.ui;
+        if hides_git_panel(
+            ui.tree_visible,
+            ui.side_mode,
+            self.side_panel.changes_collapsed,
+        ) {
+            self.toggle_tree(cx);
+        } else {
+            self.show_changes(cx);
+        }
     }
 
     /// `select_side_mode`, then focuses Outline's filter, which is what asking for the outline means.
@@ -80,13 +110,15 @@ impl Shell {
     fn render_git_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let changes = (!self.side_panel.changes_collapsed).then(|| self.render_changes(cx));
         let timeline = (!self.side_panel.timeline_collapsed).then(|| self.render_timeline(cx));
+        let changes_count = self.render_changes_count(cx);
+        let timeline_title = self.render_timeline_title(cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(self.git_section(
                 "side-changes",
-                "Changes",
+                ("Changes", changes_count),
                 changes,
                 |s| &mut s.changes_collapsed,
                 false,
@@ -94,7 +126,7 @@ impl Shell {
             ))
             .child(self.git_section(
                 "side-timeline",
-                "Timeline",
+                ("Timeline", timeline_title),
                 timeline,
                 |s| &mut s.timeline_collapsed,
                 true,
@@ -103,11 +135,12 @@ impl Shell {
             .into_any_element()
     }
 
-    /// A header that folds its `body`; a folded section keeps only the header's height.
+    /// A header that folds its `body`, with a summary beside its title; a folded section keeps
+    /// only the header's height.
     fn git_section(
         &self,
         id: &'static str,
-        title: &'static str,
+        (title, summary): (&'static str, Option<AnyElement>),
         body: Option<AnyElement>,
         collapsed: fn(&mut SidePanelState) -> &mut bool,
         divider: bool,
@@ -142,9 +175,34 @@ impl Shell {
                         cx.notify();
                     }))
                     .child(if open { "▾" } else { "▸" })
-                    .child(title),
+                    .child(title)
+                    .children(summary.map(|summary| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .font_weight(FontWeight::NORMAL)
+                            .child(summary)
+                    })),
             )
             .children(body.map(|body| div().flex_1().min_h_0().overflow_hidden().child(body)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_changes_hides_the_panel_only_when_it_is_visible_on_git_with_changes_open() {
+        assert!(hides_git_panel(true, SideMode::Git, false));
+        assert!(!hides_git_panel(true, SideMode::Git, true));
+        assert!(!hides_git_panel(false, SideMode::Git, false));
+        for mode in [SideMode::Sessions, SideMode::Files, SideMode::Outline] {
+            assert!(!hides_git_panel(true, mode, false));
+            assert!(!hides_git_panel(false, mode, false));
+        }
     }
 }

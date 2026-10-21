@@ -630,15 +630,6 @@ pub fn cost(
     (total, unpriced)
 }
 
-/// `12.3k`, `4.5M`: token counts as they fit in a list row.
-pub fn short_count(n: u64) -> String {
-    match n {
-        0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
-        _ => format!("{:.1}M", n as f64 / 1e6),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,8 +938,5 @@ mod tests {
         mine.insert("claude-haiku-4-5".to_string(), Price::of(0., 0.));
         let (usd, unpriced) = cost(&tokens, &mine);
         assert_eq!((usd, unpriced.len()), (1., 0));
-        assert_eq!(short_count(999), "999");
-        assert_eq!(short_count(12_345), "12.3k");
-        assert_eq!(short_count(4_500_000), "4.5M");
     }
 }

@@ -494,7 +494,8 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Terminal: move into editor area",
             Box::new(actions::MoveTerminalToEditor),
         ),
-        ("Notifications", Box::new(actions::ToggleNotifications)),
+        ("Notifications", Box::new(actions::ShowNotifications)),
+        ("Toggle drawer", Box::new(actions::ToggleDrawer)),
         ("Containers", Box::new(actions::ShowContainers)),
         ("Playwright", Box::new(actions::ShowPlaywright)),
         ("Run Playwright tests", Box::new(actions::RunPlaywright)),
@@ -1767,6 +1768,22 @@ mod tests {
             "athena::WindowZoomIn",
             "athena::WindowZoomOut",
             "athena::WindowZoomReset",
+        ] {
+            assert!(names.contains(&action), "{action}");
+        }
+    }
+
+    #[test]
+    fn the_commands_for_the_views_that_left_the_drawer_are_still_listed() {
+        let names: Vec<&str> = commands().iter().map(|(_, a)| a.name()).collect();
+        for action in [
+            "athena::ShowContainers",
+            "athena::ShowPlaywright",
+            "athena::ShowNotifications",
+            "athena::ToggleDrawer",
+            "athena::ShowChanges",
+            "athena::GitOpenTimeline",
+            "athena::ShowSessions",
         ] {
             assert!(names.contains(&action), "{action}");
         }

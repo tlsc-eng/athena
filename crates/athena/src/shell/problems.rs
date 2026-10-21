@@ -194,21 +194,10 @@ impl Shell {
         self.toggle_drawer_tab(DrawerTab::Problems, cx);
     }
 
-    /// The count beside the tab name, hidden when there is nothing to fix.
-    pub(super) fn render_problems_badge(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The count beside the tab name.
+    pub(super) fn problems_total(&self) -> usize {
         let (errors, warnings, infos) = self.problem_counts();
-        let total = errors + warnings + infos;
-        let t = cx.theme();
-        (total > 0).then(|| {
-            div()
-                .ml(px(6.))
-                .px(px(6.))
-                .rounded(t.shape.radius_control)
-                .bg(t.color.surface_active)
-                .text_color(t.color.content_muted)
-                .child(total.to_string())
-                .into_any_element()
-        })
+        errors + warnings + infos
     }
 
     /// Errors and warnings in the title bar, as VS Code's status bar shows them.

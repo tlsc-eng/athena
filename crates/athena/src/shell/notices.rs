@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
 use athena_ui::motion::{self, Closing};
-use athena_ui::{ActiveTheme, IconButton, Size, Space};
+use athena_ui::{ActiveTheme, Button, ButtonKind, IconButton, Size, Space};
 use athena_workspace::{ItemId, ItemKind, Panel, Project, Rect};
 use gpui::{
     Animation, AnyElement, App, Bounds, ClickEvent, Context, Corner, FocusHandle, FontWeight, Hsla,
@@ -166,7 +166,7 @@ pub(super) fn covers(toasts: Bounds<Pixels>, pane: Rect) -> bool {
     left < pane.x + pane.w && pane.x < right && top < pane.y + pane.h && pane.y < bottom
 }
 
-/// Title and body for a notice, as shown in toasts, the drawer and macOS banners.
+/// Title and body for a notice, as shown in toasts, the bell popover and macOS banners.
 pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, String) {
     let place = project.unwrap_or("Athena");
     match kind {
@@ -331,6 +331,13 @@ impl Shell {
         if self.bell.open {
             return self.close_bell(window, cx);
         }
+        self.open_bell(window, cx);
+    }
+
+    pub(super) fn open_bell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bell.open {
+            return;
+        }
         self.bell.open = true;
         self.bell.restore = window.focused(cx);
         window.focus(&self.bell.focus);
@@ -384,7 +391,36 @@ impl Shell {
                 this.bell.dismissed_by = Some(event.position);
                 this.close_bell(window, cx);
             }))
-            .child(self.render_notifications(cx));
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(t.size(Size::Row))
+                    .flex_none()
+                    .px(t.space(Space::Md))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(t.color.border)
+                    .child(
+                        div()
+                            .text_size(t.typography.caption)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.color.content_secondary)
+                            .child("Notifications"),
+                    )
+                    .child(
+                        Button::new("notices-clear", "Clear", ButtonKind::Ghost)
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_notifications(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_notifications(cx)),
+            );
         Some(
             deferred(
                 anchored()
@@ -461,9 +497,7 @@ impl Shell {
             session: target.as_ref().and(notice.pane),
             kind: notice.kind,
             at: notice.at,
-            read: watching
-                || self.bell.open
-                || self.drawer == Some(super::drawer::DrawerTab::Notifications),
+            read: watching || self.bell.open,
         };
         if !watching {
             if let Some(ItemView::Terminal(view)) = &view {
@@ -892,7 +926,7 @@ impl Shell {
         )
     }
 
-    /// The Notifications tab's list, newest first.
+    /// The bell popover's list, newest first.
     pub(super) fn render_notifications(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let log = self.notices.borrow();

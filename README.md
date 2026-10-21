@@ -8,7 +8,7 @@ encoding (and files over 50 MB read-only), a Go debugger on Delve, a git diff vi
 staging, file history and blame, a commit box and fetch, pull and push, worktrees, CI status and
 pull requests through the GitHub CLI, a test runner for Go, Vitest and Jest, a browser preview, and
 read-only views of Playwright results and Docker containers. Claude Code sessions show their state
-and todo progress on the tab, a Claude tab lists each session's changed files, cost estimate and
+and todo progress on the tab, the Sessions list lists each session's changed files, cost estimate and
 plan with Resume, each file Claude edits can be reviewed as one diff against the version from
 before the session, and an MCP server lets Claude read the editor, language servers, tests, the
 debugger and terminals.
@@ -353,14 +353,16 @@ information rather than triggering the install dialog).
   author, age, id and summary; clicking opens what that commit did to the file (through renames),
   or the uncommitted changes for lines not committed yet. Unsaved edits are blamed after a 500 ms
   pause and on save.
-- Timeline (**Git: Open timeline**, or View > Open Timeline): a drawer tab listing the active
+- Timeline (**Git: Open timeline**, or View > Open Timeline): a section of the side panel's Git view listing the active
   file's commits through renames, newest first, with subject, author and age (the id in a
   tooltip), following the active tab. Clicking a commit opens what it did to the file against
   its parent; **Compare with Current** on the row or its right-click menu compares that version
   with the working tree. It lists at most the last 500 commits.
-- A **Changes** drawer tab lists Staged Changes, Changes and Untracked, with Stage / Unstage on
-  each row and group (Stage All and Discard All leave conflicted files alone). Hovering a row also
-  offers Open File and Discard.
+- A **Changes** section in the side panel's Git view (`ctrl-shift-g`; **Source Control Changes**
+  in the View menu or palette shows it, and hides the panel when it is already there) lists Staged
+  Changes, Changes and Untracked, with Stage / Unstage on each row and group (Stage All and Discard
+  All leave conflicted files alone). Hovering a row also offers Open File and Discard. The
+  Changes and Timeline headers fold their sections.
 - Clicking a row opens its diff in a tab: a staged row compares `HEAD` with the index ("main.go
   (Index)"), an unstaged or untracked one the index with the file on disk ("main.go (Working
   Tree)"); a conflicted file opens in the editor instead. Diffs are read-only, side by side or
@@ -395,8 +397,7 @@ information rather than triggering the install dialog).
   incoming blue, a diff3 base grey), and a row after each `<<<<<<<` line offers **Accept Current
   Change**, **Accept Incoming Change**, **Accept Both Changes** (one undo step each, keeping CRLF
   and a missing final newline) and **Compare Changes** (a diff tab of every block resolved to
-  each side). A block with another `<<<<<<<` inside gets no actions. The Changes tab header says
-  "2 conflicts in 1 file"; marker lines left outside any block still count as a conflict. Saving a
+  each side). A block with another `<<<<<<<` inside gets no actions. Marker lines left outside any block still count as a conflict. Saving a
   conflicted file with no conflicts left offers a **Stage** toast to mark it resolved.
 - **Switch branch…** (palette, the branch button by the commit box, or the branch in the status
   bar) lists local then remote branches with their age and last subject. Typing a new name offers
@@ -651,10 +652,10 @@ information rather than triggering the install dialog).
   state (needs input, running, done) and how many sessions a folder or collapsed repository
   stands for.
 - An MCP server, `athena mcp-stdio`, answers from the running app (see below).
-- Each file Claude edits in an Athena terminal refreshes its open diffs; the **Claude** drawer tab
+- Each file Claude edits in an Athena terminal refreshes its open diffs; the **Sessions** list
   opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
-- The **Claude** drawer tab (palette: **Claude: Show sessions**) lists the project's recent
+- The side panel's **Sessions** view (palette: **Claude: Show sessions**) lists the project's recent
   sessions from `~/.claude` and every `~/.claude-*` profile: title, todo progress, messages,
   tokens and an estimated cost. A session expands to its todo list and plan and to each file it
   changed with +/− line counts; open a file's diff, step through them all with **Review All**
@@ -678,6 +679,12 @@ information rather than triggering the install dialog).
   optionally add the Playwright MCP server for Claude.
 - Containers: a read-only view of the local Docker engine (Docker Desktop or Rancher Desktop):
   list, stats and logs. Athena never starts, stops or removes containers.
+- The drawer under the panes has the tabs Terminal, Problems, Tests, Debug, Search and References,
+  and a **Tools** menu at the end of the bar holding Containers and Playwright (the bar then reads
+  "Containers ▾" or "Playwright ▾"). Notifications live in the bell in the title bar (View >
+  Notifications opens it, and its Clear button empties the list); Changes and Timeline in the side panel's Git view, Claude sessions in
+  its Sessions view. View > Side Panel, Drawer and Tools list each group. A `keymap.json` entry
+  for the old `ToggleNotifications` command binds `ToggleDrawer`.
 - Workspace layout, open projects and tabs are restored on launch, each editor with its cursor,
   scroll position, folds and word wrap choice as they were left.
 - The project rail widens into a sidebar with names, branches and folders: **Toggle Project
@@ -865,7 +872,7 @@ points at). They go after any of your own on the same events:
   other tool as **running**;
 - `PreToolUse` and `PostToolUse` on `Edit|MultiEdit|Write`, for reviewing Claude's edits (below);
 - `PostToolUse` on `TodoWrite|ExitPlanMode`, which shows the session's todo progress ("3/7") on
-  its terminal tab and its todos and plan in the Claude tab.
+  its terminal tab and its todos and plan in the Sessions list.
 
 Each runs `athena notify --event …` only inside a terminal Athena started (one with
 `ATHENA_PANE_ID` set) and only while Athena is installed, so Claude sessions elsewhere are not
@@ -890,7 +897,7 @@ it). The hook always exits 0, so it never blocks an edit. After each edit, the `
 tells the window, which reloads open diffs of that file. When no copy was kept for that session,
 the file's diff shows its unstaged changes instead.
 
-The diff opened from the **Claude** drawer tab is "main.go (Claude's Edits)": "Before Claude" on
+The diff opened from the **Sessions** list is "main.go (Claude's Edits)": "Before Claude" on
 the left, the file on disk on the right, with **Revert** on each change. Edits made by you or anyone else after Claude's first edit
 are in the diff too, since it compares with the file as it was then. If no copy was kept because
 the file was over 20 MB or not a regular file, the review compares with the index instead,
@@ -1008,7 +1015,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `f8` / `shift-f8` | Next / previous problem (in an editor only) |
 | `ctrl--` | Go back |
 | `ctrl-shift--` | Go forward (also bound as `ctrl-_`, which is what macOS reports for it) |
-| `cmd-j` | Notifications |
+| `cmd-j` | Show or hide the drawer, on the tab it last showed (kept across launches) |
 | `cmd-alt-j` | Next Claude session needing you |
 | `ctrl-cmd-f` | Toggle full screen |
 | `cmd-m` | Minimize |
@@ -1155,8 +1162,8 @@ in its find field `enter` or `down` goes to the next match, `up` to the previous
 | `cmd-alt-c` / `cmd-alt-w` / `cmd-alt-r` in the Search tab's fields | Toggle match case / whole word / regex |
 | `escape` in the Search tab | Close it |
 | `enter` / `escape` in a tree name field | Create or rename / cancel |
-| `cmd-enter` in the Changes tab's message field | Commit |
-| `enter`, `up` / `down` in the Changes tab's message field | New line, move between lines |
+| `cmd-enter` in the Git view's message field | Commit |
+| `enter`, `up` / `down` in the Git view's message field | New line, move between lines |
 | `cmd-a` in any text field | Select all |
 
 ### Terminal (`crates/athena-term/src/view.rs`)

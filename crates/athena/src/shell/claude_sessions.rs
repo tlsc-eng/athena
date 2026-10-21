@@ -6,17 +6,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use athena_editor::{EditorView, diff};
 use athena_proto::{AppMsg, PaneId, TodoInfo};
-use athena_ui::{ActiveTheme, ButtonKind, MenuItem, Theme, Tooltip, empty_state};
-use athena_workspace::git::relative_time;
+use athena_ui::{ButtonKind, MenuItem, Theme, Tooltip};
 use athena_workspace::{DiffBase, SideMode};
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
-    PromptLevel, Task, Window, actions, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, MouseButton, MouseDownEvent, PromptLevel,
+    Task, Window, actions, div, prelude::*, px,
 };
 
 use super::Shell;
-use super::drawer::DrawerTab;
-use super::git_view::row_button;
 use super::item::{ItemView, file_label};
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::menus::shell_item;
@@ -46,7 +43,7 @@ const MAX_COUNTED: u64 = 2 * 1024 * 1024;
 const ROW_HEIGHT: f32 = 26.;
 const PLAN_LINES: usize = 4;
 
-/// The Claude tab: recent sessions of the active project, with what each changed.
+/// Sessions mode: recent sessions of the active project, with what each changed.
 #[derive(Default)]
 pub(super) struct SessionsState {
     root: Option<PathBuf>,
@@ -399,38 +396,6 @@ fn cost_label(
     }
 }
 
-fn usage_tooltip(row: &SessionRow, prices: &HashMap<String, transcripts::Price>) -> String {
-    let mut lines = vec![format!("Session {}", row.id)];
-    if let Some(profile) = &row.profile {
-        lines.push(format!("Profile: {}", profile.name));
-    }
-    let mut sum = Tokens::default();
-    for t in row.tokens.values() {
-        sum.input += t.input;
-        sum.output += t.output;
-        sum.cache_write_5m += t.cache_write_5m + t.cache_write_1h;
-        sum.cache_read += t.cache_read;
-    }
-    if !row.tokens.is_empty() {
-        let n = transcripts::short_count;
-        lines.push(format!(
-            "Tokens: {} in · {} out · {} cache write · {} cache read",
-            n(sum.input),
-            n(sum.output),
-            n(sum.cache_write_5m),
-            n(sum.cache_read)
-        ));
-        let (usd, unpriced) = transcripts::cost(&row.tokens, prices);
-        lines.push(format!(
-            "Estimated cost ${usd:.2} at list prices; not a bill. Set prices with \"claude.prices\" in settings.json."
-        ));
-        if !unpriced.is_empty() {
-            lines.push(format!("No price for {}", unpriced.join(", ")));
-        }
-    }
-    lines.join("\n")
-}
-
 /// What Resume types: the profile's config folder, then Claude Code resuming the session.
 pub(super) fn resume_command(id: &str, config_dir: Option<&Path>) -> Option<String> {
     let typable = |dir: &Path| !dir.to_string_lossy().chars().any(char::is_control);
@@ -511,8 +476,7 @@ impl Shell {
 
     /// Whether the session list or a session's panel is on screen.
     fn sessions_visible(&self) -> bool {
-        self.drawer == Some(DrawerTab::Claude)
-            || (self.workspace.ui.tree_visible && self.workspace.ui.side_mode == SideMode::Sessions)
+        (self.workspace.ui.tree_visible && self.workspace.ui.side_mode == SideMode::Sessions)
             || !self.open_session_views().is_empty()
     }
 
@@ -855,124 +819,7 @@ impl Shell {
         self.open_context_menu(position, items, window, cx);
     }
 
-    /// The session count and Refresh, beside the drawer tabs.
-    pub(super) fn render_claude_sessions_action(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let t = cx.theme().clone();
-        let state = &self.review.sessions;
-        let count = match (state.loading.is_some(), state.rows.len()) {
-            (true, 0) => "Reading sessions…".to_string(),
-            (_, 1) => "1 session".into(),
-            (_, n) => format!("{n} sessions"),
-        };
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(div().text_color(t.color.content_muted).child(count))
-                .child(
-                    athena_ui::Button::new("claude-refresh", "Refresh", ButtonKind::Ghost)
-                        .on_click(cx.listener(|this, _, _, cx| this.claude_sessions_stale(cx))),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// `compact` is for the side panel's narrow column: fewer columns, the full text in tooltips.
-    pub(super) fn render_claude_sessions(
-        &mut self,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = cx.theme().clone();
-        let centered = |el: gpui::Div| {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(el)
-                .into_any_element()
-        };
-        let Some(root) = self.active_root() else {
-            return centered(empty_state(
-                "No project open",
-                "Open a folder to see its Claude sessions.",
-                None,
-                cx,
-            ));
-        };
-        self.refresh_sessions(&root, cx);
-        let state = &self.review.sessions;
-        if state.rows.is_empty() {
-            if state.loading.is_some() {
-                return centered(
-                    div()
-                        .text_size(t.typography.caption)
-                        .text_color(t.color.content_muted)
-                        .child("Reading sessions…"),
-                );
-            }
-            return centered(empty_state(
-                "No Claude sessions yet",
-                "Sessions run in this project are listed here with their token use. With Claude \
-                 Code hooks on, each also lists the files it changed.",
-                None::<athena_ui::Button>,
-                cx,
-            ));
-        }
-        let rows = state.rows.clone();
-        let prices = self.settings.file.claude_prices.clone();
-        let mut out: Vec<AnyElement> = Vec::new();
-        if let Some(bar) = self.render_review_bar(compact, &t, cx) {
-            out.push(bar);
-        }
-        let now = SystemTime::now();
-        for (i, row) in rows.iter().enumerate() {
-            out.push(self.render_session_row(i, row, compact, &prices, now, &t, cx));
-            if !self.review.sessions.expanded.contains(&row.id) {
-                continue;
-            }
-            out.extend(self.render_live_plan(i, row, &t));
-            if row.files.is_empty() {
-                let hint = match self.review.sessions.hooks_on {
-                    true => "No edits recorded for this session.",
-                    false => {
-                        "No edits recorded. Turn on Claude Code Hooks in Settings to record the next session's."
-                    }
-                };
-                out.push(detail_line(("claude-nofiles", i), hint, &t).into_any_element());
-            }
-            for (j, file) in row.files.iter().enumerate() {
-                out.push(self.render_file_row(
-                    i * 10_000 + j,
-                    &row.id,
-                    file,
-                    &root,
-                    compact,
-                    &t,
-                    cx,
-                ));
-            }
-        }
-        div()
-            .id("claude-sessions")
-            .size_full()
-            .overflow_y_scroll()
-            .text_size(t.typography.caption)
-            .children(out)
-            .into_any_element()
-    }
-
-    fn render_review_bar(
-        &self,
-        compact: bool,
-        t: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_review_bar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let review = self.review.sessions.review.as_ref()?;
         let n = review.files.len();
         let at = review.index;
@@ -1007,16 +854,13 @@ impl Shell {
                 )
                 .when(at > 0, |el| {
                     el.child(
-                        button(
-                            "claude-review-prev",
-                            if compact { "‹" } else { "‹ Previous" },
-                        )
-                        .on_click(cx.listener(|this, _, w, cx| this.step_review(-1, w, cx))),
+                        button("claude-review-prev", "‹")
+                            .on_click(cx.listener(|this, _, w, cx| this.step_review(-1, w, cx))),
                     )
                 })
                 .when(at + 1 < n, |el| {
                     el.child(
-                        button("claude-review-next", if compact { "›" } else { "Next ›" })
+                        button("claude-review-next", "›")
                             .on_click(cx.listener(|this, _, w, cx| this.step_review(1, w, cx))),
                     )
                 })
@@ -1028,156 +872,6 @@ impl Shell {
                 )))
                 .into_any_element(),
         )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_session_row(
-        &self,
-        i: usize,
-        row: &SessionRow,
-        compact: bool,
-        prices: &HashMap<String, transcripts::Price>,
-        now: SystemTime,
-        t: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let group = format!("claude-session-{i}");
-        let open = self.review.sessions.expanded.contains(&row.id);
-        let running = self.session_running(&row.id, cx);
-        let live = self.review.sessions.live.get(&row.id);
-        let todo_progress = live.and_then(|l| progress(&l.todos));
-        let tip = match compact {
-            true => format!("{}\n{}", row.label, usage_tooltip(row, prices)),
-            false => usage_tooltip(row, prices),
-        };
-        let id = row.id.clone();
-        let menu = row.clone();
-        let review = row.clone();
-        let resume = row.profile.clone().filter(|_| !running);
-        let resume_id = row.id.clone();
-        let ago = now
-            .duration_since(row.modified)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let muted = |text: String| {
-            div()
-                .flex_none()
-                .text_color(t.color.content_muted)
-                .child(text)
-        };
-        div()
-            .id(("claude-session", i))
-            .group(group.clone())
-            .h(t.ui(ROW_HEIGHT))
-            .px(px(12.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .cursor_pointer()
-            .hover(|s| s.bg(t.color.surface_hover))
-            .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let expanded = &mut this.review.sessions.expanded;
-                if !expanded.remove(&id) {
-                    expanded.insert(id.clone());
-                }
-                cx.notify();
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.open_session_menu(menu.clone(), ev.position, window, cx)
-                }),
-            )
-            .child(
-                div()
-                    .w(px(10.))
-                    .flex_none()
-                    .text_color(t.color.content_muted)
-                    .child(if open { "▾" } else { "▸" }),
-            )
-            .child(div().size(px(6.)).flex_none().bg(if running {
-                t.color.success
-            } else {
-                t.color.content_disabled
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(t.color.content)
-                    .child(row.label.clone()),
-            )
-            .children(todo_progress.map(|p| {
-                div()
-                    .flex_none()
-                    .px(px(6.))
-                    .rounded(t.shape.radius_control)
-                    .bg(t.color.surface_active)
-                    .text_color(t.color.content_secondary)
-                    .child(p)
-            }))
-            .when(!compact && !row.files.is_empty(), |el| {
-                el.child(row_button(
-                    ("claude-review-all", i),
-                    "Review All",
-                    group.clone(),
-                    t,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.start_review(&review, window, cx)
-                    }),
-                ))
-            })
-            .children(resume.filter(|_| !compact).map(|profile| {
-                row_button(
-                    ("claude-resume", i),
-                    "Resume",
-                    group.clone(),
-                    t,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.resume_claude_session(
-                            &resume_id,
-                            profile.config_dir.as_deref(),
-                            window,
-                            cx,
-                        )
-                    }),
-                )
-            }))
-            .children(
-                row.profile
-                    .as_ref()
-                    .filter(|p| p.config_dir.is_some() && !compact)
-                    .map(|p| muted(p.name.clone())),
-            )
-            .when(!compact && !row.files.is_empty(), |el| {
-                let n = row.files.len();
-                el.child(muted(format!("{n} file{}", if n == 1 { "" } else { "s" })))
-            })
-            .when(!compact && row.messages > 0, |el| {
-                el.child(muted(format!("{} msgs", row.messages)))
-            })
-            .when(!compact && !row.tokens.is_empty(), |el| {
-                let total = row.tokens.values().map(Tokens::total).sum();
-                el.child(muted(format!("{} tok", transcripts::short_count(total))))
-                    .child(muted(cost_label(&row.tokens, prices)))
-            })
-            .child(
-                div()
-                    .when(!compact, |el| el.w(px(88.)))
-                    .flex_none()
-                    .flex()
-                    .justify_end()
-                    .text_color(t.color.content_muted)
-                    .child(relative_time(ago)),
-            )
-            .into_any_element()
     }
 
     fn render_live_plan(&self, i: usize, row: &SessionRow, t: &Theme) -> Vec<AnyElement> {
@@ -1222,18 +916,15 @@ impl Shell {
         out
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_file_row(
         &self,
         id: usize,
         session: &str,
         file: &FileChange,
         root: &Path,
-        compact: bool,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let group = format!("claude-file-{id}");
         let rel = file
             .path
             .strip_prefix(root)
@@ -1242,15 +933,12 @@ impl Shell {
             .to_string();
         let tip = rel.clone();
         let (s_open, p_open, b_open) = (session.to_string(), file.path.clone(), file.base.clone());
-        let (s_diff, p_diff, b_diff) = (session.to_string(), file.path.clone(), file.base.clone());
-        let (s_rev, p_rev) = (session.to_string(), file.path.clone());
         let (s_menu, p_menu, b_menu) = (session.to_string(), file.path.clone(), file.base.clone());
         let reviewing = self.review.sessions.review.as_ref().is_some_and(|r| {
             r.session == session && r.files.get(r.index).map(|f| &f.path) == Some(&file.path)
         });
         div()
             .id(("claude-file", id))
-            .group(group.clone())
             .h(t.ui(ROW_HEIGHT - 2.))
             .pl(px(48.))
             .pr(px(12.))
@@ -1300,33 +988,9 @@ impl Shell {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(t.color.content)
-                    .when(compact, |el| {
-                        el.tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
-                    })
+                    .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
                     .child(rel),
             )
-            .when(!compact, |el| {
-                el.child(row_button(
-                    ("claude-file-diff", id),
-                    "Open Changes",
-                    group.clone(),
-                    t,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_session_file(&s_diff, &p_diff, b_diff.clone(), window, cx)
-                    }),
-                ))
-                .child(row_button(
-                    ("claude-file-revert", id),
-                    "Revert",
-                    group,
-                    t,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.revert_session_file(s_rev.clone(), p_rev.clone(), window, cx)
-                    }),
-                ))
-            })
             .children(file.counts.map(|(added, removed)| {
                 div()
                     .flex_none()
@@ -1361,10 +1025,10 @@ fn detail_line(
         .child(text.into())
 }
 
-/// Binds the Claude tab's commands on the shell's root element.
+/// Binds the Claude sessions commands on the shell's root element.
 pub(super) fn bind_claude_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::Div {
     el.on_action(cx.listener(|this, _: &ShowClaudeSessions, _, cx| {
-        this.toggle_drawer_tab(DrawerTab::Claude, cx)
+        this.select_side_mode(SideMode::Sessions, cx)
     }))
     .on_action(
         cx.listener(|this, _: &ClaudeOpenSessionView, w, cx| this.open_current_session_view(w, cx)),
