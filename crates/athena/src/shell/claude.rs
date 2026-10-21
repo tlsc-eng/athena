@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
 use athena_proto::NoticeKind;
-use athena_workspace::ItemKind;
+use athena_workspace::{ItemId, ItemKind};
 use gpui::{Context, PromptLevel, Window};
 
 use super::Shell;
@@ -32,9 +32,17 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(i) = self.workspace.active else {
-            return;
-        };
+        self.run_in_new_terminal_tab(command, window, cx);
+    }
+
+    /// `run_in_new_terminal`, naming the tab it opened.
+    pub(super) fn run_in_new_terminal_tab(
+        &mut self,
+        command: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(PathBuf, ItemId)> {
+        let i = self.workspace.active?;
         self.new_terminal(window, cx);
         let project = &self.workspace.projects[i];
         let root = project.root.clone();
@@ -44,11 +52,12 @@ impl Shell {
             .and_then(|l| l.focused_pane())
             .and_then(|p| p.active_item())
             .cloned();
-        if let Some(item) = item.filter(|i| matches!(i.kind, ItemKind::Terminal { .. }))
-            && let Some(ItemView::Terminal(view)) = self.item_view(&root, &item, cx)
-        {
-            view.update(cx, |v, _| v.run_on_start(format!("{command}\r")));
-        }
+        let item = item.filter(|i| matches!(i.kind, ItemKind::Terminal { .. }))?;
+        let Some(ItemView::Terminal(view)) = self.item_view(&root, &item, cx) else {
+            return None;
+        };
+        view.update(cx, |v, _| v.run_on_start(format!("{command}\r")));
+        Some((root, item.id))
     }
 
     /// Puts Athena's hooks into every Claude Code config folder, or takes them out, once per

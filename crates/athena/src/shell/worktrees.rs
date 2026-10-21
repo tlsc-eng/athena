@@ -388,6 +388,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.ide.send.worktree = None;
         let Some(root) = self.active_root() else {
             return;
         };
@@ -459,6 +460,7 @@ impl Shell {
         let dir = self.settings.file.git_worktree_dir();
         let path = worktree_path(&main, dir.as_deref(), &branch, |p| p.exists());
         let claude = std::mem::take(&mut self.git.claude_in_new_worktree);
+        let mention = self.ide.send.worktree.take();
         // Only a new branch has a fork point, and Claude's starts from the main checkout rather
         // than from whichever worktree is open.
         let forked = claude && matches!(how, NewWorktree::Create(_));
@@ -497,7 +499,10 @@ impl Shell {
                     // Another window may hold the folder already; Claude starts only where it opened.
                     let opened = this.active_root().and_then(|r| r.canonicalize().ok());
                     if claude && opened.is_some() && opened == path.canonicalize().ok() {
-                        this.new_claude_session(window, cx);
+                        match mention {
+                            Some(mention) => this.send_to_new_session(mention, window, cx),
+                            None => this.new_claude_session(window, cx),
+                        }
                     }
                 }
                 Err(err) => this.transient_notice(

@@ -13,6 +13,7 @@ use super::Shell;
 use super::item::ItemView;
 use super::notices::ToastAction;
 use super::review::{self, diff_title};
+use super::send_selection::Mention;
 use super::windows;
 use crate::ide::{self, DiffKey, Verdict};
 
@@ -32,6 +33,7 @@ pub(super) struct IdeState {
     sent: Option<Value>,
     /// What the selection was last built from, so a poll that finds nothing new copies no text.
     seen: Option<SelectionKey>,
+    pub(super) send: super::send_selection::SendState,
 }
 
 #[derive(PartialEq)]
@@ -189,22 +191,6 @@ fn selection_json(path: &Path, start: (u32, u32), end: (u32, u32), text: String)
         "fileUrl": ide::file_url(path),
         "selection": {"start": position(start), "end": position(end), "isEmpty": start == end},
     })
-}
-
-/// `at_mentioned` for a file, with 0-based lines when something is selected; a selection ending
-/// at the start of a line does not take that line in.
-fn mention_json(path: &Path, start: (u32, u32), end: (u32, u32)) -> Value {
-    let mut mention = json!({ "filePath": path });
-    if start != end {
-        let last = if end.1 == 0 && end.0 > start.0 {
-            end.0 - 1
-        } else {
-            end.0
-        };
-        mention["lineStart"] = json!(start.0);
-        mention["lineEnd"] = json!(last);
-    }
-    mention
 }
 
 /// The selection to send, if it differs from the one sent last.
@@ -608,24 +594,24 @@ impl Shell {
         targets
     }
 
-    /// Mentions the focused file and its selected lines in the Claude Code session of its project.
+    /// Asks which Claude session should get the focused file's selected lines, or its cursor line.
     pub(super) fn send_to_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if windows::ide(cx).is_none() {
-            let action = ToastAction {
-                label: "Turn On",
-                run: Rc::new(|this: &mut Shell, window, cx| {
-                    this.toggle_ide_integration(window, cx)
-                }),
-            };
-            self.action_toast(
-                "Claude Code integration is off",
-                "Turn it on to send files and selections to Claude Code sessions in Athena.",
-                action,
-                cx,
-            );
-            return;
-        }
-        let Some((root, editor)) = self.focused_editor_in() else {
+        let Some((_, editor)) = self.focused_editor_in() else {
+            if windows::ide(cx).is_none() {
+                let action = ToastAction {
+                    label: "Turn On",
+                    run: Rc::new(|this: &mut Shell, window, cx| {
+                        this.toggle_ide_integration(window, cx)
+                    }),
+                };
+                self.action_toast(
+                    "Claude Code integration is off",
+                    "Turn it on to send files and selections to Claude Code sessions in Athena.",
+                    action,
+                    cx,
+                );
+                return;
+            }
             return self.transient_notice(
                 "Nothing to send to Claude",
                 "Focus a file in the editor, then press ⌘⌥K.",
@@ -639,35 +625,7 @@ impl Shell {
         let Some((start, end, _)) = selection else {
             return;
         };
-        let targets = self.ide_targets(&root, cx);
-        if targets.is_empty() {
-            return self.transient_notice(
-                "No Claude Code session is connected",
-                "Start claude in a new Athena terminal, or type /ide in a session already running.",
-                cx,
-            );
-        }
-        if let Some(server) = windows::ide(cx) {
-            server.notify(&targets, "at_mentioned", mention_json(&path, start, end));
-        }
-        // Typing goes on in the session that got the mention, as in VS Code.
-        let terminal = targets
-            .iter()
-            .filter_map(|c| windows::ide_clients(cx).get(c).copied().flatten())
-            .find_map(|pid| self.claude_terminal(pid, cx))
-            .filter(|(r, _)| *r == root);
-        if let Some((_, item)) = terminal
-            && athena_workspace::Panel::holds(item)
-        {
-            self.activate_panel_terminal(item, window, cx);
-        } else if let Some((_, item)) = terminal
-            && let Some((pane, index)) = self
-                .workspace
-                .active_project()
-                .and_then(|p| p.layout.as_ref()?.find_item(item))
-        {
-            self.activate_tab(pane, index, window, cx);
-        }
+        self.pick_send_target(Mention::from_selection(&path, start, end), window, cx);
     }
 }
 
@@ -865,27 +823,6 @@ mod tests {
             "nothing was set aside"
         );
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_mention_names_the_selected_lines_and_drops_a_trailing_line_start() {
-        let path = Path::new("/p/a.rs");
-        assert_eq!(
-            mention_json(path, (2, 0), (2, 0)),
-            json!({"filePath": "/p/a.rs"})
-        );
-        assert_eq!(
-            mention_json(path, (2, 3), (4, 1)),
-            json!({"filePath": "/p/a.rs", "lineStart": 2, "lineEnd": 4})
-        );
-        assert_eq!(
-            mention_json(path, (2, 0), (5, 0)),
-            json!({"filePath": "/p/a.rs", "lineStart": 2, "lineEnd": 4})
-        );
-        assert_eq!(
-            mention_json(path, (2, 1), (2, 6)),
-            json!({"filePath": "/p/a.rs", "lineStart": 2, "lineEnd": 2})
-        );
     }
 
     #[test]

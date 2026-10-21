@@ -36,6 +36,7 @@ mod rename;
 mod review;
 mod review_comments;
 mod search;
+mod send_selection;
 mod settings;
 mod settings_ui;
 mod shortcuts;

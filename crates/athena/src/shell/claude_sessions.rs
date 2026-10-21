@@ -485,6 +485,7 @@ impl Shell {
                 self.review.sessions.cwds.insert(session.clone(), cwd);
             }
             self.bind_session(pane, session, cx);
+            self.deliver_pending(cx);
             cx.notify();
         }
     }
@@ -604,6 +605,7 @@ impl Shell {
                     if changed {
                         this.refresh_session_views(cx);
                     }
+                    this.refresh_send_palette(cx);
                     cx.notify();
                 }
             });

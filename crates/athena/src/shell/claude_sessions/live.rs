@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use athena_proto::{PaneId, TodoInfo};
 use athena_term::ClaudeState;
 use athena_workspace::ItemId;
 use athena_workspace::git;
-use gpui::App;
+use gpui::{App, Context};
 
 use super::{SessionRow, SessionsState, pick_row, short_id};
 use crate::shell::Shell;
@@ -179,6 +179,68 @@ fn branch_of(tree: &Path) -> Option<String> {
 fn todo_counts(todos: &[TodoInfo]) -> Option<(usize, usize)> {
     let done = todos.iter().filter(|t| t.status == "completed").count();
     (!todos.is_empty()).then_some((done, todos.len()))
+}
+
+/// A terminal whose foreground program is Claude, whether or not a hook bound a session to it.
+struct ClaudeTerminal {
+    root: PathBuf,
+    pane: PaneId,
+    label: String,
+    state: Option<ClaudeState>,
+    input: Option<Instant>,
+    output: Option<Instant>,
+}
+
+/// `sessions` narrowed to those whose terminal runs Claude now, plus an entry for each such
+/// terminal no session is bound to, all dated by the terminal's own last activity.
+fn with_terminals(
+    mut sessions: Vec<LiveSession>,
+    claude: &[ClaudeTerminal],
+    place: impl Fn(&Path) -> Place,
+    now: SystemTime,
+    at: Instant,
+) -> Vec<LiveSession> {
+    sessions.retain(|s| s.pane.is_some_and(|p| claude.iter().any(|c| c.pane == p)));
+    for c in claude {
+        if sessions.iter().any(|s| s.pane == Some(c.pane)) {
+            continue;
+        }
+        let place = place(&c.root);
+        sessions.push(LiveSession {
+            id: String::new(),
+            label: c.label.clone(),
+            pane: Some(c.pane),
+            cwd: c.root.clone(),
+            main_root: place.main_root,
+            rel: place.rel,
+            branch: place.branch,
+            state: c.state,
+            unread: false,
+            todos: None,
+            files: 0,
+            usage: BTreeMap::new(),
+            modified: SystemTime::UNIX_EPOCH,
+        });
+    }
+    // Typed-in terminals outrank the rest however busy those are, and a restart forgets typing.
+    let floor = claude
+        .iter()
+        .filter(|c| c.input.is_none())
+        .filter_map(|c| c.output)
+        .min();
+    for s in &mut sessions {
+        let Some(c) = claude.iter().find(|c| Some(c.pane) == s.pane) else {
+            continue;
+        };
+        match (c.input, c.output.zip(floor)) {
+            (Some(input), _) => s.modified = now - at.saturating_duration_since(input),
+            (None, Some((output, floor))) => {
+                s.modified = SystemTime::UNIX_EPOCH + output.saturating_duration_since(floor);
+            }
+            (None, None) => {}
+        }
+    }
+    sessions
 }
 
 /// What a terminal running a session reports.
@@ -355,6 +417,61 @@ impl Shell {
         out
     }
 
+    /// The Claude terminals in `root`'s project and worktrees, as the Sessions list counts them,
+    /// each enriched by its session when a hook bound one; the order is left to the caller.
+    pub(in crate::shell) fn project_sessions(
+        &mut self,
+        root: &Path,
+        cx: &mut Context<Shell>,
+    ) -> Vec<LiveSession> {
+        self.refresh_sessions(root, cx);
+        let claude: Vec<ClaudeTerminal> = self
+            .items
+            .iter()
+            .filter_map(|((root, _), view)| {
+                let ItemView::Terminal(view) = view else {
+                    return None;
+                };
+                let view = view.read(cx);
+                let pane = view.session().filter(|_| view.is_claude())?;
+                Some(ClaudeTerminal {
+                    root: root.clone(),
+                    pane,
+                    label: view.label(),
+                    state: view.claude_state(),
+                    input: view.last_input(),
+                    output: view.last_activity(),
+                })
+            })
+            .collect();
+        let mut sessions = self.live_sessions(cx);
+        // Read from disk now, as the list's own background load may not have run.
+        let unplaced: BTreeSet<PathBuf> = sessions
+            .iter()
+            .map(|s| s.cwd.clone())
+            .chain(claude.iter().map(|c| c.root.clone()))
+            .chain([root.to_path_buf()])
+            .filter(|cwd| !self.review.sessions.places.contains_key(cwd))
+            .collect();
+        if !unplaced.is_empty() {
+            self.review.sessions.places.extend(locate_all(&unplaced));
+            sessions = self.live_sessions(cx);
+        }
+        let state = &self.review.sessions;
+        let sessions = with_terminals(
+            sessions,
+            &claude,
+            |cwd| state.place(cwd),
+            SystemTime::now(),
+            Instant::now(),
+        );
+        let active = state.place(root);
+        sessions
+            .into_iter()
+            .filter(|s| super::list::in_project(s, &active))
+            .collect()
+    }
+
     /// Sessions needing you across all open windows, this one included.
     pub(crate) fn attention_total(&self, cx: &App) -> usize {
         self.attention_here(cx) + crate::shell::windows::attention_elsewhere(self.window_handle, cx)
@@ -396,6 +513,78 @@ mod tests {
             session("asking-new", Some(NeedsInput), false, 3),
             session("idle-old", None, false, 5),
         ]
+    }
+
+    #[test]
+    fn a_typed_in_terminal_outranks_a_never_typed_one_however_fresh_its_output() {
+        let (now, at) = (SystemTime::now(), Instant::now());
+        let terminal = |pane: PaneId, input: Option<u64>, output: u64| ClaudeTerminal {
+            root: PathBuf::from("/p"),
+            pane,
+            label: "Claude".into(),
+            state: None,
+            input: input.map(|s| at - Duration::from_secs(s)),
+            output: Some(at - Duration::from_secs(output)),
+        };
+        let place = |cwd: &Path| Place {
+            main_root: cwd.to_path_buf(),
+            branch: None,
+            rel: PathBuf::new(),
+        };
+        let claude = [
+            terminal(1, Some(600), 0),
+            terminal(2, None, 1),
+            terminal(3, None, 30),
+        ];
+        let listed = with_terminals(Vec::new(), &claude, place, now, at);
+        let modified = |pane: PaneId| {
+            listed
+                .iter()
+                .find(|s| s.pane == Some(pane))
+                .unwrap()
+                .modified
+        };
+        assert!(modified(1) > modified(2), "older typing beats newer output");
+        assert!(modified(2) > modified(3), "without typing, output decides");
+    }
+
+    #[test]
+    fn claude_terminals_are_listed_bound_or_not_and_dated_by_their_activity() {
+        let (now, at) = (SystemTime::now(), Instant::now());
+        let terminal = |pane: PaneId, label: &str, secs: u64| ClaudeTerminal {
+            root: PathBuf::from("/p"),
+            pane,
+            label: label.into(),
+            state: None,
+            input: Some(at - Duration::from_secs(secs)),
+            output: None,
+        };
+        let place = |cwd: &Path| Place {
+            main_root: cwd.to_path_buf(),
+            branch: None,
+            rel: PathBuf::new(),
+        };
+        let bound = vec![
+            session("quit", Some(ClaudeState::Running), false, 0),
+            session("live", Some(ClaudeState::Running), false, 0),
+        ];
+        let mut bound = bound;
+        bound[0].pane = Some(1);
+        bound[1].pane = Some(2);
+        let claude = [terminal(2, "Claude", 10), terminal(3, "Claude", 4)];
+        let listed = with_terminals(bound, &claude, place, now, at);
+        let found: Vec<(&str, Option<PaneId>)> =
+            listed.iter().map(|s| (s.id.as_str(), s.pane)).collect();
+        assert_eq!(
+            found,
+            [("live", Some(2)), ("", Some(3))],
+            "a bound session whose terminal left Claude is dropped, an unbound Claude kept"
+        );
+        assert_eq!(listed[1].label, "Claude");
+        assert!(
+            listed[1].modified > listed[0].modified,
+            "activity decides the order"
+        );
     }
 
     #[test]

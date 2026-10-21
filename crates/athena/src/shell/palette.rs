@@ -15,6 +15,7 @@ use gpui::{
 use super::Shell;
 use super::fuzzy;
 use super::lsp::document_key;
+use super::send_selection::{Mention, SendTo};
 use crate::actions;
 use athena_term::ClaudeState;
 
@@ -42,6 +43,8 @@ pub(super) enum Target {
     Link(String),
     /// Moving, renaming or restyling a sidebar folder, or moving a project into one.
     SidebarFolder(super::sidebar::FolderPick),
+    /// Sending a selection to a Claude session, or to a new one.
+    Send(SendTo, Mention),
 }
 
 impl Clone for Target {
@@ -57,6 +60,7 @@ impl Clone for Target {
             Self::Task(command) => Self::Task(command.clone()),
             Self::Link(url) => Self::Link(url.clone()),
             Self::SidebarFolder(pick) => Self::SidebarFolder(pick.clone()),
+            Self::Send(to, mention) => Self::Send(to.clone(), mention.clone()),
         }
     }
 }
@@ -105,6 +109,8 @@ pub(super) enum Mode {
     BringBack,
     /// A Claude session's review comments that were not sent yet.
     ReviewComments,
+    /// The Claude sessions that can take the editor's selection.
+    SendSelection,
 }
 
 fn now_secs() -> i64 {
@@ -144,6 +150,7 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Log => "No matching commits",
         Mode::BringCommit => "Type a commit message",
         Mode::BringBack => "No matching choices",
+        Mode::SendSelection => "No matching sessions",
         _ => "No matching commands",
     }
 }
@@ -686,6 +693,7 @@ impl Shell {
             Mode::Log => "Search history; pick a commit to copy its id…",
             Mode::BringCommit => "Commit message for the worktree's changes…",
             Mode::BringBack => "Bring the worktree's changes back as…",
+            Mode::SendSelection => "Send the selection to…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -729,6 +737,7 @@ impl Shell {
             Mode::Tasks => self.task_entries(),
             Mode::Checks => self.check_entries(),
             Mode::ReviewComments => self.review_comment_entries(cx),
+            Mode::SendSelection => self.send_selection_entries(cx),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
@@ -821,6 +830,50 @@ impl Shell {
             .and_then(|p| p.active_item());
         item.and_then(|item| self.items.get(&(project.root.clone(), item.id)))
             .is_some_and(|view| matches!(view, super::item::ItemView::Terminal(_)))
+    }
+
+    /// Lists the Claude terminals again once the session load lands, with the same one selected.
+    pub(super) fn refresh_send_palette(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self
+            .palette
+            .as_ref()
+            .filter(|p| p.mode == Mode::SendSelection)
+        else {
+            return;
+        };
+        let chosen = palette.hits.get(palette.selected).and_then(|(i, _)| {
+            match &palette.entries[*i].target {
+                Target::Send(to, _) => Some(to.clone()),
+                _ => None,
+            }
+        });
+        let entries = self.send_selection_entries(cx);
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        palette.entries = entries;
+        self.filter_palette(cx);
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        let at = palette
+            .hits
+            .iter()
+            .position(|(i, _)| matches!(&palette.entries[*i].target, Target::Send(to, _) if Some(to) == chosen.as_ref()));
+        palette.selected = at.unwrap_or(0);
+    }
+
+    fn send_selection_entries(&mut self, cx: &mut Context<Self>) -> Vec<Entry> {
+        self.send_rows(cx)
+            .into_iter()
+            .map(|(row, mention)| Entry {
+                label: row.label,
+                detail: row.detail,
+                kind: row.kind,
+                key: row.key,
+                target: Target::Send(row.to, mention),
+            })
+            .collect()
     }
 
     fn check_entries(&self) -> Vec<Entry> {
@@ -1386,6 +1439,7 @@ impl Shell {
             Some(Target::Link(url)) if url.starts_with("https://") => cx.open_url(&url),
             Some(Target::Link(_)) => {}
             Some(Target::SidebarFolder(pick)) => self.run_folder_pick(pick, cx),
+            Some(Target::Send(to, mention)) => self.send_selection(to, mention, window, cx),
             None => {}
         }
         cx.notify();
@@ -1462,6 +1516,7 @@ impl Shell {
                                         | Target::Project(_)
                                         | Target::Link(_)
                                         | Target::SidebarFolder(_)
+                                        | Target::Send(..)
                                 )
                                 .then(|| entry.detail.clone())
                                 .flatten()
