@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use athena_workspace::git::{self, NewWorktree};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,27 +23,25 @@ pub fn store() -> Result<PathBuf> {
     Ok(athena_proto::data_dir()?.join("worktrees"))
 }
 
-/// Branch names repeat across repositories, and sanitising can merge two names, so the file name
-/// ends in a hash of the main checkout and the exact branch.
-fn sidecar(store: &Path, main: &Path, branch: &str) -> PathBuf {
-    let safe: String = branch
+/// Keyed by the worktree's folder, so switching branches or detaching HEAD inside it does not
+/// lose the record.
+fn sidecar(store: &Path, worktree: &Path) -> PathBuf {
+    let name = worktree
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let safe: String = name
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_') {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
                 c
             } else {
                 '-'
             }
         })
         .collect();
-    let mut hash = Sha256::new();
-    hash.update(main.as_os_str().as_encoded_bytes());
-    hash.update([0]);
-    hash.update(branch.as_bytes());
-    let tag: String = hash.finalize()[..4]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let digest = Sha256::digest(worktree.as_os_str().as_encoded_bytes());
+    let tag: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
     store.join(format!("{safe}-{tag}.json"))
 }
 
@@ -52,9 +50,23 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 /// `git worktree add -b branch` at `path` from the main checkout's HEAD, then notes the commit
-/// the worktree started at.
-pub fn create(store: &Path, main: &Path, path: &Path, branch: &str) -> Result<()> {
+/// the worktree started at. The outer error means no worktree was made; the inner one that it was
+/// made but its fork point could not be saved.
+pub fn create(
+    store: Option<&Path>,
+    main: &Path,
+    path: &Path,
+    branch: &str,
+) -> Result<Option<anyhow::Error>> {
     git::add_worktree(main, path, &NewWorktree::Create(branch.to_string()))?;
+    let saved = match store {
+        Some(store) => record(store, main, path, branch),
+        None => Err(anyhow::anyhow!("Athena's data folder is not available")),
+    };
+    Ok(saved.err())
+}
+
+fn record(store: &Path, main: &Path, path: &Path, branch: &str) -> Result<()> {
     let fork = Fork {
         branch: branch.to_string(),
         fork_sha: git::head_sha(path)?,
@@ -63,41 +75,34 @@ pub fn create(store: &Path, main: &Path, path: &Path, branch: &str) -> Result<()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     };
-    write(store, &fork).context("the worktree was created, but its fork point was not recorded")
-}
-
-fn write(store: &Path, fork: &Fork) -> Result<()> {
     fs::create_dir_all(store)?;
-    let file = sidecar(store, &fork.main_root, &fork.branch);
+    let file = sidecar(store, &canonical(path));
     let tmp = file.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(fork)?)?;
+    fs::write(&tmp, serde_json::to_vec_pretty(&fork)?)?;
     fs::rename(&tmp, &file)?;
     Ok(())
 }
 
-/// Removes the worktree at `root` and the fork point recorded for its branch.
-pub fn remove(store: &Path, main: &Path, root: &Path, force: bool) -> Result<()> {
-    let branch = git::current_branch(root).ok().flatten();
-    git::remove_worktree(main, root, force)?;
-    if let Some(branch) = branch {
-        let _ = fs::remove_file(sidecar(store, &canonical(main), &branch));
+/// Removes the worktree at `worktree`, run from `repo`, and the fork point recorded for it.
+pub fn remove(store: Option<&Path>, repo: &Path, worktree: &Path, force: bool) -> Result<()> {
+    // Once the folder is gone it can no longer be resolved to the path the record is keyed by.
+    let file = store.map(|s| sidecar(s, &canonical(worktree)));
+    git::remove_worktree(repo, worktree, force)?;
+    if let Some(file) = file {
+        let _ = fs::remove_file(file);
     }
     Ok(())
 }
 
-/// Where the linked worktree at `worktree` branched from; `None` for one Athena did not start
-/// from the main checkout.
+/// Where the worktree at `worktree` branched from; `None` for one Athena did not start from the
+/// main checkout.
 #[allow(dead_code)] // Called by "bring changes back", which is not built yet.
 pub fn worktree_fork(worktree: &Path) -> Option<Fork> {
     fork_in(&store().ok()?, worktree)
 }
 
 fn fork_in(store: &Path, worktree: &Path) -> Option<Fork> {
-    let main = git::main_worktree(worktree)?;
-    let branch = git::current_branch(worktree).ok()??;
-    let fork: Fork =
-        serde_json::from_slice(&fs::read(sidecar(store, &main, &branch)).ok()?).ok()?;
-    (fork.branch == branch && fork.main_root == main).then_some(fork)
+    serde_json::from_slice(&fs::read(sidecar(store, &canonical(worktree))).ok()?).ok()
 }
 
 #[cfg(test)]
@@ -144,7 +149,11 @@ mod tests {
         let _ = fs::remove_dir_all(&tree);
         let start = sh(&main, &["rev-parse", "HEAD"]);
 
-        create(&store, &main, &tree, "claude/fix-login").unwrap();
+        assert!(
+            create(Some(&store), &main, &tree, "claude/fix-login")
+                .unwrap()
+                .is_none()
+        );
         sh(&main, &["commit", "-q", "--allow-empty", "-m", "later"]);
         sh(&tree, &["commit", "-q", "--allow-empty", "-m", "work"]);
 
@@ -156,7 +165,10 @@ mod tests {
         assert_eq!(fork_in(&store, &main), None);
         assert_eq!(fs::read_dir(&store).unwrap().count(), 1);
 
-        remove(&store, &main, &tree, false).unwrap();
+        sh(&tree, &["switch", "-q", "--detach"]);
+        assert_eq!(fork_in(&store, &tree).unwrap().fork_sha, start);
+
+        remove(Some(&store), &main, &tree, false).unwrap();
         assert_eq!(fs::read_dir(&store).unwrap().count(), 0);
         assert_eq!(fork_in(&store, &tree), None);
         fs::remove_dir_all(&main).unwrap();
@@ -164,15 +176,31 @@ mod tests {
     }
 
     #[test]
-    fn the_same_branch_name_in_two_repositories_keeps_two_records() {
+    fn worktree_folders_with_the_same_name_keep_separate_records() {
         let store = Path::new("/s");
-        assert_ne!(
-            sidecar(store, Path::new("/a"), "claude/x"),
-            sidecar(store, Path::new("/b"), "claude/x")
+        let (a, b) = (
+            sidecar(store, Path::new("/a/repo-x")),
+            sidecar(store, Path::new("/b/repo-x")),
         );
-        assert_ne!(
-            sidecar(store, Path::new("/a"), "claude/x"),
-            sidecar(store, Path::new("/a"), "claude-x")
-        );
+        assert_ne!(a, b);
+        assert!(a.to_string_lossy().starts_with("/s/repo-x-"));
+    }
+
+    #[test]
+    fn a_fork_point_that_cannot_be_saved_leaves_the_new_worktree_in_place() {
+        if !git::available() {
+            return;
+        }
+        let main = repo("unsaved");
+        let tree = main.with_extension("wt");
+        let _ = fs::remove_dir_all(&tree);
+        let blocked = main.join("not-a-dir");
+        fs::write(&blocked, "").unwrap();
+
+        let unsaved = create(Some(&blocked), &main, &tree, "claude/x").unwrap();
+        assert!(unsaved.is_some() && tree.is_dir());
+        assert_eq!(fork_in(&blocked, &tree), None);
+        remove(Some(&blocked), &main, &tree, false).unwrap();
+        fs::remove_dir_all(&main).unwrap();
     }
 }

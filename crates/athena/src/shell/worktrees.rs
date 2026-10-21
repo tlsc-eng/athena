@@ -202,18 +202,31 @@ pub(super) fn new_entries(
 ) -> Vec<BranchEntry> {
     let typed = query.trim();
     let mut out = Vec::new();
-    if let Some(stamp) = claude_stamp {
+    let claude_row = claude_stamp.map(|stamp| {
         let name = claude_branch(typed, stamp, |n| {
-            branches.iter().any(|b| !b.remote && b.name == n)
+            branches.iter().any(|b| {
+                if b.remote {
+                    short_name(&b.name) == n
+                } else {
+                    b.name == n
+                }
+            })
         });
-        out.push(BranchEntry {
-            label: format!("Start Claude on new branch “{name}”"),
-            // The query is a task description, so the row must match whatever it says.
-            key: typed.to_string(),
+        let label = format!("Start Claude on new branch “{name}”");
+        BranchEntry {
+            // The palette highlights the key's tail as the label; the query is a task
+            // description, so it leads the key to keep the row matching whatever it says.
+            key: if typed.is_empty() {
+                label.clone()
+            } else {
+                format!("{typed} {label}")
+            },
+            label,
             detail: Some("from the main checkout's HEAD".into()),
             pick: BranchPick::AddWorktree(NewWorktree::Create(name)),
-        });
-    } else if !typed.is_empty() && !branches.iter().any(|b| b.name == typed) {
+        }
+    });
+    if claude_row.is_none() && !typed.is_empty() && !branches.iter().any(|b| b.name == typed) {
         let label = format!("Create worktree with new branch “{typed}”");
         out.push(BranchEntry {
             key: label.clone(),
@@ -252,7 +265,27 @@ pub(super) fn new_entries(
             pick: BranchPick::AddWorktree(pick),
         });
     }
+    if let Some(row) = claude_row {
+        // Typing a branch's exact name means opening it; Claude's new branch comes after.
+        let exact = out.iter().position(|e| match &e.pick {
+            BranchPick::AddWorktree(NewWorktree::Existing(n)) => n == typed,
+            BranchPick::AddWorktree(NewWorktree::Track(r)) => short_name(r) == typed,
+            _ => false,
+        });
+        match exact {
+            Some(i) => {
+                let found = out.remove(i);
+                out.splice(0..0, [found, row]);
+            }
+            None => out.insert(0, row),
+        }
+    }
     out
+}
+
+/// `x` for the remote branch `origin/x`.
+fn short_name(remote: &str) -> &str {
+    remote.split_once('/').map_or(remote, |(_, name)| name)
 }
 
 impl Shell {
@@ -349,24 +382,27 @@ impl Shell {
                         std::fs::create_dir_all(parent)?;
                     }
                     if forked {
-                        worktree_forks::create(
-                            &worktree_forks::store()?,
-                            &main,
-                            &target,
-                            &new_branch,
-                        )
+                        let store = worktree_forks::store().ok();
+                        worktree_forks::create(store.as_deref(), &main, &target, &new_branch)
                     } else {
-                        git::add_worktree(&root, &target, &how)
+                        git::add_worktree(&root, &target, &how).map(|()| None)
                     }
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match done {
-                Ok(()) => {
-                    this.transient_notice(
-                        "Worktree created",
-                        format!("{branch} is checked out in {}.", display_path(&path)),
-                        cx,
-                    );
+                Ok(unsaved) => {
+                    match unsaved {
+                        Some(err) => this.transient_notice(
+                            "Worktree created, but its fork point was not saved",
+                            format!("{err:#}"),
+                            cx,
+                        ),
+                        None => this.transient_notice(
+                            "Worktree created",
+                            format!("{branch} is checked out in {}.", display_path(&path)),
+                            cx,
+                        ),
+                    }
                     this.open_folder(path.clone(), cx);
                     // Another window may hold the folder already; Claude starts only where it opened.
                     let opened = this.active_root().and_then(|r| r.canonicalize().ok());
@@ -408,7 +444,10 @@ impl Shell {
             let target = path.clone();
             let done = cx
                 .background_executor()
-                .spawn(async move { git::remove_worktree(&root, &target, force) })
+                .spawn(async move {
+                    let store = worktree_forks::store().ok();
+                    worktree_forks::remove(store.as_deref(), &root, &target, force)
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match done {
                 Ok(()) => {
@@ -556,10 +595,8 @@ impl Shell {
             let done = cx
                 .background_executor()
                 .spawn(async move {
-                    match worktree_forks::store() {
-                        Ok(store) => worktree_forks::remove(&store, &main, &target, force)?,
-                        Err(_) => git::remove_worktree(&main, &target, force)?,
-                    }
+                    let store = worktree_forks::store().ok();
+                    worktree_forks::remove(store.as_deref(), &main, &target, force)?;
                     let branch_done = branch
                         .map(|b| git::delete_branch(&main, &b, true).map_err(|e| (b, e)))
                         .transpose();
@@ -1140,24 +1177,108 @@ mod tests {
         assert!(stamp.bytes().all(|b| b.is_ascii_digit() || b == b'-'));
     }
 
+    /// The rows the Claude picker shows for `query`, in order: filtered, never re-ranked.
+    fn ranked(rows: &[BranchEntry], query: &str) -> Vec<usize> {
+        (0..rows.len())
+            .filter(|&i| crate::shell::fuzzy::score(query, &rows[i].key).is_some())
+            .collect()
+    }
+
+    #[test]
+    fn every_row_ends_its_key_with_its_label_as_the_palette_draws_it() {
+        let branches = [
+            branch("main", false),
+            branch("free", false),
+            branch("origin/remote-only", true),
+        ];
+        let worktrees = [worktree("/r", Some("main"))];
+        for stamp in [None, Some("20260102-0304")] {
+            for query in ["", "fix the login bug", "free", "日本語 ünï", "origin/x"] {
+                for row in new_entries(&branches, &worktrees, query, stamp) {
+                    assert!(
+                        row.key.ends_with(&row.label),
+                        "{:?} / {:?}",
+                        row.key,
+                        row.label
+                    );
+                    let offset = row.key.chars().count() - row.label.chars().count();
+                    let hit = crate::shell::fuzzy::score(query, &row.key);
+                    for p in hit.into_iter().flat_map(|(_, pos)| pos) {
+                        if p >= offset {
+                            let at = row.label.char_indices().nth(p - offset);
+                            assert!(at.is_some(), "highlight {p} outside {:?}", row.label);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_claude_session_offers_a_task_branch_first_whatever_is_typed() {
-        let branches = [branch("main", false), branch("claude/fix-it", false)];
+        let branches = [branch("main", false), branch("free", false)];
         let worktrees = [worktree("/r", Some("main"))];
-        let rows = new_entries(&branches, &worktrees, "fix it", Some("t"));
+        let rows = new_entries(&branches, &worktrees, "fix it!", Some("t"));
         assert_eq!(
             rows[0].pick,
-            BranchPick::AddWorktree(NewWorktree::Create("claude/fix-it-2".into()))
+            BranchPick::AddWorktree(NewWorktree::Create("claude/fix-it".into()))
         );
-        assert_eq!(rows[0].key, "fix it");
-        assert_eq!(
-            rows[1].pick,
-            BranchPick::AddWorktree(NewWorktree::Existing("claude/fix-it".into()))
-        );
+        assert!(rows[0].key.starts_with("fix it! "));
+        assert_eq!(ranked(&rows, "fix it!"), [0]);
         let blank = new_entries(&branches, &worktrees, "", Some("20260102-0304"));
         assert_eq!(
             blank[0].pick,
             BranchPick::AddWorktree(NewWorktree::Create("claude/20260102-0304".into()))
+        );
+        assert_eq!(ranked(&blank, ""), [0, 1]);
+    }
+
+    #[test]
+    fn typing_an_existing_branch_name_ranks_that_branch_before_the_claude_row() {
+        let branches = [
+            branch("main", false),
+            branch("free", false),
+            branch("feature/x", false),
+            branch("origin/remote-only", true),
+        ];
+        let worktrees = [worktree("/r", Some("main"))];
+        for (typed, wanted) in [
+            ("free", NewWorktree::Existing("free".into())),
+            ("feature/x", NewWorktree::Existing("feature/x".into())),
+            (
+                "remote-only",
+                NewWorktree::Track("origin/remote-only".into()),
+            ),
+        ] {
+            let rows = new_entries(&branches, &worktrees, typed, Some("t"));
+            assert_eq!(rows[0].pick, BranchPick::AddWorktree(wanted), "{typed}");
+            assert!(matches!(
+                rows[1].pick,
+                BranchPick::AddWorktree(NewWorktree::Create(_))
+            ));
+            let first = ranked(&rows, typed)[0];
+            assert_eq!(first, 0, "{typed} must open the branch on Enter");
+        }
+        let partial = new_entries(&branches, &worktrees, "fre", Some("t"));
+        assert!(matches!(
+            partial[0].pick,
+            BranchPick::AddWorktree(NewWorktree::Create(_))
+        ));
+        assert_eq!(ranked(&partial, "fre")[0], 0);
+    }
+
+    #[test]
+    fn a_name_is_taken_when_a_local_branch_or_a_remote_one_has_it() {
+        let branches = [
+            branch("main", false),
+            branch("claude/fix-it", false),
+            branch("origin/claude/fix-it-2", true),
+        ];
+        let worktrees = [worktree("/r", Some("main"))];
+        let rows = new_entries(&branches, &worktrees, "fix it", Some("t"));
+        assert_eq!(
+            rows[0].pick,
+            BranchPick::AddWorktree(NewWorktree::Create("claude/fix-it-3".into()))
         );
     }
 

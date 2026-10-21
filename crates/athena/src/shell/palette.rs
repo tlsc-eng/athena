@@ -1157,7 +1157,10 @@ impl Shell {
             .enumerate()
             .filter_map(|(i, e)| fuzzy::score(&query, &e.key).map(|(s, pos)| (s, i, pos)))
             .collect();
-        if !query.is_empty() {
+        // new_entries orders the Claude picker so Enter does what the query says; a fuzzy score
+        // would let a branch that merely resembles the task description outrank it.
+        let listed = palette.mode == Mode::NewWorktree && self.git.claude_in_new_worktree;
+        if !query.is_empty() && !listed {
             hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
         palette.hits = hits
