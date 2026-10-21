@@ -14,6 +14,7 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 
 use super::Shell;
+use super::claude_sessions::live::next_waiting;
 use super::item::ItemView;
 
 const KEEP: usize = 200;
@@ -267,25 +268,14 @@ pub(super) fn is_dismissing_click(
     pressed.is_some() && pressed == dismissed_by.take()
 }
 
-/// How many of the given Claude states are waiting for an answer.
-fn needing_input(states: impl IntoIterator<Item = Option<ClaudeState>>) -> usize {
-    states
-        .into_iter()
-        .filter(|s| matches!(s, Some(ClaudeState::NeedsInput)))
-        .count()
-}
-
 impl Shell {
-    /// Claude terminals, across this window's projects, waiting for an answer.
-    pub(super) fn claude_attention_count(&self) -> usize {
-        needing_input(self.items.values().filter_map(|view| match view {
-            ItemView::Terminal(t) => Some(self.claude_marks.get(&t.entity_id())?.state),
-            _ => None,
-        }))
+    /// Claude sessions, in every window, waiting for an answer or finished and not yet seen.
+    pub(super) fn claude_attention_count(&self, cx: &App) -> usize {
+        self.attention_total(cx)
     }
 
     pub(super) fn render_attention_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let count = self.claude_attention_count();
+        let count = self.claude_attention_count(cx);
         if count == 0 {
             return None;
         }
@@ -697,49 +687,32 @@ impl Shell {
         cx.notify();
     }
 
-    /// ⌥⌘J: the next Claude session waiting for an answer, else the next that has finished.
+    /// ⌥⌘J: the next Claude session, in any window, waiting for an answer, else the next finished
+    /// one not yet seen; the set the title bar counts.
     pub(super) fn next_claude_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut waiting: Vec<(u8, usize, ItemId, PathBuf)> = Vec::new();
-        for ((root, id), view) in &self.items {
-            let ItemView::Terminal(t) = view else {
-                continue;
-            };
-            let urgency = match self.claude_marks.get(&t.entity_id()).and_then(|m| m.state) {
-                Some(ClaudeState::NeedsInput) => 2,
-                Some(ClaudeState::Finished) => 1,
-                _ => continue,
-            };
-            if let Some(index) = self.workspace.projects.iter().position(|p| p.root == *root) {
-                waiting.push((urgency, index, *id, root.clone()));
-            }
-        }
-        let Some(top) = waiting.iter().map(|w| w.0).max() else {
+        let (waiting, this) = super::windows::waiting_everywhere(self, cx);
+        let focused = self.workspace.active.and_then(|index| {
+            let layout = self.workspace.projects[index].layout.as_ref();
+            let item = layout?.focused_pane()?.active_item()?.id;
+            Some((this, index, item))
+        });
+        let Some(next) = next_waiting(&waiting, focused) else {
             return self.transient_notice(
                 "No Claude session needs you",
                 "None is waiting for an answer or has finished.",
                 cx,
             );
         };
-        waiting.retain(|w| w.0 == top);
-        waiting.sort_by_key(|w| (w.1, w.2));
-        let here = self.workspace.active.map(|index| {
-            let focused = self.workspace.projects[index]
-                .layout
-                .as_ref()
-                .and_then(|l| l.focused_pane()?.active_item())
-                .map(|i| i.id);
-            (index, focused)
-        });
-        let next = waiting
-            .iter()
-            .find(|w| here.is_none_or(|(index, focused)| (w.1, Some(w.2)) > (index, focused)))
-            .unwrap_or(&waiting[0]);
-        let (root, id) = (next.3.clone(), next.2);
-        self.focus_item(&root, id, window, cx);
-        cx.notify();
+        if next.window == this {
+            let (root, id) = (next.root.clone(), next.item);
+            self.focus_item(&root, id, window, cx);
+            cx.notify();
+        } else {
+            super::windows::focus_item_in(next.window, next.root.clone(), next.item, cx);
+        }
     }
 
-    fn focus_item(
+    pub(super) fn focus_item(
         &mut self,
         root: &Path,
         item: ItemId,
@@ -1032,19 +1005,6 @@ mod tests {
     use super::*;
     use athena_workspace::Item;
     use gpui::{point, size};
-
-    #[test]
-    fn only_sessions_waiting_for_an_answer_need_you() {
-        let states = [
-            Some(ClaudeState::NeedsInput),
-            Some(ClaudeState::Running),
-            Some(ClaudeState::Finished),
-            None,
-            Some(ClaudeState::NeedsInput),
-        ];
-        assert_eq!(needing_input(states), 2);
-        assert_eq!(needing_input([]), 0);
-    }
 
     #[test]
     fn a_notice_finds_its_terminal_after_it_moves_and_not_the_one_reusing_its_id() {

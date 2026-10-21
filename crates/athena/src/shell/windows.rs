@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_proto::{AppMsg, AppReply, Notice, PaneId};
-use athena_workspace::{Project, WindowMode, WindowState, Workspace};
+use athena_workspace::{ItemId, Project, WindowMode, WindowState, Workspace};
 use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, Context, Global, PromptLevel, Task, TitlebarOptions,
     Window, WindowBounds, WindowHandle, WindowOptions, point, px, size,
@@ -15,6 +15,7 @@ use gpui::{
 
 use super::Shell;
 use super::bridge::hook_claude_holds_terminal;
+use super::claude_sessions::live::Waiting;
 use super::claude_sessions::{Bindings, SessionsState};
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
@@ -585,8 +586,36 @@ pub(super) fn unbind_elsewhere(session: String, except: AnyWindowHandle, cx: &mu
     }
 }
 
+/// Sessions needing you in every window, in the order the windows opened, with the number of
+/// `this` one, which cannot be read through its handle mid-update.
+pub(super) fn waiting_everywhere(this: &Shell, cx: &App) -> (Vec<Waiting>, usize) {
+    let mut at = 0;
+    let mut waiting = Vec::new();
+    for (n, handle) in handles(cx).into_iter().enumerate() {
+        if AnyWindowHandle::from(handle) == this.window_handle {
+            at = n;
+            waiting.extend(this.waiting_here(n, cx));
+        } else if let Ok(shell) = handle.read(cx) {
+            waiting.extend(shell.waiting_here(n, cx));
+        }
+    }
+    (waiting, at)
+}
+
+/// Brings window number `window`, as `waiting_everywhere` counts them, forward on a tab.
+pub(super) fn focus_item_in(window: usize, root: PathBuf, item: ItemId, cx: &mut App) {
+    let Some(handle) = handles(cx).get(window).copied() else {
+        return;
+    };
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |shell, window, cx| {
+            window.activate_window();
+            shell.focus_item(&root, item, window, cx);
+        });
+    });
+}
+
 /// Sessions needing you in every window but `except`; that window cannot be read mid-update.
-#[allow(dead_code)] // The title chip, which is not built yet, adds its own window's count.
 pub(super) fn attention_elsewhere(except: AnyWindowHandle, cx: &App) -> usize {
     handles(cx)
         .into_iter()

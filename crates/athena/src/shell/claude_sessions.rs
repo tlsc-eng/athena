@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, PoisonError};
@@ -25,8 +25,7 @@ use super::review::backup_dir;
 use crate::snapshots::{self, Before};
 use crate::transcripts::{self, Profile, Tokens};
 
-#[allow(dead_code)]
-// Read by the Sessions list, rail counts and title chip, which are not built yet.
+mod list;
 pub(super) mod live;
 
 actions!(
@@ -51,6 +50,10 @@ const PLAN_LINES: usize = 4;
 pub(super) struct SessionsState {
     root: Option<PathBuf>,
     rows: Rc<Vec<SessionRow>>,
+    /// The sessions of the other projects that terminals here run in; `rows` holds the active one's.
+    elsewhere: Rc<Vec<SessionRow>>,
+    /// The project roots the rows were last asked for.
+    loaded_roots: BTreeSet<PathBuf>,
     hooks_on: bool,
     loading: Option<Task<()>>,
     loaded_at: Option<Instant>,
@@ -126,6 +129,12 @@ impl SessionsState {
         self.panes.len() != before
     }
 
+    /// The row read for `id`, from whichever project's list holds it.
+    fn row(&self, id: &str) -> Option<&SessionRow> {
+        let mut all = self.elsewhere.iter().chain(self.rows.iter());
+        all.find(|r| r.id == id)
+    }
+
     /// The sessions bound to a pane here, each with when it last changed (`UNIX_EPOCH` while the
     /// list has not loaded it).
     pub(super) fn bound_sessions(&self) -> Vec<(String, SystemTime)> {
@@ -157,6 +166,8 @@ struct Review {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SessionRow {
     id: String,
+    /// The project it was read for.
+    root: PathBuf,
     label: String,
     /// The config folder its transcript is in; `None` when only edits were recorded.
     profile: Option<Profile>,
@@ -239,6 +250,7 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("Session {}", short_id(&s.id))),
             id: s.id,
+            root: root.to_path_buf(),
             profile: Some(s.profile),
             modified: s.modified,
             messages: s.summary.messages,
@@ -261,6 +273,7 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
             None => rows.push(SessionRow {
                 label: format!("Session {}", short_id(&stored.session)),
                 id: stored.session,
+                root: root.to_path_buf(),
                 profile: None,
                 modified: stored.modified,
                 messages: 0,
@@ -460,7 +473,10 @@ impl Shell {
         })
     }
 
+    /// Reads the sessions of `root` and of every other project a terminal here runs a session in.
     fn load_claude_sessions(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let mut roots = self.session_row_roots();
+        roots.insert(root.clone());
         let state = &mut self.review.sessions;
         if state.root.as_ref() != Some(&root) {
             state.rows = Rc::default();
@@ -468,22 +484,31 @@ impl Shell {
         }
         state.root = Some(root.clone());
         state.loaded_at = Some(Instant::now());
+        state.loaded_roots = roots.clone();
         let (Some(home), Ok(store)) = (std::env::home_dir(), snapshots::store()) else {
             return;
         };
         state.loading = Some(cx.spawn(async move |this, cx| {
-            let task_root = root.clone();
-            let (rows, hooks_on) = cx
+            let (loaded, hooks_on) = cx
                 .background_executor()
                 .spawn(async move {
-                    let rows = load(&home, &store, &task_root);
+                    let loaded: Vec<SessionRow> =
+                        roots.iter().flat_map(|r| load(&home, &store, r)).collect();
                     let hooks = crate::claude_hooks::global_settings(&home);
-                    (rows, hooks.iter().any(|p| crate::claude_hooks::enabled(p)))
+                    (
+                        loaded,
+                        hooks.iter().any(|p| crate::claude_hooks::enabled(p)),
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let state = &mut this.review.sessions;
                 if state.root.as_ref() == Some(&root) {
+                    let (rows, elsewhere): (Vec<_>, Vec<_>) =
+                        loaded.into_iter().partition(|r| r.root == root);
+                    if *state.elsewhere != elsewhere {
+                        state.elsewhere = Rc::new(elsewhere);
+                    }
                     state.loading = None;
                     state.hooks_on = hooks_on;
                     state.places.get_mut().clear();
@@ -503,6 +528,18 @@ impl Shell {
         }));
     }
 
+    /// Reads the lists again when they are stale, or a terminal now runs a session in a project
+    /// they have not covered.
+    fn refresh_sessions(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let state = &self.review.sessions;
+        let stale = state.loaded_at.is_none_or(|at| at.elapsed() > STALE_AFTER);
+        let idle = state.loading.is_none();
+        let reload = stale || self.session_row_roots() != state.loaded_roots;
+        if state.root.as_deref() != Some(root) || (reload && idle) {
+            self.load_claude_sessions(root.to_path_buf(), cx);
+        }
+    }
+
     pub(super) fn resume_claude_session(
         &mut self,
         id: &str,
@@ -511,6 +548,13 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(command) = resume_command(id, config_dir) {
+            // Claude finds a session by the folder it ran in, so a worktree's is resumed from there.
+            let home = self.review.sessions.row(id).map(|r| r.root.clone());
+            let index =
+                home.and_then(|root| self.workspace.projects.iter().position(|p| p.root == root));
+            if let Some(index) = index.filter(|i| Some(*i) != self.workspace.active) {
+                self.switch_to(index, cx);
+            }
             self.run_in_new_terminal(command, window, cx);
         }
     }
@@ -570,7 +614,12 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(root) = self.review.sessions.root.clone() else {
+        let state = &self.review.sessions;
+        let Some(root) = state
+            .row(&session)
+            .map(|r| r.root.clone())
+            .or(state.root.clone())
+        else {
             return;
         };
         if self.refuse_unsaved_revert(&path, cx) {
@@ -771,11 +820,7 @@ impl Shell {
                 cx,
             ));
         };
-        let state = &self.review.sessions;
-        let stale = state.loaded_at.is_none_or(|at| at.elapsed() > STALE_AFTER);
-        if state.root.as_ref() != Some(&root) || (stale && state.loading.is_none()) {
-            self.load_claude_sessions(root.clone(), cx);
-        }
+        self.refresh_sessions(&root, cx);
         let state = &self.review.sessions;
         if state.rows.is_empty() {
             if state.loading.is_some() {

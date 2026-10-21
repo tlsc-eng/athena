@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use athena_proto::{PaneId, TodoInfo};
 use athena_term::ClaudeState;
+use athena_workspace::ItemId;
 use athena_workspace::git;
 use gpui::App;
 
@@ -36,6 +37,7 @@ pub(crate) struct LiveSession {
 }
 
 impl LiveSession {
+    #[allow(dead_code)] // No caller yet; the list shows cost, not a token count.
     pub fn tokens(&self) -> u64 {
         self.usage.values().map(Tokens::total).sum()
     }
@@ -63,7 +65,48 @@ fn needs_you(state: Option<ClaudeState>, unread: bool) -> bool {
     }
 }
 
+/// A session that needs the user, placed so the next one to visit can be told.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Waiting {
+    /// 2 while it asks, 1 once it has finished unseen.
+    pub urgency: u8,
+    pub window: usize,
+    pub project: usize,
+    pub root: PathBuf,
+    pub item: ItemId,
+}
+
+/// The session after `here` in the order questions, then unseen finishes, each by window, project
+/// and tab; the first when `here` is not one of them.
+pub(crate) fn next_waiting(
+    waiting: &[Waiting],
+    here: Option<(usize, usize, ItemId)>,
+) -> Option<&Waiting> {
+    let mut order: Vec<&Waiting> = waiting.iter().collect();
+    order.sort_by_key(|w| (std::cmp::Reverse(w.urgency), w.window, w.project, w.item));
+    let current = here.and_then(|h| {
+        order
+            .iter()
+            .position(|w| (w.window, w.project, w.item) == h)
+    });
+    order
+        .get(current.map_or(0, |at| (at + 1) % order.len()))
+        .copied()
+}
+
+/// The project roots whose sessions to read: the active one and those of the bound sessions.
+pub(super) fn row_roots(
+    active: Option<&Path>,
+    bound: impl IntoIterator<Item = PathBuf>,
+) -> BTreeSet<PathBuf> {
+    bound
+        .into_iter()
+        .chain(active.map(Path::to_path_buf))
+        .collect()
+}
+
 /// Sessions that need the user: waiting for an answer, or finished and not yet seen.
+#[allow(dead_code)] // The windows count from their terminals instead; this one defines the rule over a list.
 pub(crate) fn attention_count(sessions: &[LiveSession]) -> usize {
     sessions
         .iter()
@@ -138,25 +181,72 @@ impl SessionsState {
 }
 
 impl Shell {
-    /// The project root and terminal view of `pane`, if this window holds it.
-    fn pane_view(&self, pane: PaneId) -> Option<(PathBuf, &ItemView)> {
+    /// The project root, tab and terminal view of `pane`, if this window holds it.
+    fn pane_view(&self, pane: PaneId) -> Option<(PathBuf, ItemId, &ItemView)> {
         let (root, item) = self.find_session(pane)?;
         let view = self.items.get(&(root.clone(), item))?;
-        matches!(view, ItemView::Terminal(_)).then_some((root, view))
+        matches!(view, ItemView::Terminal(_)).then_some((root, item, view))
     }
 
     /// This window's sessions that need you, from its terminals alone so it is cheap per frame.
-    pub(crate) fn attention_here(&self, cx: &App) -> usize {
+    fn needing_you<'a>(&'a self, cx: &'a App) -> impl Iterator<Item = (PathBuf, ItemId, u8)> + 'a {
         self.review
             .sessions
             .panes
             .keys()
             .filter_map(|pane| self.pane_view(*pane))
-            .filter(|(_, view)| {
+            .filter_map(|(root, item, view)| {
                 let state = view.claude_state(cx);
-                needs_you(state, unread(state, view.has_bell(cx)))
+                let urgency = match state {
+                    Some(ClaudeState::NeedsInput) => 2,
+                    _ if needs_you(state, unread(state, view.has_bell(cx))) => 1,
+                    _ => return None,
+                };
+                Some((root, item, urgency))
             })
-            .count()
+    }
+
+    pub(crate) fn attention_here(&self, cx: &App) -> usize {
+        self.needing_you(cx).count()
+    }
+
+    /// The project roots of this window's sessions that need you, one per session.
+    pub(in crate::shell) fn attention_roots(&self, cx: &App) -> Vec<PathBuf> {
+        self.needing_you(cx).map(|(root, ..)| root).collect()
+    }
+
+    /// This window's sessions that need you, as window number `window` of those open.
+    pub(in crate::shell) fn waiting_here(&self, window: usize, cx: &App) -> Vec<Waiting> {
+        self.needing_you(cx)
+            .filter_map(|(root, item, urgency)| {
+                let project = self
+                    .workspace
+                    .projects
+                    .iter()
+                    .position(|p| p.root == root)?;
+                Some(Waiting {
+                    urgency,
+                    window,
+                    project,
+                    root,
+                    item,
+                })
+            })
+            .collect()
+    }
+
+    /// The project roots to read sessions for: the active one and each a bound session runs in.
+    pub(in crate::shell) fn session_row_roots(&self) -> BTreeSet<PathBuf> {
+        let bound = self
+            .review
+            .sessions
+            .panes
+            .keys()
+            .filter_map(|pane| self.find_session(*pane).map(|(root, _)| root));
+        row_roots(
+            self.workspace.active_project().map(|p| p.root.as_path()),
+            bound,
+        )
     }
 
     /// One entry per session this window knows: those its terminals run, then its project's recent ones.
@@ -164,7 +254,7 @@ impl Shell {
         let state = &self.review.sessions;
         let mut running: HashMap<&str, Running> = HashMap::new();
         for (pane, id) in &state.panes {
-            let Some((root, view)) = self.pane_view(*pane) else {
+            let Some((root, _, view)) = self.pane_view(*pane) else {
                 continue;
             };
             running.insert(
@@ -177,8 +267,14 @@ impl Shell {
                 },
             );
         }
-        let rows: HashMap<&str, &SessionRow> =
-            state.rows.iter().map(|r| (r.id.as_str(), r)).collect();
+        // The other projects' rows come last, so a session's own project wins over one that only
+        // left edits under another's folder.
+        let rows: HashMap<&str, &SessionRow> = state
+            .rows
+            .iter()
+            .chain(state.elsewhere.iter())
+            .map(|r| (r.id.as_str(), r))
+            .collect();
         let ids = running
             .keys()
             .copied()
@@ -191,6 +287,7 @@ impl Shell {
                     .cwds
                     .get(id)
                     .or(term.map(|t| &t.root))
+                    .or(row.map(|r| &r.root))
                     .or(state.root.as_ref())
                     .cloned()
                     .unwrap_or_default();
@@ -298,6 +395,79 @@ mod tests {
                 "idle-old"
             ]
         );
+    }
+
+    fn waiting(urgency: u8, window: usize, project: usize, item: u64) -> Waiting {
+        Waiting {
+            urgency,
+            window,
+            project,
+            root: PathBuf::new(),
+            item: ItemId(item),
+        }
+    }
+
+    fn visited(
+        waiting: &[Waiting],
+        from: Option<(usize, usize, u64)>,
+        steps: usize,
+    ) -> Vec<(u8, usize, usize, u64)> {
+        let mut here = from.map(|(w, p, i)| (w, p, ItemId(i)));
+        let mut seen = Vec::new();
+        for _ in 0..steps {
+            let next = next_waiting(waiting, here).unwrap();
+            seen.push((next.urgency, next.window, next.project, next.item.0));
+            here = Some((next.window, next.project, next.item));
+        }
+        seen
+    }
+
+    #[test]
+    fn cycling_visits_questions_before_unseen_finishes_across_windows_and_wraps() {
+        let all = [
+            waiting(1, 0, 0, 5),
+            waiting(2, 1, 0, 2),
+            waiting(2, 0, 1, 3),
+            waiting(1, 1, 0, 1),
+            waiting(2, 0, 0, 9),
+        ];
+        let order = [
+            (2, 0, 0, 9),
+            (2, 0, 1, 3),
+            (2, 1, 0, 2),
+            (1, 0, 0, 5),
+            (1, 1, 0, 1),
+        ];
+        assert_eq!(
+            visited(&all, None, 6),
+            [order.as_slice(), &[order[0]]].concat()
+        );
+        assert_eq!(
+            visited(&all, Some((0, 0, 4)), 1),
+            [order[0]],
+            "from a tab that is not waiting, the most urgent first"
+        );
+        assert_eq!(next_waiting(&[], None), None);
+        let one = [waiting(2, 0, 0, 1)];
+        assert_eq!(visited(&one, Some((0, 0, 1)), 2), [(2, 0, 0, 1); 2]);
+    }
+
+    #[test]
+    fn rows_are_read_for_the_active_project_and_every_project_a_session_runs_in() {
+        let roots = |active: Option<&str>, bound: &[&str]| {
+            row_roots(active.map(Path::new), bound.iter().map(PathBuf::from))
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let path = |s: &str| PathBuf::from(s);
+        assert_eq!(roots(Some("/a"), &[]), [path("/a")]);
+        assert_eq!(
+            roots(Some("/a"), &["/b", "/a", "/b", "/a-wt"]),
+            [path("/a"), path("/a-wt"), path("/b")],
+            "each root once, the active one included"
+        );
+        assert_eq!(roots(None, &["/b"]), [path("/b")]);
+        assert!(roots(None, &[]).is_empty());
     }
 
     fn sh(dir: &Path, args: &[&str]) {
