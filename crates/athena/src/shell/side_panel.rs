@@ -74,7 +74,7 @@ impl Shell {
 
     /// The one call site Sessions mode renders through.
     fn render_sessions_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.render_claude_sessions(true, cx)
+        self.render_sessions_list(cx)
     }
 
     fn render_git_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {

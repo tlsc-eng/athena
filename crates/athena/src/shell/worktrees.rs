@@ -1128,6 +1128,23 @@ impl RailGroups {
         self.roots.len()
     }
 
+    /// Per project, how many of the sessions needing you (one root each) its row speaks for: its
+    /// own, and those of the worktrees `hidden` folds into their repository's row.
+    pub fn attention<'a>(
+        &self,
+        waiting: impl IntoIterator<Item = &'a Path>,
+        hidden: impl Fn(usize) -> bool,
+    ) -> Vec<usize> {
+        let mut counts = vec![0; self.roots.len()];
+        for root in waiting {
+            let Some((at, group)) = self.group_of(root) else {
+                continue;
+            };
+            counts[if hidden(at) { group.start } else { at }] += 1;
+        }
+        counts
+    }
+
     /// Whether a group starts at `at`, the end counting as one.
     pub fn starts_group(&self, at: usize) -> bool {
         match self.groups.get(at) {
@@ -1276,6 +1293,29 @@ mod tests {
             "/c-x" => Some(PathBuf::from("/c")),
             _ => None,
         }
+    }
+
+    #[test]
+    fn attention_counts_per_project_and_folds_hidden_worktrees_into_their_repository() {
+        let (_, groups) = rail(&["/a", "/a-feat", "/a-fix", "/b"]);
+        let waiting: Vec<&Path> = ["/a-feat", "/a", "/a-feat", "/a-fix", "/b", "/elsewhere"]
+            .iter()
+            .map(|r| Path::new(*r))
+            .collect();
+        assert_eq!(
+            groups.attention(waiting.iter().copied(), |_| false),
+            [1, 2, 1, 1]
+        );
+        assert_eq!(
+            groups.attention(waiting.iter().copied(), |i| i == 1),
+            [3, 0, 1, 1],
+            "only the worktree its repository hides moves up"
+        );
+        assert_eq!(
+            groups.attention(waiting.iter().copied(), |i| i == 1 || i == 2),
+            [4, 0, 0, 1]
+        );
+        assert_eq!(groups.attention([], |_| false), [0, 0, 0, 0]);
     }
 
     #[test]

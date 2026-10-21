@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use athena_term::ClaudeState;
-use athena_ui::{ActiveTheme, Theme, Tooltip, motion};
+use athena_ui::{ActiveTheme, Badge, Theme, Tooltip, motion};
 use athena_workspace::{FolderColor, FolderIcon, SidebarRow, Workspace, default_look};
 use gpui::{
     Animation, AnyElement, Context, ExternalPaths, FontWeight, Hsla, MouseButton, SharedString,
@@ -1073,6 +1073,10 @@ impl Shell {
         let rows = self.workspace.sidebar_rows_opening(&closing);
         let monograms = self.workspace.monograms();
         let groups = Rc::new(self.rail_groups());
+        let waiting = self.attention_roots(cx);
+        let attention = groups.attention(waiting.iter().map(PathBuf::as_path), |i| {
+            self.worktree_hidden(i, &groups)
+        });
         let mut items: Vec<AnyElement> = Vec::with_capacity(rows.len());
         // Each row's line, None when hidden; unopened worktrees add lines of their own when wide.
         let mut line_of_row = Vec::with_capacity(rows.len());
@@ -1149,6 +1153,7 @@ impl Shell {
                         monograms[*index].clone(),
                         wide,
                         &groups,
+                        attention[*index],
                         cx,
                     ));
                     if wide {
@@ -1585,6 +1590,7 @@ impl Shell {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_project_row(
         &self,
         i: usize,
@@ -1592,6 +1598,7 @@ impl Shell {
         monogram: String,
         wide: bool,
         groups: &Rc<RailGroups>,
+        attention: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
@@ -1735,6 +1742,7 @@ impl Shell {
                 .children(branch)
                 .children(awake)
                 .children(claude)
+                .when(attention > 0, |el| el.child(Badge::new(attention)))
                 .children(fold)
                 .into_any_element()
         } else {
@@ -1754,6 +1762,15 @@ impl Shell {
                 }))
                 .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
                 .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
+                .when(attention > 0, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(px(1.))
+                            .bottom(px(1.))
+                            .child(Badge::new(attention)),
+                    )
+                })
                 .when(folded, |el| {
                     el.child(
                         div()

@@ -1,5 +1,4 @@
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, PoisonError};
@@ -25,8 +24,7 @@ use super::review::backup_dir;
 use crate::snapshots::{self, Before};
 use crate::transcripts::{self, Profile, Tokens};
 
-#[allow(dead_code)]
-// Read by the Sessions list, rail counts and title chip, which are not built yet.
+mod list;
 pub(super) mod live;
 
 actions!(
@@ -51,6 +49,10 @@ const PLAN_LINES: usize = 4;
 pub(super) struct SessionsState {
     root: Option<PathBuf>,
     rows: Rc<Vec<SessionRow>>,
+    /// The sessions of the other projects that terminals here run in; `rows` holds the active one's.
+    elsewhere: Rc<Vec<SessionRow>>,
+    /// The project roots the rows were last asked for.
+    loaded_roots: BTreeSet<PathBuf>,
     hooks_on: bool,
     loading: Option<Task<()>>,
     loaded_at: Option<Instant>,
@@ -61,9 +63,8 @@ pub(super) struct SessionsState {
     panes: HashMap<PaneId, String>,
     /// Where each session started, as its SessionStart hook said.
     cwds: HashMap<String, PathBuf>,
-    /// `live::locate` per cwd, as the session list redraws often; dropped when a hook, a reload
-    /// or a branch move says the checkout may have changed.
-    places: RefCell<HashMap<PathBuf, (PathBuf, Option<String>)>>,
+    /// `live::locate` per cwd, read by a load in the background so drawing never touches the disk.
+    places: HashMap<PathBuf, live::Place>,
     review: Option<Review>,
 }
 
@@ -126,6 +127,16 @@ impl SessionsState {
         self.panes.len() != before
     }
 
+    /// The row read for `id`, from whichever project's list holds it.
+    fn row(&self, id: &str) -> Option<&SessionRow> {
+        let all = self.rows.iter().chain(self.elsewhere.iter());
+        pick_row(
+            all.filter(|r| r.id == id),
+            self.cwds.get(id).map(PathBuf::as_path),
+            self.root.as_deref(),
+        )
+    }
+
     /// The sessions bound to a pane here, each with when it last changed (`UNIX_EPOCH` while the
     /// list has not loaded it).
     pub(super) fn bound_sessions(&self) -> Vec<(String, SystemTime)> {
@@ -157,6 +168,8 @@ struct Review {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SessionRow {
     id: String,
+    /// The project it was read for.
+    root: PathBuf,
     label: String,
     /// The config folder its transcript is in; `None` when only edits were recorded.
     profile: Option<Profile>,
@@ -239,6 +252,7 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("Session {}", short_id(&s.id))),
             id: s.id,
+            root: root.to_path_buf(),
             profile: Some(s.profile),
             modified: s.modified,
             messages: s.summary.messages,
@@ -261,6 +275,7 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
             None => rows.push(SessionRow {
                 label: format!("Session {}", short_id(&stored.session)),
                 id: stored.session,
+                root: root.to_path_buf(),
                 profile: None,
                 modified: stored.modified,
                 messages: 0,
@@ -272,6 +287,23 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
     rows.sort_by_key(|r| std::cmp::Reverse(r.modified));
     rows.truncate(SESSIONS);
     rows
+}
+
+/// Of the rows read for one session, the one with a transcript, then the one read for the folder
+/// the session ran in, then the active project's; a project's list also holds sessions that only
+/// edited files under it. Rows are given in the same order everywhere, so a tie falls the same way.
+fn pick_row<'a>(
+    rows: impl IntoIterator<Item = &'a SessionRow>,
+    cwd: Option<&Path>,
+    active: Option<&Path>,
+) -> Option<&'a SessionRow> {
+    rows.into_iter().max_by_key(|r| {
+        (
+            r.profile.is_some(),
+            cwd == Some(r.root.as_path()),
+            active == Some(r.root.as_path()),
+        )
+    })
 }
 
 /// Whether two spellings of a path name the same file.
@@ -409,9 +441,11 @@ impl Shell {
     /// Binds `session` to `pane` here and drops it from every other window, which cannot run it too.
     pub(super) fn bind_session(&mut self, pane: PaneId, session: String, cx: &mut Context<Self>) {
         super::windows::unbind_elsewhere(session.clone(), self.window_handle, cx);
-        let state = &mut self.review.sessions;
-        state.places.get_mut().clear();
-        state.bind(pane, session);
+        let changed = self.review.sessions.panes.get(&pane) != Some(&session);
+        self.review.sessions.bind(pane, session);
+        if changed {
+            self.claude_sessions_stale(cx);
+        }
     }
 
     /// Something changed on disk or in a session: read the list again when it next draws.
@@ -460,7 +494,10 @@ impl Shell {
         })
     }
 
+    /// Reads the sessions of `root` and of every other project a terminal here runs a session in.
     fn load_claude_sessions(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let mut roots = self.session_row_roots();
+        roots.insert(root.clone());
         let state = &mut self.review.sessions;
         if state.root.as_ref() != Some(&root) {
             state.rows = Rc::default();
@@ -468,25 +505,37 @@ impl Shell {
         }
         state.root = Some(root.clone());
         state.loaded_at = Some(Instant::now());
+        state.loaded_roots = roots.clone();
+        let mut cwds = roots.clone();
+        cwds.extend(state.cwds.values().cloned());
         let (Some(home), Ok(store)) = (std::env::home_dir(), snapshots::store()) else {
             return;
         };
         state.loading = Some(cx.spawn(async move |this, cx| {
-            let task_root = root.clone();
-            let (rows, hooks_on) = cx
+            let (loaded, places, hooks_on) = cx
                 .background_executor()
                 .spawn(async move {
-                    let rows = load(&home, &store, &task_root);
+                    let loaded: Vec<SessionRow> =
+                        roots.iter().flat_map(|r| load(&home, &store, r)).collect();
                     let hooks = crate::claude_hooks::global_settings(&home);
-                    (rows, hooks.iter().any(|p| crate::claude_hooks::enabled(p)))
+                    (
+                        loaded,
+                        live::locate_all(&cwds),
+                        hooks.iter().any(|p| crate::claude_hooks::enabled(p)),
+                    )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 let state = &mut this.review.sessions;
                 if state.root.as_ref() == Some(&root) {
+                    let (rows, elsewhere): (Vec<_>, Vec<_>) =
+                        loaded.into_iter().partition(|r| r.root == root);
+                    if *state.elsewhere != elsewhere {
+                        state.elsewhere = Rc::new(elsewhere);
+                    }
                     state.loading = None;
                     state.hooks_on = hooks_on;
-                    state.places.get_mut().clear();
+                    state.places = places;
                     // The newest session opens on first view: it is usually the one to review.
                     if state.rows.is_empty()
                         && state.expanded.is_empty()
@@ -503,6 +552,18 @@ impl Shell {
         }));
     }
 
+    /// Reads the lists again when they are stale, or a terminal now runs a session in a project
+    /// they have not covered.
+    fn refresh_sessions(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let state = &self.review.sessions;
+        let stale = state.loaded_at.is_none_or(|at| at.elapsed() > STALE_AFTER);
+        let idle = state.loading.is_none();
+        let reload = stale || self.session_row_roots() != state.loaded_roots;
+        if state.root.as_deref() != Some(root) || (reload && idle) {
+            self.load_claude_sessions(root.to_path_buf(), cx);
+        }
+    }
+
     pub(super) fn resume_claude_session(
         &mut self,
         id: &str,
@@ -511,6 +572,13 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(command) = resume_command(id, config_dir) {
+            // Claude finds a session by the folder it ran in, so a worktree's is resumed from there.
+            let home = self.review.sessions.row(id).map(|r| r.root.clone());
+            let index =
+                home.and_then(|root| self.workspace.projects.iter().position(|p| p.root == root));
+            if let Some(index) = index.filter(|i| Some(*i) != self.workspace.active) {
+                self.switch_to(index, cx);
+            }
             self.run_in_new_terminal(command, window, cx);
         }
     }
@@ -570,7 +638,12 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(root) = self.review.sessions.root.clone() else {
+        let state = &self.review.sessions;
+        let Some(root) = state
+            .row(&session)
+            .map(|r| r.root.clone())
+            .or(state.root.clone())
+        else {
             return;
         };
         if self.refuse_unsaved_revert(&path, cx) {
@@ -771,11 +844,7 @@ impl Shell {
                 cx,
             ));
         };
-        let state = &self.review.sessions;
-        let stale = state.loaded_at.is_none_or(|at| at.elapsed() > STALE_AFTER);
-        if state.root.as_ref() != Some(&root) || (stale && state.loading.is_none()) {
-            self.load_claude_sessions(root.clone(), cx);
-        }
+        self.refresh_sessions(&root, cx);
         let state = &self.review.sessions;
         if state.rows.is_empty() {
             if state.loading.is_some() {
@@ -1241,6 +1310,69 @@ pub(super) fn bind_claude_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(id: &str, root: &str, transcript: bool) -> SessionRow {
+        SessionRow {
+            id: id.into(),
+            root: root.into(),
+            label: format!("{root} {transcript}"),
+            profile: transcript.then(|| Profile {
+                name: "claude".into(),
+                config_dir: None,
+                dir: PathBuf::new(),
+            }),
+            modified: SystemTime::UNIX_EPOCH,
+            messages: 0,
+            tokens: BTreeMap::new(),
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_session_in_two_lists_takes_the_row_with_a_transcript_then_the_one_for_its_folder() {
+        let (edits_only, own) = (row("s", "/main", false), row("s", "/wt", false));
+        let transcript = row("s", "/wt", true);
+        let picked = |rows: &[&SessionRow], cwd: &str| {
+            pick_row(rows.iter().copied(), Some(Path::new(cwd)), None).map(|r| r.label.clone())
+        };
+        assert_eq!(
+            picked(&[&edits_only, &transcript], "/main"),
+            Some("/wt true".into()),
+            "a transcript beats the folder match"
+        );
+        assert_eq!(
+            picked(&[&edits_only, &own], "/wt"),
+            Some("/wt false".into())
+        );
+        assert_eq!(
+            picked(&[&own, &edits_only], "/main"),
+            Some("/main false".into())
+        );
+        assert!(pick_row([], None, None).is_none());
+        let (here, there) = (row("s", "/a", false), row("s", "/b", false));
+        let by_active = |active: &str| {
+            let rows = [&there, &here];
+            pick_row(rows, None, Some(Path::new(active))).map(|r| r.root.clone())
+        };
+        assert_eq!(by_active("/a"), Some(PathBuf::from("/a")));
+        assert_eq!(by_active("/b"), Some(PathBuf::from("/b")));
+
+        let mut state = SessionsState {
+            rows: Rc::new(vec![edits_only]),
+            elsewhere: Rc::new(vec![own]),
+            ..SessionsState::default()
+        };
+        state.cwds.insert("s".into(), "/wt".into());
+        assert_eq!(
+            state.row("s").map(|r| r.root.as_path()),
+            Some(Path::new("/wt"))
+        );
+        state.cwds.insert("s".into(), "/main".into());
+        assert_eq!(
+            state.row("s").map(|r| r.root.as_path()),
+            Some(Path::new("/main"))
+        );
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("athena-cs-{name}-{}", std::process::id()));

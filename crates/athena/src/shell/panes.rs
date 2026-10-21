@@ -234,6 +234,9 @@ impl Shell {
                             if on_screen || after != before {
                                 this.notify_coalesced(cx);
                             }
+                            if after.state != before.state {
+                                super::windows::notify_others(this.window_handle, cx);
+                            }
                             return;
                         }
                         TerminalEvent::Seen => {
