@@ -166,7 +166,7 @@ pub(super) fn covers(toasts: Bounds<Pixels>, pane: Rect) -> bool {
     left < pane.x + pane.w && pane.x < right && top < pane.y + pane.h && pane.y < bottom
 }
 
-/// Title and body for a notice, as shown in toasts, the drawer and macOS banners.
+/// Title and body for a notice, as shown in toasts, the bell popover and macOS banners.
 pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, String) {
     let place = project.unwrap_or("Athena");
     match kind {
@@ -331,6 +331,13 @@ impl Shell {
         if self.bell.open {
             return self.close_bell(window, cx);
         }
+        self.open_bell(window, cx);
+    }
+
+    pub(super) fn open_bell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bell.open {
+            return;
+        }
         self.bell.open = true;
         self.bell.restore = window.focused(cx);
         window.focus(&self.bell.focus);
@@ -461,9 +468,7 @@ impl Shell {
             session: target.as_ref().and(notice.pane),
             kind: notice.kind,
             at: notice.at,
-            read: watching
-                || self.bell.open
-                || self.drawer == Some(super::drawer::DrawerTab::Notifications),
+            read: watching || self.bell.open,
         };
         if !watching {
             if let Some(ItemView::Terminal(view)) = &view {
@@ -892,7 +897,7 @@ impl Shell {
         )
     }
 
-    /// The Notifications tab's list, newest first.
+    /// The bell popover's list, newest first.
     pub(super) fn render_notifications(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let log = self.notices.borrow();
@@ -966,11 +971,6 @@ impl Shell {
                 )
             })
             .into_any_element()
-    }
-
-    pub(super) fn clear_notifications(&mut self, cx: &mut Context<Self>) {
-        self.notices.borrow_mut().list.clear();
-        self.notices_changed(cx);
     }
 
     pub(super) fn mark_all_read(&mut self, cx: &mut Context<Self>) {

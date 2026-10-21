@@ -534,12 +534,19 @@ fn rule(
     Ok(Rule::Bind(binding(key, action, when)?))
 }
 
+/// Commands that were renamed, so a keymap.json written before still binds and unbinds them.
+const RENAMED: &[(&str, &str)] = &[("athena::ToggleNotifications", "athena::ToggleDrawer")];
+
 /// Athena's own commands may be named without their `athena::` prefix.
 fn qualified(name: &str) -> String {
-    if name.contains("::") {
+    let full = if name.contains("::") {
         name.to_string()
     } else {
         format!("athena::{name}")
+    };
+    match RENAMED.iter().find(|(old, _)| *old == full) {
+        Some((_, new)) => new.to_string(),
+        None => full,
     }
 }
 
@@ -722,7 +729,7 @@ mod tests {
     use gpui::KeyContext;
 
     use super::*;
-    use crate::actions::{NewTerminal, QuickOpen, SplitDown, SplitRight};
+    use crate::actions::{NewTerminal, QuickOpen, SplitDown, SplitRight, ToggleDrawer};
 
     fn build(name: &str, _: Option<serde_json::Value>) -> Result<Box<dyn Action>> {
         match name {
@@ -791,6 +798,35 @@ mod tests {
         assert!(problems[4].contains("typo"));
         let (_, broken) = parse("{", build);
         assert_eq!(broken.len(), 1);
+    }
+
+    #[test]
+    fn the_old_toggle_notifications_name_binds_and_unbinds_toggle_drawer() {
+        let build = |name: &str, _: Option<serde_json::Value>| -> Result<Box<dyn Action>> {
+            match name {
+                "athena::ToggleDrawer" => Ok(Box::new(ToggleDrawer)),
+                _ => Err(anyhow!("unknown")),
+            }
+        };
+        let (rules, problems) = parse(
+            r#"[{"key": "cmd-k cmd-j", "command": "ToggleNotifications"},
+                {"key": "cmd-l", "command": "athena::ToggleNotifications"},
+                {"key": "cmd-j", "command": "-ToggleNotifications"}]"#,
+            build,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let merged = merge(&[KeyBinding::new("cmd-j", ToggleDrawer, None)], rules);
+        assert_eq!(
+            summary(&merged),
+            [
+                ("cmd-k cmd-j".to_string(), "athena::ToggleDrawer"),
+                ("cmd-l".to_string(), "athena::ToggleDrawer"),
+            ]
+        );
+        assert_eq!(
+            entry_commands(r#"[{"key": "cmd-l", "command": "ToggleNotifications"}]"#),
+            [Some("athena::ToggleDrawer".to_string())]
+        );
     }
 
     #[test]

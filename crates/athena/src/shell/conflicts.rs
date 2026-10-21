@@ -23,25 +23,6 @@ pub(super) fn count_conflicts(entries: &[(PathBuf, Entry)]) -> (usize, usize) {
     (blocks.len(), blocks.iter().sum())
 }
 
-/// "2 conflicts in 1 file" for the Changes tab, or nothing when there are none.
-pub(super) fn conflicts_label((files, blocks): (usize, usize)) -> Option<String> {
-    if files == 0 {
-        return None;
-    }
-    let plural = |n: usize, word: &str| {
-        if n == 1 {
-            format!("1 {word}")
-        } else {
-            format!("{n} {word}s")
-        }
-    };
-    Some(format!(
-        "{} in {}",
-        plural(blocks, "conflict"),
-        plural(files, "file")
-    ))
-}
-
 impl Shell {
     /// Offers to stage a conflicted file once a save leaves no conflict markers in it.
     pub(super) fn watch_conflicts(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
@@ -106,19 +87,6 @@ pub(super) fn bind_conflict_actions(el: gpui::Div, cx: &mut Context<Shell>) -> g
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_changes_tab_counts_blocks_and_files() {
-        assert_eq!(conflicts_label((0, 0)), None);
-        assert_eq!(
-            conflicts_label((1, 1)).as_deref(),
-            Some("1 conflict in 1 file")
-        );
-        assert_eq!(
-            conflicts_label((2, 3)).as_deref(),
-            Some("3 conflicts in 2 files")
-        );
-    }
 
     #[test]
     fn conflicted_files_are_read_for_their_blocks() {

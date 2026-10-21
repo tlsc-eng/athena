@@ -18,6 +18,11 @@ pub(super) struct SidePanelState {
     timeline_collapsed: bool,
 }
 
+/// Whether ShowChanges hides the panel: only when it is already showing Git.
+fn hides_git_panel(panel_visible: bool, mode: SideMode) -> bool {
+    panel_visible && mode == SideMode::Git
+}
+
 impl Shell {
     /// Switches the side panel to `mode`, showing the panel first if it was hidden.
     pub(super) fn select_side_mode(&mut self, mode: SideMode, cx: &mut Context<Self>) {
@@ -29,6 +34,26 @@ impl Shell {
             self.schedule_save(cx);
         }
         cx.notify();
+    }
+
+    /// Shows Git mode with Changes open, unlike ShowChanges, which hides the panel when it is already there.
+    pub(super) fn show_changes(&mut self, cx: &mut Context<Self>) {
+        self.side_panel.changes_collapsed = false;
+        self.select_side_mode(SideMode::Git, cx);
+    }
+
+    /// Shows Git mode with Timeline open.
+    pub(super) fn show_timeline(&mut self, cx: &mut Context<Self>) {
+        self.side_panel.timeline_collapsed = false;
+        self.select_side_mode(SideMode::Git, cx);
+    }
+
+    pub(super) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
+        if hides_git_panel(self.workspace.ui.tree_visible, self.workspace.ui.side_mode) {
+            self.toggle_tree(cx);
+        } else {
+            self.show_changes(cx);
+        }
     }
 
     /// `select_side_mode`, then focuses Outline's filter, which is what asking for the outline means.
@@ -146,5 +171,20 @@ impl Shell {
             )
             .children(body.map(|body| div().flex_1().min_h_0().overflow_hidden().child(body)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_changes_hides_the_panel_only_when_it_is_visible_on_git() {
+        assert!(hides_git_panel(true, SideMode::Git));
+        assert!(!hides_git_panel(false, SideMode::Git));
+        for mode in [SideMode::Sessions, SideMode::Files, SideMode::Outline] {
+            assert!(!hides_git_panel(true, mode));
+            assert!(!hides_git_panel(false, mode));
+        }
     }
 }

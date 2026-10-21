@@ -12,9 +12,7 @@ use gpui::{
 };
 
 use super::Shell;
-use super::drawer::DrawerTab;
 use super::git_view::under_root;
-use super::item::file_label;
 use super::menus::shell_item;
 use super::review::short_rev;
 
@@ -64,9 +62,9 @@ impl Shell {
         Some((project.root.clone(), file))
     }
 
-    /// "Open Timeline": the active file's history in the drawer.
+    /// "Open Timeline": the active file's history in the Git panel.
     pub(super) fn open_timeline(&mut self, cx: &mut Context<Self>) {
-        self.show_drawer_tab(DrawerTab::Timeline, cx);
+        self.show_timeline(cx);
         match self.timeline_target() {
             Some(target) => self.load_timeline(target, cx),
             None => {
@@ -151,24 +149,6 @@ impl Shell {
             }),
         ];
         self.open_context_menu(position, items, window, cx);
-    }
-
-    /// The file the list is for, shown beside the drawer tabs.
-    pub(super) fn render_timeline_title(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (_, path) = self.review.timeline.file.as_ref()?;
-        let n = self.review.timeline.entries.len();
-        let count = match (self.review.timeline.loading.is_some(), n) {
-            (true, _) => "Reading history…".to_string(),
-            (false, 1) => "1 commit".into(),
-            (false, n) if n >= git::LOG_LIMIT => format!("Latest {n} commits"),
-            (false, n) => format!("{n} commits"),
-        };
-        Some(
-            div()
-                .text_color(cx.theme().color.content_muted)
-                .child(format!("{} · {count}", file_label(path)))
-                .into_any_element(),
-        )
     }
 
     pub(super) fn render_timeline(&mut self, cx: &mut Context<Self>) -> AnyElement {

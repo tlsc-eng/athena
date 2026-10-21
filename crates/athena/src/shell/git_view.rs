@@ -1215,36 +1215,6 @@ impl Shell {
         Some(change_rows(root, repo.prefix.as_deref()?, &repo.entries))
     }
 
-    pub(super) fn render_changes_count(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let root = &self.workspace.active_project()?.root;
-        let repo = self.git.repos.get(root)?;
-        repo.prefix.as_ref()?;
-        let n = repo
-            .entries
-            .iter()
-            .filter(|(_, e)| e.unstaged != Some(FileStatus::Ignored))
-            .count();
-        let text = match n {
-            0 => "No changes".to_string(),
-            1 => "1 changed file".to_string(),
-            n => format!("{n} changed files"),
-        };
-        let branch = repo.branch.clone().map(|b| format!("{b} · "));
-        let conflicts = super::conflicts::conflicts_label(repo.conflicts);
-        let t = cx.theme();
-        Some(
-            div()
-                .flex()
-                .gap(px(6.))
-                .text_color(t.color.content_muted)
-                .child(format!("{}{text}", branch.unwrap_or_default()))
-                .children(
-                    conflicts.map(|c| div().text_color(t.color.danger).child(format!("· {c}"))),
-                )
-                .into_any_element(),
-        )
-    }
-
     /// Cmd+Enter in the message box or the Commit button: commits what is staged, offering to
     /// stage everything first when nothing is, as VS Code does.
     pub(super) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
