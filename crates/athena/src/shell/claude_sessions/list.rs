@@ -178,11 +178,6 @@ fn should_spin(visible: bool, any_running: bool, reduced: bool) -> bool {
     visible && any_running && !reduced
 }
 
-/// Whether a tick goes on: only if the list drew since the last one, else nothing shows it.
-fn keep_spinning(drawn: bool) -> bool {
-    drawn
-}
-
 /// The wait to the next tick boundary after `elapsed`, so ticks stay on the grid `spin_step` reads.
 fn until_next_tick(elapsed: Duration) -> Duration {
     let tick = SPIN_TICK_MS as u64;
@@ -667,7 +662,8 @@ impl Shell {
                 cx.background_executor().timer(wait).await;
                 let kept = this.update(cx, |this, cx| {
                     let state = &mut this.review.sessions;
-                    let kept = keep_spinning(std::mem::take(&mut state.spin_drawn));
+                    // No draw since the last tick means nothing shows the glyph, so stop.
+                    let kept = std::mem::take(&mut state.spin_drawn);
                     if kept {
                         cx.notify();
                     } else {
@@ -975,12 +971,6 @@ mod tests {
         assert_eq!(at(125), eighth);
         assert_eq!(at(1000), 0.);
         assert_eq!(at(1125), eighth);
-    }
-
-    #[test]
-    fn a_tick_goes_on_only_if_the_list_drew_since_the_last() {
-        assert!(keep_spinning(true));
-        assert!(!keep_spinning(false));
     }
 
     #[test]
