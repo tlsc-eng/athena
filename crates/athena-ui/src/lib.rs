@@ -63,8 +63,8 @@ impl ActiveTheme for App {
     }
 }
 
-/// Single-line text that ends in "…" when it overflows its box.
-/// The element must not be a flex container; gpui 0.2.2 never truncates `whitespace_nowrap` text.
+/// Text that ends in "…" when a line overflows its box.
+/// Put it on an element whose only child is the text, not on a flex container, where the bare text cannot shrink.
 pub trait Ellipsis: Styled + Sized {
     fn ellipsis(self) -> Self {
         self.whitespace_normal().line_clamp(1).text_ellipsis()
@@ -72,3 +72,18 @@ pub trait Ellipsis: Styled + Sized {
 }
 
 impl<E: Styled> Ellipsis for E {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{WhiteSpace, div};
+
+    #[test]
+    fn ellipsis_clamps_one_normal_whitespace_line() {
+        let mut el = div().whitespace_nowrap().ellipsis();
+        let style = el.text_style().clone().unwrap();
+        assert_eq!(style.white_space, Some(WhiteSpace::Normal));
+        assert_eq!(style.line_clamp, Some(1));
+        assert!(style.text_overflow.is_some());
+    }
+}
