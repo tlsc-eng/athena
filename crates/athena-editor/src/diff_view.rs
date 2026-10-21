@@ -14,7 +14,9 @@ use gpui::{
 use ropey::Rope;
 
 use crate::diff::{self, Change, Row, Shown};
-use crate::review::{ReviewEvent, ReviewMark, ReviewState, anchor, range_for};
+use crate::review::{
+    MarkState, ReviewEvent, ReviewMark, ReviewState, anchor, range_for, row_visible,
+};
 use crate::syntax::{Lang, Syntax, Token};
 
 actions!(
@@ -585,11 +587,20 @@ impl DiffView {
         ((view / h) as isize - 2).max(1)
     }
 
-    fn scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let delta = event.delta.pixel_delta(px(self.row_height(cx)));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         if dy != 0. {
             self.current = None;
+        }
+        if dy != 0. && self.review.close() {
+            window.focus(&self.focus);
+            cx.notify();
         }
         if dx.abs() > dy.abs()
             && let Some(loaded) = &self.loaded
@@ -659,7 +670,9 @@ impl DiffView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
-        self.review.close();
+        if self.review.close() {
+            cx.notify();
+        }
         let Some((row, which, col)) = self.point_at(event.position, cx) else {
             return;
         };
@@ -1315,6 +1328,11 @@ impl DiffView {
         }
     }
 
+    /// Tells the open popover its comment was stored.
+    pub fn review_saved(&mut self, cx: &mut Context<Self>) {
+        self.review.saved(cx);
+    }
+
     /// The new-side lines of a selection on the new side, if it spans several rows.
     fn selected_new_lines(&self) -> Option<RangeInclusive<u32>> {
         let s = self
@@ -1369,17 +1387,20 @@ impl DiffView {
             false => gpui::relative(0.5).into(),
         };
         let mark = match self.review.dot(line) {
-            Some(stale) => div()
-                .size(px(7.))
-                .rounded_full()
-                .border_1()
-                .border_color(if stale {
-                    t.color.content_muted
-                } else {
-                    t.color.accent
-                })
-                .when(!stale, |el| el.bg(t.color.accent))
-                .into_any_element(),
+            Some(state) => {
+                let (fill, ring) = match state {
+                    MarkState::Active => (Some(t.color.accent), t.color.accent),
+                    MarkState::Stale => (None, t.color.content_muted),
+                    MarkState::Sent => (Some(t.color.content_disabled), t.color.content_disabled),
+                };
+                div()
+                    .size(px(7.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(ring)
+                    .when_some(fill, |el, color| el.bg(color))
+                    .into_any_element()
+            }
             None => div()
                 .text_color(gpui::transparent_black())
                 .group_hover(group.clone(), |s| s.text_color(t.syntax.line_number_active))
@@ -1422,10 +1443,11 @@ impl DiffView {
         let handle = self.scroll.0.borrow().base_handle.clone();
         let bounds = handle.bounds();
         let row_h = self.row_height(cx);
-        let y = bounds.top() + handle.offset().y + px(row_h * (at + 1) as f32);
-        if y < bounds.top() || y > bounds.bottom() {
+        let top = handle.offset().y + px(row_h * at as f32);
+        if !row_visible(top.into(), row_h, bounds.size.height.into()) {
             return None;
         }
+        let y = bounds.top() + top + px(row_h);
         let gutter = self.gutter_width(loaded, cx);
         let x = match self.inline {
             true => 2. * gutter + SIGN_WIDTH,

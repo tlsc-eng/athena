@@ -118,6 +118,7 @@ impl Shell {
             },
             AppMsg::ClaudeSession { session, .. } => {
                 self.claude_session_started(session, caller, cx);
+                self.sync_review_columns(cx);
                 AppReply::Ok
             }
             msg @ (AppMsg::ClaudeTodos { .. } | AppMsg::ClaudePlan { .. }) => {

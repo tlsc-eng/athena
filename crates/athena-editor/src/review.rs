@@ -25,6 +25,28 @@ pub struct ReviewMark {
     pub body: String,
     /// Its lines changed so much that this is only where it used to be.
     pub stale: bool,
+    /// Already delivered to the session.
+    pub sent: bool,
+}
+
+/// How a gutter dot looks; a line with several comments shows the loudest of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MarkState {
+    /// Filled muted, as something done with.
+    Sent,
+    /// A hollow ring: the comment lost its lines.
+    Stale,
+    Active,
+}
+
+impl ReviewMark {
+    fn state(&self) -> MarkState {
+        match (self.sent, self.stale) {
+            (true, _) => MarkState::Sent,
+            (false, true) => MarkState::Stale,
+            (false, false) => MarkState::Active,
+        }
+    }
 }
 
 /// What the user did in a view's comment popover; whoever stores the comments answers it with
@@ -75,10 +97,43 @@ pub(crate) fn selection_lines(first: usize, last: usize, end_col: usize) -> Rang
     first as u32 + 1..=last as u32 + 1
 }
 
+/// What saving the box asks for: an edit of the comment being edited, else a new comment on
+/// `range`; nothing for blank text.
+fn save_event(
+    editing: Option<u64>,
+    range: &RangeInclusive<u32>,
+    text: &str,
+) -> Option<ReviewEvent> {
+    let body = text.trim().to_string();
+    if body.is_empty() {
+        return None;
+    }
+    Some(match editing {
+        Some(id) => ReviewEvent::Edit { id, body },
+        None => ReviewEvent::Add {
+            lines: range.clone(),
+            body,
+        },
+    })
+}
+
+/// Whether a row whose top is `top` below the viewport's top, `row_h` tall, is on screen.
+pub(crate) fn row_visible(top: f32, row_h: f32, viewport_h: f32) -> bool {
+    top + row_h > 0. && top < viewport_h
+}
+
+/// The last visual row of a line: the lowest of its drawn rows, never above its first.
+pub(crate) fn last_row(drawn: impl Iterator<Item = usize>, first: usize) -> usize {
+    drawn.fold(first, usize::max)
+}
+
 /// A view's review comments and the popover open on one of its lines.
 #[derive(Default)]
 pub(crate) struct ReviewState {
+    /// Comments can be read and written here.
     pub(crate) enabled: bool,
+    /// The gutter column is kept, empty if need be, so text does not move when `enabled` flips.
+    pub(crate) reserved: bool,
     marks: Vec<ReviewMark>,
     /// The one-based line the pointer is over.
     pub(crate) hover: Option<u32>,
@@ -92,11 +147,14 @@ struct Open {
 }
 
 impl ReviewState {
-    /// Whether `line` starts a comment, and if so whether every one there is stale.
-    pub(crate) fn dot(&self, line: u32) -> Option<bool> {
-        let mut here = self.marks.iter().filter(|m| *m.lines.start() == line);
-        let first = here.next()?;
-        Some(first.stale && here.all(|m| m.stale))
+    /// The dot for `line` if a comment starts there.
+    pub(crate) fn dot(&self, line: u32) -> Option<MarkState> {
+        let starts_here = self.marks.iter().filter(|m| *m.lines.start() == line);
+        starts_here.map(ReviewMark::state).max()
+    }
+
+    pub(crate) fn column_shown(&self) -> bool {
+        self.enabled || self.reserved
     }
 
     fn here(&self, line: u32) -> Vec<ReviewMark> {
@@ -113,7 +171,17 @@ impl ReviewState {
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if !enabled {
-            *self = Self::default();
+            *self = Self {
+                reserved: self.reserved,
+                ..Self::default()
+            };
+        }
+    }
+
+    /// Tells the open popover its comment was stored, so it lets go of what was typed.
+    pub(crate) fn saved(&self, cx: &mut gpui::App) {
+        if let Some(open) = &self.open {
+            open.popover.update(cx, |p, cx| p.saved(cx));
         }
     }
 
@@ -222,19 +290,17 @@ impl CommentPopover {
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
-        let body = self.input.read(cx).text().trim().to_string();
-        if body.is_empty() {
-            return;
+        let text = self.input.read(cx).text();
+        if let Some(event) = save_event(self.editing, &self.range, text) {
+            cx.emit(PopoverEvent::Review(event));
         }
-        let event = match self.editing.take() {
-            Some(id) => ReviewEvent::Edit { id, body },
-            None => ReviewEvent::Add {
-                lines: self.range.clone(),
-                body,
-            },
-        };
+    }
+
+    /// The comment was stored; only now does the box let go of the text, so a failed save loses
+    /// nothing.
+    fn saved(&mut self, cx: &mut Context<Self>) {
+        self.editing = None;
         self.input.update(cx, |i, cx| i.set_text("", cx));
-        cx.emit(PopoverEvent::Review(event));
         cx.notify();
     }
 
@@ -281,7 +347,10 @@ impl Render for CommentPopover {
                 .border_b_1()
                 .border_color(t.color.border)
                 .child(div().text_color(t.color.content).child(m.body.clone()))
-                .when(m.stale, |el| {
+                .when(m.sent, |el| {
+                    el.child(div().text_color(t.color.content_muted).child("Sent"))
+                })
+                .when(m.stale && !m.sent, |el| {
                     el.child(
                         div()
                             .text_color(t.color.warning)
@@ -489,12 +558,37 @@ impl EditorView {
         let line = self.review.open_line()?;
         let layout = self.layout.as_ref()?;
         let lh = layout.line_height;
-        let row = self.display.row_of(line as usize - 1);
-        let y = layout.origin.y + lh * (row + 1) as f32 - px(self.scroll.y);
-        if y < layout.origin.y || y > layout.origin.y + self.viewport.height - lh {
+        let first = self.display.row_of(line as usize - 1);
+        let top = lh * first as f32 - px(self.scroll.y);
+        if !row_visible(top.into(), lh.into(), self.viewport.height.into()) {
             return None;
         }
+        let drawn = layout.rows.iter().filter(|r| r.line == line as usize - 1);
+        let last = last_row(drawn.map(|r| r.row), first);
+        let y = layout.origin.y + lh * (last + 1) as f32 - px(self.scroll.y);
         Some(anchor(self.review.popover()?, point(layout.text_left, y)))
+    }
+
+    /// Tells the open popover its comment was stored.
+    pub fn review_saved(&mut self, cx: &mut Context<Self>) {
+        self.review.saved(cx);
+    }
+
+    /// Reserves the gutter column for comments, so the text does not move when a file becomes
+    /// reviewable.
+    pub fn set_review_reserved(&mut self, reserved: bool, cx: &mut Context<Self>) {
+        if self.review.reserved != reserved {
+            self.review.reserved = reserved;
+            cx.notify();
+        }
+    }
+
+    /// Closes the popover because the view scrolled out from under it.
+    pub(crate) fn dismiss_review_on_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review.close() {
+            window.focus(&self.focus);
+            cx.notify();
+        }
     }
 }
 
@@ -518,24 +612,69 @@ mod tests {
         assert_eq!(selection_lines(2, 2, 0), 3..=3, "a caret's own line stays");
     }
 
-    fn mark(id: u64, line: u32, stale: bool) -> ReviewMark {
+    fn mark(id: u64, line: u32, stale: bool, sent: bool) -> ReviewMark {
         ReviewMark {
             id,
             lines: line..=line + 1,
             body: String::new(),
             stale,
+            sent,
         }
     }
 
     #[test]
-    fn a_dot_sits_on_a_comments_first_line_and_is_stale_only_when_all_there_are() {
+    fn a_dot_sits_on_a_comments_first_line_and_shows_the_loudest_state_there() {
         let state = ReviewState {
-            marks: vec![mark(1, 4, true), mark(2, 4, false), mark(3, 9, true)],
+            marks: vec![
+                mark(1, 4, true, false),
+                mark(2, 4, false, false),
+                mark(3, 9, true, false),
+                mark(4, 12, false, true),
+                mark(5, 12, true, false),
+                mark(6, 15, true, true),
+            ],
             ..Default::default()
         };
-        assert_eq!(state.dot(4), Some(false));
-        assert_eq!(state.dot(9), Some(true));
+        assert_eq!(state.dot(4), Some(MarkState::Active));
+        assert_eq!(state.dot(9), Some(MarkState::Stale));
+        assert_eq!(state.dot(12), Some(MarkState::Stale), "unsent beats sent");
+        assert_eq!(state.dot(15), Some(MarkState::Sent), "sent wins over stale");
         assert_eq!(state.dot(5), None, "its last line has none");
         assert_eq!(state.here(4).len(), 2);
+    }
+
+    #[test]
+    fn the_popover_hides_only_when_its_rows_top_is_off_screen() {
+        assert!(row_visible(0., 20., 400.));
+        assert!(row_visible(380., 20., 400.), "the bottom row still shows");
+        assert!(row_visible(-10., 20., 400.), "partly scrolled off the top");
+        assert!(!row_visible(-20., 20., 400.));
+        assert!(!row_visible(400., 20., 400.));
+    }
+
+    #[test]
+    fn the_popover_sits_under_the_last_drawn_row_of_a_wrapped_line() {
+        assert_eq!(last_row([4, 5, 6].into_iter(), 4), 6);
+        assert_eq!(last_row(std::iter::empty(), 4), 4, "nothing drawn yet");
+        assert_eq!(last_row([2].into_iter(), 4), 4, "never above the first row");
+    }
+
+    #[test]
+    fn saving_blank_text_asks_for_nothing_and_an_edit_keeps_its_comment() {
+        assert_eq!(save_event(None, &(3..=4), "  \n "), None);
+        assert_eq!(
+            save_event(None, &(3..=4), " why \n"),
+            Some(ReviewEvent::Add {
+                lines: 3..=4,
+                body: "why".into()
+            })
+        );
+        assert_eq!(
+            save_event(Some(7), &(3..=4), "now"),
+            Some(ReviewEvent::Edit {
+                id: 7,
+                body: "now".into()
+            })
+        );
     }
 }

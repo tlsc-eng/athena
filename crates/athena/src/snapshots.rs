@@ -269,6 +269,12 @@ pub fn prune(store: &Path, keep: &str, now: SystemTime, max_age: Duration, max_b
         let old = now.duration_since(modified).unwrap_or_default() > max_age;
         if (old || total > max_bytes) && fs::remove_dir_all(&path).is_ok() {
             total -= bytes;
+            // With its snapshots gone the session can no longer be reviewed, so its comments
+            // cannot be reached either.
+            if let Some(name) = path.file_name() {
+                let file = format!("{}.json", name.to_string_lossy());
+                let _ = fs::remove_file(store.join(COMMENTS_DIR).join(file));
+            }
         }
     }
 }
@@ -365,6 +371,27 @@ mod tests {
         let day = Duration::from_secs(86_400);
         prune(&dir, "live", SystemTime::now() + day * 30, day * 7, 0);
         assert!(dir.join(COMMENTS_DIR).join("s.json").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pruning_a_session_deletes_its_comments_and_keeps_the_others() {
+        let dir = temp("prune-own-comments");
+        fs::create_dir_all(dir.join(COMMENTS_DIR)).unwrap();
+        for session in ["gone", "live", "young"] {
+            fs::create_dir_all(dir.join(session)).unwrap();
+            fs::write(dir.join(COMMENTS_DIR).join(format!("{session}.json")), "{}").unwrap();
+        }
+        let day = Duration::from_secs(86_400);
+        let backdated = SystemTime::now() - day * 10;
+        fs::File::open(dir.join("gone"))
+            .unwrap()
+            .set_modified(backdated)
+            .unwrap();
+        prune(&dir, "live", SystemTime::now(), day * 7, u64::MAX);
+        let comments = |s: &str| dir.join(COMMENTS_DIR).join(format!("{s}.json")).exists();
+        assert!(!dir.join("gone").exists() && !comments("gone"));
+        assert!(comments("live") && comments("young"));
         fs::remove_dir_all(dir).unwrap();
     }
 

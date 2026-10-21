@@ -50,6 +50,17 @@ impl Target {
         }
     }
 
+    fn saved(&self, cx: &mut App) {
+        match self {
+            Self::Editor(v) => {
+                let _ = v.update(cx, |v, cx| v.review_saved(cx));
+            }
+            Self::Diff(v) => {
+                let _ = v.update(cx, |v, cx| v.review_saved(cx));
+            }
+        }
+    }
+
     fn show(&self, marks: Vec<ReviewMark>, cx: &mut App) {
         match self {
             Self::Editor(v) => {
@@ -72,18 +83,50 @@ fn pick_session(bound: &[(String, SystemTime)], changed: impl Fn(&str) -> bool) 
 }
 
 fn marks(text: &str, comments: &[ReviewComment]) -> Vec<ReviewMark> {
+    let lines = store::split_lines(text);
     comments
         .iter()
         .map(|c| {
-            let placed = store::place(text, c);
+            let placed = store::place(&lines, c);
             ReviewMark {
                 id: c.id,
                 lines: placed.lines,
                 body: c.body.clone(),
                 stale: placed.stale,
+                sent: c.sent,
             }
         })
         .collect()
+}
+
+/// Stores what the popover asked for; true when it was text the box can let go of.
+fn apply(
+    dir: &Path,
+    session: &str,
+    path: &Path,
+    text: Option<&str>,
+    event: ReviewEvent,
+) -> anyhow::Result<bool> {
+    match event {
+        ReviewEvent::Add { lines, body } => {
+            let anchor = text
+                .and_then(|t| store::anchor_of(t, &lines))
+                .ok_or_else(|| anyhow::anyhow!("Those lines are no longer in the file."))?;
+            store::add(dir, session, path, lines, anchor, body)?;
+            Ok(true)
+        }
+        ReviewEvent::Edit { id, body } => {
+            if !store::update_body(dir, session, id, body)? {
+                anyhow::bail!("That comment no longer exists.");
+            }
+            Ok(true)
+        }
+        ReviewEvent::Delete { id } => {
+            store::delete(dir, session, id)?;
+            Ok(false)
+        }
+        ReviewEvent::Moved => Ok(false),
+    }
 }
 
 /// One row of the "Review Comments" palette.
@@ -138,6 +181,41 @@ impl Shell {
             None => {
                 self.review.comments.watched.remove(&editor.entity_id());
             }
+        }
+    }
+
+    /// Whether `path` gets the empty comment column: a session runs in this window and the file
+    /// is in one of its projects, so the text moves when a session starts, not when it edits.
+    fn review_reserved(&self, path: &Path) -> bool {
+        !self.review.sessions.bound_sessions().is_empty()
+            && self
+                .workspace
+                .projects
+                .iter()
+                .any(|p| path.starts_with(&p.root))
+    }
+
+    pub(super) fn reserve_review_column(
+        &mut self,
+        editor: &Entity<EditorView>,
+        cx: &mut Context<Self>,
+    ) {
+        let reserved = self.review_reserved(editor.read(cx).path());
+        editor.update(cx, |e, cx| e.set_review_reserved(reserved, cx));
+    }
+
+    /// Every open editor takes or gives up the comment column, after a session bound.
+    pub(super) fn sync_review_columns(&mut self, cx: &mut Context<Self>) {
+        let editors: Vec<Entity<EditorView>> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                ItemView::Editor(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        for editor in editors {
+            self.reserve_review_column(&editor, cx);
         }
     }
 
@@ -235,22 +313,16 @@ impl Shell {
         let Ok(dir) = snapshots::store() else {
             return;
         };
-        let saved = match event {
-            ReviewEvent::Add { lines, body } => {
-                let Some(anchor) = w.view.text(cx).and_then(|t| store::anchor_of(&t, &lines))
-                else {
-                    return;
-                };
-                store::add(&dir, &session, &path, lines, anchor, body).map(drop)
+        let text = w.view.text(cx);
+        let released = match apply(&dir, &session, &path, text.as_deref(), event) {
+            Ok(released) => released,
+            // The box keeps what was typed, so the user can try again.
+            Err(err) => {
+                return self.transient_notice("Could not save the comment", format!("{err:#}"), cx);
             }
-            ReviewEvent::Edit { id, body } => {
-                store::update_body(&dir, &session, id, body).map(drop)
-            }
-            ReviewEvent::Delete { id } => store::delete(&dir, &session, id).map(drop),
-            ReviewEvent::Moved => return,
         };
-        if let Err(err) = saved {
-            return self.transient_notice("Could not save the comment", format!("{err:#}"), cx);
+        if released && let Some(w) = self.review.comments.watched.get(&id) {
+            w.view.saved(cx);
         }
         let fresh = store::for_file(&dir, &session, &path).unwrap_or_default();
         let sharing: Vec<EntityId> = self
@@ -294,7 +366,7 @@ impl Shell {
             .into_iter()
             .map(|c| {
                 let line = std::fs::read_to_string(&c.path).map_or(*c.lines.start(), |text| {
-                    *store::place(&text, &c).lines.start()
+                    *store::place(&store::split_lines(&text), &c).lines.start()
                 });
                 let shown = root
                     .as_ref()
@@ -338,6 +410,66 @@ mod tests {
         assert_eq!(pick_session(&bound, changed).as_deref(), Some("new"));
         assert_eq!(pick_session(&bound, |_| false), None, "none changed it");
         assert_eq!(pick_session(&[], |_| true), None, "none in this window");
+    }
+
+    #[test]
+    fn a_failed_save_stores_nothing_and_tells_the_box_to_keep_its_text() {
+        let dir = std::env::temp_dir().join(format!("athena-rc-apply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Path::new("/p/a.rs");
+        let add = |lines| ReviewEvent::Add {
+            lines,
+            body: "why".into(),
+        };
+        let run = |text: Option<&str>, event| apply(&dir, "s-1", path, text, event);
+        assert!(
+            run(Some("a\nb\n"), add(3..=3)).unwrap(),
+            "the trailing empty line"
+        );
+        assert!(
+            run(Some("a\nb\n"), add(9..=9)).is_err(),
+            "a line that is gone"
+        );
+        assert!(run(None, add(1..=1)).is_err(), "a view with no text");
+        let edit = |id| ReviewEvent::Edit {
+            id,
+            body: "x".into(),
+        };
+        assert!(run(None, edit(99)).is_err(), "a comment deleted meanwhile");
+        assert!(run(None, edit(0)).unwrap());
+        assert!(!run(None, ReviewEvent::Delete { id: 0 }).unwrap());
+        assert_eq!(store::load(&dir, "s-1").unwrap().len(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn placing_every_comment_in_one_split_gives_each_its_own_result() {
+        let comment = |id, line, anchor: &str, sent| ReviewComment {
+            id,
+            session: "s".into(),
+            path: "/p/a.rs".into(),
+            lines: line..=line,
+            anchor: anchor.into(),
+            body: String::new(),
+            sent,
+            created: 0,
+        };
+        let text = "new\nnew\na\nb\nc\n";
+        let all = [
+            comment(1, 1, "a", false),
+            comment(2, 2, "b", true),
+            comment(3, 5, "gone", false),
+        ];
+        let shown = marks(text, &all);
+        for (c, m) in all.iter().zip(&shown) {
+            let alone = store::place(&store::split_lines(text), c);
+            assert_eq!(
+                (alone.lines, alone.stale, c.sent),
+                (m.lines.clone(), m.stale, m.sent)
+            );
+        }
+        assert_eq!(shown[0].lines, 3..=3);
+        assert!(shown[2].stale);
     }
 
     #[test]

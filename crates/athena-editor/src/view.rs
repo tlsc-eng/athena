@@ -1003,6 +1003,7 @@ impl EditorView {
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
         if self.click_minimap(event, cx) {
+            self.dismiss_review(cx);
             return;
         }
         self.hide_hover(cx);
@@ -1110,7 +1111,13 @@ impl EditorView {
         }
     }
 
-    fn scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_review_on_scroll(window, cx);
         let lh = self.layout.as_ref().map_or(px(20.), |l| l.line_height);
         let delta = event.delta.pixel_delta(lh);
         let lines = self

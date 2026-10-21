@@ -642,6 +642,7 @@ impl Shell {
         {
             self.review.sessions.bind(pane, session.clone());
         }
+        self.sync_review_columns(cx);
         let Some(root) = self
             .workspace
             .projects

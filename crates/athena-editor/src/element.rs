@@ -13,6 +13,7 @@ use gpui::{
 use crate::Lang;
 use crate::buffer::Buffer;
 use crate::display::{DisplayLine, Guides, column_width, wrap_breaks, wrap_indent};
+use crate::review::MarkState;
 use crate::syntax::Token;
 use crate::view::{EditorLayout, EditorView, LayoutRow};
 
@@ -331,7 +332,7 @@ const FOLD_COLUMN: f32 = 20.;
 const TEXT_PAD: f32 = 8.;
 
 fn review_width(view: &crate::view::EditorView) -> Pixels {
-    match view.review.enabled {
+    match view.review.column_shown() {
         true => px(crate::review::REVIEW_COLUMN),
         false => px(0.),
     }
@@ -1266,7 +1267,7 @@ fn run_mark(
 #[allow(clippy::too_many_arguments)]
 fn review_mark(
     frame: &mut Frame,
-    dot: Option<bool>,
+    dot: Option<MarkState>,
     hovered: bool,
     left: Pixels,
     y: Pixels,
@@ -1277,17 +1278,18 @@ fn review_mark(
 ) {
     let column = px(crate::review::REVIEW_COLUMN);
     match (dot, hovered) {
-        (Some(stale), _) => {
+        (Some(state), _) => {
             let d = px(7.);
             let bounds = Bounds::new(
                 point(left + (column - d) / 2., y + (lh - d) / 2.),
                 size(d, d),
             );
-            let mark = match stale {
-                true => fill(bounds, gpui::transparent_black())
+            let mark = match state {
+                MarkState::Stale => fill(bounds, gpui::transparent_black())
                     .border_widths(px(1.5))
                     .border_color(theme.color.content_muted),
-                false => fill(bounds, theme.color.accent),
+                MarkState::Sent => fill(bounds, theme.color.content_disabled),
+                MarkState::Active => fill(bounds, theme.color.accent),
             };
             frame.gutter_marks.push(mark.corner_radii(d / 2.));
         }

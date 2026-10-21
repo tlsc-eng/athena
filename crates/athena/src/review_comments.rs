@@ -78,9 +78,19 @@ pub fn load(store: &Path, session: &str) -> Result<Vec<ReviewComment>> {
     Ok(read(store, session)?.comments)
 }
 
+/// The lines of `text` as an editor numbers them, so a file ending in a newline has an empty
+/// last line.
+pub fn split_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if text.is_empty() || text.ends_with('\n') {
+        lines.push("");
+    }
+    lines
+}
+
 /// The commented lines of `text` as an anchor, or `None` when the file has fewer lines.
 pub fn anchor_of(text: &str, lines: &RangeInclusive<u32>) -> Option<String> {
-    let all: Vec<&str> = text.lines().collect();
+    let all = split_lines(text);
     let first = lines.start().checked_sub(1)? as usize;
     Some(all.get(first..*lines.end() as usize)?.join("\n"))
 }
@@ -159,10 +169,10 @@ pub fn mark_sent(store: &Path, session: &str, ids: &[u64]) -> Result<()> {
     write(store, session, &data)
 }
 
-/// Where `comment` belongs in `text`: its own lines while they still read as the anchor, else the
-/// nearest place within [`SEARCH_LINES`] that does, else stale at its old lines.
-pub fn place(text: &str, comment: &ReviewComment) -> Placement {
-    let all: Vec<&str> = text.lines().collect();
+/// Where `comment` belongs in a file's `all` lines (from [`split_lines`]): its own lines while
+/// they still read as the anchor, else the nearest place within [`SEARCH_LINES`] that does, else
+/// stale at its old lines.
+pub fn place(all: &[&str], comment: &ReviewComment) -> Placement {
     let anchor: Vec<&str> = comment.anchor.split('\n').collect();
     let len = anchor.len();
     let old = *comment.lines.start();
@@ -342,8 +352,28 @@ mod tests {
     fn the_anchor_is_the_commented_lines_and_missing_lines_give_none() {
         let text = "a\nb\r\nc\n";
         assert_eq!(anchor_of(text, &(2..=3)).as_deref(), Some("b\nc"));
-        assert_eq!(anchor_of(text, &(3..=4)), None);
+        assert_eq!(anchor_of(text, &(4..=5)), None);
         assert_eq!(anchor_of(text, &(0..=1)), None);
+    }
+
+    #[test]
+    fn the_empty_line_after_a_final_newline_can_be_commented_and_found_again() {
+        let text = "a\nb\n";
+        assert_eq!(anchor_of(text, &(3..=3)).as_deref(), Some(""));
+        assert_eq!(anchor_of("no newline", &(2..=2)), None);
+        assert_eq!(
+            anchor_of("", &(1..=1)).as_deref(),
+            Some(""),
+            "an empty file"
+        );
+        let c = comment(3..=3, "");
+        assert_eq!(placed(text, &c).lines, 3..=3);
+        assert!(!placed(text, &c).stale);
+        assert_eq!(placed("a\nb\nc\n\n", &comment(3..=3, "c")).lines, 3..=3);
+    }
+
+    fn placed(text: &str, c: &ReviewComment) -> Placement {
+        place(&split_lines(text), c)
     }
 
     #[test]
@@ -351,7 +381,7 @@ mod tests {
         let text = numbered(20).join("\n");
         let c = comment(5..=6, "line 5\nline 6");
         assert_eq!(
-            place(&text, &c),
+            placed(&text, &c),
             Placement {
                 lines: 5..=6,
                 stale: false
@@ -367,7 +397,7 @@ mod tests {
         }
         let c = comment(5..=6, "line 5\nline 6");
         assert_eq!(
-            place(&lines.join("\n"), &c),
+            placed(&lines.join("\n"), &c),
             Placement {
                 lines: 10..=11,
                 stale: false
@@ -380,7 +410,7 @@ mod tests {
         let text = numbered(20).join("\n").replace("line 6", "edited");
         let c = comment(5..=6, "line 5\nline 6");
         assert_eq!(
-            place(&text, &c),
+            placed(&text, &c),
             Placement {
                 lines: 5..=6,
                 stale: true
@@ -396,9 +426,9 @@ mod tests {
         let text = lines.join("\n");
         // Commented at line 25 before the file changed: line 31 is 6 away, line 5 is 20 away.
         let c = comment(25..=25, "dup");
-        assert_eq!(place(&text, &c).lines, 31..=31);
+        assert_eq!(placed(&text, &c).lines, 31..=31);
         let c = comment(10..=10, "dup");
-        assert_eq!(place(&text, &c).lines, 5..=5);
+        assert_eq!(placed(&text, &c).lines, 5..=5);
     }
 
     #[test]
@@ -406,8 +436,8 @@ mod tests {
         let mut lines: Vec<String> = (1..=500).map(|i| format!("filler {i}")).collect();
         lines[400] = "far".into();
         let c = comment(10..=10, "far");
-        assert!(place(&lines.join("\n"), &c).stale);
+        assert!(placed(&lines.join("\n"), &c).stale);
         let c = comment(250..=250, "far");
-        assert_eq!(place(&lines.join("\n"), &c).lines, 401..=401);
+        assert_eq!(placed(&lines.join("\n"), &c).lines, 401..=401);
     }
 }
