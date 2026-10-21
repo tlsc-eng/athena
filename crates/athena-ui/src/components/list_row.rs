@@ -18,8 +18,10 @@ pub struct ListRow {
     trailing: Option<AnyElement>,
     detail: Option<AnyElement>,
     emphasized: bool,
+    bright: bool,
     tooltip: Option<SharedString>,
     selected: bool,
+    muted_selection: bool,
     group: Option<SharedString>,
     on_click: Option<ClickHandler>,
     on_context_menu: Option<MenuHandler>,
@@ -38,8 +40,10 @@ impl ListRow {
             trailing: None,
             detail: None,
             emphasized: false,
+            bright: false,
             tooltip: None,
             selected: false,
+            muted_selection: false,
             group: None,
             on_click: None,
             on_context_menu: None,
@@ -73,9 +77,15 @@ impl ListRow {
         self
     }
 
-    /// Medium weight and full-strength text, for a row that wants attention.
+    /// Semibold weight and full-strength text, for a row that wants attention.
     pub fn emphasized(mut self, emphasized: bool) -> Self {
         self.emphasized = emphasized;
+        self
+    }
+
+    /// Full-strength text without the heavier weight.
+    pub fn bright(mut self, bright: bool) -> Self {
+        self.bright = bright;
         self
     }
 
@@ -86,6 +96,12 @@ impl ListRow {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Fills a selected row with the neutral highlight instead of the accent, as a window out of focus does.
+    pub fn muted_selection(mut self, muted: bool) -> Self {
+        self.muted_selection = muted;
         self
     }
 
@@ -114,7 +130,7 @@ impl RenderOnce for ListRow {
         let t = cx.theme();
         let c = &t.color;
         let pad = t.space(Space::Md) + t.space(Space::Lg) * self.indent as f32;
-        let bright = self.selected || self.emphasized;
+        let bright = self.selected || self.emphasized || self.bright;
         let line = div()
             .h(t.size(Size::Row))
             .w_full()
@@ -129,7 +145,7 @@ impl RenderOnce for ListRow {
                     .flex_1()
                     .min_w_0()
                     .ellipsis()
-                    .when(self.emphasized, |el| el.font_weight(FontWeight::MEDIUM))
+                    .when(self.emphasized, |el| el.font_weight(FontWeight::SEMIBOLD))
                     .child(self.label),
             )
             .children(
@@ -141,11 +157,12 @@ impl RenderOnce for ListRow {
         let row = div()
             .id(self.id)
             .when_some(self.group, |el, group| el.group(group))
-            .w_full()
+            .mx(t.space(Space::Sm))
+            .py(t.space(Space::Xxs))
             .flex_none()
             .flex()
             .flex_col()
-            .rounded(t.shape.radius_control)
+            .rounded(t.shape.radius_panel)
             .cursor_pointer()
             .text_size(t.typography.caption)
             .text_color(if bright {
@@ -153,7 +170,13 @@ impl RenderOnce for ListRow {
             } else {
                 c.content_secondary
             })
-            .when(self.selected, |el| el.bg(c.surface_accent))
+            .when(self.selected, |el| {
+                el.bg(if self.muted_selection {
+                    c.surface_active
+                } else {
+                    c.surface_accent
+                })
+            })
             .when(!self.selected, |el| {
                 el.hover(|s| s.bg(c.surface_hover).text_color(c.content))
             })
@@ -168,7 +191,7 @@ impl RenderOnce for ListRow {
                     .items_center()
                     .gap(t.space(Space::Sm))
                     .overflow_hidden()
-                    .pl(pad + t.space(Space::Xxl) + t.space(Space::Xs))
+                    .pl(pad + t.ui(34.))
                     .pr(t.space(Space::Md))
                     .pb(t.space(Space::Xs))
                     .text_color(c.content_muted)

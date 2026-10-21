@@ -543,7 +543,7 @@ impl Shell {
                         .flex_1()
                         .min_h_0()
                         .flex()
-                        .children(self.render_tree(cx))
+                        .children(self.render_tree(window, cx))
                         .child(
                             div()
                                 .flex_1()

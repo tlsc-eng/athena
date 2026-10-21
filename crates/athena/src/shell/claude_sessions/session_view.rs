@@ -5,7 +5,7 @@ use athena_lsp::Position;
 use athena_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, Space, StatusDot, Theme, empty_state};
 use athena_workspace::git::{self, Since};
 use athena_workspace::{Axis, DiffBase, ItemKind};
-use gpui::{AnyElement, Context, FontWeight, Task, Window, div, prelude::*};
+use gpui::{AnyElement, App, Context, FontWeight, Task, Window, div, prelude::*};
 
 use super::list::{bare_row, dot_state, row_text};
 use super::{FileChange, ROW_HEIGHT, detail_line};
@@ -335,13 +335,9 @@ impl Shell {
         self.after_layout_change(window, cx);
     }
 
-    /// The palette command: the focused terminal's session, else the most recent one.
-    pub(in crate::shell) fn open_current_session_view(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let focused = match self.focused_item_view() {
+    /// The session the focused terminal runs, or the one the focused Session View shows.
+    pub(in crate::shell) fn current_session_id(&self, cx: &App) -> Option<String> {
+        match self.focused_item_view() {
             Some(ItemView::Terminal(t)) => t
                 .read(cx)
                 .session()
@@ -349,8 +345,16 @@ impl Shell {
                 .map(str::to_string),
             Some(ItemView::Session(tab)) => Some(tab.id),
             _ => None,
-        };
-        let session = focused.or_else(|| {
+        }
+    }
+
+    /// The palette command: the focused terminal's session, else the most recent one.
+    pub(in crate::shell) fn open_current_session_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self.current_session_id(cx).or_else(|| {
             let all = self.live_sessions(cx);
             all.into_iter().max_by_key(|s| s.modified).map(|s| s.id)
         });
@@ -438,7 +442,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(t.space(Space::Md))
-                    .child(StatusDot::new(dot_state(session.state)))
+                    .child(StatusDot::new(dot_state(session.state, session.unread)))
                     .child(
                         div()
                             .flex_1()

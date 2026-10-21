@@ -1,10 +1,17 @@
+use std::collections::HashSet;
+use std::f32::consts::FRAC_PI_2;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
 use athena_ui::{
-    ActiveTheme, Button, ButtonKind, DotState, Ellipsis, IconButton, ListRow, Space, StatusDot,
-    empty_state,
+    ActiveTheme, Button, ButtonKind, DotState, Ellipsis, IconButton, ListRow, Size, Space,
+    StatusDot, Theme, empty_state,
 };
-use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*};
+use gpui::{
+    AnyElement, Context, FontWeight, MouseDownEvent, Svg, Transformation, Window, div, prelude::*,
+    radians, svg,
+};
 
 use super::live::{LiveSession, Place};
 use super::{SessionRow, Shell};
@@ -30,13 +37,106 @@ pub(super) fn row_text(session: &LiveSession) -> RowText {
     }
 }
 
-pub(super) fn dot_state(state: Option<ClaudeState>) -> DotState {
+pub(super) fn dot_state(state: Option<ClaudeState>, unread: bool) -> DotState {
     match state {
         Some(ClaudeState::Running) => DotState::Running,
         Some(ClaudeState::NeedsInput) => DotState::NeedsInput,
+        Some(ClaudeState::Finished) if unread => DotState::Unread,
         Some(ClaudeState::Finished) => DotState::Finished,
         None => DotState::Idle,
     }
+}
+
+const DAY: i64 = 86_400;
+
+/// How long ago, in the fewest characters: `now`, `5m`, `3h`, `2d`, `4w`, `1y`.
+fn short_age(secs: i64) -> String {
+    if secs < 60 {
+        "now".into()
+    } else if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else if secs < DAY {
+        format!("{}h", secs / 3_600)
+    } else if secs < 7 * DAY {
+        format!("{}d", secs / DAY)
+    } else if secs < 365 * DAY {
+        format!("{}w", secs / (7 * DAY))
+    } else {
+        format!("{}y", secs / (365 * DAY))
+    }
+}
+
+/// A group of rows under one header, newest group first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Section {
+    Active,
+    Today,
+    Yesterday,
+    Week,
+    Older,
+}
+
+impl Section {
+    fn label(self) -> &'static str {
+        match self {
+            Section::Active => "Active",
+            Section::Today => "Today",
+            Section::Yesterday => "Yesterday",
+            Section::Week => "Previous 7 Days",
+            Section::Older => "Older",
+        }
+    }
+
+    /// `flipped` holds the sections the user toggled away from their default, which is open except
+    /// for the oldest.
+    fn folded(self, flipped: &HashSet<Section>) -> bool {
+        (self == Section::Older) != flipped.contains(&self)
+    }
+}
+
+/// The section a session sits in; `midnight` is the start of today in unix seconds.
+fn section(live: bool, modified: i64, midnight: i64) -> Section {
+    if live {
+        Section::Active
+    } else if modified >= midnight {
+        Section::Today
+    } else if modified >= midnight - DAY {
+        Section::Yesterday
+    } else if modified >= midnight - 7 * DAY {
+        Section::Week
+    } else {
+        Section::Older
+    }
+}
+
+/// The start of the local day containing `now`, in unix seconds.
+fn local_midnight(now: SystemTime) -> i64 {
+    let secs = unix_secs(now);
+    let t = secs as libc::time_t;
+    // SAFETY: localtime_r only writes the tm it is given.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    secs - i64::from(tm.tm_hour * 3_600 + tm.tm_min * 60 + tm.tm_sec)
+}
+
+fn unix_secs(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The disclosure arrow, pointing right and turned down while `open`.
+fn chevron(open: bool, t: &Theme) -> Svg {
+    svg()
+        .path("ui/chevron.svg")
+        .size(t.ui(10.))
+        .flex_none()
+        .text_color(t.color.content_muted)
+        .when(open, |s| {
+            s.with_transformation(Transformation::rotate(radians(FRAC_PI_2)))
+        })
 }
 
 /// Whether a session shows in the project at `active`: it is in the same repository and below the
@@ -71,7 +171,11 @@ fn centered(el: impl IntoElement) -> AnyElement {
 
 impl Shell {
     /// Sessions mode: the active project's sessions, in the main checkout and every worktree.
-    pub(in crate::shell) fn render_sessions_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::shell) fn render_sessions_list(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = cx.theme().clone();
         let Some(root) = self.active_root() else {
             return centered(empty_state(
@@ -114,17 +218,61 @@ impl Shell {
         if let Some(bar) = self.render_review_bar(&t, cx) {
             out.push(bar);
         }
-        for (i, session) in sessions.iter().enumerate() {
-            out.push(self.render_live_row(i, session, cx));
-            if !self.review.sessions.expanded.contains(&session.id) {
+        let now = SystemTime::now();
+        let (now_secs, midnight) = (unix_secs(now), local_midnight(now));
+        let (active, mut history): (Vec<_>, Vec<_>) =
+            sessions.iter().partition(|s| s.state.is_some());
+        history.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        let mut sections: Vec<(Section, Vec<(usize, &LiveSession)>)> = Vec::new();
+        for (i, session) in active.into_iter().chain(history).enumerate() {
+            let at = section(
+                session.state.is_some(),
+                unix_secs(session.modified),
+                midnight,
+            );
+            match sections.last_mut() {
+                Some((last, rows)) if *last == at => rows.push((i, session)),
+                _ => sections.push((at, vec![(i, session)])),
+            }
+        }
+        let headed =
+            sections.len() > 1 || sections.first().is_some_and(|(s, _)| *s != Section::Active);
+        let current = self.current_session_id(cx);
+        let muted = !window.is_window_active();
+        for (n, (at, rows)) in sections.iter().enumerate() {
+            let folded = headed && at.folded(&self.review.sessions.folded);
+            if headed {
+                out.push(self.render_section_header(n, *at, rows.len(), folded, &t, cx));
+            }
+            if folded {
                 continue;
             }
-            let Some(row) = self.review.sessions.row(&session.id).cloned() else {
-                continue;
-            };
-            out.extend(self.render_live_plan(i, &row, &t));
-            for (j, file) in row.files.iter().enumerate() {
-                out.push(self.render_file_row(i * 10_000 + j, &row.id, file, &row.root, &t, cx));
+            for &(i, session) in rows {
+                let selected = current.as_deref() == Some(session.id.as_str());
+                out.push(self.render_live_row(
+                    i,
+                    session,
+                    (selected, muted),
+                    now_secs - unix_secs(session.modified),
+                    cx,
+                ));
+                if !self.review.sessions.expanded.contains(&session.id) {
+                    continue;
+                }
+                let Some(row) = self.review.sessions.row(&session.id).cloned() else {
+                    continue;
+                };
+                out.extend(self.render_live_plan(i, &row, &t));
+                for (j, file) in row.files.iter().enumerate() {
+                    out.push(self.render_file_row(
+                        i * 10_000 + j,
+                        &row.id,
+                        file,
+                        &row.root,
+                        &t,
+                        cx,
+                    ));
+                }
             }
         }
         div()
@@ -136,14 +284,57 @@ impl Shell {
             .into_any_element()
     }
 
+    fn render_section_header(
+        &self,
+        n: usize,
+        section: Section,
+        count: usize,
+        folded: bool,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = if folded {
+            format!("{} · {count}", section.label())
+        } else {
+            section.label().to_string()
+        };
+        div()
+            .id(("claude-section", n))
+            .h(t.size(Size::Row))
+            .mx(t.space(Space::Sm))
+            .pl(t.space(Space::Md))
+            .pr(t.space(Space::Md))
+            .flex()
+            .items_center()
+            .gap(t.space(Space::Sm))
+            .cursor_pointer()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(t.color.content_muted)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let flipped = &mut this.review.sessions.folded;
+                if !flipped.remove(&section) {
+                    flipped.insert(section);
+                }
+                cx.notify();
+            }))
+            .child(chevron(!folded, t))
+            .child(label)
+            .into_any_element()
+    }
+
     fn render_live_row(
         &self,
         i: usize,
         session: &LiveSession,
+        (selected, muted): (bool, bool),
+        age: i64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
+        let c = &t.color;
         let text = row_text(session);
+        let dot = dot_state(session.state, session.unread);
+        let live = session.state.is_some();
         let expandable = session.files > 0;
         let open = expandable && self.review.sessions.expanded.contains(&session.id);
         let (toggle_id, open_id, view_id) =
@@ -151,14 +342,12 @@ impl Shell {
         let group = format!("claude-live-session-{i}");
         let menu_for = session.clone();
         let pane = session.pane;
-        let chevron = div()
+        let chevron_slot = div()
             .id(("session-chevron", i))
             .w(t.ui(10.))
             .flex_none()
-            .text_color(t.color.content_muted)
             .when(expandable, |el| {
                 el.cursor_pointer()
-                    .hover(|s| s.text_color(t.color.content))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         let expanded = &mut this.review.sessions.expanded;
@@ -167,38 +356,94 @@ impl Shell {
                         }
                         cx.notify();
                     }))
-                    .child(if open { "▾" } else { "▸" })
+                    .child(
+                        chevron(open, &t).group_hover(group.clone(), |s| s.text_color(c.content)),
+                    )
             });
-        let detail = (text.branch.is_some() || text.files.is_some()).then(|| {
+        let phrase = session.state.map(|state| match state {
+            ClaudeState::NeedsInput => ("Needs input", c.warning),
+            ClaudeState::Finished if session.unread => ("Done", c.success),
+            ClaudeState::Finished => ("Done", c.content_muted),
+            ClaudeState::Running => ("Running", c.content_muted),
+        });
+        let detail = phrase.map(|(phrase, color)| {
+            let dot_sep = || div().flex_none().child("·");
             div()
                 .min_w_0()
                 .flex()
                 .items_center()
                 .gap(t.space(Space::Sm))
+                .child(div().flex_none().text_color(color).child(phrase))
+                .children(text.todos.map(|todos| {
+                    div()
+                        .flex()
+                        .gap(t.space(Space::Sm))
+                        .child(dot_sep())
+                        .child(div().flex_none().child(todos))
+                }))
                 .children(text.branch.map(|branch| {
                     div()
                         .min_w_0()
-                        .max_w(t.ui(110.))
-                        .ellipsis()
-                        .px(t.space(Space::Sm))
-                        .rounded(t.shape.radius_control)
-                        .bg(t.color.surface_active)
-                        .text_color(t.color.content_secondary)
-                        .child(branch)
+                        .flex()
+                        .gap(t.space(Space::Sm))
+                        .child(dot_sep())
+                        .child(
+                            div()
+                                .min_w_0()
+                                .max_w(t.ui(110.))
+                                .ellipsis()
+                                .px(t.space(Space::Sm))
+                                .rounded(t.shape.radius_control)
+                                .bg(c.surface_active)
+                                .text_color(c.content_secondary)
+                                .child(branch),
+                        )
                 }))
-                .children(text.files.map(|files| div().flex_none().child(files)))
+                .children(text.files.as_ref().map(|files| {
+                    div()
+                        .flex()
+                        .gap(t.space(Space::Sm))
+                        .child(dot_sep())
+                        .child(div().flex_none().child(files.clone()))
+                }))
         });
-        let open_view = div()
-            .invisible()
-            .group_hover(group.clone(), |s| s.visible())
+        let tooltip = match (&text.files, live) {
+            (Some(files), false) => format!("{}\n{files}", session.label),
+            _ => session.label.clone(),
+        };
+        let trailing = div()
+            .relative()
+            .flex_none()
+            .h_full()
+            .min_w(t.ui(28.))
+            .flex()
+            .items_center()
+            .justify_end()
             .child(
-                IconButton::new(("session-view-open", i))
-                    .label("◧")
-                    .tooltip("Open Session View")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_session_view(view_id.clone(), window, cx)
-                    })),
+                div()
+                    .text_color(c.content_muted)
+                    .group_hover(group.clone(), |s| s.invisible())
+                    .child(short_age(age)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .flex()
+                    .items_center()
+                    .invisible()
+                    .group_hover(group.clone(), |s| s.visible())
+                    .child(
+                        IconButton::new(("session-view-open", i))
+                            .label("◧")
+                            .tooltip("Open Session View")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_session_view(view_id.clone(), window, cx)
+                            })),
+                    ),
             );
         ListRow::new(("claude-live-session", i), session.label.clone())
             .group(group)
@@ -207,11 +452,14 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(t.space(Space::Sm))
-                    .child(chevron)
-                    .child(StatusDot::new(dot_state(session.state))),
+                    .child(chevron_slot)
+                    .child(StatusDot::new(dot)),
             )
-            .emphasized(session.unread)
-            .tooltip(session.label.clone())
+            .emphasized(matches!(dot, DotState::NeedsInput | DotState::Unread))
+            .bright(live)
+            .selected(selected)
+            .muted_selection(muted)
+            .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_live_session(&open_id, pane, window, cx)
             }))
@@ -220,8 +468,7 @@ impl Shell {
                 let row = row.unwrap_or_else(|| bare_row(&menu_for));
                 this.open_session_menu(row, ev.position, window, cx)
             }))
-            .trailing(open_view)
-            .when_some(text.todos, |row, todos| row.meta(todos))
+            .trailing(trailing)
             .when_some(detail, |row, detail| row.detail(detail))
             .into_any_element()
     }
@@ -346,12 +593,79 @@ mod tests {
 
     #[test]
     fn a_session_without_a_terminal_is_idle() {
-        assert_eq!(dot_state(None), DotState::Idle);
+        for unread in [false, true] {
+            assert_eq!(dot_state(None, unread), DotState::Idle);
+            assert_eq!(
+                dot_state(Some(ClaudeState::NeedsInput), unread),
+                DotState::NeedsInput
+            );
+            assert_eq!(
+                dot_state(Some(ClaudeState::Running), unread),
+                DotState::Running
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_session_is_unread_until_looked_at() {
         assert_eq!(
-            dot_state(Some(ClaudeState::NeedsInput)),
-            DotState::NeedsInput
+            dot_state(Some(ClaudeState::Finished), true),
+            DotState::Unread
         );
-        assert_eq!(dot_state(Some(ClaudeState::Running)), DotState::Running);
-        assert_eq!(dot_state(Some(ClaudeState::Finished)), DotState::Finished);
+        assert_eq!(
+            dot_state(Some(ClaudeState::Finished), false),
+            DotState::Finished
+        );
+    }
+
+    #[test]
+    fn ages_read_in_the_largest_whole_unit() {
+        for (secs, text) in [
+            (0, "now"),
+            (59, "now"),
+            (60, "1m"),
+            (3_599, "59m"),
+            (3_600, "1h"),
+            (86_399, "23h"),
+            (86_400, "1d"),
+            (7 * 86_400 - 1, "6d"),
+            (7 * 86_400, "1w"),
+            (365 * 86_400 - 1, "52w"),
+            (365 * 86_400, "1y"),
+            (-5, "now"),
+        ] {
+            assert_eq!(short_age(secs), text, "{secs}s");
+        }
+    }
+
+    #[test]
+    fn sections_split_at_local_midnight() {
+        let midnight = 1_000_000;
+        let at = |modified| section(false, modified, midnight);
+        assert_eq!(section(true, 0, midnight), Section::Active);
+        assert_eq!(at(midnight), Section::Today);
+        assert_eq!(at(midnight - 1), Section::Yesterday);
+        assert_eq!(at(midnight - 86_400), Section::Yesterday);
+        assert_eq!(at(midnight - 86_401), Section::Week);
+        assert_eq!(at(midnight - 6 * 86_400), Section::Week);
+        assert_eq!(at(midnight - 7 * 86_400), Section::Week);
+        assert_eq!(at(midnight - 8 * 86_400), Section::Older);
+    }
+
+    #[test]
+    fn only_the_oldest_section_starts_folded() {
+        let mut flipped = HashSet::new();
+        assert!(Section::Older.folded(&flipped));
+        assert!(!Section::Today.folded(&flipped));
+        flipped.extend([Section::Older, Section::Today]);
+        assert!(!Section::Older.folded(&flipped));
+        assert!(Section::Today.folded(&flipped));
+    }
+
+    #[test]
+    fn local_midnight_is_at_most_a_day_before_now() {
+        let now = SystemTime::now();
+        let back = unix_secs(now) - local_midnight(now);
+        assert!((0..=DAY + 3_600).contains(&back), "{back}");
     }
 }

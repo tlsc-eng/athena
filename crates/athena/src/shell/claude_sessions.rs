@@ -13,6 +13,7 @@ use gpui::{
     Task, Window, actions, div, prelude::*,
 };
 
+use self::list::Section;
 use super::Shell;
 use super::item::{ItemView, file_label};
 use super::lsp::{CONFIRMED, confirm_buttons};
@@ -56,6 +57,8 @@ pub(super) struct SessionsState {
     loading: Option<Task<()>>,
     loaded_at: Option<Instant>,
     expanded: HashSet<String>,
+    /// Sections the user toggled away from their default fold.
+    folded: HashSet<Section>,
     /// Todo lists and plans the hooks reported, by session id.
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.
@@ -503,6 +506,7 @@ impl Shell {
         if state.root.as_ref() != Some(&root) {
             state.rows = Rc::default();
             state.expanded.clear();
+            state.folded.clear();
         }
         state.root = Some(root.clone());
         state.loaded_at = Some(Instant::now());

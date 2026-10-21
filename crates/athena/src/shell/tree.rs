@@ -333,7 +333,11 @@ impl Shell {
         .detach();
     }
 
-    pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_tree(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.workspace.ui.tree_visible && self.tree_closing.is_none() {
             return None;
         }
@@ -526,7 +530,7 @@ impl Shell {
         .flex_1();
         let w = clamp_tree_width(self.workspace.ui.tree_width);
         let switch = self.render_side_switch(cx);
-        let body = self.render_side_body(list.into_any_element(), cx);
+        let body = self.render_side_body(list.into_any_element(), window, cx);
         let files = self.workspace.ui.side_mode == SideMode::Files;
         let panel = div()
             .w(px(w))

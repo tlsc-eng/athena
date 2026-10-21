@@ -1,4 +1,7 @@
-use gpui::{App, Empty, Hsla, IntoElement, RenderOnce, Window, div, prelude::*};
+use gpui::{
+    App, Empty, Hsla, IntoElement, RenderOnce, Transformation, Window, div, prelude::*, radians,
+    svg,
+};
 
 use crate::{ActiveTheme, Colors, Space};
 
@@ -42,52 +45,61 @@ impl RenderOnce for Badge {
     }
 }
 
-/// What a Claude session is doing, as the sidebar's dot shows it.
+/// What a Claude session is doing, as the sidebar's glyph shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DotState {
     Running,
     NeedsInput,
+    /// Finished and not looked at since.
+    Unread,
     Finished,
     Idle,
 }
 
 impl DotState {
-    fn color(self, c: &Colors) -> Hsla {
+    fn look(self, c: &Colors) -> (&'static str, Hsla) {
         match self {
-            DotState::Running => c.success,
-            DotState::NeedsInput => c.warning,
-            DotState::Finished | DotState::Idle => c.content_muted,
+            DotState::NeedsInput => ("ui/session-ask.svg", c.warning),
+            DotState::Unread => ("ui/session-done.svg", c.success),
+            DotState::Running => ("ui/session-running.svg", c.content_muted),
+            DotState::Finished => ("ui/session-done-outline.svg", c.content_muted),
+            DotState::Idle => ("ui/session-idle.svg", c.content_disabled),
         }
-    }
-
-    /// An idle session has nothing to report, so its dot is an outline.
-    fn hollow(self) -> bool {
-        self == DotState::Idle
     }
 }
 
-/// A small square marking a session's state: filled when it has something to say, hollow when idle.
+/// A small glyph whose shape and colour mark a session's state.
 #[derive(IntoElement)]
 pub struct StatusDot {
     state: DotState,
+    rotation: f32,
 }
 
 impl StatusDot {
     pub fn new(state: DotState) -> Self {
-        Self { state }
+        Self {
+            state,
+            rotation: 0.,
+        }
+    }
+
+    /// Turns the glyph by `radians`, for the running spinner to drive.
+    pub fn rotation(mut self, radians: f32) -> Self {
+        self.rotation = radians;
+        self
     }
 }
 
 impl RenderOnce for StatusDot {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
-        let color = self.state.color(&t.color);
-        let dot = div().size(t.space(Space::Sm)).flex_none();
-        if self.state.hollow() {
-            dot.border_1().border_color(color)
-        } else {
-            dot.bg(color)
-        }
+        let (asset, color) = self.state.look(&t.color);
+        svg()
+            .path(asset)
+            .size(t.space(Space::Lg))
+            .flex_none()
+            .text_color(color)
+            .with_transformation(Transformation::rotate(radians(self.rotation)))
     }
 }
 
@@ -106,17 +118,44 @@ mod tests {
     }
 
     #[test]
-    fn dot_states_use_the_sidebar_colours() {
+    fn dot_states_pick_a_glyph_and_colour_in_both_themes() {
         for t in [Theme::dark(false), Theme::light(false)] {
             let c = &t.color;
-            assert_eq!(DotState::Running.color(c), c.success);
-            assert_eq!(DotState::NeedsInput.color(c), c.warning);
-            assert_eq!(DotState::Finished.color(c), c.content_muted);
-            assert_eq!(DotState::Idle.color(c), c.content_muted);
+            assert_eq!(
+                DotState::NeedsInput.look(c),
+                ("ui/session-ask.svg", c.warning)
+            );
+            assert_eq!(DotState::Unread.look(c), ("ui/session-done.svg", c.success));
+            assert_eq!(
+                DotState::Running.look(c),
+                ("ui/session-running.svg", c.content_muted)
+            );
+            assert_eq!(
+                DotState::Finished.look(c),
+                ("ui/session-done-outline.svg", c.content_muted)
+            );
+            assert_eq!(
+                DotState::Idle.look(c),
+                ("ui/session-idle.svg", c.content_disabled)
+            );
         }
-        assert!(DotState::Idle.hollow());
-        assert!(!DotState::Finished.hollow());
-        assert!(!DotState::Running.hollow());
-        assert!(!DotState::NeedsInput.hollow());
+    }
+
+    #[test]
+    fn every_state_has_its_own_bundled_glyph() {
+        let c = &Theme::dark(false).color;
+        let assets: Vec<_> = [
+            DotState::NeedsInput,
+            DotState::Unread,
+            DotState::Running,
+            DotState::Finished,
+            DotState::Idle,
+        ]
+        .map(|s| s.look(c).0)
+        .into();
+        for (i, a) in assets.iter().enumerate() {
+            assert!(crate::assets::bundled(a).is_some(), "{a} is not bundled");
+            assert!(!assets[..i].contains(a), "{a} is used twice");
+        }
     }
 }

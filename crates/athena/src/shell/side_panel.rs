@@ -92,10 +92,11 @@ impl Shell {
     pub(super) fn render_side_body(
         &mut self,
         files: AnyElement,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.workspace.ui.side_mode {
-            SideMode::Sessions => self.render_sessions_panel(cx),
+            SideMode::Sessions => self.render_sessions_panel(window, cx),
             SideMode::Files => files,
             SideMode::Outline => self.render_outline(cx),
             SideMode::Git => self.render_git_panel(cx),
@@ -103,8 +104,8 @@ impl Shell {
     }
 
     /// The one call site Sessions mode renders through.
-    fn render_sessions_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.render_sessions_list(cx)
+    fn render_sessions_panel(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        self.render_sessions_list(window, cx)
     }
 
     fn render_git_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
