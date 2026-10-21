@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
 use athena_ui::{
@@ -56,7 +54,6 @@ pub(super) fn bare_row(session: &LiveSession) -> SessionRow {
         profile: None,
         modified: session.modified,
         messages: 0,
-        tokens: BTreeMap::new(),
         files: Vec::new(),
     }
 }
@@ -248,7 +245,6 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::SystemTime;
 
@@ -267,7 +263,6 @@ mod tests {
             unread: false,
             todos: None,
             files: 0,
-            usage: BTreeMap::new(),
             modified: SystemTime::UNIX_EPOCH,
         }
     }

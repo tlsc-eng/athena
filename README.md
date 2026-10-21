@@ -656,8 +656,8 @@ information rather than triggering the install dialog).
   opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
 - The side panel's **Sessions** view (palette: **Claude: Show sessions**) lists the project's recent
-  sessions from `~/.claude` and every `~/.claude-*` profile: title, todo progress, messages,
-  and tokens. A session expands to its todo list and plan and to each file it
+  sessions from `~/.claude` and every `~/.claude-*` profile: title, todo progress
+  and changed files. A session expands to its todo list and plan and to each file it
   changed with +/− line counts; open a file's diff, step through them all with **Review All**
   (palette: **Claude: Review next/previous changed file**), or **Revert** one file to before the
   session (a copy of the current file is kept in `discarded/` for 30 days). Revert is refused

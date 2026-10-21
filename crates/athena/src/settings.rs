@@ -1558,6 +1558,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_claude_block_still_reports_unknown_keys_and_bad_hooks() {
+        for bad in [
+            r#"{"claude": {"pricess": {}}}"#,
+            r#"{"claude": {"hooks": "no"}}"#,
+            r#"{"claude.hooks": "no"}"#,
+        ] {
+            let (_, problems) = parse(bad).unwrap();
+            assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
+        }
+    }
+
+    #[test]
     fn claude_profiles_name_config_folders_and_the_deepest_folder_wins() {
         let (s, problems) = parse(
             r#"{"claude": {"profiles": {"/code": "tlsc", "/code/ai": "claude-ai",
