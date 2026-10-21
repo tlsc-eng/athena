@@ -7,6 +7,7 @@ mod keymap;
 mod mcp;
 mod power;
 mod procinfo;
+mod review_comments;
 mod settings;
 mod shell;
 mod snapshots;

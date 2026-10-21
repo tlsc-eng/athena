@@ -30,6 +30,9 @@ pub enum Before {
     Text(Vec<u8>),
 }
 
+/// Review comments live in this folder of the store, which pruning must not take for a session.
+pub const COMMENTS_DIR: &str = "comments";
+
 pub fn store() -> Result<PathBuf> {
     Ok(athena_proto::data_dir()?.join("snapshots"))
 }
@@ -250,7 +253,7 @@ pub fn prune(store: &Path, keep: &str, now: SystemTime, max_age: Duration, max_b
     };
     let mut sessions: Vec<(SystemTime, u64, PathBuf)> = entries
         .flatten()
-        .filter(|e| e.file_name() != keep && e.path().is_dir())
+        .filter(|e| e.file_name() != keep && e.file_name() != COMMENTS_DIR && e.path().is_dir())
         .map(|e| {
             let path = e.path();
             let modified = e
@@ -351,6 +354,17 @@ mod tests {
             !left("new") && left("live"),
             "the live session is never pruned"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pruning_leaves_the_review_comments_folder_alone() {
+        let dir = temp("prune-comments");
+        fs::create_dir_all(dir.join(COMMENTS_DIR)).unwrap();
+        fs::write(dir.join(COMMENTS_DIR).join("s.json"), "{}").unwrap();
+        let day = Duration::from_secs(86_400);
+        prune(&dir, "live", SystemTime::now() + day * 30, day * 7, 0);
+        assert!(dir.join(COMMENTS_DIR).join("s.json").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
