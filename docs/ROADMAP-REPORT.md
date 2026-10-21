@@ -427,8 +427,7 @@ installed v0.7.0 and one fix sweep for both. The v0.7.0 section follows this one
 - **Resume** opens a terminal tab in the project running `claude --resume <id>`, with
   `CLAUDE_CONFIG_DIR` set for a profile other than `~/.claude`.
 - Token use comes from the transcripts (each streamed reply counted once, subagents included,
-  read on incrementally); cost is an estimate from a built-in list-price table, which
-  `"claude": {"prices": …}` in settings.json overrides per model id. Unknown models show "cost n/a".
+  read on incrementally).
 - Eight MCP tools, additive: `lsp_definition`, `lsp_references`, `document_symbols` (from the live
   server, unsaved edits flushed first, for files open in Athena only), `get_open_editors`,
   `read_buffer` (256 KiB by default, 512 KiB at most), `run_tests` / `get_test_results` (a Tests

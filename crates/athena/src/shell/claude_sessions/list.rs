@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
@@ -9,7 +9,6 @@ use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*};
 
 use super::live::{LiveSession, Place};
 use super::{SessionRow, Shell};
-use crate::transcripts::Price;
 
 /// What a row says besides its label, as shown in its detail line.
 #[derive(Debug, PartialEq)]
@@ -17,12 +16,10 @@ pub(super) struct RowText {
     /// `3/7`: finished todos out of all of them.
     pub todos: Option<String>,
     pub files: Option<String>,
-    pub cost: Option<String>,
     pub branch: Option<String>,
 }
 
-pub(super) fn row_text(session: &LiveSession, prices: &HashMap<String, Price>) -> RowText {
-    let cost = session.cost_label(prices);
+pub(super) fn row_text(session: &LiveSession) -> RowText {
     RowText {
         todos: session.todos.map(|(done, all)| format!("{done}/{all}")),
         files: match session.files {
@@ -30,7 +27,6 @@ pub(super) fn row_text(session: &LiveSession, prices: &HashMap<String, Price>) -
             1 => Some("1 file".into()),
             n => Some(format!("{n} files")),
         },
-        cost: (!cost.is_empty()).then_some(cost),
         branch: session.branch.clone(),
     }
 }
@@ -116,13 +112,12 @@ impl Shell {
                 cx,
             ));
         }
-        let prices = self.settings.file.claude_prices.clone();
         let mut out: Vec<AnyElement> = Vec::new();
         if let Some(bar) = self.render_review_bar(&t, cx) {
             out.push(bar);
         }
         for (i, session) in sessions.iter().enumerate() {
-            out.push(self.render_live_row(i, session, &prices, cx));
+            out.push(self.render_live_row(i, session, cx));
             if !self.review.sessions.expanded.contains(&session.id) {
                 continue;
             }
@@ -147,11 +142,10 @@ impl Shell {
         &self,
         i: usize,
         session: &LiveSession,
-        prices: &HashMap<String, Price>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
-        let text = row_text(session, prices);
+        let text = row_text(session);
         let expandable = session.files > 0;
         let open = expandable && self.review.sessions.expanded.contains(&session.id);
         let (toggle_id, open_id, view_id) =
@@ -177,27 +171,25 @@ impl Shell {
                     }))
                     .child(if open { "▾" } else { "▸" })
             });
-        let detail =
-            (text.branch.is_some() || text.files.is_some() || text.cost.is_some()).then(|| {
-                div()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(t.space(Space::Sm))
-                    .children(text.branch.map(|branch| {
-                        div()
-                            .min_w_0()
-                            .max_w(t.ui(110.))
-                            .truncate()
-                            .px(t.space(Space::Sm))
-                            .rounded(t.shape.radius_control)
-                            .bg(t.color.surface_active)
-                            .text_color(t.color.content_secondary)
-                            .child(branch)
-                    }))
-                    .children(text.files.map(|files| div().flex_none().child(files)))
-                    .children(text.cost.map(|cost| div().flex_none().child(cost)))
-            });
+        let detail = (text.branch.is_some() || text.files.is_some()).then(|| {
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(t.space(Space::Sm))
+                .children(text.branch.map(|branch| {
+                    div()
+                        .min_w_0()
+                        .max_w(t.ui(110.))
+                        .truncate()
+                        .px(t.space(Space::Sm))
+                        .rounded(t.shape.radius_control)
+                        .bg(t.color.surface_active)
+                        .text_color(t.color.content_secondary)
+                        .child(branch)
+                }))
+                .children(text.files.map(|files| div().flex_none().child(files)))
+        });
         let open_view = div()
             .invisible()
             .group_hover(group.clone(), |s| s.visible())
@@ -261,7 +253,6 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
-    use crate::transcripts::Tokens;
 
     fn session() -> LiveSession {
         LiveSession {
@@ -332,13 +323,12 @@ mod tests {
 
     #[test]
     fn a_bare_session_has_nothing_beside_its_label() {
-        let text = row_text(&session(), &HashMap::new());
+        let text = row_text(&session());
         assert_eq!(
             text,
             RowText {
                 todos: None,
                 files: None,
-                cost: None,
                 branch: None
             }
         );
@@ -350,31 +340,12 @@ mod tests {
         s.todos = Some((3, 7));
         s.files = 1;
         s.branch = Some("claude/fix".into());
-        let text = row_text(&s, &HashMap::new());
+        let text = row_text(&s);
         assert_eq!(text.todos.as_deref(), Some("3/7"));
         assert_eq!(text.files.as_deref(), Some("1 file"));
         assert_eq!(text.branch.as_deref(), Some("claude/fix"));
         s.files = 12;
-        assert_eq!(
-            row_text(&s, &HashMap::new()).files.as_deref(),
-            Some("12 files")
-        );
-    }
-
-    #[test]
-    fn cost_appears_once_tokens_are() {
-        let mut s = session();
-        s.usage.insert(
-            "model-without-a-price".into(),
-            Tokens {
-                input: 10,
-                ..Tokens::default()
-            },
-        );
-        assert_eq!(
-            row_text(&s, &HashMap::new()).cost.as_deref(),
-            Some("cost n/a")
-        );
+        assert_eq!(row_text(&s).files.as_deref(), Some("12 files"));
     }
 
     #[test]

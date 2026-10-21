@@ -32,12 +32,9 @@
   // "explorer.excludeGitIgnore": true, // hide git-ignored entries rather than dim them
   // "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   // "eslint": { "fixOnSave": true },   // ⌘S applies ESLint's fixes; needs the project's server
-  // // The Claude tab estimates each session's cost from built-in list prices; these replace
-  // // them by model id, in USD per million tokens. Cache prices default to 1.25×, 2× and 0.1×
-  // // the input price. It is an estimate, not a bill.
   // // "hooks": false keeps Athena's hooks out of Claude Code's settings.json, and its tabs
   // // without exact running / needs input / done states.
-  // "claude": { "hooks": false, "prices": { "claude-sonnet-5": { "input": 3, "output": 15, "cache_read": 0.3 } } },
+  // "claude": { "hooks": false },
   // // The title bar's plan usage shows this profile for projects under each folder ("tlsc" is
   // // ~/.claude-tlsc; the deepest folder wins), else the profile of the project's newest session.
   // "claude.profiles": { "~/code/ai": "ai", "~/code": "tlsc" },

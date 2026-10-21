@@ -382,20 +382,6 @@ fn todo_lines(todos: &[TodoInfo]) -> String {
         .join("\n")
 }
 
-fn cost_label(
-    tokens: &BTreeMap<String, Tokens>,
-    prices: &HashMap<String, transcripts::Price>,
-) -> String {
-    if tokens.is_empty() {
-        return String::new();
-    }
-    match transcripts::cost(tokens, prices) {
-        (_, unpriced) if unpriced.len() == tokens.len() => "cost n/a".into(),
-        (usd, unpriced) if unpriced.is_empty() => format!("≈ ${usd:.2}"),
-        (usd, _) => format!("≈ ${usd:.2}+"),
-    }
-}
-
 /// What Resume types: the profile's config folder, then Claude Code resuming the session.
 pub(super) fn resume_command(id: &str, config_dir: Option<&Path>) -> Option<String> {
     let typable = |dir: &Path| !dir.to_string_lossy().chars().any(char::is_control);

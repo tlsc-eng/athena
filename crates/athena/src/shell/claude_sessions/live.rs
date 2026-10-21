@@ -39,10 +39,6 @@ pub(crate) struct LiveSession {
 }
 
 impl LiveSession {
-    pub fn cost_label(&self, prices: &HashMap<String, crate::transcripts::Price>) -> String {
-        super::cost_label(&self.usage, prices)
-    }
-
     fn rank(&self) -> u8 {
         match self.state {
             Some(ClaudeState::NeedsInput) => 0,

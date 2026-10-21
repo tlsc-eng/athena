@@ -542,94 +542,6 @@ pub fn sessions(home: &Path, root: &Path, limit: usize) -> Vec<Session> {
         .collect()
 }
 
-/// USD per million tokens.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Price {
-    pub input: f64,
-    pub output: f64,
-    pub cache_write_5m: f64,
-    pub cache_write_1h: f64,
-    pub cache_read: f64,
-}
-
-impl Price {
-    /// A model's price with the usual cache multiples of its input price.
-    pub const fn of(input: f64, output: f64) -> Self {
-        Self {
-            input,
-            output,
-            cache_write_5m: input * 1.25,
-            cache_write_1h: input * 2.,
-            cache_read: input * 0.1,
-        }
-    }
-
-    fn cost(&self, t: &Tokens) -> f64 {
-        (t.input as f64 * self.input
-            + t.output as f64 * self.output
-            + t.cache_write_5m as f64 * self.cache_write_5m
-            + t.cache_write_1h as f64 * self.cache_write_1h
-            + t.cache_read as f64 * self.cache_read)
-            / 1_000_000.
-    }
-}
-
-/// List prices as Claude Code's own cost tally applied them when this was written; an estimate.
-const PRICES: &[(&str, Price)] = &[
-    (
-        "claude-opus-5-5",
-        Price {
-            cache_read: 0.2,
-            ..Price::of(4., 20.)
-        },
-    ),
-    ("claude-opus-5", Price::of(5., 25.)),
-    ("claude-haiku-5-5", Price::of(0.1, 0.5)),
-    ("claude-opus-4-5", Price::of(5., 25.)),
-    ("claude-opus-4-1", Price::of(15., 75.)),
-    ("claude-opus-4", Price::of(15., 75.)),
-    ("claude-sonnet-4-5", Price::of(3., 15.)),
-    ("claude-sonnet-4", Price::of(3., 15.)),
-    ("claude-haiku-4-5", Price::of(1., 5.)),
-    ("claude-3-7-sonnet", Price::of(3., 15.)),
-    ("claude-3-5-haiku", Price::of(0.8, 4.)),
-];
-
-/// A model id without a trailing `-YYYYMMDD` release date.
-fn base_model(model: &str) -> &str {
-    match model.rsplit_once('-') {
-        Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
-        _ => model,
-    }
-}
-
-/// The price of `model`: the user's from settings first, then the built-in table.
-pub fn price_of(model: &str, overrides: &HashMap<String, Price>) -> Option<Price> {
-    let base = base_model(model);
-    [model, base].into_iter().find_map(|id| {
-        overrides
-            .get(id)
-            .copied()
-            .or_else(|| PRICES.iter().find(|(m, _)| *m == id).map(|(_, p)| *p))
-    })
-}
-
-/// The estimated cost in USD of `tokens`, and the models it has no price for.
-pub fn cost(
-    tokens: &BTreeMap<String, Tokens>,
-    overrides: &HashMap<String, Price>,
-) -> (f64, Vec<String>) {
-    let mut total = 0.;
-    let mut unpriced = Vec::new();
-    for (model, t) in tokens {
-        match price_of(model, overrides) {
-            Some(price) => total += price.cost(t),
-            None => unpriced.push(model.clone()),
-        }
-    }
-    (total, unpriced)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,34 +821,5 @@ mod tests {
         );
         assert!(read_subagent(&dir.join("gone.jsonl"), Some(sub)).is_none());
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn cost_uses_the_users_prices_first_and_names_models_without_one() {
-        let mut tokens = BTreeMap::new();
-        tokens.insert(
-            "claude-haiku-4-5-20251001".to_string(),
-            Tokens {
-                input: 909,
-                output: 11,
-                ..Tokens::default()
-            },
-        );
-        tokens.insert(
-            "claude-new-9".to_string(),
-            Tokens {
-                input: 1,
-                ..Tokens::default()
-            },
-        );
-        let (usd, unpriced) = cost(&tokens, &HashMap::new());
-        assert!((usd - 0.000964).abs() < 1e-9, "{usd}");
-        assert_eq!(unpriced, ["claude-new-9"]);
-
-        let mut mine = HashMap::new();
-        mine.insert("claude-new-9".to_string(), Price::of(1_000_000., 0.));
-        mine.insert("claude-haiku-4-5".to_string(), Price::of(0., 0.));
-        let (usd, unpriced) = cost(&tokens, &mine);
-        assert_eq!((usd, unpriced.len()), (1., 0));
     }
 }
