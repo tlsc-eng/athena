@@ -38,7 +38,7 @@ const PLAN_TOOLS: &str = "TodoWrite|ExitPlanMode";
 /// Notifications that wait on the user; `idle_prompt` is only a reminder after Claude finished.
 const ASKS: &str = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|worker_permission_prompt";
 
-fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 10] {
+fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 11] {
     let athena = athena.display();
     // Settings are shared with Claude sessions outside Athena, where the hook must stay silent.
     let cmd = |event: &str| {
@@ -60,6 +60,8 @@ fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 10] {
         ("PreToolUse", Some(EDIT_TOOLS), cmd("claude-will-edit")),
         ("PostToolUse", Some(EDIT_TOOLS), cmd("claude-edited")),
         ("PostToolUse", Some(PLAN_TOOLS), cmd("claude-plan")),
+        // Binds the terminal to the session id, which /clear and resume change.
+        ("SessionStart", None, cmd("claude-session")),
     ]
 }
 
@@ -296,6 +298,28 @@ mod tests {
     }
 
     #[test]
+    fn an_install_from_before_session_start_is_upgraded_once() {
+        let dir = temp("upgrade");
+        let mut old = merge(json!({}), Path::new(ATHENA), true).unwrap();
+        old["hooks"].as_object_mut().unwrap().remove("SessionStart");
+        fs::write(settings_path(&dir), old.to_string()).unwrap();
+        assert!(installed(&settings_path(&dir)) && !enabled(&settings_path(&dir)));
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        assert!(enabled(&settings_path(&dir)));
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
+        let start = written["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(start.len(), 1);
+        assert_eq!(start[0]["hooks"][0]["command"], command("claude-session"));
+        assert_eq!(written["hooks"]["Stop"], old["hooks"]["Stop"]);
+        assert_eq!(
+            merge(written.clone(), Path::new(ATHENA), true).unwrap(),
+            written
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn is_idempotent_and_removable() {
         let once = merge(json!({}), Path::new(ATHENA), true).unwrap();
         let twice = merge(once.clone(), Path::new(ATHENA), true).unwrap();
@@ -356,10 +380,9 @@ mod tests {
         assert_eq!(post[0]["hooks"][0]["command"], "prettier --write");
         assert_eq!(post[1]["hooks"][0]["command"], command("claude-running"));
         assert_eq!(post[2]["hooks"][0]["command"], command("claude-edited"));
-        assert_eq!(
-            out["hooks"]["SessionStart"],
-            user_settings()["hooks"]["SessionStart"]
-        );
+        let start = out["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(start[0], user_settings()["hooks"]["SessionStart"][0]);
+        assert_eq!(start[1]["hooks"][0]["command"], command("claude-session"));
         assert_eq!(out["model"], "opus");
 
         let again = merge(out.clone(), Path::new(ATHENA), true).unwrap();
@@ -511,7 +534,7 @@ mod tests {
         let settings = json!({
             "zeta": 1,
             "hooks": {
-                "SessionStart": [],
+                "SessionEnd": [],
                 "Stop": [{ "hooks": [{ "type": "command", "command": "say done" }] }]
             },
             "alpha": true
@@ -521,7 +544,7 @@ mod tests {
         write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
         let on = fs::read_to_string(settings_path(&dir)).unwrap();
         let order = |t: &str| {
-            ["zeta", "hooks", "SessionStart", "Stop", "alpha"]
+            ["zeta", "hooks", "SessionEnd", "Stop", "alpha"]
                 .map(|k| t.find(&format!("\"{k}\"")).unwrap())
         };
         assert!(order(&on).is_sorted(), "{on}");

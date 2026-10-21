@@ -14,6 +14,7 @@ use gpui::{
 };
 
 use super::Shell;
+use super::bridge::hook_claude_holds_terminal;
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
@@ -688,6 +689,7 @@ fn target(
         | AppMsg::Identify { .. }
         | AppMsg::ClaudeTodos { .. }
         | AppMsg::ClaudePlan { .. }
+        | AppMsg::ClaudeSession { .. }
         | AppMsg::RunTests { .. }
         | AppMsg::TestResults
         | AppMsg::DebugState => Target::Window(caller.unwrap_or(focused)),
@@ -769,6 +771,15 @@ fn serve(request: Request, cx: &mut App) {
         })
         .unwrap_or((None, None));
     let caller_at = caller.and(caller_at);
+    // Only these bind a pane to a session, and a nested `claude -p` must not take the pane over.
+    let binds = matches!(
+        request.msg,
+        AppMsg::ClaudeSession { .. }
+            | AppMsg::ClaudeEdited { .. }
+            | AppMsg::ClaudeTodos { .. }
+            | AppMsg::ClaudePlan { .. }
+    );
+    let caller = caller.filter(|_| !binds || hook_claude_holds_terminal(&request.lineage));
     let path_holder = |path: &Path| {
         windows
             .iter()

@@ -57,6 +57,17 @@ pub(super) struct SessionsState {
     review: Option<Review>,
 }
 
+impl SessionsState {
+    /// Makes `session` the one `pane` runs; a session lives in one pane, the latest to claim it.
+    pub(super) fn bind(&mut self, pane: PaneId, session: String) {
+        if session.is_empty() {
+            return;
+        }
+        self.panes.retain(|p, s| *p == pane || *s != session);
+        self.panes.insert(pane, session);
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct LivePlan {
     todos: Vec<TodoInfo>,
@@ -299,9 +310,22 @@ impl Shell {
             _ => return,
         };
         if let Some(pane) = caller {
-            state.panes.insert(pane, session);
+            state.bind(pane, session);
         }
         cx.notify();
+    }
+
+    /// A SessionStart hook reported in: the terminal it came from now runs that session.
+    pub(super) fn claude_session_started(
+        &mut self,
+        session: String,
+        caller: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane) = caller {
+            self.review.sessions.bind(pane, session);
+            cx.notify();
+        }
     }
 
     /// Something changed on disk or in a session: read the list again when it next draws.
@@ -1091,6 +1115,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
+    }
+
+    fn bound(state: &SessionsState) -> Vec<(PaneId, &str)> {
+        let mut all: Vec<_> = state.panes.iter().map(|(p, s)| (*p, s.as_str())).collect();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn a_pane_runs_one_session_and_a_session_lives_in_one_pane() {
+        let mut state = SessionsState::default();
+        state.bind(1, "a".into());
+        state.bind(1, "b".into());
+        assert_eq!(
+            bound(&state),
+            [(1, "b")],
+            "rebinding a pane replaces its session"
+        );
+        state.bind(2, "b".into());
+        assert_eq!(
+            bound(&state),
+            [(2, "b")],
+            "resuming elsewhere moves the session"
+        );
+        state.bind(1, "a".into());
+        state.bind(2, "".into());
+        assert_eq!(
+            bound(&state),
+            [(1, "a"), (2, "b")],
+            "an empty id binds nothing"
+        );
     }
 
     #[test]

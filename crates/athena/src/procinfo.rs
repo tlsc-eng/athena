@@ -23,7 +23,9 @@ pub fn peer_pid(stream: &UnixStream) -> Option<i32> {
     (rc == 0 && pid > 0).then_some(pid)
 }
 
-fn parent(pid: i32) -> Option<i32> {
+/// A process's parent, its process group, and the foreground group of its terminal (0 or less
+/// when it has none).
+fn info(pid: i32) -> Option<(i32, i32, i32)> {
     // SAFETY: zeroed is valid for this plain C struct; the kernel fills at most `size` bytes.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
@@ -36,7 +38,22 @@ fn parent(pid: i32) -> Option<i32> {
             size,
         )
     };
-    (n == size).then_some(info.pbi_ppid as i32)
+    (n == size).then_some((
+        info.pbi_ppid as i32,
+        info.pbi_pgid as i32,
+        info.e_tpgid as i32,
+    ))
+}
+
+fn parent(pid: i32) -> Option<i32> {
+    info(pid).map(|(ppid, ..)| ppid)
+}
+
+/// `(pid, process group, terminal's foreground group)` of each process, read now.
+pub fn groups(pids: &[i32]) -> Option<Vec<(i32, i32, i32)>> {
+    pids.iter()
+        .map(|&pid| info(pid).map(|(_, pgid, tpgid)| (pid, pgid, tpgid)))
+        .collect()
 }
 
 /// `pid` and every process above it, nearest first, stopping before launchd.

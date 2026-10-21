@@ -13,6 +13,20 @@ const MAX_SELECTION: usize = 64 * 1024;
 const MAX_RUN: usize = 4096;
 const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Whether the Claude that ran a hook, third from the client (client, hook shell, claude), is in
+/// its terminal's foreground group. A nested `claude -p` has its own group or no terminal, and
+/// the polled foreground program lags a launcher, so neither is asked.
+pub(super) fn hook_claude_holds_terminal(lineage: &[i32]) -> bool {
+    crate::procinfo::groups(&lineage[..lineage.len().min(3)])
+        .is_some_and(|groups| runs_hook_of(&groups))
+}
+
+fn runs_hook_of(lineage: &[(i32, i32, i32)]) -> bool {
+    lineage
+        .get(2)
+        .is_some_and(|&(_, pgid, tpgid)| tpgid > 0 && pgid == tpgid)
+}
+
 impl Shell {
     /// Answers a request from `athena` or the MCP bridge.
     pub(super) fn handle_app(
@@ -67,7 +81,7 @@ impl Shell {
                 }
             }
             AppMsg::ClaudeEdited { path, session } => {
-                self.claude_edited(path, session, cx);
+                self.claude_edited(path, session, caller, cx);
                 AppReply::Ok
             }
             AppMsg::OpenDiff { path, staged } => {
@@ -102,6 +116,10 @@ impl Shell {
                 session: caller,
                 project: caller.and_then(|s| self.session_root(s)),
             },
+            AppMsg::ClaudeSession { session, .. } => {
+                self.claude_session_started(session, caller, cx);
+                AppReply::Ok
+            }
             msg @ (AppMsg::ClaudeTodos { .. } | AppMsg::ClaudePlan { .. }) => {
                 self.claude_plan_event(msg, caller, cx);
                 AppReply::Ok
@@ -126,13 +144,17 @@ impl Shell {
         cx: &gpui::App,
     ) -> Option<PaneId> {
         let session = claimed?;
-        let foreground = self.items.values().find_map(|v| match v {
+        let foreground = self.foreground_pid(session, cx)?;
+        lineage.contains(&foreground).then_some(session)
+    }
+
+    fn foreground_pid(&self, session: PaneId, cx: &gpui::App) -> Option<i32> {
+        self.items.values().find_map(|v| match v {
             ItemView::Terminal(t) if t.read(cx).session() == Some(session) => {
                 t.read(cx).foreground_pid()
             }
             _ => None,
-        })?;
-        lineage.contains(&foreground).then_some(session)
+        })
     }
 
     /// Asks the user before typing anything Claude sends into a terminal; no answer means no.
@@ -329,5 +351,75 @@ impl Shell {
                 "terminal {session} is not open in Athena; open its tab first"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // (pid, process group, terminal's foreground group), nearest first
+    const SHELL: (i32, i32, i32) = (20, 20, 30);
+
+    #[test]
+    fn a_native_claude_in_the_foreground_binds() {
+        assert!(runs_hook_of(&[
+            (40, 35, 30),
+            (35, 35, 30),
+            (30, 30, 30),
+            SHELL
+        ]));
+    }
+
+    #[test]
+    fn a_launcher_chain_shares_the_jobs_group_with_claude() {
+        // wrapper script (30) runs node (31) without exec; the job's group is the wrapper's
+        assert!(runs_hook_of(&[
+            (40, 35, 30),
+            (35, 35, 30),
+            (31, 30, 30),
+            (30, 30, 30),
+            SHELL
+        ]));
+    }
+
+    #[test]
+    fn the_polled_foreground_program_is_not_consulted() {
+        // zsh is still what the daemon last reported, yet claude already holds the terminal
+        assert!(runs_hook_of(&[
+            (40, 35, 30),
+            (35, 35, 30),
+            (30, 30, 30),
+            (20, 20, 30)
+        ]));
+    }
+
+    #[test]
+    fn a_bash_tool_claude_has_its_own_group_and_no_terminal() {
+        assert!(!runs_hook_of(&[
+            (40, 36, 0),
+            (36, 36, 0),
+            (33, 33, 0),
+            (32, 32, 0),
+            (30, 30, 30)
+        ]));
+        assert!(!runs_hook_of(&[(40, 36, -1), (36, 36, -1), (33, 33, -1)]));
+    }
+
+    #[test]
+    fn a_claude_started_by_a_hook_is_in_the_hook_shells_group() {
+        // the hook shell (31) is a job of its own; claude replaced the shell that ran it
+        assert!(!runs_hook_of(&[
+            (40, 36, 30),
+            (36, 31, 30),
+            (31, 31, 30),
+            (30, 30, 30)
+        ]));
+    }
+
+    #[test]
+    fn too_short_a_lineage_binds_nothing() {
+        assert!(!runs_hook_of(&[(40, 30, 30), (35, 30, 30)]));
+        assert!(!runs_hook_of(&[]));
     }
 }
