@@ -181,6 +181,12 @@ fn todo_counts(todos: &[TodoInfo]) -> Option<(usize, usize)> {
     (!todos.is_empty()).then_some((done, todos.len()))
 }
 
+/// When a terminal was last used: its last typing, as a working Claude's redraws would otherwise
+/// outrank the session the user just typed in; output only for one never typed in.
+fn active_at(input: Option<Instant>, output: Option<Instant>) -> Option<Instant> {
+    input.or(output)
+}
+
 /// A terminal whose foreground program is Claude, whether or not a hook bound a session to it.
 struct ClaudeTerminal {
     root: PathBuf,
@@ -426,7 +432,7 @@ impl Shell {
                     pane,
                     label: view.label(),
                     state: view.claude_state(),
-                    active: view.last_activity(),
+                    active: active_at(view.last_input(), view.last_activity()),
                 })
             })
             .collect();
@@ -499,6 +505,15 @@ mod tests {
             session("asking-new", Some(NeedsInput), false, 3),
             session("idle-old", None, false, 5),
         ]
+    }
+
+    #[test]
+    fn a_terminal_is_dated_by_its_typing_before_its_output() {
+        let at = Instant::now();
+        let (typed, wrote) = (at - Duration::from_secs(60), at);
+        assert_eq!(active_at(Some(typed), Some(wrote)), Some(typed));
+        assert_eq!(active_at(None, Some(wrote)), Some(wrote));
+        assert_eq!(active_at(None, None), None);
     }
 
     #[test]

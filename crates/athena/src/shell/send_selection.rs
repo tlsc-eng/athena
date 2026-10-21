@@ -235,6 +235,12 @@ struct Pending {
     expires: Instant,
 }
 
+/// Whether the terminal at a pending mention's tab key is still its own: item ids are reused, so
+/// once the pane is known it decides, not the key.
+fn key_holds(pending: Option<PaneId>, shown: Option<PaneId>) -> bool {
+    pending.is_none() || pending == shown
+}
+
 /// Takes out of `pending` the mentions whose time is up.
 fn take_expired(pending: &mut Vec<Pending>, now: Instant) -> Vec<Pending> {
     let (gone, kept) = std::mem::take(pending)
@@ -435,7 +441,7 @@ impl Shell {
     }
 
     /// Hands each pending mention to its terminal once Claude Code there has connected as an IDE or
-    /// its session has started, and drops those that waited too long.
+    /// its terminal takes a paste, and drops those that waited too long.
     pub(super) fn deliver_pending(&mut self, cx: &mut Context<Self>) {
         let mut waiting = Vec::new();
         for mut pending in std::mem::take(&mut self.ide.send.pending) {
@@ -449,7 +455,8 @@ impl Shell {
                 Outcome::Closed => self.transient_notice(
                     "Selection not sent",
                     format!(
-                        "The new Claude session's terminal was closed; send {} again.",
+                        "The new Claude session's terminal is no longer in this window; {} was not \
+                         sent.",
                         file_label(&pending.mention.path)
                     ),
                     cx,
@@ -487,9 +494,13 @@ impl Shell {
 
     fn try_deliver(&self, pending: &mut Pending, cx: &mut Context<Self>) -> Outcome {
         let here = (pending.root.clone(), pending.item);
-        let found = match self.items.get(&here) {
-            Some(_) => Some(here),
-            None => pending.pane.and_then(|pane| self.find_session(pane)),
+        let at_key = match self.items.get(&here) {
+            Some(ItemView::Terminal(view)) => Some(view.read(cx).session()),
+            _ => None,
+        };
+        let found = match at_key {
+            Some(shown) if key_holds(pending.pane, shown) => Some(here),
+            _ => pending.pane.and_then(|pane| self.find_session(pane)),
         };
         let Some((root, item)) = found else {
             return Outcome::Closed;
@@ -498,7 +509,9 @@ impl Shell {
             return Outcome::Closed;
         };
         (pending.root, pending.item) = (root.clone(), item);
-        pending.pane = view.read(cx).session().or(pending.pane);
+        if pending.pane.is_none() {
+            pending.pane = view.read(cx).session();
+        }
         let target = (root, item);
         let client = windows::ide(cx).and_then(|_| {
             client_for(
@@ -650,6 +663,21 @@ mod tests {
             "above the cap only the size is compared"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_reused_tab_key_never_hands_a_pending_mention_to_another_terminal() {
+        assert!(
+            key_holds(None, None),
+            "a terminal not yet attached is trusted by its key"
+        );
+        assert!(key_holds(None, Some(7)));
+        assert!(key_holds(Some(7), Some(7)));
+        assert!(
+            !key_holds(Some(7), Some(8)),
+            "a newer terminal at the same key"
+        );
+        assert!(!key_holds(Some(7), None));
     }
 
     #[test]
