@@ -6,7 +6,7 @@ use std::process::Command;
 
 use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
 
-const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan|claude-session> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
+const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan|claude-session|claude-prompt> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
 
 /// Hook input past this is cut off; a Write of a file up to the snapshot limit fits easily.
 const MAX_HOOK_INPUT: u64 = 256 * 1024 * 1024;
@@ -240,6 +240,10 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
         if let Some(msg) = plan_message(hook_input()) {
             let _ = tell_window(msg);
         }
+        return Ok(());
+    }
+    if event.as_deref() == Some("claude-prompt") {
+        let _ = tell_window(AppMsg::ClaudePrompt);
         return Ok(());
     }
     if event.as_deref() == Some("claude-session") {

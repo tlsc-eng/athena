@@ -228,6 +228,7 @@ impl Shell {
                             let running =
                                 ItemView::Terminal(view.clone()).claude_state(cx).is_some();
                             this.note_claude_terminal(view.entity_id(), running, cx);
+                            this.retry_queued_comments(&view, cx);
                             let on_screen = this
                                 .terminal_key(&view)
                                 .is_some_and(|(root, _)| Some(root) == this.active_root());

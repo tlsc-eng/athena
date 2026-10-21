@@ -421,6 +421,14 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::review_comments::ClaudeReviewComments),
         ),
         (
+            "Claude: Send Review Comments",
+            Box::new(super::review_comments::ClaudeSendReviewComments),
+        ),
+        (
+            "Claude: Cancel Queued Review Comments",
+            Box::new(super::review_comments::ClaudeCancelQueuedComments),
+        ),
+        (
             "Allow project code (linters, TypeScript, project settings)",
             Box::new(super::lsp::AllowProjectLinters),
         ),
@@ -716,7 +724,7 @@ impl Shell {
             Mode::Projects => self.project_entries(),
             Mode::Tasks => self.task_entries(),
             Mode::Checks => self.check_entries(),
-            Mode::ReviewComments => self.review_comment_entries(),
+            Mode::ReviewComments => self.review_comment_entries(cx),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
@@ -839,8 +847,8 @@ impl Shell {
             .collect()
     }
 
-    fn review_comment_entries(&self) -> Vec<Entry> {
-        self.comment_rows()
+    fn review_comment_entries(&self, cx: &gpui::App) -> Vec<Entry> {
+        self.comment_rows(cx)
             .into_iter()
             .map(|row| Entry {
                 key: format!("{} {}", row.label, row.detail),

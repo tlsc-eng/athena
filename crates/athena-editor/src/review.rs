@@ -67,6 +67,8 @@ pub enum ReviewEvent {
     },
     /// The text the comments are placed in changed under the view (a diff finished computing).
     Moved,
+    /// Send every unsent comment of the session to Claude.
+    Send,
 }
 
 enum PopoverEvent {
@@ -95,6 +97,13 @@ pub(crate) fn selection_lines(first: usize, last: usize, end_col: usize) -> Rang
         last
     };
     first as u32 + 1..=last as u32 + 1
+}
+
+fn send_label(unsent: usize) -> String {
+    match unsent {
+        1 => "Send 1 Comment to Claude".to_string(),
+        n => format!("Send {n} Comments to Claude"),
+    }
 }
 
 /// What saving the box asks for: an edit of the comment being edited, else a new comment on
@@ -135,6 +144,8 @@ pub(crate) struct ReviewState {
     /// The gutter column is kept, empty if need be, so text does not move when `enabled` flips.
     pub(crate) reserved: bool,
     marks: Vec<ReviewMark>,
+    /// Unsent comments of the whole session, not just this file's.
+    unsent: usize,
     /// The one-based line the pointer is over.
     pub(crate) hover: Option<u32>,
     open: Option<Open>,
@@ -185,11 +196,13 @@ impl ReviewState {
         }
     }
 
-    pub(crate) fn set_marks(&mut self, marks: Vec<ReviewMark>, cx: &mut gpui::App) {
+    pub(crate) fn set_marks(&mut self, marks: Vec<ReviewMark>, unsent: usize, cx: &mut gpui::App) {
         self.marks = marks;
+        self.unsent = unsent;
         if let Some(open) = &self.open {
             let here = self.here(open.line);
-            open.popover.update(cx, |p, cx| p.set_comments(here, cx));
+            open.popover
+                .update(cx, |p, cx| p.set_comments(here, unsent, cx));
         }
     }
 
@@ -220,7 +233,8 @@ impl ReviewState {
         cx: &mut Context<H>,
     ) {
         let here = self.here(line);
-        let popover = cx.new(|cx| CommentPopover::new(range, here, window, cx));
+        let unsent = self.unsent;
+        let popover = cx.new(|cx| CommentPopover::new(range, here, unsent, window, cx));
         let subscription = cx.subscribe_in(
             &popover,
             window,
@@ -241,6 +255,7 @@ impl ReviewState {
 struct CommentPopover {
     range: RangeInclusive<u32>,
     here: Vec<ReviewMark>,
+    unsent: usize,
     editing: Option<u64>,
     input: Entity<TextInput>,
     opened: Opening,
@@ -253,6 +268,7 @@ impl CommentPopover {
     fn new(
         range: RangeInclusive<u32>,
         here: Vec<ReviewMark>,
+        unsent: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -271,6 +287,7 @@ impl CommentPopover {
         Self {
             range,
             here,
+            unsent,
             editing: None,
             input,
             opened: Opening::now(),
@@ -278,7 +295,7 @@ impl CommentPopover {
         }
     }
 
-    fn set_comments(&mut self, here: Vec<ReviewMark>, cx: &mut Context<Self>) {
+    fn set_comments(&mut self, here: Vec<ReviewMark>, unsent: usize, cx: &mut Context<Self>) {
         if self
             .editing
             .is_some_and(|id| here.iter().all(|m| m.id != id))
@@ -286,6 +303,7 @@ impl CommentPopover {
             self.editing = None;
         }
         self.here = here;
+        self.unsent = unsent;
         cx.notify();
     }
 
@@ -428,6 +446,20 @@ impl Render for CommentPopover {
                             .flex()
                             .justify_end()
                             .gap(space(Space::Sm))
+                            .when(self.unsent > 0, |el| {
+                                el.child(
+                                    Button::new(
+                                        "comment-send",
+                                        send_label(self.unsent),
+                                        ButtonKind::Ghost,
+                                    )
+                                    .on_click(cx.listener(
+                                        |_, _, _, cx| {
+                                            cx.emit(PopoverEvent::Review(ReviewEvent::Send))
+                                        },
+                                    )),
+                                )
+                            })
                             .child(
                                 Button::new("comment-cancel", "Cancel", ButtonKind::Ghost)
                                     .on_click(
@@ -469,9 +501,14 @@ impl EditorView {
     }
 
     /// The comments on this file, placed on the lines they belong to now.
-    pub fn set_review_comments(&mut self, marks: Vec<ReviewMark>, cx: &mut Context<Self>) {
+    pub fn set_review_comments(
+        &mut self,
+        marks: Vec<ReviewMark>,
+        unsent: usize,
+        cx: &mut Context<Self>,
+    ) {
         if self.review.enabled {
-            self.review.set_marks(marks, cx);
+            self.review.set_marks(marks, unsent, cx);
             cx.notify();
         }
     }

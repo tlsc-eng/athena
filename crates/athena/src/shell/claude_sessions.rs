@@ -149,6 +149,23 @@ impl SessionsState {
             .map(|s| (s.clone(), modified(s)))
             .collect()
     }
+
+    /// The pane that runs `session` here.
+    pub(super) fn pane_of(&self, session: &str) -> Option<PaneId> {
+        self.panes
+            .iter()
+            .find_map(|(pane, s)| (s == session).then_some(*pane))
+    }
+
+    /// The session `pane` runs here.
+    pub(super) fn session_of(&self, pane: PaneId) -> Option<&str> {
+        self.panes.get(&pane).map(String::as_str)
+    }
+
+    /// Where `session` started, as its SessionStart hook said.
+    pub(super) fn cwd_of(&self, session: &str) -> Option<&Path> {
+        self.cwds.get(session).map(PathBuf::as_path)
+    }
 }
 
 #[derive(Clone, Debug, Default)]

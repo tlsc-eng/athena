@@ -13,7 +13,16 @@ use super::item::ItemView;
 use crate::review_comments::{self as store, ReviewComment};
 use crate::snapshots;
 
-actions!(athena, [ClaudeReviewComments]);
+mod delivery;
+
+actions!(
+    athena,
+    [
+        ClaudeReviewComments,
+        ClaudeSendReviewComments,
+        ClaudeCancelQueuedComments
+    ]
+);
 
 /// The views showing comments, by entity.
 #[derive(Default)]
@@ -21,6 +30,7 @@ pub(super) struct CommentsState {
     watched: HashMap<EntityId, Watched>,
     /// Terminals whose raw Claude state is `Some`, so only a first one asks for the column.
     claude_terminals: HashSet<EntityId>,
+    queue: delivery::Queue,
 }
 
 struct Watched {
@@ -29,6 +39,8 @@ struct Watched {
     path: PathBuf,
     /// The file's comments as stored, placed again on every edit.
     comments: Vec<ReviewComment>,
+    /// The session's unsent comments in all files.
+    unsent: usize,
 }
 
 enum Target {
@@ -63,13 +75,13 @@ impl Target {
         }
     }
 
-    fn show(&self, marks: Vec<ReviewMark>, cx: &mut App) {
+    fn show(&self, marks: Vec<ReviewMark>, unsent: usize, cx: &mut App) {
         match self {
             Self::Editor(v) => {
-                let _ = v.update(cx, |v, cx| v.set_review_comments(marks, cx));
+                let _ = v.update(cx, |v, cx| v.set_review_comments(marks, unsent, cx));
             }
             Self::Diff(v) => {
-                let _ = v.update(cx, |v, cx| v.set_review_comments(marks, cx));
+                let _ = v.update(cx, |v, cx| v.set_review_comments(marks, unsent, cx));
             }
         }
     }
@@ -133,7 +145,7 @@ fn apply(
             store::delete(dir, session, id)?;
             Ok(false)
         }
-        ReviewEvent::Moved => Ok(false),
+        ReviewEvent::Moved | ReviewEvent::Send => Ok(false),
     }
 }
 
@@ -288,10 +300,15 @@ impl Shell {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let comments = snapshots::store()
-            .ok()
-            .and_then(|s| store::for_file(&s, &session, &path).ok())
+        let store = snapshots::store().ok();
+        let comments = store
+            .as_ref()
+            .and_then(|s| store::for_file(s, &session, &path).ok())
             .unwrap_or_default();
+        let unsent = store
+            .as_ref()
+            .and_then(|s| store::unsent(s, &session).ok())
+            .map_or(0, |u| u.len());
         let watched = &mut self.review.comments.watched;
         watched.retain(|_, w| w.view.alive());
         watched.insert(
@@ -301,6 +318,7 @@ impl Shell {
                 session,
                 path,
                 comments,
+                unsent,
             },
         );
         self.refresh_comment_marks(id, cx);
@@ -327,7 +345,7 @@ impl Shell {
             return;
         };
         if let Some(text) = w.view.text(cx) {
-            w.view.show(marks(&text, &w.comments), cx);
+            w.view.show(marks(&text, &w.comments), w.unsent, cx);
         }
     }
 
@@ -357,6 +375,10 @@ impl Shell {
         let Some(w) = self.review.comments.watched.get(&id) else {
             return;
         };
+        if event == ReviewEvent::Send {
+            let session = w.session.clone();
+            return self.send_review_comments(session, cx);
+        }
         let (session, path) = (w.session.clone(), w.path.clone());
         let Ok(dir) = snapshots::store() else {
             return;
@@ -383,38 +405,54 @@ impl Shell {
         let Ok(fresh) = store::for_file(dir, session, path) else {
             return;
         };
+        let unsent = store::unsent(dir, session).map_or(0, |u| u.len());
         let sharing: Vec<EntityId> = self
             .review
             .comments
             .watched
             .iter()
-            .filter(|(_, w)| w.session == session && w.path == path)
+            .filter(|(_, w)| w.session == session)
             .map(|(id, _)| *id)
             .collect();
         for id in sharing {
             if let Some(w) = self.review.comments.watched.get_mut(&id) {
-                w.comments = fresh.clone();
+                w.unsent = unsent;
+                if w.path == path {
+                    w.comments = fresh.clone();
+                }
             }
             self.refresh_comment_marks(id, cx);
         }
     }
 
-    /// The unsent comments of the session the focused tab belongs to, else of the window's
-    /// most recently active session.
-    pub(super) fn comment_rows(&self) -> Vec<CommentRow> {
-        let Ok(dir) = snapshots::store() else {
-            return Vec::new();
-        };
+    /// The session the focused terminal runs or the focused tab's comments belong to, else the
+    /// window's most recently active one.
+    fn current_comment_session(&self, dir: &Path, cx: &App) -> Option<String> {
+        if let Some(ItemView::Terminal(t)) = self.focused_item_view()
+            && let Some(session) = t
+                .read(cx)
+                .session()
+                .and_then(|pane| self.review.sessions.session_of(pane))
+        {
+            return Some(session.to_string());
+        }
         let focused = match self.focused_item_view() {
             Some(ItemView::Editor(e)) => Some(e.entity_id()),
             Some(ItemView::Diff(d)) => Some(d.entity_id()),
             _ => None,
         };
-        let session = focused
+        focused
             .and_then(|id| self.review.comments.watched.get(&id))
             .map(|w| w.session.clone())
-            .or_else(|| pick_session(&self.bound_sessions(&dir), |_| true));
-        let Some(session) = session else {
+            .or_else(|| pick_session(&self.bound_sessions(dir), |_| true))
+    }
+
+    /// The unsent comments of [`Self::current_comment_session`].
+    pub(super) fn comment_rows(&self, cx: &App) -> Vec<CommentRow> {
+        let Ok(dir) = snapshots::store() else {
+            return Vec::new();
+        };
+        let Some(session) = self.current_comment_session(&dir, cx) else {
             return Vec::new();
         };
         let root = self.active_root();
@@ -445,6 +483,12 @@ impl Shell {
 pub(super) fn bind_comment_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::Div {
     el.on_action(cx.listener(|this, _: &ClaudeReviewComments, window, cx| {
         this.open_palette(super::palette::Mode::ReviewComments, window, cx)
+    }))
+    .on_action(cx.listener(|this, _: &ClaudeSendReviewComments, _, cx| {
+        this.send_current_review_comments(cx)
+    }))
+    .on_action(cx.listener(|this, _: &ClaudeCancelQueuedComments, _, cx| {
+        this.cancel_queued_review_comments(cx)
     }))
 }
 

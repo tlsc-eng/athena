@@ -25,7 +25,9 @@ use crate::keys;
 use crate::links;
 use crate::mouse::{self, MouseEvent};
 use crate::search::{Search, Span};
-use crate::terminal::{GridSize, Link, NoOutput, PaneEvent, SCROLLBACK_LINES, Terminal, Transport};
+use crate::terminal::{
+    GridSize, Link, NoOutput, PaneEvent, SCROLLBACK_LINES, Terminal, Transport, submitted_cleanly,
+};
 
 actions!(
     terminal,
@@ -195,6 +197,11 @@ pub struct TerminalView {
     claude_state: Option<ClaudeState>,
     /// What Claude Code's own hooks last reported, and when; trusted over the output guess.
     claude_hook: Option<(ClaudeState, Instant)>,
+    /// When Claude's prompt box was last known empty: a prompt was submitted, or a question the
+    /// user was typing an answer to was answered. `None` means unknown.
+    prompt_cleared: Option<Instant>,
+    /// Whether the prompt box was known empty when the last hook-reported question came up.
+    empty_before_question: Option<bool>,
     /// Typed into the shell once it is ready, for tabs opened to run a command.
     pending_input: Option<Vec<u8>>,
     grid: GridSize,
@@ -247,6 +254,8 @@ impl TerminalView {
             selecting: false,
             claude_state: None,
             claude_hook: None,
+            prompt_cleared: None,
+            empty_before_question: None,
             pending_input: None,
             scroll_remainder: 0.,
             find: None,
@@ -336,6 +345,54 @@ impl TerminalView {
         }
     }
 
+    /// Pastes `text` as the terminal's own Paste does, bracketed when the program asked for it.
+    pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.paste(text);
+            cx.notify();
+        }
+    }
+
+    /// Presses Enter.
+    pub fn submit(&mut self, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.submit();
+            cx.notify();
+        }
+    }
+
+    /// When the user last typed or pasted into this terminal.
+    pub fn last_input(&self) -> Option<Instant> {
+        self.terminal.as_ref().and_then(|t| t.last_input)
+    }
+
+    /// Claude's prompt box may hold text the user typed, or it is not known to be empty.
+    pub fn prompt_may_have_text(&self) -> bool {
+        draft_possible(self.prompt_cleared, self.last_input())
+    }
+
+    /// A UserPromptSubmit hook reported; the box is marked empty only if nothing was typed
+    /// after the Enter that submitted it.
+    pub fn note_prompt_submit(&mut self, cx: &mut Context<Self>) {
+        let enter = self.terminal.as_ref().and_then(|t| t.last_enter);
+        if !submitted_cleanly(enter, self.last_input()) {
+            return;
+        }
+        self.prompt_cleared = Some(Instant::now());
+        cx.emit(TerminalEvent::Changed);
+        cx.notify();
+    }
+
+    /// The state Claude's last hook reported, however long ago.
+    pub fn claude_hook_state(&self) -> Option<ClaudeState> {
+        self.claude_hook.map(|(state, _)| state)
+    }
+
+    /// The program asked for bracketed paste, so pasted text cannot be taken for typing.
+    pub fn bracketed_paste(&self) -> bool {
+        self.terminal.as_ref().is_some_and(|t| t.bracketed_paste())
+    }
+
     /// Types `text` into the shell as soon as it is attached.
     pub fn run_on_start(&mut self, text: impl Into<String>) {
         self.pending_input = Some(text.into().into_bytes());
@@ -352,7 +409,14 @@ impl TerminalView {
         };
         let news =
             !matches!(self.claude_hook, Some((last, at)) if last == state && !typed_since(at));
+        let empty_now = !self.prompt_may_have_text();
+        let before = self.claude_hook_state();
+        let (asked, cleared) = hook_question(before, state, self.empty_before_question, empty_now);
+        self.empty_before_question = asked;
         self.claude_hook = Some((state, Instant::now()));
+        if cleared {
+            self.prompt_cleared = Some(Instant::now());
+        }
         self.refresh_claude(cx);
         cx.notify();
         news
@@ -717,6 +781,10 @@ impl TerminalView {
                 self.foreground = process;
                 if !self.is_claude() {
                     self.claude_hook = None;
+                    self.empty_before_question = None;
+                }
+                if !self.is_claude() || was.is_some() && was != self.foreground_pid() {
+                    self.prompt_cleared = None;
                 }
                 self.refresh_claude(cx);
                 cx.emit(TerminalEvent::Changed);
@@ -1621,6 +1689,32 @@ impl Render for TerminalView {
     }
 }
 
+/// Whether Claude's prompt box may hold typed text: unless it was last known empty, and nothing
+/// was typed since.
+fn draft_possible(cleared: Option<Instant>, last_input: Option<Instant>) -> bool {
+    match cleared {
+        None => true,
+        Some(at) => last_input.is_some_and(|key| key > at),
+    }
+}
+
+/// What a hook-reported state does about the prompt box around a question: when one comes up,
+/// whether the box was empty then (`empty_now`); when it is dealt with, whether the box is empty
+/// again, which holds only if it was before. Returns the new snapshot and that verdict.
+fn hook_question(
+    before: Option<ClaudeState>,
+    after: ClaudeState,
+    empty_before: Option<bool>,
+    empty_now: bool,
+) -> (Option<bool>, bool) {
+    let asked = |state| state == Some(ClaudeState::NeedsInput);
+    match (asked(before), asked(Some(after))) {
+        (false, true) => (Some(empty_now), false),
+        (true, false) => (None, empty_before == Some(true)),
+        _ => (empty_before, false),
+    }
+}
+
 /// What a Claude Code tab shows, from its last hook report and when the user last typed and the
 /// program last drew something other than that typing's echo.
 fn claude_state(
@@ -1993,5 +2087,46 @@ mod tests {
         assert!(is_shell("bash"));
         assert!(!is_shell("vim"));
         assert!(!is_shell("2.1.294"));
+    }
+
+    #[test]
+    fn the_prompt_is_empty_only_once_a_submit_or_an_answer_said_so() {
+        let t0 = Instant::now();
+        let later = |s| Some(t0 + secs(s));
+        assert!(draft_possible(None, None), "unknown after a launch");
+        assert!(draft_possible(None, later(1.)), "typed, never cleared");
+        assert!(!draft_possible(later(2.), None), "submitted, nothing typed");
+        assert!(
+            !draft_possible(later(2.), later(1.)),
+            "typed before the submit"
+        );
+        assert!(
+            draft_possible(later(2.), later(3.)),
+            "typed after the submit"
+        );
+    }
+
+    #[test]
+    fn a_question_clears_the_prompt_only_if_it_was_empty_before_and_a_hook_ended_it() {
+        use ClaudeState::*;
+        let ask = |empty_now| hook_question(Some(Running), NeedsInput, None, empty_now);
+        assert_eq!(ask(true), (Some(true), false));
+        assert_eq!(ask(false), (Some(false), false));
+        let answer = |empty_before| hook_question(Some(NeedsInput), Running, empty_before, false);
+        assert_eq!(answer(Some(true)), (None, true), "empty before, answered");
+        assert_eq!(
+            answer(Some(false)),
+            (None, false),
+            "a draft stays after the answer"
+        );
+        assert_eq!(answer(None), (None, false), "unknown stays unknown");
+        let again = hook_question(Some(NeedsInput), NeedsInput, Some(true), false);
+        assert_eq!(
+            again,
+            (Some(true), false),
+            "a second question hook changes nothing"
+        );
+        let other = hook_question(Some(Running), Finished, Some(true), true);
+        assert_eq!(other, (Some(true), false), "other hooks never clear");
     }
 }

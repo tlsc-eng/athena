@@ -76,6 +76,8 @@ pub struct Terminal {
     /// Last live output that was not the echo of the user's own typing.
     pub last_activity: Instant,
     pub last_input: Option<Instant>,
+    /// Last time Enter was sent, by the user or `submit`; pastes do not count.
+    pub last_enter: Option<Instant>,
     pub clipboard_write: Option<String>,
     marks: Scanner,
     commands: Commands,
@@ -135,6 +137,7 @@ impl Terminal {
             bell: false,
             last_activity: Instant::now(),
             last_input: None,
+            last_enter: None,
             clipboard_write: None,
             marks: Scanner::default(),
             commands: Commands::default(),
@@ -480,6 +483,14 @@ impl Terminal {
 
     /// Sends user input, snapping the view back to the live screen first.
     pub fn input(&mut self, bytes: Vec<u8>) {
+        let enter = bytes == b"\r";
+        self.send(bytes);
+        if enter && self.exit.is_none() {
+            self.last_enter = self.last_input;
+        }
+    }
+
+    fn send(&mut self, bytes: Vec<u8>) {
         if self.exit.is_some() {
             return;
         }
@@ -622,13 +633,23 @@ impl Terminal {
     pub fn paste(&mut self, text: &str) {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if self.mode().contains(TermMode::BRACKETED_PASTE) {
-            // Strip any embedded end marker so pasted text cannot break out of the bracket.
-            let inner = text.replace("\x1b[201~", "");
+            // Every ESC goes, as stripping only the end marker lets one split around another
+            // reassemble into it.
+            let inner = text.replace('\x1b', "");
             format!("\x1b[200~{inner}\x1b[201~").into_bytes()
         } else {
             text.into_bytes()
         };
-        self.input(bytes);
+        self.send(bytes);
+    }
+
+    pub fn bracketed_paste(&self) -> bool {
+        self.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// Presses Enter.
+    pub fn submit(&mut self) {
+        self.input(b"\r".to_vec());
     }
 
     pub fn scroll(&mut self, lines: i32) {
@@ -734,6 +755,12 @@ fn strip_tags(text: &str) -> String {
     text.chars().filter(|&c| !marks::is_athenas(c)).collect()
 }
 
+/// Whether a prompt-submit hook left the prompt box empty: the user pressed Enter and has typed
+/// nothing since, which the hook's delay would otherwise hide.
+pub(crate) fn submitted_cleanly(last_enter: Option<Instant>, last_input: Option<Instant>) -> bool {
+    last_enter.is_some_and(|enter| last_input.is_none_or(|key| key <= enter))
+}
+
 fn sanitize_title(title: &str) -> String {
     title
         .chars()
@@ -789,6 +816,72 @@ mod tests {
         t.last_input = t.last_input.map(|at| at - ECHO * 2);
         feed(&mut t, b"working");
         assert!(t.last_activity > quiet_since);
+    }
+
+    #[test]
+    fn a_paste_is_bracketed_only_when_the_program_asked_for_it() {
+        let (mut t, sent) = terminal();
+        t.paste("a\nb");
+        assert_eq!(sent.0.borrow().as_slice(), b"a\rb");
+        sent.0.borrow_mut().clear();
+        feed(&mut t, b"\x1b[?2004h");
+        t.paste("a\r\nb\x1b[201~c");
+        assert_eq!(sent.0.borrow().as_slice(), b"\x1b[200~a\rb[201~c\x1b[201~");
+        sent.0.borrow_mut().clear();
+        t.paste("\x1b[20\x1b[201~1~");
+        assert_eq!(sent.0.borrow().as_slice(), b"\x1b[200~[20[201~1~\x1b[201~");
+    }
+
+    #[test]
+    fn submit_sends_enter() {
+        let (mut t, sent) = terminal();
+        t.submit();
+        assert_eq!(sent.0.borrow().as_slice(), b"\r");
+    }
+
+    #[test]
+    fn only_enter_keys_and_submit_count_as_an_enter_not_pastes() {
+        let (mut t, _) = terminal();
+        t.input(b"a".to_vec());
+        t.paste("a\nb");
+        assert!(t.last_enter.is_none());
+        t.input(b"\x1b\r".to_vec());
+        t.input(b"a\r".to_vec());
+        assert!(
+            t.last_enter.is_none(),
+            "Alt+Enter and text with a CR are not a submit"
+        );
+        t.input(b"\r".to_vec());
+        assert!(t.last_enter.is_some());
+        assert_eq!(t.last_enter, t.last_input);
+        let (mut t, _) = terminal();
+        t.submit();
+        assert!(t.last_enter.is_some());
+    }
+
+    fn after_a_tick(t: &mut Terminal, bytes: &[u8]) {
+        std::thread::sleep(Duration::from_millis(2));
+        t.input(bytes.to_vec());
+    }
+
+    #[test]
+    fn a_submit_hook_empties_the_prompt_only_if_nothing_was_typed_after_the_enter() {
+        let cleared = |t: &Terminal| submitted_cleanly(t.last_enter, t.last_input);
+        let (mut t, _) = terminal();
+        t.input(b"draft".to_vec());
+        assert!(!cleared(&t), "no Enter seen");
+        t.input(b"\r".to_vec());
+        assert!(cleared(&t), "the user's Enter, then nothing");
+        after_a_tick(&mut t, b"x");
+        assert!(!cleared(&t), "typed before the hook came");
+
+        let (mut t, _) = terminal();
+        t.paste("a comment");
+        std::thread::sleep(Duration::from_millis(2));
+        t.submit();
+        assert!(cleared(&t), "paste, our submit, then nothing");
+        after_a_tick(&mut t, b"x");
+        assert!(!cleared(&t), "paste, our submit, then the user typed");
     }
 
     #[test]
