@@ -1,10 +1,10 @@
 use athena_editor::{EditorView, FileEncoding, Indent, Lang, LineEnding};
-use athena_ui::{ActiveTheme, MenuItem, Tooltip};
+use athena_ui::{ActiveTheme, MenuItem, Space, Tooltip};
 use athena_workspace::gh::CiState;
 use athena_workspace::git;
 use gpui::{
     ClickEvent, Context, Entity, Focusable, IntoElement, Pixels, Point, SharedString, WeakEntity,
-    Window, div, prelude::*, px,
+    Window, div, prelude::*,
 };
 
 use super::Shell;
@@ -91,10 +91,10 @@ impl Shell {
             div()
                 .id(id)
                 .h_full()
-                .px(t.ui(8.))
+                .px(t.space(Space::Md))
                 .flex()
                 .items_center()
-                .gap(t.ui(6.))
+                .gap(t.space(Space::Sm))
                 .whitespace_nowrap()
                 .child(label)
         };
@@ -162,7 +162,7 @@ impl Shell {
                     div()
                         .id("status-ci")
                         .h_full()
-                        .px(t.ui(8.))
+                        .px(t.space(Space::Md))
                         .flex()
                         .items_center()
                         .cursor_pointer()
@@ -173,7 +173,7 @@ impl Shell {
                                 cx.open_url(&run.url);
                             }
                         })
-                        .child(div().size(px(6.)).rounded_full().bg(color))
+                        .child(div().size(t.ui(6.)).rounded_full().bg(color))
                 }))
         });
         let right = status.zip(editor).map(|(status, editor)| {
@@ -191,11 +191,11 @@ impl Shell {
                 div()
                     .id("status-lsp")
                     .h_full()
-                    .px(t.ui(8.))
+                    .px(t.space(Space::Md))
                     .flex()
                     .items_center()
                     .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
-                    .child(div().size(px(6.)).rounded_full().bg(color))
+                    .child(div().size(t.ui(6.)).rounded_full().bg(color))
             });
             div()
                 .flex()
@@ -279,7 +279,7 @@ impl Shell {
             .flex()
             .items_center()
             .justify_between()
-            .px(t.ui(4.))
+            .px(t.space(Space::Xs))
             .bg(t.color.surface)
             .border_t_1()
             .border_color(t.color.border)

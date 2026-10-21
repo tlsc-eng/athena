@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use athena_term::ClaudeState;
-use athena_ui::{ActiveTheme, Badge, Theme, Tooltip, motion};
+use athena_ui::{ActiveTheme, Badge, Space, Theme, Tooltip, motion};
 use athena_workspace::{FolderColor, FolderIcon, SidebarRow, Workspace, default_look};
 use gpui::{
     Animation, AnyElement, Context, ExternalPaths, FontWeight, Hsla, MouseButton, SharedString,
@@ -505,7 +505,7 @@ fn divider_lines(starts: &[usize], shown: &[f32]) -> Vec<(usize, f32)> {
 
 /// A filled square for Claude's state, or a hollow one for a Claude session with nothing to say.
 fn claude_dot(t: &Theme, mark: ClaudeMark) -> Option<gpui::Div> {
-    let dot = div().size(px(6.)).flex_none();
+    let dot = div().size(t.ui(6.)).flex_none();
     match mark.state {
         Some(ClaudeState::NeedsInput) => Some(dot.bg(t.color.warning)),
         Some(ClaudeState::Running) => Some(dot.bg(t.color.success)),
@@ -523,15 +523,15 @@ fn awake_mark(t: &Theme, mark: ClaudeMark) -> Option<gpui::Div> {
         div()
             .relative()
             .flex_none()
-            .w(px(9.))
-            .h(px(6.))
+            .w(t.ui(9.))
+            .h(t.ui(6.))
             .child(
                 div()
                     .absolute()
                     .left_0()
                     .top_0()
-                    .w(px(6.))
-                    .h(px(6.))
+                    .w(t.ui(6.))
+                    .h(t.ui(6.))
                     .border_l_1()
                     .border_r_1()
                     .border_b_1()
@@ -541,10 +541,10 @@ fn awake_mark(t: &Theme, mark: ClaudeMark) -> Option<gpui::Div> {
             .child(
                 div()
                     .absolute()
-                    .left(px(5.))
-                    .top(px(1.))
-                    .w(px(3.))
-                    .h(px(3.))
+                    .left(t.ui(5.))
+                    .top(t.ui(1.))
+                    .w(t.ui(3.))
+                    .h(t.ui(3.))
                     .border_t_1()
                     .border_r_1()
                     .border_b_1()
@@ -1214,7 +1214,7 @@ impl Shell {
                 .absolute()
                 .left_0()
                 .top(px(to_y))
-                .w(px(2.))
+                .w(t.ui(2.))
                 .h(t.ui(20.))
                 .bg(t.color.accent);
             motion::animate_if(
@@ -1326,7 +1326,7 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_between()
-                .px(t.ui(6.))
+                .px(t.space(Space::Sm))
                 .child(add)
                 .child(toggle)
         } else {
@@ -1381,7 +1381,7 @@ impl Shell {
                                     .flex()
                                     .flex_col()
                                     .when(!wide, |el| el.items_center())
-                                    .when(wide, |el| el.px(t.ui(6.)))
+                                    .when(wide, |el| el.px(t.space(Space::Sm)))
                                     .pt(t.ui(inset))
                                     .children(trays)
                                     .children(dividers)
@@ -1431,9 +1431,9 @@ impl Shell {
                     .ml(t.ui(INDENT * depth.saturating_sub(1) as f32))
                     .flex()
                     .items_center()
-                    .gap(t.ui(6.))
+                    .gap(t.space(Space::Sm))
                     .pl(t.ui(6. + INDENT * (depth.min(1) + 1) as f32))
-                    .pr(t.ui(6.))
+                    .pr(t.space(Space::Sm))
                     .rounded(t.shape.radius_control)
                     .text_size(t.typography.caption)
                     .text_color(t.color.content_muted)
@@ -1555,9 +1555,9 @@ impl Shell {
         if wide {
             el.h(t.ui(ROW))
                 .ml(t.ui(INDENT * depth as f32))
-                .pl(t.ui(6.))
-                .pr(t.ui(6.))
-                .gap(t.ui(6.))
+                .pl(t.space(Space::Sm))
+                .pr(t.space(Space::Sm))
+                .gap(t.space(Space::Sm))
                 .text_size(t.typography.caption)
                 .font_weight(FontWeight::SEMIBOLD)
                 .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
@@ -1584,8 +1584,16 @@ impl Shell {
                     })
                 })
                 .child(folder_icon(&t, icon, color, FOLDER_ICON))
-                .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
-                .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
+                .children(claude.map(|dot| {
+                    dot.absolute()
+                        .right(t.space(Space::Xxs))
+                        .bottom(t.space(Space::Xxs))
+                }))
+                .children(awake.map(|cup| {
+                    cup.absolute()
+                        .left(t.space(Space::Xxs))
+                        .top(t.space(Space::Xxs))
+                }))
                 .into_any_element()
         }
     }
@@ -1632,7 +1640,7 @@ impl Shell {
             .top(-t.ui(gap / 2.) - px(1.))
             .when(wide, |el| el.w_full())
             .when(!wide, |el| el.w(t.ui(RAIL_ITEM)))
-            .h(px(2.))
+            .h(t.ui(2.))
             .bg(t.color.accent)
             .invisible()
             .group_drag_over::<ProjectDrag>(group.clone(), |s| s.visible())
@@ -1709,7 +1717,7 @@ impl Shell {
                 div()
                     .id(("rail-fold", i))
                     .flex_none()
-                    .px(t.ui(4.))
+                    .px(t.space(Space::Xs))
                     .rounded(t.shape.radius_control)
                     .text_color(t.color.content_muted)
                     .hover(|s| s.bg(t.color.surface).text_color(t.color.content))
@@ -1727,8 +1735,8 @@ impl Shell {
             el.h(t.ui(ROW))
                 .ml(t.ui(INDENT * depth.saturating_sub(1) as f32))
                 .pl(t.ui(6. + INDENT * indent as f32))
-                .pr(t.ui(6.))
-                .gap(t.ui(6.))
+                .pr(t.space(Space::Sm))
+                .gap(t.space(Space::Sm))
                 .when(selected, |el| el.bg(t.color.surface_hover))
                 .when(main.is_some(), |el| el.child("↳"))
                 .child(
@@ -1760,14 +1768,22 @@ impl Shell {
                         .h(t.ui(RAIL_GAP))
                         .bg(t.color.border_strong)
                 }))
-                .children(claude.map(|dot| dot.absolute().right(px(2.)).bottom(px(2.))))
-                .children(awake.map(|cup| cup.absolute().left(px(2.)).top(px(2.))))
+                .children(claude.map(|dot| {
+                    dot.absolute()
+                        .right(t.space(Space::Xxs))
+                        .bottom(t.space(Space::Xxs))
+                }))
+                .children(awake.map(|cup| {
+                    cup.absolute()
+                        .left(t.space(Space::Xxs))
+                        .top(t.space(Space::Xxs))
+                }))
                 .when(attention > 0, |el| {
                     el.child(
                         div()
                             .absolute()
-                            .left(px(1.))
-                            .bottom(px(1.))
+                            .left(t.ui(1.))
+                            .bottom(t.ui(1.))
                             .child(Badge::new(attention)),
                     )
                 })
@@ -1776,9 +1792,9 @@ impl Shell {
                         div()
                             .id(("rail-fold", i))
                             .absolute()
-                            .right(px(1.))
+                            .right(t.ui(1.))
                             .top(px(0.))
-                            .px(px(1.))
+                            .px(t.ui(1.))
                             .rounded(px(2.))
                             .text_size(px(9.))
                             .hover(|s| s.bg(t.color.surface).text_color(t.color.content))
@@ -1809,7 +1825,7 @@ fn sidebar_button(
         .flex()
         .items_center()
         .justify_center()
-        .gap(t.ui(6.))
+        .gap(t.space(Space::Sm))
         .rounded(t.shape.radius_control)
         .text_size(t.typography.body)
         .text_color(t.color.content_muted)

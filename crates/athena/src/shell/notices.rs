@@ -832,15 +832,15 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_notification(id, window, cx)
                     }))
-                    .child(div().w(px(2.)).flex_none().bg(color))
+                    .child(div().w(t.ui(2.)).flex_none().bg(color))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .p(t.ui(12.))
+                            .p(t.space(Space::Lg))
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
+                            .gap(t.space(Space::Xxs))
                             .child(
                                 div()
                                     .text_size(t.typography.body)
@@ -855,7 +855,7 @@ impl Shell {
                             )
                             .children(action.map(|label| {
                                 div()
-                                    .pt(px(4.))
+                                    .pt(t.space(Space::Xs))
                                     .text_size(t.typography.caption)
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(t.color.accent)
@@ -866,8 +866,8 @@ impl Shell {
                         div()
                             .id(("toast-close", id))
                             .flex_none()
-                            .m(t.ui(8.))
-                            .size(px(16.))
+                            .m(t.space(Space::Md))
+                            .size(t.ui(16.))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -915,11 +915,11 @@ impl Shell {
         Some(
             div()
                 .absolute()
-                .right(px(16.))
-                .bottom(px(16.))
+                .right(t.space(Space::Xl))
+                .bottom(t.space(Space::Xl))
                 .flex()
                 .flex_col()
-                .gap(px(8.))
+                .gap(t.space(Space::Md))
                 .child(recorder)
                 .children(cards)
                 .into_any_element(),
@@ -939,11 +939,11 @@ impl Shell {
                 let id = n.id;
                 div()
                     .id(("notice", id))
-                    .h(px(32.))
-                    .px(px(12.))
+                    .h(t.ui(32.))
+                    .px(t.space(Space::Lg))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(t.ui(10.))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.color.surface_hover))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -951,7 +951,7 @@ impl Shell {
                     }))
                     .child(
                         div()
-                            .size(px(6.))
+                            .size(t.ui(6.))
                             .flex_none()
                             .bg(self.kind_color(&n.kind, cx)),
                     )

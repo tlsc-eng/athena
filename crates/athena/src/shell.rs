@@ -64,7 +64,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, empty_state, motion};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Size, Space, empty_state, motion};
 use athena_workspace::{
     Axis, Direction, ItemId, PaneId, SideMode, WindowMode, WindowState, Workspace,
 };
@@ -92,7 +92,6 @@ use crate::actions::{
     ShowChanges, ShowProblems, SwitchBranch, ToggleBlame, ToggleIdeIntegration,
 };
 
-const TITLE_BAR_HEIGHT: f32 = 36.;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub struct Shell {
@@ -491,11 +490,11 @@ impl Shell {
         let project = self.workspace.active_project();
         div()
             .id("title-bar")
-            .h(t.ui(TITLE_BAR_HEIGHT))
+            .h(t.size(Size::TitleBar))
             .flex_none()
             .flex()
             .items_center()
-            .pl(px(88.))
+            .pl(t.ui(88.))
             .bg(t.color.surface)
             .border_b_1()
             .border_color(t.color.border)
@@ -508,7 +507,7 @@ impl Shell {
             .children(project.map(|p| {
                 div()
                     .flex()
-                    .gap(px(6.))
+                    .gap(t.space(Space::Sm))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)

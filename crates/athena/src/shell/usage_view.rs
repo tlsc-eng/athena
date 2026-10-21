@@ -7,7 +7,7 @@ use athena_ui::motion::{self, Closing};
 use athena_ui::{ActiveTheme, ButtonKind, IconButton, Space};
 use gpui::{
     Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Point,
-    PromptLevel, Window, div, prelude::*, px,
+    PromptLevel, Window, div, prelude::*,
 };
 
 use super::Shell;
@@ -230,10 +230,10 @@ impl Shell {
 
     fn bar(&self, used: f32, width: f32, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.theme();
-        div().w(px(width)).h(px(2.)).bg(t.color.border).child(
+        div().w(t.ui(width)).h(t.ui(2.)).bg(t.color.border).child(
             div()
                 .h_full()
-                .w(px(width * (used / 100.).clamp(0., 1.)))
+                .w(t.ui(width * (used / 100.).clamp(0., 1.)))
                 .bg(self.level_color(used, cx)),
         )
     }
@@ -278,7 +278,7 @@ impl Shell {
         let summary = if windows.is_some() {
             div()
                 .flex()
-                .gap(px(4.))
+                .gap(t.space(Space::Xs))
                 .children(tag.map(|tag| div().text_color(t.color.content_muted).child(tag)))
                 .child(part("5h", five))
                 .child(div().text_color(t.color.content_muted).child("·"))
@@ -390,12 +390,12 @@ impl Shell {
                         Status::Windows(windows) => div()
                             .flex()
                             .flex_col()
-                            .gap(px(8.))
+                            .gap(t.space(Space::Md))
                             .children(windows.iter().map(|w| {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(4.))
+                                    .gap(t.space(Space::Xs))
                                     .child(
                                         div()
                                             .flex()
@@ -440,11 +440,11 @@ impl Shell {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(8.))
+                        .gap(t.space(Space::Md))
                         .child(
                             div()
                                 .flex()
-                                .gap(px(6.))
+                                .gap(t.space(Space::Sm))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(profile.name.clone())
                                 .when(Some(profile.name.as_str()) == preferred, |el| {
@@ -468,11 +468,11 @@ impl Shell {
             .absolute()
             .bottom(rise)
             .right(t.space(Space::Md))
-            .w(px(300.))
-            .p(px(16.))
+            .w(t.ui(300.))
+            .p(t.space(Space::Xl))
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(t.space(Space::Xl))
             .bg(t.color.surface)
             .border_1()
             .border_color(t.color.border)

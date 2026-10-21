@@ -6,11 +6,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use athena_editor::{EditorView, diff};
 use athena_proto::{AppMsg, PaneId, TodoInfo};
-use athena_ui::{ButtonKind, MenuItem, Theme, Tooltip};
+use athena_ui::{ButtonKind, MenuItem, Space, Theme, Tooltip};
 use athena_workspace::{DiffBase, SideMode};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, MouseButton, MouseDownEvent, PromptLevel,
-    Task, Window, actions, div, prelude::*, px,
+    Task, Window, actions, div, prelude::*,
 };
 
 use super::Shell;
@@ -836,10 +836,10 @@ impl Shell {
         Some(
             div()
                 .h(t.ui(ROW_HEIGHT + 4.))
-                .px(px(12.))
+                .px(t.space(Space::Lg))
                 .flex()
                 .items_center()
-                .gap(px(8.))
+                .gap(t.space(Space::Md))
                 .bg(t.color.surface_active)
                 .child(
                     div()
@@ -940,11 +940,11 @@ impl Shell {
         div()
             .id(("claude-file", id))
             .h(t.ui(ROW_HEIGHT - 2.))
-            .pl(px(48.))
-            .pr(px(12.))
+            .pl(t.ui(48.))
+            .pr(t.space(Space::Lg))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(t.space(Space::Md))
             .cursor_pointer()
             .when(reviewing, |el| el.bg(t.color.surface_active))
             .hover(|s| s.bg(t.color.surface_hover))
@@ -967,7 +967,7 @@ impl Shell {
             )
             .child(
                 div()
-                    .w(px(10.))
+                    .w(t.ui(10.))
                     .flex_none()
                     .text_color(match (file.created, file.deleted) {
                         (_, true) => t.color.danger,
@@ -995,7 +995,7 @@ impl Shell {
                 div()
                     .flex_none()
                     .flex()
-                    .gap(px(6.))
+                    .gap(t.space(Space::Sm))
                     .child(div().text_color(t.color.success).child(format!("+{added}")))
                     .child(
                         div()
@@ -1015,8 +1015,8 @@ fn detail_line(
     div()
         .id(id)
         .h(t.ui(ROW_HEIGHT - 4.))
-        .pl(px(48.))
-        .pr(px(12.))
+        .pl(t.ui(48.))
+        .pr(t.space(Space::Lg))
         .flex()
         .items_center()
         .overflow_hidden()

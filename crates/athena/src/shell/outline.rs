@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_lsp::{Position, Symbol, symbol_kind_label};
-use athena_ui::{ActiveTheme, InputEvent, TextInput, Tooltip};
+use athena_ui::{ActiveTheme, InputEvent, Space, TextInput, Tooltip};
 use gpui::{
     AnyElement, Context, Entity, MouseButton, ScrollStrategy, Subscription,
-    UniformListScrollHandle, div, prelude::*, px, uniform_list,
+    UniformListScrollHandle, div, prelude::*, uniform_list,
 };
 
 use super::Shell;
@@ -207,8 +207,8 @@ impl Shell {
         let filter = self.outline_filter(cx);
         let message = |text: String| {
             div()
-                .px(px(12.))
-                .py(px(8.))
+                .px(t.space(Space::Lg))
+                .py(t.space(Space::Md))
                 .text_size(t.typography.caption)
                 .text_color(t.color.content_muted)
                 .child(text)
@@ -258,19 +258,23 @@ impl Shell {
             .flex()
             .flex_col()
             .child(
-                div().flex_none().px(px(8.)).py(px(6.)).child(
-                    div()
-                        .h(t.ui(24.))
-                        .px(px(6.))
-                        .flex()
-                        .items_center()
-                        .rounded(t.shape.radius_control)
-                        .bg(t.color.surface_sunken)
-                        .border_1()
-                        .border_color(t.color.border)
-                        .text_size(t.typography.caption)
-                        .child(filter),
-                ),
+                div()
+                    .flex_none()
+                    .px(t.space(Space::Md))
+                    .py(t.space(Space::Sm))
+                    .child(
+                        div()
+                            .h(t.ui(24.))
+                            .px(t.space(Space::Sm))
+                            .flex()
+                            .items_center()
+                            .rounded(t.shape.radius_control)
+                            .bg(t.color.surface_sunken)
+                            .border_1()
+                            .border_color(t.color.border)
+                            .text_size(t.typography.caption)
+                            .child(filter),
+                    ),
             )
             .child(body)
             .into_any_element()
@@ -311,10 +315,10 @@ impl Shell {
                             .w_full()
                             .h(t.ui(ROW_HEIGHT))
                             .pl(t.ui(8. + INDENT * row.depth as f32))
-                            .pr(px(8.))
+                            .pr(t.space(Space::Md))
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(t.space(Space::Sm))
                             .cursor_pointer()
                             .text_size(t.typography.caption)
                             .text_color(if current {
@@ -340,7 +344,7 @@ impl Shell {
                             .child(
                                 div()
                                     .id(("outline-chevron", n))
-                                    .w(px(10.))
+                                    .w(t.ui(10.))
                                     .flex_none()
                                     .text_color(t.color.content_muted)
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -358,7 +362,7 @@ impl Shell {
                             .child(
                                 div()
                                     .flex_none()
-                                    .w(px(14.))
+                                    .w(t.ui(14.))
                                     .text_color(badge_color)
                                     .child(badge),
                             )

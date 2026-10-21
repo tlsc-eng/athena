@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use athena_ui::{ActiveTheme, MenuItem, Tooltip};
+use athena_ui::{ActiveTheme, MenuItem, Space, Tooltip};
 use athena_workspace::DiffBase;
 use athena_workspace::git::{self, LogEntry};
 use gpui::{
     AnyElement, ClipboardItem, Context, MouseButton, MouseDownEvent, Task, Window, div, prelude::*,
-    px, uniform_list,
+    uniform_list,
 };
 
 use super::Shell;
@@ -222,10 +222,10 @@ impl Shell {
                             .group(hover.clone())
                             .w_full()
                             .h(t.ui(ROW_HEIGHT))
-                            .px(px(12.))
+                            .px(t.space(Space::Lg))
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(t.space(Space::Md))
                             .text_size(t.typography.caption)
                             .cursor_pointer()
                             .hover(|s| s.bg(t.color.surface_hover))
@@ -242,8 +242,8 @@ impl Shell {
                             )
                             .child(
                                 div()
-                                    .w(px(6.))
-                                    .h(px(6.))
+                                    .w(t.ui(6.))
+                                    .h(t.ui(6.))
                                     .flex_none()
                                     .rounded_full()
                                     .bg(t.color.content_muted),
@@ -275,7 +275,7 @@ impl Shell {
                             )
                             .child(
                                 div()
-                                    .w(px(96.))
+                                    .w(t.ui(96.))
                                     .flex_none()
                                     .flex()
                                     .justify_end()

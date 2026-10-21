@@ -5,7 +5,7 @@ use athena_term::ClaudeState;
 use athena_ui::{
     ActiveTheme, Button, ButtonKind, DotState, IconButton, ListRow, Space, StatusDot, empty_state,
 };
-use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*};
 
 use super::live::{LiveSession, Place};
 use super::{SessionRow, Shell};
@@ -161,7 +161,7 @@ impl Shell {
         let pane = session.pane;
         let chevron = div()
             .id(("session-chevron", i))
-            .w(px(10.))
+            .w(t.ui(10.))
             .flex_none()
             .text_color(t.color.content_muted)
             .when(expandable, |el| {

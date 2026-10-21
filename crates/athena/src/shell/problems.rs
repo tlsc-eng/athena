@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_lsp::{Diagnostic, Position, Severity};
-use athena_ui::{ActiveTheme, Tooltip};
-use gpui::{AnyElement, Context, FontWeight, Hsla, div, prelude::*, px, uniform_list};
+use athena_ui::{ActiveTheme, Space, Tooltip};
+use gpui::{AnyElement, Context, FontWeight, Hsla, div, prelude::*, uniform_list};
 
 use super::Shell;
 use super::drawer::DrawerTab;
@@ -208,8 +208,8 @@ impl Shell {
             div()
                 .flex()
                 .items_center()
-                .gap(px(4.))
-                .child(div().size(px(6.)).flex_none().bg(if n > 0 {
+                .gap(t.space(Space::Xs))
+                .child(div().size(t.ui(6.)).flex_none().bg(if n > 0 {
                     color
                 } else {
                     t.color.content_disabled
@@ -220,10 +220,10 @@ impl Shell {
         div()
             .id("problems-button")
             .h_full()
-            .px(px(8.))
+            .px(t.space(Space::Md))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(t.space(Space::Md))
             .rounded(t.shape.radius_control)
             .cursor_pointer()
             .text_color(if active {
@@ -309,10 +309,10 @@ impl Shell {
                                 .id(("problem-file", i))
                                 .w_full()
                                 .h(t.ui(ROW_HEIGHT))
-                                .px(px(12.))
+                                .px(t.space(Space::Lg))
                                 .flex()
                                 .items_center()
-                                .gap(px(6.))
+                                .gap(t.space(Space::Sm))
                                 .text_size(t.typography.caption)
                                 .cursor_pointer()
                                 .hover(|s| s.bg(t.color.surface_hover))
@@ -324,7 +324,7 @@ impl Shell {
                                 }))
                                 .child(
                                     div()
-                                        .w(px(10.))
+                                        .w(t.ui(10.))
                                         .flex_none()
                                         .text_color(t.color.content_muted)
                                         .child(if *collapsed { "▸" } else { "▾" }),
@@ -348,7 +348,7 @@ impl Shell {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .px(px(6.))
+                                        .px(t.space(Space::Sm))
                                         .rounded(t.shape.radius_control)
                                         .bg(t.color.surface_active)
                                         .text_color(t.color.content_muted)
@@ -368,11 +368,11 @@ impl Shell {
                                 .id(("problem", i))
                                 .w_full()
                                 .h(t.ui(ROW_HEIGHT))
-                                .pl(px(40.))
-                                .pr(px(12.))
+                                .pl(t.ui(40.))
+                                .pr(t.space(Space::Lg))
                                 .flex()
                                 .items_center()
-                                .gap(px(8.))
+                                .gap(t.space(Space::Md))
                                 .text_size(t.typography.caption)
                                 .cursor_pointer()
                                 .hover(|s| s.bg(t.color.surface_hover))
@@ -384,7 +384,7 @@ impl Shell {
                                 }))
                                 .child(
                                     div()
-                                        .size(px(6.))
+                                        .size(t.ui(6.))
                                         .flex_none()
                                         .bg(severity_color(problem.severity, &t)),
                                 )

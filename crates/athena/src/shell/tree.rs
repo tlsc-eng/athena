@@ -367,6 +367,8 @@ impl Shell {
         let edit_input = self.tree.editing.as_ref().map(|e| e.input.clone());
         let drop_root = root.clone();
         let (row_height, scale) = (t.ui(ROW_HEIGHT), t.ui_scale);
+        let (pad_md, gap_sm, pad_xs) = (t.space(Space::Md), t.space(Space::Sm), t.space(Space::Xs));
+        let (ui_6, ui_10, ui_20) = (t.ui(6.), t.ui(10.), t.ui(20.));
         let list = uniform_list(
             "file-tree",
             count,
@@ -385,19 +387,19 @@ impl Shell {
                                 .w_full()
                                 .h(row_height)
                                 .pl(px(scale * (12. + INDENT * row.depth as f32)))
-                                .pr(px(8.))
+                                .pr(pad_md)
                                 .flex()
                                 .items_center()
-                                .gap(px(6.))
+                                .gap(gap_sm)
                                 .text_size(t.typography.caption)
-                                .child(div().w(px(10.)).flex_none())
+                                .child(div().w(ui_10).flex_none())
                                 .child(athena_ui::file_icon(&row.entry.path, is_dir, cx))
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .h(px(20.))
-                                        .px(px(4.))
+                                        .h(ui_20)
+                                        .px(pad_xs)
                                         .flex()
                                         .items_center()
                                         .bg(t.color.surface_sunken)
@@ -430,10 +432,10 @@ impl Shell {
                             .w_full()
                             .h(row_height)
                             .pl(px(scale * (12. + INDENT * row.depth as f32)))
-                            .pr(px(8.))
+                            .pr(pad_md)
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(gap_sm)
                             .cursor_pointer()
                             .text_size(t.typography.caption)
                             .text_color(if selected {
@@ -499,7 +501,7 @@ impl Shell {
                             ))
                             .child(
                                 div()
-                                    .w(px(10.))
+                                    .w(ui_10)
                                     .flex_none()
                                     .text_color(t.color.content_muted)
                                     .child(marker),
@@ -514,9 +516,7 @@ impl Shell {
                                     .child(row.entry.name.clone()),
                             )
                             .when(unsaved, |el| {
-                                el.child(
-                                    div().size(px(6.)).flex_none().bg(t.color.content_disabled),
-                                )
+                                el.child(div().size(ui_6).flex_none().bg(t.color.content_disabled))
                             })
                             .children(super::git_view::status_badge(git, is_dir, &git_theme))
                     })

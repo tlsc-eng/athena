@@ -6,7 +6,7 @@ use athena_editor::{
 };
 use athena_preview::{DocEvent, DocView, PreviewEvent, PreviewView, is_document_path};
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
-use athena_ui::{ActiveTheme, Button, ButtonKind, empty_state, motion};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Size, Space, empty_state, motion};
 use athena_workspace::{
     Axis, Direction, Divider, Item, ItemId, ItemKind, Layout, Node, NodePath, Pane, PaneId, Panel,
     Rect, ViewState,
@@ -23,7 +23,6 @@ use super::dnd::{DropZone, TabDrag, TabGhost, strip_drop_index, zone_for};
 use super::item::{ItemView, SessionTab, file_label};
 use crate::actions::NewTerminal;
 
-const TAB_STRIP_HEIGHT: f32 = 32.;
 const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// How far a resize handle reaches past each side of the line it drags.
 pub(super) const DIVIDER_HIT: f32 = 3.;
@@ -1603,7 +1602,7 @@ impl Shell {
                     .left_0()
                     .top_0()
                     .bottom_0()
-                    .w(px(2.))
+                    .w(t.ui(2.))
                     .bg(t.color.accent)
                     .invisible()
                     .group_drag_over::<TabDrag>(group.clone(), |s| s.visible());
@@ -1614,11 +1613,11 @@ impl Shell {
                     .flex_none()
                     .whitespace_nowrap()
                     .h_full()
-                    .pl(t.ui(12.))
-                    .pr(t.ui(6.))
+                    .pl(t.space(Space::Lg))
+                    .pr(t.space(Space::Sm))
                     .flex()
                     .items_center()
-                    .gap(t.ui(6.))
+                    .gap(t.space(Space::Sm))
                     .border_r_1()
                     .border_color(t.color.border)
                     .text_size(t.typography.caption)
@@ -1678,7 +1677,7 @@ impl Shell {
                     .child(
                         div()
                             .id(("tab-close", item.id.0))
-                            .size(px(16.))
+                            .size(t.ui(16.))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1706,7 +1705,7 @@ impl Shell {
                                 el.child(
                                     div()
                                         .absolute()
-                                        .size(px(6.))
+                                        .size(t.ui(6.))
                                         .bg(t.color.content_disabled)
                                         .group_hover(close_group, |s| s.invisible()),
                                 )
@@ -1778,7 +1777,7 @@ impl Shell {
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .w(px(16.))
+                .w(t.ui(16.))
                 .when(left, |el| el.left_0())
                 .when(!left, |el| el.right_0())
                 .bg(linear_gradient(
@@ -1788,7 +1787,7 @@ impl Shell {
                 ))
         };
         let strip = div()
-            .h(t.ui(TAB_STRIP_HEIGHT))
+            .h(t.size(Size::TabBar))
             .flex_none()
             .relative()
             .bg(t.color.surface)

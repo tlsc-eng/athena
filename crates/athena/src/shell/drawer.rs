@@ -1,5 +1,5 @@
 use athena_ui::motion::{self, Closing, Opening};
-use athena_ui::{ActiveTheme, MenuItem, Size, Tab, TabBar};
+use athena_ui::{ActiveTheme, MenuItem, Size, Space, Tab, TabBar};
 use athena_workspace::{Axis, DrawerTabName, UiState};
 use gpui::{
     Animation, AnyElement, ClickEvent, Context, MouseButton, MouseDownEvent, Window, div,
@@ -262,7 +262,7 @@ impl Shell {
                         div()
                             .h_full()
                             .flex_none()
-                            .pr(px(8.))
+                            .pr(t.space(Space::Md))
                             .flex()
                             .items_center()
                             .border_b_1()
