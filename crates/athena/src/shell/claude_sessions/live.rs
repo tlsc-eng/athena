@@ -181,19 +181,14 @@ fn todo_counts(todos: &[TodoInfo]) -> Option<(usize, usize)> {
     (!todos.is_empty()).then_some((done, todos.len()))
 }
 
-/// When a terminal was last used: its last typing, as a working Claude's redraws would otherwise
-/// outrank the session the user just typed in; output only for one never typed in.
-fn active_at(input: Option<Instant>, output: Option<Instant>) -> Option<Instant> {
-    input.or(output)
-}
-
 /// A terminal whose foreground program is Claude, whether or not a hook bound a session to it.
 struct ClaudeTerminal {
     root: PathBuf,
     pane: PaneId,
     label: String,
     state: Option<ClaudeState>,
-    active: Option<Instant>,
+    input: Option<Instant>,
+    output: Option<Instant>,
 }
 
 /// `sessions` narrowed to those whose terminal runs Claude now, plus an entry for each such
@@ -227,10 +222,22 @@ fn with_terminals(
             modified: SystemTime::UNIX_EPOCH,
         });
     }
+    // Typed-in terminals outrank the rest however busy those are, and a restart forgets typing.
+    let floor = claude
+        .iter()
+        .filter(|c| c.input.is_none())
+        .filter_map(|c| c.output)
+        .min();
     for s in &mut sessions {
-        let active = claude.iter().find(|c| Some(c.pane) == s.pane);
-        if let Some(active) = active.and_then(|c| c.active) {
-            s.modified = now - at.saturating_duration_since(active);
+        let Some(c) = claude.iter().find(|c| Some(c.pane) == s.pane) else {
+            continue;
+        };
+        match (c.input, c.output.zip(floor)) {
+            (Some(input), _) => s.modified = now - at.saturating_duration_since(input),
+            (None, Some((output, floor))) => {
+                s.modified = SystemTime::UNIX_EPOCH + output.saturating_duration_since(floor);
+            }
+            (None, None) => {}
         }
     }
     sessions
@@ -432,7 +439,8 @@ impl Shell {
                     pane,
                     label: view.label(),
                     state: view.claude_state(),
-                    active: active_at(view.last_input(), view.last_activity()),
+                    input: view.last_input(),
+                    output: view.last_activity(),
                 })
             })
             .collect();
@@ -508,12 +516,36 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_is_dated_by_its_typing_before_its_output() {
-        let at = Instant::now();
-        let (typed, wrote) = (at - Duration::from_secs(60), at);
-        assert_eq!(active_at(Some(typed), Some(wrote)), Some(typed));
-        assert_eq!(active_at(None, Some(wrote)), Some(wrote));
-        assert_eq!(active_at(None, None), None);
+    fn a_typed_in_terminal_outranks_a_never_typed_one_however_fresh_its_output() {
+        let (now, at) = (SystemTime::now(), Instant::now());
+        let terminal = |pane: PaneId, input: Option<u64>, output: u64| ClaudeTerminal {
+            root: PathBuf::from("/p"),
+            pane,
+            label: "Claude".into(),
+            state: None,
+            input: input.map(|s| at - Duration::from_secs(s)),
+            output: Some(at - Duration::from_secs(output)),
+        };
+        let place = |cwd: &Path| Place {
+            main_root: cwd.to_path_buf(),
+            branch: None,
+            rel: PathBuf::new(),
+        };
+        let claude = [
+            terminal(1, Some(600), 0),
+            terminal(2, None, 1),
+            terminal(3, None, 30),
+        ];
+        let listed = with_terminals(Vec::new(), &claude, place, now, at);
+        let modified = |pane: PaneId| {
+            listed
+                .iter()
+                .find(|s| s.pane == Some(pane))
+                .unwrap()
+                .modified
+        };
+        assert!(modified(1) > modified(2), "older typing beats newer output");
+        assert!(modified(2) > modified(3), "without typing, output decides");
     }
 
     #[test]
@@ -524,7 +556,8 @@ mod tests {
             pane,
             label: label.into(),
             state: None,
-            active: Some(at - Duration::from_secs(secs)),
+            input: Some(at - Duration::from_secs(secs)),
+            output: None,
         };
         let place = |cwd: &Path| Place {
             main_root: cwd.to_path_buf(),
