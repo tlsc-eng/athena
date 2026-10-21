@@ -322,7 +322,7 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
             items: vec![
                 MenuItem::action("New Terminal", NewTerminal),
                 MenuItem::action("New Claude Session", NewClaudeSession),
-                MenuItem::action("Continue Last Claude Session", ContinueClaudeSession),
+                MenuItem::action("Resume Claude Session…", ContinueClaudeSession),
                 MenuItem::action("New Window", NewWindow),
                 MenuItem::action("Open Project…", AddProject),
                 MenuItem::action("Open Project in New Window…", OpenProjectInNewWindow),
