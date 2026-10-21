@@ -4,7 +4,7 @@ use gpui::{
 };
 
 use super::{ClickHandler, Tooltip};
-use crate::{ActiveTheme, Size, Space};
+use crate::{ActiveTheme, Ellipsis, Size, Space};
 
 /// One row of a list or tree: indent, a leading icon or dot, a label, meta text and trailing
 /// controls, with an optional second line of detail.
@@ -128,7 +128,7 @@ impl RenderOnce for ListRow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
+                    .ellipsis()
                     .when(self.emphasized, |el| el.font_weight(FontWeight::MEDIUM))
                     .child(self.label),
             )

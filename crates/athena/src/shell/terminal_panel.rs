@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use athena_ui::{ActiveTheme, Button, ButtonKind, Tooltip, empty_state};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, Tooltip, empty_state};
 use athena_workspace::{Item, ItemId, ItemKind, Layout, PaneId, Panel};
 use gpui::{
     AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, Window, div, prelude::*, px,
@@ -482,14 +482,7 @@ impl Shell {
                 cx.new(|_| TabGhost { label })
             })
             .children(self.item_badge(root, item, &t, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(label),
-            )
+            .child(div().flex_1().min_w_0().ellipsis().child(label))
             .child(
                 div()
                     .id(("panel-row-close", id.0))

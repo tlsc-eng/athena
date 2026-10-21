@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_lsp::{Diagnostic, Position, Severity};
-use athena_ui::{ActiveTheme, Space, Tooltip};
+use athena_ui::{ActiveTheme, Ellipsis, Space, Tooltip};
 use gpui::{AnyElement, Context, FontWeight, Hsla, div, prelude::*, uniform_list};
 
 use super::Shell;
@@ -340,8 +340,7 @@ impl Shell {
                                 .child(
                                     div()
                                         .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .ellipsis()
                                         .text_color(t.color.content_muted)
                                         .child(dir),
                                 )
@@ -391,8 +390,7 @@ impl Shell {
                                 .child(
                                     div()
                                         .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .ellipsis()
                                         .text_color(if selected {
                                             t.color.content
                                         } else {

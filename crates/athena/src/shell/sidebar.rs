@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use athena_term::ClaudeState;
-use athena_ui::{ActiveTheme, Badge, Space, Theme, Tooltip, motion};
+use athena_ui::{ActiveTheme, Badge, Ellipsis, Space, Theme, Tooltip, motion};
 use athena_workspace::{FolderColor, FolderIcon, SidebarRow, Workspace, default_look};
 use gpui::{
     Animation, AnyElement, Context, ExternalPaths, FontWeight, Hsla, MouseButton, SharedString,
@@ -1445,11 +1445,11 @@ impl Shell {
                         cx.listener(move |this, _, _, cx| this.open_worktree(path.clone(), cx)),
                     )
                     .child("↳")
-                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(div().flex_1().min_w_0().ellipsis().child(name))
                     .children(
                         w.branch
                             .clone()
-                            .map(|b| div().flex_none().max_w(t.ui(90.)).truncate().child(b)),
+                            .map(|b| div().flex_none().max_w(t.ui(90.)).ellipsis().child(b)),
                     )
                     .into_any_element()
             })
@@ -1562,7 +1562,7 @@ impl Shell {
                 .font_weight(FontWeight::SEMIBOLD)
                 .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
                 .child(folder_icon(&t, icon, color, 14.))
-                .child(div().flex_1().min_w_0().truncate().child(name))
+                .child(div().flex_1().min_w_0().ellipsis().child(name))
                 .children(awake)
                 .children(claude)
                 .child(if collapsed { "▸" } else { "▾" })
@@ -1709,7 +1709,7 @@ impl Shell {
                 div()
                     .flex_none()
                     .max_w(t.ui(90.))
-                    .truncate()
+                    .ellipsis()
                     .text_color(t.color.content_muted)
                     .child(c)
             });
@@ -1743,7 +1743,7 @@ impl Shell {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .ellipsis()
                         .font_weight(FontWeight::MEDIUM)
                         .child(project.name()),
                 )

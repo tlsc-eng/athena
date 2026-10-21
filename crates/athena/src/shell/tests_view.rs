@@ -10,7 +10,7 @@ use athena_testing::{
     find_js_package, go_job, go_run_pattern, go_subtest_pattern, js_job, js_name_pattern,
     parse_coverprofile, with_coverage,
 };
-use athena_ui::{ActiveTheme, ButtonKind, Theme, empty_state};
+use athena_ui::{ActiveTheme, ButtonKind, Ellipsis, Theme, empty_state};
 use athena_workspace::LinterTrust;
 use gpui::{
     AnyElement, Context, Entity, EntityId, FontWeight, Hsla, Subscription, Task, WeakEntity,
@@ -972,8 +972,7 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .ellipsis()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(t.color.content)
                     .child(label),
@@ -1042,8 +1041,7 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .ellipsis()
                     .text_color(t.color.content)
                     .child(test.titles.last().cloned().unwrap_or_default()),
             )

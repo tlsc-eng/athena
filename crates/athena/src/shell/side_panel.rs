@@ -1,4 +1,4 @@
-use athena_ui::{ActiveTheme, SegmentedControl, Size, Space};
+use athena_ui::{ActiveTheme, Ellipsis, SegmentedControl, Size, Space};
 use athena_workspace::SideMode;
 use gpui::{AnyElement, Context, Focusable, FontWeight, Window, div, prelude::*};
 
@@ -180,8 +180,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .font_weight(FontWeight::NORMAL)
                             .child(summary)
                     })),

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use athena_editor::find::{self, FindOptions};
 use athena_editor::{DiffView, ToggleMatchCase, ToggleRegex, ToggleWholeWord};
-use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, InputEvent, TextInput};
 use athena_workspace::{DiffBase, ItemKind};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use gpui::{
@@ -1217,8 +1217,7 @@ impl Shell {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .ellipsis()
                                         .text_color(t.color.content_muted)
                                         .child(dir),
                                 )
@@ -1283,8 +1282,7 @@ impl Shell {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .ellipsis()
                                         .font_family(t.typography.mono.clone())
                                         .text_size(t.typography.caption)
                                         .text_color(t.color.content_muted)

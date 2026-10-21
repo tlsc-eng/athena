@@ -13,7 +13,7 @@ use athena_lsp::{
     SemanticAnswer, SemanticLegend, SemanticReply, ServerKind, Severity,
 };
 use athena_proto::{DiagnosticInfo, NoticeKind};
-use athena_ui::ActiveTheme;
+use athena_ui::{ActiveTheme, Ellipsis};
 use athena_workspace::LinterTrust;
 use gpui::{
     AnyElement, Context, Entity, EntityId, FontWeight, PromptButton, PromptLevel, Task, WeakEntity,
@@ -2090,8 +2090,7 @@ impl Shell {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
+                                    .ellipsis()
                                     .font_family(t.typography.mono.clone())
                                     .text_size(t.typography.caption)
                                     .text_color(t.color.content_muted)

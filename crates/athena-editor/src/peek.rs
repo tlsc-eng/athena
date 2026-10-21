@@ -2,7 +2,7 @@
 //! Stage, Revert, Next and Previous, as VS Code's dirty diff peek does.
 
 use athena_ui::motion::{self, Opening};
-use athena_ui::{ActiveTheme, Tooltip};
+use athena_ui::{ActiveTheme, Ellipsis, Tooltip};
 use gpui::{
     Animation, AnyElement, Context, FontWeight, HighlightStyle, MouseButton, Pixels, Point,
     SharedString, StyledText, anchored, div, point, prelude::*, px,
@@ -287,8 +287,7 @@ impl EditorView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .ellipsis()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(t.color.content_secondary)
                     .child(title),

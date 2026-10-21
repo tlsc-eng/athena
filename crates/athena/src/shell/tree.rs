@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_ui::motion::{self, Closing, Opening};
-use athena_ui::{ActiveTheme, Size, Space, TextInput};
+use athena_ui::{ActiveTheme, Ellipsis, Size, Space, TextInput};
 use athena_workspace::{Axis, SideMode, UiState};
 use gpui::{
     Animation, AnyElement, ClickEvent, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
@@ -511,8 +511,7 @@ impl Shell {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
+                                    .ellipsis()
                                     .child(row.entry.name.clone()),
                             )
                             .when(unsaved, |el| {

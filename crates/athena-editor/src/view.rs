@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use athena_ui::motion::{self, Closing, Opening};
 use athena_ui::{
-    ActiveTheme, Button, ButtonKind, ContextMenu, InputEvent, MenuItem, TextInput, empty_state,
+    ActiveTheme, Button, ButtonKind, ContextMenu, Ellipsis, InputEvent, MenuItem, TextInput,
+    empty_state,
 };
 use gpui::{
     Animation, App, Bounds, ClipboardItem, Context, DismissEvent, Entity, EntityInputHandler,
@@ -1424,8 +1425,7 @@ impl EditorView {
                 div()
                     .id("find-count")
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .ellipsis()
                     .text_color(if error.is_some() {
                         t.color.danger
                     } else {
@@ -1666,8 +1666,7 @@ impl EditorView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
+                        .ellipsis()
                         .text_color(t.color.content_secondary)
                         .child(first_line),
                 )
@@ -2420,8 +2419,7 @@ impl EditorView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
+                        .ellipsis()
                         .text_color(t.color.content_secondary)
                         .child(if deleted {
                             format!("{name} was deleted on disk.")

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use athena_lsp::{Call, CallItem, Position};
-use athena_ui::{ActiveTheme, Theme, Tooltip};
+use athena_ui::{ActiveTheme, Ellipsis, Theme, Tooltip};
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, Hsla, MouseButton, div, prelude::*, px,
     uniform_list,
@@ -425,8 +425,7 @@ impl Shell {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
+                                    .ellipsis()
                                     .text_color(t.color.content_muted)
                                     .child(row.detail.clone()),
                             )

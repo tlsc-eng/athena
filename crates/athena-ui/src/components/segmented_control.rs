@@ -4,7 +4,7 @@ use gpui::{
     App, ElementId, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*,
 };
 
-use crate::{ActiveTheme, Size, Space, Tooltip};
+use crate::{ActiveTheme, Ellipsis, Size, Space, Tooltip};
 
 type SelectHandler = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 
@@ -13,8 +13,8 @@ fn clamp_selected(selected: usize, len: usize) -> usize {
     selected.min(len.saturating_sub(1))
 }
 
-/// A switch of N labelled segments, one selected. It fills its container; segments share the
-/// width and truncate their labels, which a tooltip spells out.
+/// A switch of N labelled segments, one selected. It fills its container; segments size to their
+/// labels and shrink, truncating with a tooltip, only when the container is too narrow.
 #[derive(IntoElement)]
 pub struct SegmentedControl {
     id: ElementId,
@@ -60,9 +60,9 @@ impl RenderOnce for SegmentedControl {
                 div()
                     .id((self.id.clone(), ix.to_string()))
                     .h(t.size(Size::Row))
-                    .flex_1()
+                    .flex_auto()
                     .min_w_0()
-                    .px(t.space(Space::Md))
+                    .px(t.space(Space::Sm))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -83,14 +83,7 @@ impl RenderOnce for SegmentedControl {
                         let label = label.clone();
                         move |_, cx| Tooltip::view(label.clone(), cx)
                     })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(label),
-                    )
+                    .child(div().min_w_0().ellipsis().child(label))
             }))
     }
 }

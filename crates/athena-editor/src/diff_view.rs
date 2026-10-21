@@ -3,7 +3,9 @@ use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use athena_ui::{ActiveTheme, ContextMenu, MenuItem, SyntaxColors, Theme, Tooltip, empty_state};
+use athena_ui::{
+    ActiveTheme, ContextMenu, Ellipsis, MenuItem, SyntaxColors, Theme, Tooltip, empty_state,
+};
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, HighlightStyle, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
@@ -1242,9 +1244,7 @@ impl DiffView {
             .child(
                 div()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
+                    .ellipsis()
                     .text_color(t.color.content_secondary)
                     .child(format!("{} ↔ {}", self.old_label, self.new_label)),
             )

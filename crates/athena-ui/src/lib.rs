@@ -22,7 +22,7 @@ pub use theme::{
     TerminalColors, Theme, Typography, UI_ZOOM,
 };
 
-use gpui::{App, WindowAppearance};
+use gpui::{App, Styled, WindowAppearance};
 
 /// Registers fonts and the theme global; call once before opening windows.
 pub fn init(cx: &mut App) {
@@ -60,5 +60,30 @@ pub trait ActiveTheme {
 impl ActiveTheme for App {
     fn theme(&self) -> &Theme {
         self.global::<Theme>()
+    }
+}
+
+/// Text that ends in "…" when a line overflows its box.
+/// Put it on an element whose only child is the text, not on a flex container, where the bare text cannot shrink.
+pub trait Ellipsis: Styled + Sized {
+    fn ellipsis(self) -> Self {
+        self.whitespace_normal().line_clamp(1).text_ellipsis()
+    }
+}
+
+impl<E: Styled> Ellipsis for E {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{WhiteSpace, div};
+
+    #[test]
+    fn ellipsis_clamps_one_normal_whitespace_line() {
+        let mut el = div().whitespace_nowrap().ellipsis();
+        let style = el.text_style().clone().unwrap();
+        assert_eq!(style.white_space, Some(WhiteSpace::Normal));
+        assert_eq!(style.line_clamp, Some(1));
+        assert!(style.text_overflow.is_some());
     }
 }

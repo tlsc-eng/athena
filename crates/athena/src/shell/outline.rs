@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_lsp::{Position, Symbol, symbol_kind_label};
-use athena_ui::{ActiveTheme, InputEvent, Space, TextInput, Tooltip};
+use athena_ui::{ActiveTheme, Ellipsis, InputEvent, Space, TextInput, Tooltip};
 use gpui::{
     AnyElement, Context, Entity, MouseButton, ScrollStrategy, Subscription,
     UniformListScrollHandle, div, prelude::*, uniform_list,
@@ -366,14 +366,7 @@ impl Shell {
                                     .text_color(badge_color)
                                     .child(badge),
                             )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(s.name.clone()),
-                            )
+                            .child(div().flex_1().min_w_0().ellipsis().child(s.name.clone()))
                     })
                     .collect::<Vec<_>>()
             }),
