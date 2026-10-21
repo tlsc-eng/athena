@@ -27,7 +27,7 @@ const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// How far a resize handle reaches past each side of the line it drags.
 pub(super) const DIVIDER_HIT: f32 = 3.;
 
-const TREE_MIN: f32 = 160.;
+const TREE_MIN: f32 = 210.;
 const TREE_MAX: f32 = 480.;
 const DRAWER_MIN: f32 = 120.;
 /// Window height the drawer must leave for the title bar and panes.
@@ -2686,7 +2686,7 @@ mod tests {
     #[test]
     fn tree_width_stays_between_its_limits() {
         assert_eq!(clamp_tree_width(240.), 240.);
-        assert_eq!(clamp_tree_width(20.), 160.);
+        assert_eq!(clamp_tree_width(20.), 210.);
         assert_eq!(clamp_tree_width(900.), 480.);
     }
 
