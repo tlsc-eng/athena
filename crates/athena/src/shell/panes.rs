@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use athena_editor::{
-    EditorEvent, EditorView, ImageView, LargeFileView, is_image_path, is_large_file,
+    EditorEvent, EditorView, ImageView, LargeFileView, ReviewEvent, is_image_path, is_large_file,
 };
 use athena_preview::{DocEvent, DocView, PreviewEvent, PreviewView, is_document_path};
 use athena_term::{ClaudeState, TerminalEvent, TerminalView};
@@ -296,8 +296,10 @@ impl Shell {
                         EditorEvent::Opened => {
                             this.lsp_opened(&tab.0, &view, cx);
                             this.git_opened(&view, cx);
+                            this.watch_editor_comments(&view, cx);
                         }
                         EditorEvent::Edited { .. } => {
+                            this.comments_edited(&view, cx);
                             this.lsp_edited(&view, cx);
                             this.follow_docs(&view, cx);
                             view.update(cx, |v, cx| v.schedule_autosave(cx));
@@ -374,8 +376,13 @@ impl Shell {
                     cx.notify();
                 })
                 .detach();
+                cx.subscribe(&view, |this, view, event: &ReviewEvent, cx| {
+                    this.review_comment_event(view.entity_id(), event.clone(), cx)
+                })
+                .detach();
                 self.lsp_opened(root, &view, cx);
                 self.git_opened(&view, cx);
+                self.watch_editor_comments(&view, cx);
                 self.watch_tests(&view, cx);
                 self.debug_opened(&view, cx);
                 ItemView::Editor(view)

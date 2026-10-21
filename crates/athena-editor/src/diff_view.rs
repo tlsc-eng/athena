@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -14,6 +14,7 @@ use gpui::{
 use ropey::Rope;
 
 use crate::diff::{self, Change, Row, Shown};
+use crate::review::{ReviewEvent, ReviewMark, ReviewState, anchor, range_for};
 use crate::syntax::{Lang, Syntax, Token};
 
 actions!(
@@ -250,6 +251,7 @@ pub struct DiffView {
     /// Width of one column of the code font, measured each frame.
     cell: f32,
     context_menu: Option<(Entity<ContextMenu>, Subscription)>,
+    review: ReviewState,
 }
 
 /// Selected text on one side, between two (row, column) points of the current layout's rows.
@@ -281,6 +283,22 @@ impl Selection {
 }
 
 impl EventEmitter<DiffEvent> for DiffView {}
+impl EventEmitter<ReviewEvent> for DiffView {}
+
+/// The one-based line of the new file a row shows; rows with only removed text have none, so
+/// comments cannot attach to them.
+fn row_new_line(row: &Row) -> Option<u32> {
+    match row {
+        Row::Line { new: Some(n), .. } => Some(*n as u32 + 1),
+        _ => None,
+    }
+}
+
+/// The new-file lines shown on rows `first` to `last`, if any of them shows one.
+fn new_lines_between(rows: &[Row], first: usize, last: usize) -> Option<RangeInclusive<u32>> {
+    let lines = rows.get(first..=last)?.iter().filter_map(row_new_line);
+    Some(lines.clone().min()?..=lines.max()?)
+}
 
 impl Focusable for DiffView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -322,6 +340,7 @@ impl DiffView {
             selecting: false,
             cell: 0.,
             context_menu: None,
+            review: ReviewState::default(),
         }
     }
 
@@ -399,6 +418,9 @@ impl DiffView {
                 this.computing = None;
                 this.error = None;
                 this.loaded = Some(Rc::new(loaded));
+                if this.review.enabled {
+                    cx.emit(ReviewEvent::Moved);
+                }
                 this.selection = None;
                 this.refresh_shown();
                 if this
@@ -637,6 +659,7 @@ impl DiffView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
+        self.review.close();
         let Some((row, which, col)) = self.point_at(event.position, cx) else {
             return;
         };
@@ -1276,6 +1299,144 @@ impl DiffView {
             })
     }
 
+    /// Lets the user comment on the new side's lines; only for a session's changes.
+    pub fn set_review(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.review.enabled != enabled {
+            self.review.set_enabled(enabled);
+            cx.notify();
+        }
+    }
+
+    /// The comments on the new side, placed on the lines they belong to now.
+    pub fn set_review_comments(&mut self, marks: Vec<ReviewMark>, cx: &mut Context<Self>) {
+        if self.review.enabled {
+            self.review.set_marks(marks, cx);
+            cx.notify();
+        }
+    }
+
+    /// The new-side lines of a selection on the new side, if it spans several rows.
+    fn selected_new_lines(&self) -> Option<RangeInclusive<u32>> {
+        let s = self
+            .selection
+            .filter(|s| self.inline || s.side == Which::New)?;
+        let ((first, _), (last, end_col)) = s.ordered();
+        let last = if last > first && end_col == 0 {
+            last - 1
+        } else {
+            last
+        };
+        new_lines_between(self.rows()?, first, last)
+    }
+
+    fn click_review(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(line) = self.rows().and_then(|rows| row_new_line(rows.get(ix)?)) else {
+            return;
+        };
+        let was_open = self.review.open_line() == Some(line);
+        self.review.close();
+        if !was_open {
+            let range = range_for(line, self.selected_new_lines());
+            self.review
+                .open(line, range, Self::close_review_popover, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn close_review_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.review.close();
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// The new side's gutter slot on a row that shows a new line: a dot where a comment starts,
+    /// else a "+" while the row is hovered.
+    fn review_slot(
+        &self,
+        row: gpui::Div,
+        ix: usize,
+        shown: &Row,
+        gutter: f32,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let Some(line) = row_new_line(shown).filter(|_| self.review.enabled) else {
+            return row;
+        };
+        let group = SharedString::from(format!("review-row-{ix}"));
+        let left: gpui::Length = match self.inline {
+            true => px(gutter).into(),
+            false => gpui::relative(0.5).into(),
+        };
+        let mark = match self.review.dot(line) {
+            Some(stale) => div()
+                .size(px(7.))
+                .rounded_full()
+                .border_1()
+                .border_color(if stale {
+                    t.color.content_muted
+                } else {
+                    t.color.accent
+                })
+                .when(!stale, |el| el.bg(t.color.accent))
+                .into_any_element(),
+            None => div()
+                .text_color(gpui::transparent_black())
+                .group_hover(group.clone(), |s| s.text_color(t.syntax.line_number_active))
+                .child("+")
+                .into_any_element(),
+        };
+        row.relative().group(group).child(
+            div()
+                .id(("review-slot", ix))
+                .absolute()
+                .top(px(0.))
+                .left(left)
+                .ml(px(2.))
+                .w(px(10.))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.click_review(ix, window, cx)
+                    }),
+                )
+                .child(mark),
+        )
+    }
+
+    /// The popover under its row, left of the new side's text; hidden while the row is off screen.
+    fn render_review(&self, cx: &App) -> Option<gpui::AnyElement> {
+        let line = self.review.open_line()?;
+        let loaded = self.loaded.as_ref()?;
+        let rows = self.rows()?;
+        let at = self.shown.iter().position(|s| match s {
+            Shown::Row(ix) => row_new_line(&rows[*ix]) == Some(line),
+            Shown::Hidden(_) => false,
+        })?;
+        let handle = self.scroll.0.borrow().base_handle.clone();
+        let bounds = handle.bounds();
+        let row_h = self.row_height(cx);
+        let y = bounds.top() + handle.offset().y + px(row_h * (at + 1) as f32);
+        if y < bounds.top() || y > bounds.bottom() {
+            return None;
+        }
+        let gutter = self.gutter_width(loaded, cx);
+        let x = match self.inline {
+            true => 2. * gutter + SIGN_WIDTH,
+            false => (f32::from(bounds.size.width) - 1.) / 2. + 1. + gutter + SIGN_WIDTH,
+        };
+        Some(anchor(
+            self.review.popover()?,
+            point(bounds.left() + px(x), y),
+        ))
+    }
+
     fn toggle_inline(&mut self, cx: &mut Context<Self>) {
         self.inline = !self.inline;
         self.selection = None;
@@ -1334,6 +1495,7 @@ impl DiffView {
                                 return this.fold_bar(at, hidden.clone(), row, &t, cx);
                             }
                         };
+                        let row = this.review_slot(row, ix, &rows[ix], gutter, &t, cx);
                         let selected = |which: Which| {
                             selection
                                 .filter(|s| inline || s.side == which)
@@ -1488,6 +1650,7 @@ impl Render for DiffView {
                     )
                     .child(self.render_body(cx)),
             )
+            .children(self.render_review(cx))
             .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
     }
 }
@@ -1495,6 +1658,41 @@ impl Render for DiffView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line(old: Option<usize>, new: Option<usize>) -> Row {
+        Row::Line {
+            old,
+            new,
+            change: Some(0),
+        }
+    }
+
+    #[test]
+    fn comments_attach_to_new_lines_only_and_removed_rows_have_none() {
+        assert_eq!(row_new_line(&line(Some(3), Some(5))), Some(6));
+        assert_eq!(row_new_line(&line(None, Some(0))), Some(1));
+        assert_eq!(
+            row_new_line(&line(Some(3), None)),
+            None,
+            "only removed text"
+        );
+        assert_eq!(row_new_line(&Row::Header(0)), None);
+    }
+
+    #[test]
+    fn a_selection_over_rows_covers_the_new_lines_they_show() {
+        let rows = [
+            Row::Header(0),
+            line(Some(1), None),
+            line(Some(2), Some(1)),
+            line(None, Some(2)),
+            line(Some(4), None),
+        ];
+        assert_eq!(new_lines_between(&rows, 0, 4), Some(2..=3));
+        assert_eq!(new_lines_between(&rows, 2, 2), Some(2..=2));
+        assert_eq!(new_lines_between(&rows, 1, 1), None);
+        assert_eq!(new_lines_between(&rows, 3, 9), None, "past the rows");
+    }
 
     fn side(text: &str) -> Side {
         Side::new(text.to_string(), Lang::for_path(Path::new("x.go")))

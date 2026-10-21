@@ -99,6 +99,8 @@ pub(super) enum Mode {
     NewTag,
     /// The repository's recent history.
     Log,
+    /// A Claude session's review comments that were not sent yet.
+    ReviewComments,
 }
 
 fn now_secs() -> i64 {
@@ -127,6 +129,7 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::Worktrees | Mode::RemoveWorktree => "No matching worktrees",
         Mode::NewWorktree => "Type a name for a new branch",
         Mode::Checks => "No matching checks",
+        Mode::ReviewComments => "No unsent review comments",
         Mode::MoveToFolder => "Type a name for a new folder",
         Mode::RenameFolder => "Type the folder's new name",
         Mode::FolderIcon => "No matching icons",
@@ -404,6 +407,10 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::claude_sessions::ClaudeReviewPreviousFile),
         ),
         (
+            "Claude: Review Comments for Session…",
+            Box::new(super::review_comments::ClaudeReviewComments),
+        ),
+        (
             "Allow project code (linters, TypeScript, project settings)",
             Box::new(super::lsp::AllowProjectLinters),
         ),
@@ -623,6 +630,7 @@ impl Shell {
             Mode::NewWorktree => "Pick a branch for the new worktree, or type a new branch name…",
             Mode::RemoveWorktree => "Delete a worktree…",
             Mode::Checks => "Open a pull request check…",
+            Mode::ReviewComments => "Jump to an unsent review comment…",
             Mode::MoveToFolder => "Move to a folder, or type a name for a new one…",
             Mode::RenameFolder => "New name for the folder…",
             Mode::FolderIcon => "Pick an icon for the folder…",
@@ -673,6 +681,7 @@ impl Shell {
             Mode::Projects => self.project_entries(),
             Mode::Tasks => self.task_entries(),
             Mode::Checks => self.check_entries(),
+            Mode::ReviewComments => self.review_comment_entries(),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
@@ -789,6 +798,25 @@ impl Shell {
                     kind: None,
                     target: Target::Link(check.link.clone()),
                 }
+            })
+            .collect()
+    }
+
+    fn review_comment_entries(&self) -> Vec<Entry> {
+        self.comment_rows()
+            .into_iter()
+            .map(|row| Entry {
+                key: format!("{} {}", row.label, row.detail),
+                label: row.label,
+                detail: Some(row.detail),
+                kind: None,
+                target: Target::Symbol(
+                    row.path,
+                    Position {
+                        line: row.line,
+                        character: 0,
+                    },
+                ),
             })
             .collect()
     }

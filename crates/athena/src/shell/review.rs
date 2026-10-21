@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
-use athena_editor::{DiffEvent, DiffView, FileEncoding, HunkActions};
+use athena_editor::{DiffEvent, DiffView, FileEncoding, HunkActions, ReviewEvent};
 use athena_proto::PaneId;
 use athena_workspace::git::{self, Rev};
 use athena_workspace::{DiffBase, ItemKind};
@@ -25,6 +25,7 @@ pub(super) struct ReviewState {
     /// The file "Select for Compare" picked, the left side of the next Compare with Selected.
     pub(super) compare_with: Option<PathBuf>,
     pub(super) sessions: super::claude_sessions::SessionsState,
+    pub(super) comments: super::review_comments::CommentsState,
     /// Each diff's encoding for writing a hunk back, or why hunks can't be written.
     encodings: HashMap<EntityId, Result<FileEncoding, String>>,
 }
@@ -436,6 +437,13 @@ impl Shell {
             this.diff_event(&root_key, &view, &base_key, event.clone(), cx)
         })
         .detach();
+        if let DiffBase::Snapshot { session } = base {
+            self.watch_diff_comments(&view, session, cx);
+            cx.subscribe(&view, |this, view, event: &ReviewEvent, cx| {
+                this.review_comment_event(view.entity_id(), event.clone(), cx)
+            })
+            .detach();
+        }
         self.load_diff(root, &view, base, cx);
         ItemView::Diff(view)
     }
@@ -645,6 +653,7 @@ impl Shell {
             return;
         };
         self.reload_diffs(&root, Some(&path), cx);
+        self.refresh_comment_editors(&path, cx);
         self.claude_sessions_stale(cx);
         tracing::debug!(path = %path.display(), session, "Claude edited a file");
     }

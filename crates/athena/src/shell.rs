@@ -34,6 +34,7 @@ mod problems;
 mod quit;
 mod rename;
 mod review;
+mod review_comments;
 mod search;
 mod settings;
 mod settings_ui;
@@ -673,6 +674,7 @@ impl Render for Shell {
         let root = snippets::bind_snippet_actions(root, cx);
         let root = debug::bind_debug_actions(root, cx);
         let root = claude_sessions::bind_claude_actions(root, cx);
+        let root = review_comments::bind_comment_actions(root, cx);
         let root = github::bind_github_actions(root, cx);
         root.track_focus(&self.focus)
             .key_context("Shell")

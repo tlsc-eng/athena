@@ -330,6 +330,13 @@ pub(crate) const GUTTER_PAD: f32 = 16.;
 const FOLD_COLUMN: f32 = 20.;
 const TEXT_PAD: f32 = 8.;
 
+fn review_width(view: &crate::view::EditorView) -> Pixels {
+    match view.review.enabled {
+        true => px(crate::review::REVIEW_COLUMN),
+        false => px(0.),
+    }
+}
+
 pub struct EditorElement {
     view: Entity<EditorView>,
     focused: bool,
@@ -486,10 +493,14 @@ impl Element for EditorElement {
         };
 
         let blame_w = blame_width(self.view.read(cx), cell);
+        let review_w = review_width(self.view.read(cx));
         let gutter = |total: usize| {
             let digits = total.to_string().len().max(3);
             let numbers_right = bounds.left() + px(GUTTER_PAD) + cell * digits as f32;
-            let fold_column = (numbers_right, numbers_right + px(FOLD_COLUMN));
+            let fold_column = (
+                numbers_right + review_w,
+                numbers_right + review_w + px(FOLD_COLUMN),
+            );
             let text_left = fold_column.1 + blame_w + px(TEXT_PAD);
             (numbers_right, fold_column, text_left)
         };
@@ -871,6 +882,19 @@ impl Element for EditorElement {
                 );
                 let x = numbers_right - label.width;
                 frame.gutter.push((point(x, y), label));
+                if view.review.enabled {
+                    review_mark(
+                        &mut frame,
+                        view.review.dot(*line as u32 + 1),
+                        view.review.hover == Some(*line as u32 + 1),
+                        numbers_right,
+                        y,
+                        lh,
+                        font_size,
+                        &theme,
+                        window,
+                    );
+                }
                 let debug_mark =
                     view.breakpoint_look(*line).is_some() || view.stopped_arrow(*line).is_some();
                 if let Some(state) = view
@@ -1116,6 +1140,7 @@ impl Element for EditorElement {
                 rows: stored,
                 sticky,
                 fold_column,
+                review_column: (numbers_right, numbers_right + review_w),
             });
         });
         frame
@@ -1235,6 +1260,57 @@ fn run_mark(
     frame
         .gutter_marks
         .push(fill(Bounds::new(origin, size(d, d)), color).corner_radii(d / 2.));
+}
+
+/// A review comment's dot, hollow when stale, or the "+" that shows on the hovered line.
+#[allow(clippy::too_many_arguments)]
+fn review_mark(
+    frame: &mut Frame,
+    dot: Option<bool>,
+    hovered: bool,
+    left: Pixels,
+    y: Pixels,
+    lh: Pixels,
+    font_size: Pixels,
+    theme: &athena_ui::Theme,
+    window: &mut Window,
+) {
+    let column = px(crate::review::REVIEW_COLUMN);
+    match (dot, hovered) {
+        (Some(stale), _) => {
+            let d = px(7.);
+            let bounds = Bounds::new(
+                point(left + (column - d) / 2., y + (lh - d) / 2.),
+                size(d, d),
+            );
+            let mark = match stale {
+                true => fill(bounds, gpui::transparent_black())
+                    .border_widths(px(1.5))
+                    .border_color(theme.color.content_muted),
+                false => fill(bounds, theme.color.accent),
+            };
+            frame.gutter_marks.push(mark.corner_radii(d / 2.));
+        }
+        (None, true) => {
+            let glyph = window.text_system().shape_line(
+                "+".into(),
+                font_size,
+                &[TextRun {
+                    len: 1,
+                    font: gpui::font(theme.typography.mono.clone()),
+                    color: theme.syntax.line_number_active,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            );
+            frame
+                .gutter
+                .push((point(left + (column - glyph.width) / 2., y), glyph));
+        }
+        (None, false) => {}
+    }
 }
 
 /// A line's breakpoint in the gutter's left margin, and the arrow where a paused program is.

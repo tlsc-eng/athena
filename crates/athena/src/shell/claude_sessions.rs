@@ -66,6 +66,19 @@ impl SessionsState {
         self.panes.retain(|p, s| *p == pane || *s != session);
         self.panes.insert(pane, session);
     }
+
+    /// The sessions bound to a pane here, each with when it last changed (`UNIX_EPOCH` while the
+    /// list has not loaded it).
+    pub(super) fn bound_sessions(&self) -> Vec<(String, SystemTime)> {
+        let modified = |id: &String| {
+            let row = self.rows.iter().find(|r| r.id == *id);
+            row.map_or(SystemTime::UNIX_EPOCH, |r| r.modified)
+        };
+        self.panes
+            .values()
+            .map(|s| (s.clone(), modified(s)))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Default)]

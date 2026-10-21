@@ -317,6 +317,8 @@ pub(crate) struct EditorLayout {
     pub sticky: Vec<usize>,
     /// Left and right edge of the gutter column holding fold chevrons.
     pub fold_column: (Pixels, Pixels),
+    /// The gutter column holding review comment dots; empty when the file is not under review.
+    pub review_column: (Pixels, Pixels),
 }
 
 impl EditorLayout {
@@ -512,6 +514,7 @@ pub struct EditorView {
     /// The Format Selection request in flight and the buffer version it was asked for.
     pub(crate) range_format: Option<(u64, u64)>,
     pub(crate) debug: crate::breakpoints::DebugMarks,
+    pub(crate) review: crate::review::ReviewState,
 }
 
 /// Where a view stood in its file, for restoring a tab across launches; positions are zero-based.
@@ -614,6 +617,7 @@ impl EditorView {
             linked: Default::default(),
             range_format: None,
             debug: Default::default(),
+            review: Default::default(),
         }
     }
 
@@ -1006,6 +1010,10 @@ impl EditorView {
         if self.click_sticky(event.position, cx) {
             return;
         }
+        if self.click_review_column(event.position, window, cx) {
+            return;
+        }
+        self.dismiss_review(cx);
         if self.click_breakpoint_margin(event.position, window, cx)
             || self.click_lightbulb(event.position, window, cx)
             || self.click_run_mark(event.position, window, cx)
@@ -1075,6 +1083,7 @@ impl EditorView {
         }
         self.hover_blame(event.position, cx);
         self.hover_breakpoint_margin(Some(event.position), cx);
+        self.hover_review(Some(event.position), cx);
         if event.pressed_button.is_none() {
             self.hover_pointer(event.position, cx);
         }
@@ -1777,6 +1786,7 @@ impl Render for EditorView {
                         if !hovered {
                             this.hover_left(cx);
                             this.hover_breakpoint_margin(None, cx);
+                            this.hover_review(None, cx);
                         }
                     }))
                     .on_scroll_wheel(cx.listener(Self::scroll_wheel))
@@ -1996,6 +2006,7 @@ impl Render for EditorView {
             .children(self.render_hover(cx))
             .children(self.render_blame_hover(cx))
             .children(self.render_peek(cx))
+            .children(self.render_review())
             .children(self.render_merge_actions(cx))
             .children(self.render_rename(cx))
             .children(focused.then(|| self.render_signature(cx)).flatten())

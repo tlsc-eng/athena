@@ -1,0 +1,366 @@
+//! Review comments in the window: which Claude session a file's comments belong to, the store
+//! round trips, and keeping the editors and diffs that show them in step.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use athena_editor::{DiffView, EditorView, ReviewEvent, ReviewMark};
+use gpui::{App, Context, Entity, EntityId, InteractiveElement as _, WeakEntity, actions};
+
+use super::Shell;
+use super::item::ItemView;
+use crate::review_comments::{self as store, ReviewComment};
+use crate::snapshots;
+
+actions!(athena, [ClaudeReviewComments]);
+
+/// The views showing comments, by entity.
+#[derive(Default)]
+pub(super) struct CommentsState {
+    watched: HashMap<EntityId, Watched>,
+}
+
+struct Watched {
+    view: Target,
+    session: String,
+    path: PathBuf,
+    /// The file's comments as stored, placed again on every edit.
+    comments: Vec<ReviewComment>,
+}
+
+enum Target {
+    Editor(WeakEntity<EditorView>),
+    Diff(WeakEntity<DiffView>),
+}
+
+impl Target {
+    fn alive(&self) -> bool {
+        match self {
+            Self::Editor(v) => v.upgrade().is_some(),
+            Self::Diff(v) => v.upgrade().is_some(),
+        }
+    }
+
+    /// The text the comments are placed in: the buffer, or the diff's new side.
+    fn text(&self, cx: &App) -> Option<String> {
+        match self {
+            Self::Editor(v) => v.upgrade()?.read(cx).text(),
+            Self::Diff(v) => v.upgrade()?.read(cx).new_text().map(str::to_string),
+        }
+    }
+
+    fn show(&self, marks: Vec<ReviewMark>, cx: &mut App) {
+        match self {
+            Self::Editor(v) => {
+                let _ = v.update(cx, |v, cx| v.set_review_comments(marks, cx));
+            }
+            Self::Diff(v) => {
+                let _ = v.update(cx, |v, cx| v.set_review_comments(marks, cx));
+            }
+        }
+    }
+}
+
+/// The session a file's comments go to: of those that changed it, the one that did anything last.
+fn pick_session(bound: &[(String, SystemTime)], changed: impl Fn(&str) -> bool) -> Option<String> {
+    bound
+        .iter()
+        .filter(|(session, _)| changed(session))
+        .max_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)))
+        .map(|(session, _)| session.clone())
+}
+
+fn marks(text: &str, comments: &[ReviewComment]) -> Vec<ReviewMark> {
+    comments
+        .iter()
+        .map(|c| {
+            let placed = store::place(text, c);
+            ReviewMark {
+                id: c.id,
+                lines: placed.lines,
+                body: c.body.clone(),
+                stale: placed.stale,
+            }
+        })
+        .collect()
+}
+
+/// One row of the "Review Comments" palette.
+pub(super) struct CommentRow {
+    pub(super) path: PathBuf,
+    /// Zero-based, where the comment is in the file now.
+    pub(super) line: u32,
+    pub(super) label: String,
+    pub(super) detail: String,
+}
+
+impl Shell {
+    /// The sessions bound to a pane here, each with the last time it or its snapshots changed.
+    fn bound_sessions(&self, store: &Path) -> Vec<(String, SystemTime)> {
+        self.review
+            .sessions
+            .bound_sessions()
+            .into_iter()
+            .map(|(session, at)| {
+                let snapshotted = std::fs::metadata(store.join(&session))
+                    .and_then(|m| m.modified())
+                    .unwrap_or(UNIX_EPOCH);
+                (session, at.max(snapshotted))
+            })
+            .collect()
+    }
+
+    fn review_session_for(&self, path: &Path) -> Option<String> {
+        let store = snapshots::store().ok()?;
+        pick_session(&self.bound_sessions(&store), |session| {
+            snapshots::files(&store, session).iter().any(|f| f == path)
+        })
+    }
+
+    /// Turns comments on for an editor whose file a session of this window changed, else off.
+    pub(super) fn watch_editor_comments(
+        &mut self,
+        editor: &Entity<EditorView>,
+        cx: &mut Context<Self>,
+    ) {
+        let path = editor.read(cx).path().to_path_buf();
+        let session = self.review_session_for(&path);
+        editor.update(cx, |e, cx| e.set_review(session.is_some(), cx));
+        match session {
+            Some(session) => self.watch(
+                editor.entity_id(),
+                Target::Editor(editor.downgrade()),
+                session,
+                path,
+                cx,
+            ),
+            None => {
+                self.review.comments.watched.remove(&editor.entity_id());
+            }
+        }
+    }
+
+    /// Turns comments on for a diff of a session's changes.
+    pub(super) fn watch_diff_comments(
+        &mut self,
+        view: &Entity<DiffView>,
+        session: &str,
+        cx: &mut Context<Self>,
+    ) {
+        view.update(cx, |v, cx| v.set_review(true, cx));
+        let path = view.read(cx).path().to_path_buf();
+        let target = Target::Diff(view.downgrade());
+        self.watch(view.entity_id(), target, session.to_string(), path, cx);
+    }
+
+    fn watch(
+        &mut self,
+        id: EntityId,
+        view: Target,
+        session: String,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let comments = snapshots::store()
+            .ok()
+            .and_then(|s| store::for_file(&s, &session, &path).ok())
+            .unwrap_or_default();
+        let watched = &mut self.review.comments.watched;
+        watched.retain(|_, w| w.view.alive());
+        watched.insert(
+            id,
+            Watched {
+                view,
+                session,
+                path,
+                comments,
+            },
+        );
+        self.refresh_comment_marks(id, cx);
+    }
+
+    /// Re-evaluates every open editor of `path` after a session touched it.
+    pub(super) fn refresh_comment_editors(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let editors: Vec<Entity<EditorView>> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                ItemView::Editor(e) if e.read(cx).path() == path => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        for editor in editors {
+            self.watch_editor_comments(&editor, cx);
+        }
+    }
+
+    /// Places the comments again in the view's current text, so the dots follow their lines.
+    pub(super) fn refresh_comment_marks(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        let Some(w) = self.review.comments.watched.get(&id) else {
+            return;
+        };
+        if let Some(text) = w.view.text(cx) {
+            w.view.show(marks(&text, &w.comments), cx);
+        }
+    }
+
+    /// An editor's text changed; reading it only pays when it has comments to move.
+    pub(super) fn comments_edited(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+        let id = editor.entity_id();
+        if self
+            .review
+            .comments
+            .watched
+            .get(&id)
+            .is_some_and(|w| !w.comments.is_empty())
+        {
+            self.refresh_comment_marks(id, cx);
+        }
+    }
+
+    pub(super) fn review_comment_event(
+        &mut self,
+        id: EntityId,
+        event: ReviewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if event == ReviewEvent::Moved {
+            return self.refresh_comment_marks(id, cx);
+        }
+        let Some(w) = self.review.comments.watched.get(&id) else {
+            return;
+        };
+        let (session, path) = (w.session.clone(), w.path.clone());
+        let Ok(dir) = snapshots::store() else {
+            return;
+        };
+        let saved = match event {
+            ReviewEvent::Add { lines, body } => {
+                let Some(anchor) = w.view.text(cx).and_then(|t| store::anchor_of(&t, &lines))
+                else {
+                    return;
+                };
+                store::add(&dir, &session, &path, lines, anchor, body).map(drop)
+            }
+            ReviewEvent::Edit { id, body } => {
+                store::update_body(&dir, &session, id, body).map(drop)
+            }
+            ReviewEvent::Delete { id } => store::delete(&dir, &session, id).map(drop),
+            ReviewEvent::Moved => return,
+        };
+        if let Err(err) = saved {
+            return self.transient_notice("Could not save the comment", format!("{err:#}"), cx);
+        }
+        let fresh = store::for_file(&dir, &session, &path).unwrap_or_default();
+        let sharing: Vec<EntityId> = self
+            .review
+            .comments
+            .watched
+            .iter()
+            .filter(|(_, w)| w.session == session && w.path == path)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in sharing {
+            if let Some(w) = self.review.comments.watched.get_mut(&id) {
+                w.comments = fresh.clone();
+            }
+            self.refresh_comment_marks(id, cx);
+        }
+    }
+
+    /// The unsent comments of the session the focused tab belongs to, else of the window's
+    /// most recently active session.
+    pub(super) fn comment_rows(&self) -> Vec<CommentRow> {
+        let Ok(dir) = snapshots::store() else {
+            return Vec::new();
+        };
+        let focused = match self.focused_item_view() {
+            Some(ItemView::Editor(e)) => Some(e.entity_id()),
+            Some(ItemView::Diff(d)) => Some(d.entity_id()),
+            _ => None,
+        };
+        let session = focused
+            .and_then(|id| self.review.comments.watched.get(&id))
+            .map(|w| w.session.clone())
+            .or_else(|| pick_session(&self.bound_sessions(&dir), |_| true));
+        let Some(session) = session else {
+            return Vec::new();
+        };
+        let root = self.active_root();
+        let mut comments = store::unsent(&dir, &session).unwrap_or_default();
+        comments.sort_by(|a, b| (&a.path, a.lines.start()).cmp(&(&b.path, b.lines.start())));
+        comments
+            .into_iter()
+            .map(|c| {
+                let line = std::fs::read_to_string(&c.path).map_or(*c.lines.start(), |text| {
+                    *store::place(&text, &c).lines.start()
+                });
+                let shown = root
+                    .as_ref()
+                    .and_then(|r| c.path.strip_prefix(r).ok())
+                    .unwrap_or(&c.path);
+                CommentRow {
+                    label: format!("{}:{line}", shown.display()),
+                    detail: c.body.lines().next().unwrap_or_default().to_string(),
+                    line: line.saturating_sub(1),
+                    path: c.path,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Binds "Claude: Review Comments for Session…" on the shell's root element.
+pub(super) fn bind_comment_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::Div {
+    el.on_action(cx.listener(|this, _: &ClaudeReviewComments, window, cx| {
+        this.open_palette(super::palette::Mode::ReviewComments, window, cx)
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn the_latest_session_that_changed_the_file_is_the_one() {
+        let bound = [
+            ("old".to_string(), at(10)),
+            ("new".to_string(), at(30)),
+            ("other-file".to_string(), at(50)),
+        ];
+        let changed = |s: &str| s != "other-file";
+        assert_eq!(pick_session(&bound, changed).as_deref(), Some("new"));
+        assert_eq!(pick_session(&bound, |_| false), None, "none changed it");
+        assert_eq!(pick_session(&[], |_| true), None, "none in this window");
+    }
+
+    #[test]
+    fn equal_times_pick_the_same_session_every_time() {
+        let bound = [("b".to_string(), at(5)), ("a".to_string(), at(5))];
+        assert_eq!(pick_session(&bound, |_| true).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn comments_are_placed_in_the_text_they_are_shown_in() {
+        let c = ReviewComment {
+            id: 3,
+            session: "s".into(),
+            path: "/p/a.rs".into(),
+            lines: 2..=2,
+            anchor: "b".into(),
+            body: "why".into(),
+            sent: false,
+            created: 0,
+        };
+        let shown = marks("x\ny\nb\n", std::slice::from_ref(&c));
+        assert_eq!(shown[0].lines, 3..=3);
+        assert!(!shown[0].stale);
+        assert!(marks("x\ny\n", &[c])[0].stale);
+    }
+}
