@@ -545,7 +545,10 @@ fn project_files(root: &Path) -> Vec<String> {
 
 impl Shell {
     pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
-        self.git.claude_in_new_worktree = false;
+        // open_worktrees sets the flag for the one palette it is about to open.
+        if mode != Mode::NewWorktree {
+            self.git.claude_in_new_worktree = false;
+        }
         let placeholder = match mode {
             Mode::Files => "Go to file…  (@ symbol, # workspace symbol, > command)",
             Mode::FilesBeside => "Open to the side…",
@@ -559,6 +562,9 @@ impl Shell {
             Mode::Stashes => "Pop a stash…",
             Mode::Tasks => "Select the task to run…",
             Mode::Worktrees => "Open a worktree…",
+            Mode::NewWorktree if self.git.claude_in_new_worktree => {
+                "Describe the task (optional), or pick an existing branch…"
+            }
             Mode::NewWorktree => "Pick a branch for the new worktree, or type a new branch name…",
             Mode::RemoveWorktree => "Delete a worktree…",
             Mode::Checks => "Open a pull request check…",
@@ -1076,6 +1082,10 @@ impl Shell {
                 &self.git.branches,
                 &self.git.worktrees,
                 &query,
+                self.git
+                    .claude_in_new_worktree
+                    .then(super::worktrees::local_stamp)
+                    .as_deref(),
             )),
             Mode::RemoveWorktree => Some(super::worktrees::remove_entries(&self.git.worktrees)),
             Mode::MergeBranch | Mode::RebaseOnto | Mode::DeleteBranch => {

@@ -11,6 +11,7 @@ use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::palette::Mode;
 use crate::actions::display_path;
+use crate::worktree_forks;
 
 actions!(
     athena,
@@ -23,6 +24,8 @@ actions!(
         GitPruneWorktrees
     ]
 );
+
+const MAX_SLUG: usize = 40;
 
 /// Where a worktree for `branch` goes: in `dir`, else beside the main worktree, as
 /// `<repo>-<branch>`, with a number added while that folder is taken.
@@ -56,6 +59,53 @@ pub(super) fn worktree_path(
         n += 1;
     }
     path
+}
+
+/// Lowercase ASCII words of `task` joined by `-`, cut to a branch-friendly length.
+fn task_slug(task: &str) -> String {
+    let mut slug = String::new();
+    for c in task.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.truncate(MAX_SLUG);
+    slug.trim_matches('-').to_string()
+}
+
+/// `claude/<slug of task>`, or `claude/<stamp>` for a task with no words, with a number added
+/// while a branch of that name exists.
+fn claude_branch(task: &str, stamp: &str, exists: impl Fn(&str) -> bool) -> String {
+    let slug = task_slug(task);
+    let base = format!("claude/{}", if slug.is_empty() { stamp } else { &slug });
+    let mut name = base.clone();
+    let mut n = 2;
+    while exists(&name) {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    name
+}
+
+/// Local time as `yyyymmdd-hhmm`; Athena has no date library, and libc is already a dependency.
+pub(super) fn local_stamp() -> String {
+    // SAFETY: `localtime_r` only writes into the zeroed `tm` it is given.
+    let tm = unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        tm
+    };
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
 }
 
 fn worktree_label(w: &Worktree) -> String {
@@ -142,15 +192,28 @@ pub(super) fn remove_entries(worktrees: &[Worktree]) -> Vec<BranchEntry> {
 }
 
 /// Rows of "Create worktree…": a new branch named by the query, then the local branches no
-/// worktree has checked out, then remote branches with no local one.
+/// worktree has checked out, then remote branches with no local one. For a Claude session,
+/// `claude_stamp` makes the first row a branch named from the query as a task description.
 pub(super) fn new_entries(
     branches: &[Branch],
     worktrees: &[Worktree],
     query: &str,
+    claude_stamp: Option<&str>,
 ) -> Vec<BranchEntry> {
     let typed = query.trim();
     let mut out = Vec::new();
-    if !typed.is_empty() && !branches.iter().any(|b| b.name == typed) {
+    if let Some(stamp) = claude_stamp {
+        let name = claude_branch(typed, stamp, |n| {
+            branches.iter().any(|b| !b.remote && b.name == n)
+        });
+        out.push(BranchEntry {
+            label: format!("Start Claude on new branch “{name}”"),
+            // The query is a task description, so the row must match whatever it says.
+            key: typed.to_string(),
+            detail: Some("from the main checkout's HEAD".into()),
+            pick: BranchPick::AddWorktree(NewWorktree::Create(name)),
+        });
+    } else if !typed.is_empty() && !branches.iter().any(|b| b.name == typed) {
         let label = format!("Create worktree with new branch “{typed}”");
         out.push(BranchEntry {
             key: label.clone(),
@@ -223,8 +286,8 @@ impl Shell {
                 Ok((worktrees, branches)) => {
                     this.git.worktrees = worktrees;
                     this.git.branches = branches;
-                    this.open_palette(mode, window, cx);
                     this.git.claude_in_new_worktree = claude && mode == Mode::NewWorktree;
+                    this.open_palette(mode, window, cx);
                 }
                 Err(err) => {
                     this.transient_notice("Could not list worktrees", format!("{err:#}"), cx)
@@ -273,15 +336,28 @@ impl Shell {
         let dir = self.settings.file.git_worktree_dir();
         let path = worktree_path(&main, dir.as_deref(), &branch, |p| p.exists());
         let claude = std::mem::take(&mut self.git.claude_in_new_worktree);
+        // Only a new branch has a fork point, and Claude's starts from the main checkout rather
+        // than from whichever worktree is open.
+        let forked = claude && matches!(how, NewWorktree::Create(_));
         cx.spawn_in(window, async move |this, cx| {
             let target = path.clone();
+            let new_branch = branch.clone();
             let done = cx
                 .background_executor()
                 .spawn(async move {
                     if let Some(parent) = target.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    git::add_worktree(&root, &target, &how)
+                    if forked {
+                        worktree_forks::create(
+                            &worktree_forks::store()?,
+                            &main,
+                            &target,
+                            &new_branch,
+                        )
+                    } else {
+                        git::add_worktree(&root, &target, &how)
+                    }
                 })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match done {
@@ -480,7 +556,10 @@ impl Shell {
             let done = cx
                 .background_executor()
                 .spawn(async move {
-                    git::remove_worktree(&main, &target, force)?;
+                    match worktree_forks::store() {
+                        Ok(store) => worktree_forks::remove(&store, &main, &target, force)?,
+                        Err(_) => git::remove_worktree(&main, &target, force)?,
+                    }
                     let branch_done = branch
                         .map(|b| git::delete_branch(&main, &b, true).map_err(|e| (b, e)))
                         .transpose();
@@ -985,7 +1064,7 @@ mod tests {
             branch("origin/remote-only", true),
         ];
         let worktrees = [worktree("/r", Some("main"))];
-        let picks: Vec<BranchPick> = new_entries(&branches, &worktrees, "new")
+        let picks: Vec<BranchPick> = new_entries(&branches, &worktrees, "new", None)
             .into_iter()
             .map(|e| e.pick)
             .collect();
@@ -998,9 +1077,87 @@ mod tests {
             ]
         );
         assert!(
-            new_entries(&branches, &worktrees, "free")
+            new_entries(&branches, &worktrees, "free", None)
                 .iter()
                 .all(|e| !matches!(e.pick, BranchPick::AddWorktree(NewWorktree::Create(_))))
+        );
+    }
+
+    #[test]
+    fn a_task_description_becomes_a_lowercase_ascii_slug() {
+        assert_eq!(task_slug("Fix the login bug!"), "fix-the-login-bug");
+        assert_eq!(
+            task_slug("  --Add: user/profile (v2)--  "),
+            "add-user-profile-v2"
+        );
+        assert_eq!(task_slug("naïve café 日本語 ok"), "na-ve-caf-ok");
+        assert_eq!(task_slug(""), "");
+        assert_eq!(task_slug("!!! ???"), "");
+        assert_eq!(task_slug("日本語"), "");
+    }
+
+    #[test]
+    fn a_long_task_is_cut_without_leaving_a_trailing_dash() {
+        let long = "word ".repeat(30);
+        let slug = task_slug(&long);
+        assert!(slug.len() <= MAX_SLUG && !slug.ends_with('-'), "{slug}");
+        assert!(slug.starts_with("word-word-"));
+        // The cut lands right after a separator, which must not stay.
+        assert_eq!(
+            task_slug(&format!("{} tail", "a".repeat(39))),
+            "a".repeat(39)
+        );
+        assert_eq!(task_slug(&"b".repeat(100)), "b".repeat(MAX_SLUG));
+    }
+
+    #[test]
+    fn a_claude_branch_falls_back_to_the_time_and_avoids_taken_names() {
+        let none = |_: &str| false;
+        assert_eq!(
+            claude_branch("Fix it", "20260102-0304", none),
+            "claude/fix-it"
+        );
+        assert_eq!(
+            claude_branch("", "20260102-0304", none),
+            "claude/20260102-0304"
+        );
+        assert_eq!(
+            claude_branch("?!", "20260102-0304", none),
+            "claude/20260102-0304"
+        );
+        let taken = ["claude/fix-it", "claude/fix-it-2"];
+        assert_eq!(
+            claude_branch("fix it", "t", |n| taken.contains(&n)),
+            "claude/fix-it-3"
+        );
+    }
+
+    #[test]
+    fn the_local_stamp_is_a_date_and_a_time() {
+        let stamp = local_stamp();
+        let (date, time) = stamp.split_once('-').unwrap();
+        assert!(date.len() == 8 && time.len() == 4);
+        assert!(stamp.bytes().all(|b| b.is_ascii_digit() || b == b'-'));
+    }
+
+    #[test]
+    fn a_claude_session_offers_a_task_branch_first_whatever_is_typed() {
+        let branches = [branch("main", false), branch("claude/fix-it", false)];
+        let worktrees = [worktree("/r", Some("main"))];
+        let rows = new_entries(&branches, &worktrees, "fix it", Some("t"));
+        assert_eq!(
+            rows[0].pick,
+            BranchPick::AddWorktree(NewWorktree::Create("claude/fix-it-2".into()))
+        );
+        assert_eq!(rows[0].key, "fix it");
+        assert_eq!(
+            rows[1].pick,
+            BranchPick::AddWorktree(NewWorktree::Existing("claude/fix-it".into()))
+        );
+        let blank = new_entries(&branches, &worktrees, "", Some("20260102-0304"));
+        assert_eq!(
+            blank[0].pick,
+            BranchPick::AddWorktree(NewWorktree::Create("claude/20260102-0304".into()))
         );
     }
 

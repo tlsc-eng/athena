@@ -1283,6 +1283,13 @@ pub fn push(root: &Path, publish: Option<(&str, &str)>) -> Result<()> {
     run_within(cmd, None, REMOTE_TIMEOUT).map(drop)
 }
 
+/// The full id of the commit HEAD points at.
+pub fn head_sha(root: &Path) -> Result<String> {
+    let mut cmd = git(root);
+    cmd.args(["rev-parse", "--verify", "HEAD"]);
+    Ok(String::from_utf8_lossy(&run(cmd, None)?).trim().to_string())
+}
+
 /// The checked-out branch's name; `None` on a detached HEAD.
 pub fn current_branch(root: &Path) -> Result<Option<String>> {
     let mut cmd = git(root);
