@@ -254,6 +254,23 @@ pub(super) struct SendState {
     retry: Option<Task<()>>,
 }
 
+#[derive(Debug, PartialEq)]
+enum Delivery {
+    Ide(u64),
+    Paste,
+    Wait,
+}
+
+/// How a pending mention goes out now: to a connected IDE client, else pasted once nothing
+/// refuses it; Claude turns bracketed paste on when its prompt is ready, so a fresh start waits.
+fn delivery(client: Option<u64>, refusal: Option<Refusal>) -> Delivery {
+    match (client, refusal) {
+        (Some(client), _) => Delivery::Ide(client),
+        (None, None) => Delivery::Paste,
+        (None, Some(_)) => Delivery::Wait,
+    }
+}
+
 enum Outcome {
     Sent,
     Waiting,
@@ -490,21 +507,18 @@ impl Shell {
                 &target,
             )
         });
-        if let Some(client) = client {
-            if let Some(server) = windows::ide(cx) {
-                server.notify(&[client], "at_mentioned", pending.mention.json());
+        match delivery(client, terminal_refusal(view.read(cx))) {
+            Delivery::Ide(client) => {
+                if let Some(server) = windows::ide(cx) {
+                    server.notify(&[client], "at_mentioned", pending.mention.json());
+                }
             }
-            return Outcome::Sent;
+            Delivery::Paste => {
+                view.clone()
+                    .update(cx, |v, cx| v.paste_text(&pending.text, cx));
+            }
+            Delivery::Wait => return Outcome::Waiting,
         }
-        let started = view
-            .read(cx)
-            .session()
-            .is_some_and(|pane| self.review.sessions.session_of(pane).is_some());
-        if !started || terminal_refusal(view.read(cx)).is_some() {
-            return Outcome::Waiting;
-        }
-        view.clone()
-            .update(cx, |v, cx| v.paste_text(&pending.text, cx));
         Outcome::Sent
     }
 }
@@ -636,6 +650,21 @@ mod tests {
             "above the cap only the size is compared"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_pending_mention_goes_out_once_nothing_refuses_it_and_prefers_the_ide() {
+        use Refusal::*;
+        assert_eq!(delivery(None, Some(NotClaude)), Delivery::Wait);
+        assert_eq!(delivery(None, Some(NoBracketedPaste)), Delivery::Wait);
+        assert_eq!(delivery(None, Some(Asking)), Delivery::Wait);
+        assert_eq!(
+            delivery(None, paste_refusal(true, None, true)),
+            Delivery::Paste,
+            "no session bind is needed"
+        );
+        assert_eq!(delivery(Some(4), None), Delivery::Ide(4));
+        assert_eq!(delivery(Some(4), Some(NoBracketedPaste)), Delivery::Ide(4));
     }
 
     #[test]
