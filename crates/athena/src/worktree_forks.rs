@@ -171,6 +171,19 @@ mod tests {
         remove(Some(&store), &main, &tree, false).unwrap();
         assert_eq!(fs::read_dir(&store).unwrap().count(), 0);
         assert_eq!(fork_in(&store, &tree), None);
+
+        let gone = main.with_extension("gone");
+        let _ = fs::remove_dir_all(&gone);
+        assert!(
+            create(Some(&store), &main, &gone, "claude/gone")
+                .unwrap()
+                .is_none()
+        );
+        let gone = gone.canonicalize().unwrap();
+        assert_eq!(fs::read_dir(&store).unwrap().count(), 1);
+        fs::remove_dir_all(&gone).unwrap();
+        remove(Some(&store), &main, &gone, false).unwrap();
+        assert_eq!(fs::read_dir(&store).unwrap().count(), 0);
         fs::remove_dir_all(&main).unwrap();
         fs::remove_dir_all(&store).unwrap();
     }

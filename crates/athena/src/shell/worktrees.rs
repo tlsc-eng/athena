@@ -1187,27 +1187,8 @@ mod tests {
         assert!(stamp.bytes().all(|b| b.is_ascii_digit() || b == b'-'));
     }
 
-    /// The picks the Claude picker lists for `query`: fuzzy-sorted as `filter_palette` does,
-    /// then the Claude row pinned.
     fn shown(rows: &[BranchEntry], query: &str) -> Vec<BranchPick> {
-        let mut hits: Vec<(i32, usize)> = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| crate::shell::fuzzy::score(query, &e.key).map(|(s, _)| (s, i)))
-            .collect();
-        if !query.is_empty() {
-            hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        }
-        let mut picks: Vec<BranchPick> = hits
-            .into_iter()
-            .map(|(_, i)| rows[i].pick.clone())
-            .collect();
-        let moved = claude_row_move(&picks.iter().map(Some).collect::<Vec<_>>(), query);
-        if let Some((from, to)) = moved {
-            let row = picks.remove(from);
-            picks.insert(to, row);
-        }
-        picks
+        super::super::palette::listed_worktree_picks(rows, query, true)
     }
 
     fn create(name: &str) -> BranchPick {
@@ -1295,6 +1276,10 @@ mod tests {
                 create("claude/remote-only")
             ]
         );
+
+        // Without the Claude flag the same rows are only fuzzy-sorted.
+        let plain = super::super::palette::listed_worktree_picks(&at("fre"), "fre", false);
+        assert_eq!(plain[0], existing("free"));
 
         let blank = shown(&at(""), "");
         assert_eq!(blank[0], create("claude/t"));

@@ -543,6 +543,61 @@ fn project_files(root: &Path) -> Vec<String> {
     out
 }
 
+/// The entries matching `query`, best first, as (score, entry index, matched positions). The
+/// Claude worktree picker then has its Claude row pinned.
+fn rank_entries(
+    entries: &[Entry],
+    query: &str,
+    mode: Mode,
+    claude_picker: bool,
+) -> Vec<(i32, usize, Vec<usize>)> {
+    let mut hits: Vec<(i32, usize, Vec<usize>)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| fuzzy::score(query, &e.key).map(|(s, pos)| (s, i, pos)))
+        .collect();
+    if !query.is_empty() {
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    }
+    if mode == Mode::NewWorktree && claude_picker {
+        let picks: Vec<_> = hits
+            .iter()
+            .map(|(_, i, _)| match &entries[*i].target {
+                Target::Branch(pick) => Some(pick),
+                _ => None,
+            })
+            .collect();
+        if let Some((from, to)) = super::worktrees::claude_row_move(&picks, query) {
+            let row = hits.remove(from);
+            hits.insert(to, row);
+        }
+    }
+    hits
+}
+
+/// The picks the New Worktree picker lists for `query`, through the same ranking the palette uses.
+#[cfg(test)]
+pub(super) fn listed_worktree_picks(
+    rows: &[super::branches::BranchEntry],
+    query: &str,
+    claude_picker: bool,
+) -> Vec<super::branches::BranchPick> {
+    let entries: Vec<Entry> = rows
+        .iter()
+        .map(|b| Entry {
+            kind: None,
+            label: b.label.clone(),
+            detail: b.detail.clone(),
+            key: b.key.clone(),
+            target: Target::Branch(b.pick.clone()),
+        })
+        .collect();
+    rank_entries(&entries, query, Mode::NewWorktree, claude_picker)
+        .into_iter()
+        .map(|(_, i, _)| rows[i].pick.clone())
+        .collect()
+}
+
 impl Shell {
     pub(super) fn open_palette(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         // open_worktrees sets the flag for the one palette it is about to open.
@@ -1152,28 +1207,7 @@ impl Shell {
             Mode::Symbols | Mode::WorkspaceSymbols => MAX_SYMBOL_ROWS,
             _ => MAX_ROWS,
         };
-        let mut hits: Vec<(i32, usize, Vec<usize>)> = palette
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| fuzzy::score(&query, &e.key).map(|(s, pos)| (s, i, pos)))
-            .collect();
-        if !query.is_empty() {
-            hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        }
-        if palette.mode == Mode::NewWorktree && claude_picker {
-            let picks: Vec<_> = hits
-                .iter()
-                .map(|(_, i, _)| match &palette.entries[*i].target {
-                    Target::Branch(pick) => Some(pick),
-                    _ => None,
-                })
-                .collect();
-            if let Some((from, to)) = super::worktrees::claude_row_move(&picks, &query) {
-                let row = hits.remove(from);
-                hits.insert(to, row);
-            }
-        }
+        let hits = rank_entries(&palette.entries, &query, palette.mode, claude_picker);
         palette.hits = hits
             .into_iter()
             .take(limit)
