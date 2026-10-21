@@ -11,7 +11,7 @@ mod theme;
 pub use assets::Assets;
 pub use components::{
     Badge, Button, ButtonKind, DotState, IconButton, ListRow, SegmentedControl, StatusDot, Tab,
-    TabBar, TabVariant, Tooltip, empty_state,
+    TabBar, Tooltip, empty_state,
 };
 pub use icons::{FileIcon, ICON_SIZE, file_icon, icon_for};
 pub use input::{InputEvent, TextInput};

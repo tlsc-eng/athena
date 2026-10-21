@@ -6,21 +6,12 @@ use gpui::{
 use super::{Badge, ClickHandler};
 use crate::{ActiveTheme, Size, Space};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TabVariant {
-    /// A hairline under the active tab, for drawer-style bars.
-    Underline,
-    /// A filled background on the active tab, for compact switches.
-    Pill,
-}
-
 #[derive(IntoElement)]
 pub struct Tab {
     id: ElementId,
     label: SharedString,
     active: bool,
     badge: Option<usize>,
-    variant: TabVariant,
     close: Option<AnyElement>,
     on_click: Option<ClickHandler>,
 }
@@ -32,7 +23,6 @@ impl Tab {
             label: label.into(),
             active: false,
             badge: None,
-            variant: TabVariant::Underline,
             close: None,
             on_click: None,
         }
@@ -46,11 +36,6 @@ impl Tab {
     /// A count after the label; zero shows nothing.
     pub fn badge(mut self, count: usize) -> Self {
         self.badge = Some(count);
-        self
-    }
-
-    pub fn variant(mut self, variant: TabVariant) -> Self {
-        self.variant = variant;
         self
     }
 
@@ -70,7 +55,7 @@ impl RenderOnce for Tab {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
         let c = &t.color;
-        let (active, variant) = (self.active, self.variant);
+        let active = self.active;
         let tab = div()
             .id(self.id)
             .relative()
@@ -89,9 +74,10 @@ impl RenderOnce for Tab {
                     .filter(|&n| n > 0)
                     .map(|n| div().ml(t.space(Space::Sm)).child(Badge::new(n))),
             )
-            .children(self.close.map(|x| div().ml(t.space(Space::Sm)).child(x)));
-        let tab = match variant {
-            TabVariant::Underline => tab.h_full().px(t.space(Space::Lg)).when(active, |el| {
+            .children(self.close.map(|x| div().ml(t.space(Space::Sm)).child(x)))
+            .h_full()
+            .px(t.space(Space::Lg))
+            .when(active, |el| {
                 el.child(
                     div()
                         .absolute()
@@ -101,14 +87,7 @@ impl RenderOnce for Tab {
                         .h(t.shape.hairline)
                         .bg(c.accent),
                 )
-            }),
-            TabVariant::Pill => tab
-                .h(t.size(Size::Row))
-                .px(t.space(Space::Md))
-                .rounded(t.shape.radius_control)
-                .when(active, |el| el.bg(c.surface_active))
-                .when(!active, |el| el.hover(|s| s.bg(c.surface_hover))),
-        };
+            });
         match self.on_click {
             Some(f) => tab.on_click(f),
             None => tab,

@@ -4,7 +4,6 @@ use crate::{ActiveTheme, Colors, Space};
 
 const MAX_COUNT: usize = 99;
 
-/// The pill's text: none for zero, so an empty count leaves no pill behind.
 fn badge_text(count: usize) -> Option<String> {
     match count {
         0 => None,

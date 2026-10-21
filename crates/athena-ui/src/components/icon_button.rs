@@ -1,9 +1,9 @@
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, IntoElement, RenderOnce, SharedString, Window, div,
-    prelude::*,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, IntoElement, RenderOnce, SharedString,
+    Window, div, prelude::*,
 };
 
-use super::{Badge, ClickHandler, Tooltip};
+use super::{ClickHandler, Tooltip};
 use crate::{ActiveTheme, Size, Space};
 
 /// A compact title-bar or status-bar button: an icon and/or label, with an optional count.
@@ -84,7 +84,12 @@ impl RenderOnce for IconButton {
             .hover(|s| s.bg(c.surface_hover).text_color(c.content))
             .children(self.icon)
             .children(self.label)
-            .children(self.badge.filter(|&n| n > 0).map(Badge::new))
+            .children(self.badge.filter(|&n| n > 0).map(|n| {
+                div()
+                    .text_color(c.accent)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(n.to_string())
+            }))
             .when_some(self.tooltip, |el, text| {
                 el.tooltip(move |_, cx| Tooltip::view(text.clone(), cx))
             });

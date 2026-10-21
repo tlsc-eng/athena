@@ -17,7 +17,7 @@ HOME=$qa_home target/debug/athena >"$qa_home/stdout.log" 2>&1 &
 pid=$!
 
 # With an empty HOME the CLI would hand a folder argument to the installed app, so the project
-# goes to this window over its own socket once that exists.
+# goes to this window over its own socket, and only once that exists.
 if [[ -n $project ]]; then
   socket="$qa_home/Library/Application Support/athena/app.sock"
   for _ in {1..100}; do
@@ -25,8 +25,14 @@ if [[ -n $project ]]; then
     kill -0 $pid 2>/dev/null || { echo "launch.sh: athena exited, see $qa_home/stdout.log" >&2; exit 1; }
     sleep 0.2
   done
+  if [[ ! -S $socket ]]; then
+    kill $pid 2>/dev/null || true
+    echo "launch.sh: no app.sock after 20 s, see $qa_home/stdout.log" >&2
+    exit 1
+  fi
   HOME=$qa_home target/debug/athena "$project"
 fi
 
 echo "pid:  $pid"
 echo "HOME: $qa_home"
+echo "clean up: kill $pid; HOME=$qa_home $PWD/target/debug/athena mux stop; rm -rf $qa_home"
