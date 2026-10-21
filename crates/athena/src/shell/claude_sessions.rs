@@ -6,7 +6,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use athena_editor::{EditorView, diff};
 use athena_proto::{AppMsg, PaneId, TodoInfo};
-use athena_ui::{ButtonKind, Ellipsis, MenuItem, Space, Theme, Tooltip};
+use athena_ui::motion::{Closing, Opening};
+use athena_ui::{ButtonKind, DotState, Ellipsis, MenuItem, Space, Theme, Tooltip};
 use athena_workspace::{DiffBase, SideMode};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, MouseButton, MouseDownEvent, PromptLevel,
@@ -19,6 +20,7 @@ use super::item::{ItemView, file_label};
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::menus::shell_item;
 use super::review::backup_dir;
+use super::sidebar::Tween;
 use crate::snapshots::{self, Before};
 use crate::transcripts::{self, Profile};
 
@@ -59,6 +61,16 @@ pub(super) struct SessionsState {
     expanded: HashSet<String>,
     /// Sections the user toggled away from their default fold.
     folded: HashSet<Section>,
+    /// Chevron turns under way, by session id or `section:<name>`.
+    turning: HashMap<String, Tween>,
+    /// Rows and sections that opened lately, so only they play the enter animation.
+    entering: HashMap<String, Opening>,
+    /// Rows whose children stay mounted while they animate out.
+    collapsing: HashMap<String, Closing>,
+    /// The last glyph state per row, with a count of its changes and when the latest came.
+    looks: HashMap<String, (DotState, u64, Opening)>,
+    /// The running spinner's start and its tick, held only while something visible spins.
+    spin: Option<(Instant, Task<()>)>,
     /// Todo lists and plans the hooks reported, by session id.
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.
@@ -507,6 +519,11 @@ impl Shell {
             state.rows = Rc::default();
             state.expanded.clear();
             state.folded.clear();
+            state.turning.clear();
+            state.entering.clear();
+            state.collapsing.clear();
+            state.looks.clear();
+            state.spin = None;
         }
         state.root = Some(root.clone());
         state.loaded_at = Some(Instant::now());

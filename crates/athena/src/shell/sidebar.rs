@@ -80,7 +80,7 @@ pub(super) struct Tween {
 
 impl Tween {
     /// The ease from `from` toward `open`; None when motion is reduced or nothing would move.
-    fn start(reduced: bool, open: bool, from: f32) -> Option<Self> {
+    pub(super) fn start(reduced: bool, open: bool, from: f32) -> Option<Self> {
         let tween = Self {
             open,
             from,
@@ -99,7 +99,7 @@ impl Tween {
     }
 
     /// How open it is drawn at `now`, `shut` easing the way closed.
-    fn at(&self, now: Instant, base: Duration, shut: impl Fn(f32) -> f32) -> f32 {
+    pub(super) fn at(&self, now: Instant, base: Duration, shut: impl Fn(f32) -> f32) -> f32 {
         let duration = self.duration(base).as_secs_f32();
         let elapsed = now.saturating_duration_since(self.since).as_secs_f32();
         let x = if duration > 0. {
@@ -115,7 +115,7 @@ impl Tween {
         self.from + (self.target() - self.from) * eased
     }
 
-    fn running(&self, now: Instant, base: Duration) -> bool {
+    pub(super) fn running(&self, now: Instant, base: Duration) -> bool {
         now.saturating_duration_since(self.since) < self.duration(base)
     }
 }

@@ -1,20 +1,28 @@
 use std::collections::HashSet;
-use std::f32::consts::FRAC_PI_2;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::f32::consts::{FRAC_PI_2, TAU};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
+use athena_ui::motion::{Closing, Opening};
 use athena_ui::{
     ActiveTheme, Button, ButtonKind, DotState, Ellipsis, IconButton, ListRow, Size, Space,
-    StatusDot, Theme, empty_state,
+    StatusDot, Theme, empty_state, motion,
 };
+use athena_workspace::SideMode;
 use gpui::{
-    AnyElement, Context, FontWeight, MouseDownEvent, Svg, Transformation, Window, div, prelude::*,
-    radians, svg,
+    Animation, AnyElement, Context, Div, ElementId, FontWeight, MouseDownEvent, Svg, Task,
+    Transformation, Window, div, prelude::*, px, radians, svg,
 };
 
 use super::live::{LiveSession, Place};
-use super::{SessionRow, Shell};
+use super::{ROW_HEIGHT, SessionRow, SessionsState, Shell};
+use crate::shell::sidebar::Tween;
+
+/// Above this many child rows an expanding session only fades, so a long list does not sweep.
+const MAX_SWEPT_ROWS: usize = 12;
+const SPIN_TICK_MS: u128 = 125;
+const SPIN_STEPS: u128 = 8;
 
 /// What a row says besides its label, as shown in its detail line.
 #[derive(Debug, PartialEq)]
@@ -149,16 +157,90 @@ fn unix_secs(time: SystemTime) -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// The disclosure arrow, pointing right and turned down while `open`.
-fn chevron(open: bool, t: &Theme) -> Svg {
+/// The disclosure arrow, pointing right and turned down once `turn` reaches 1.
+fn chevron(turn: f32, t: &Theme) -> Svg {
     svg()
         .path("ui/chevron.svg")
         .size(t.ui(10.))
         .flex_none()
         .text_color(t.color.content_muted)
-        .when(open, |s| {
-            s.with_transformation(Transformation::rotate(radians(FRAC_PI_2)))
+        .when(turn > 0., |s| {
+            s.with_transformation(Transformation::rotate(radians(FRAC_PI_2 * turn)))
         })
+}
+
+/// The running glyph's turn after `elapsed`: one eighth of a revolution per tick.
+fn spin_step(elapsed: Duration) -> f32 {
+    ((elapsed.as_millis() / SPIN_TICK_MS) % SPIN_STEPS) as f32 * TAU / SPIN_STEPS as f32
+}
+
+fn should_spin(visible: bool, any_running: bool, reduced: bool) -> bool {
+    visible && any_running && !reduced
+}
+
+/// The height the children of an expanding row reach, or None when there are too many to sweep.
+fn expand_height(lines: usize, files: usize, scale: f32) -> Option<f32> {
+    (lines + files <= MAX_SWEPT_ROWS)
+        .then_some((lines as f32 * (ROW_HEIGHT - 4.) + files as f32 * (ROW_HEIGHT - 2.)) * scale)
+}
+
+fn section_key(section: Section) -> String {
+    format!("section:{section:?}")
+}
+
+impl SessionsState {
+    /// Turns the chevron toward `open`, from wherever a turn in flight had got to.
+    fn turn(&mut self, key: String, open: bool, reduced: bool, fast: Duration) {
+        let from = self.turning.get(&key).map_or(f32::from(!open), |t| {
+            t.at(Instant::now(), fast, motion::ease_standard())
+        });
+        match Tween::start(reduced, open, from) {
+            Some(tween) => self.turning.insert(key, tween),
+            None => self.turning.remove(&key),
+        };
+    }
+
+    fn chevron_turn(&self, key: &str, open: bool, fast: Duration) -> f32 {
+        self.turning.get(key).map_or(f32::from(open), |t| {
+            t.at(Instant::now(), fast, motion::ease_standard())
+        })
+    }
+}
+
+/// Wraps a session's child rows so they sweep open, or shut while `closing`.
+fn animate_children(
+    kids: Vec<AnyElement>,
+    (lines, files): (usize, usize),
+    (closing, entering): (Option<Closing>, bool),
+    id: &str,
+    t: &Theme,
+) -> AnyElement {
+    let height = expand_height(lines, files, t.ui_scale);
+    let wrap = div().overflow_hidden().children(kids);
+    let shown = move |el: Div, d: f32| {
+        let el = el.opacity(d);
+        match height {
+            Some(h) => el.h(px(h * d)),
+            None => el,
+        }
+    };
+    match closing {
+        Some(c) => motion::animate_exit(
+            t.motion.reduced,
+            wrap,
+            ElementId::NamedInteger(format!("session-collapse-{id}").into(), c.generation),
+            t.motion.fast,
+            move |el, d| shown(el, 1. - d),
+        ),
+        None => motion::animate_enter(
+            t.motion.reduced,
+            entering,
+            wrap,
+            ElementId::Name(format!("session-expand-{id}").into()),
+            Animation::new(t.motion.base).with_easing(motion::ease_standard()),
+            shown,
+        ),
+    }
 }
 
 /// Whether a session shows in the project at `active`: it is in the same repository and below the
@@ -199,6 +281,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = cx.theme().clone();
+        // Taken so every early return below stops the spinner; the end puts it back if it still spins.
+        let spin = self.review.sessions.spin.take();
         let Some(root) = self.active_root() else {
             return centered(empty_state(
                 "No project open",
@@ -253,10 +337,15 @@ impl Shell {
                 _ => sections.push((at, vec![(i, session)])),
             }
         }
+        self.track_looks(&sessions);
         let headed =
             sections.len() > 1 || sections.first().is_some_and(|(s, _)| *s != Section::Active);
         let current = self.current_session_id(cx);
         let muted = !window.is_window_active();
+        let angle = spin
+            .as_ref()
+            .map_or(0., |(start, _)| spin_step(start.elapsed()));
+        let mut any_running = false;
         for (n, (at, rows)) in sections.iter().enumerate() {
             let folded = headed && at.folded(&self.review.sessions.folded);
             if headed {
@@ -265,24 +354,34 @@ impl Shell {
             if folded {
                 continue;
             }
+            let mut body: Vec<AnyElement> = Vec::new();
             for &(i, session) in rows {
+                any_running |= session.state == Some(ClaudeState::Running);
                 let selected = current.as_deref() == Some(session.id.as_str());
-                out.push(self.render_live_row(
+                body.push(self.render_live_row(
                     i,
                     session,
                     (selected, muted),
+                    angle,
                     now_secs - unix_secs(session.modified),
                     cx,
                 ));
-                if !self.review.sessions.expanded.contains(&session.id) {
+                let state = &self.review.sessions;
+                let closing = state.collapsing.get(&session.id).copied();
+                if !state.expanded.contains(&session.id) && closing.is_none() {
                     continue;
                 }
-                let Some(row) = self.review.sessions.row(&session.id).cloned() else {
+                let Some(row) = state.row(&session.id).cloned() else {
                     continue;
                 };
-                out.extend(self.render_live_plan(i, &row, &t));
+                let entering = state
+                    .entering
+                    .get(&session.id)
+                    .is_some_and(|o| o.running(t.motion.base));
+                let mut kids = self.render_live_plan(i, &row, &t);
+                let lines = kids.len();
                 for (j, file) in row.files.iter().enumerate() {
-                    out.push(self.render_file_row(
+                    kids.push(self.render_file_row(
                         i * 10_000 + j,
                         &row.id,
                         file,
@@ -291,8 +390,40 @@ impl Shell {
                         cx,
                     ));
                 }
+                body.push(animate_children(
+                    kids,
+                    (lines, row.files.len()),
+                    (closing, entering),
+                    &row.id,
+                    &t,
+                ));
+            }
+            if headed {
+                let key = section_key(*at);
+                let entering = self
+                    .review
+                    .sessions
+                    .entering
+                    .get(&key)
+                    .is_some_and(|o| o.running(t.motion.base));
+                out.push(motion::animate_enter(
+                    t.motion.reduced,
+                    entering,
+                    div().children(body),
+                    ElementId::Name(format!("section-rows-{key}").into()),
+                    Animation::new(t.motion.base).with_easing(motion::ease_standard()),
+                    |el, d| el.opacity(d),
+                ));
+            } else {
+                out.extend(body);
             }
         }
+        self.review.sessions.spin = if should_spin(self.list_shown(), any_running, t.motion.reduced)
+        {
+            spin.or_else(|| Some(Self::start_spin(cx)))
+        } else {
+            None
+        };
         div()
             .id("claude-sessions")
             .size_full()
@@ -328,14 +459,13 @@ impl Shell {
             .cursor_pointer()
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(t.color.content_muted)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let flipped = &mut this.review.sessions.folded;
-                if !flipped.remove(&section) {
-                    flipped.insert(section);
-                }
-                cx.notify();
-            }))
-            .child(chevron(!folded, t))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(section, cx)))
+            .child(chevron(
+                self.review
+                    .sessions
+                    .chevron_turn(&section_key(section), !folded, t.motion.fast),
+                t,
+            ))
             .child(label)
             .into_any_element()
     }
@@ -345,6 +475,7 @@ impl Shell {
         i: usize,
         session: &LiveSession,
         (selected, muted): (bool, bool),
+        angle: f32,
         age: i64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -355,6 +486,10 @@ impl Shell {
         let live = session.state.is_some();
         let expandable = session.files > 0;
         let open = expandable && self.review.sessions.expanded.contains(&session.id);
+        let turn = self
+            .review
+            .sessions
+            .chevron_turn(&session.id, open, t.motion.fast);
         let (toggle_id, open_id, view_id) =
             (session.id.clone(), session.id.clone(), session.id.clone());
         let group = format!("claude-live-session-{i}");
@@ -368,14 +503,10 @@ impl Shell {
                 el.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        let expanded = &mut this.review.sessions.expanded;
-                        if !expanded.remove(&toggle_id) {
-                            expanded.insert(toggle_id.clone());
-                        }
-                        cx.notify();
+                        this.toggle_session(&toggle_id, cx);
                     }))
                     .child(
-                        chevron(open, &t).group_hover(group.clone(), |s| s.text_color(c.content)),
+                        chevron(turn, &t).group_hover(group.clone(), |s| s.text_color(c.content)),
                     )
             });
         let phrase = session.state.map(|state| match state {
@@ -463,6 +594,24 @@ impl Shell {
                             })),
                     ),
             );
+        let (generation, fresh) =
+            self.review.sessions.looks.get(&session.id).map_or(
+                (0, false),
+                |(_, generation, since)| {
+                    (*generation, *generation > 0 && since.running(t.motion.base))
+                },
+            );
+        let glyph =
+            motion::animate_enter(
+                t.motion.reduced,
+                fresh,
+                div().flex_none().child(
+                    StatusDot::new(dot).rotation(if dot == DotState::Running { angle } else { 0. }),
+                ),
+                ElementId::NamedInteger(format!("session-dot-{}", session.id).into(), generation),
+                Animation::new(t.motion.base).with_easing(motion::ease_enter()),
+                |el, d| el.opacity(d),
+            );
         ListRow::new(("claude-live-session", i), session.label.clone())
             .group(group)
             .leading(
@@ -471,7 +620,7 @@ impl Shell {
                     .items_center()
                     .gap(t.space(Space::Sm))
                     .child(chevron_slot)
-                    .child(StatusDot::new(dot)),
+                    .child(glyph),
             )
             .emphasized(matches!(dot, DotState::NeedsInput | DotState::Unread))
             .bright(live)
@@ -489,6 +638,114 @@ impl Shell {
             .trailing(trailing)
             .when_some(detail, |row, detail| row.detail(detail))
             .into_any_element()
+    }
+
+    fn list_shown(&self) -> bool {
+        self.workspace.ui.tree_visible && self.workspace.ui.side_mode == SideMode::Sessions
+    }
+
+    /// Ticks the running glyph on a timer rather than an animation, so it costs eight frames a second.
+    fn start_spin(cx: &mut Context<Self>) -> (Instant, Task<()>) {
+        let tick = Duration::from_millis(SPIN_TICK_MS as u64);
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(tick).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+        (Instant::now(), task)
+    }
+
+    /// Notes each row's glyph state, so a change replays the fade under a new animation id.
+    fn track_looks(&mut self, sessions: &[LiveSession]) {
+        let looks = &mut self.review.sessions.looks;
+        looks.retain(|id, _| sessions.iter().any(|s| s.id == *id));
+        for s in sessions {
+            let dot = dot_state(s.state, s.unread);
+            match looks.get_mut(&s.id) {
+                Some((seen, generation, since)) if *seen != dot => {
+                    *seen = dot;
+                    *generation += 1;
+                    *since = Opening::now();
+                }
+                Some(_) => {}
+                None => {
+                    looks.insert(s.id.clone(), (dot, 0, Opening::now()));
+                }
+            }
+        }
+    }
+
+    /// Drops finished turns and fades, stops the spinner once the list is off screen, and keeps
+    /// frames coming while a chevron turns.
+    pub(in crate::shell) fn sync_sessions_motion(
+        &mut self,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) {
+        let (base, fast) = (cx.theme().motion.base, cx.theme().motion.fast);
+        let shown = self.list_shown();
+        let state = &mut self.review.sessions;
+        if !shown {
+            state.spin = None;
+            state.looks.clear();
+        }
+        let now = Instant::now();
+        state.turning.retain(|_, tween| tween.running(now, fast));
+        state.entering.retain(|_, opening| opening.running(base));
+        if !state.turning.is_empty() {
+            window.request_animation_frame();
+        }
+    }
+
+    fn toggle_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        let (reduced, fast) = (cx.theme().motion.reduced, cx.theme().motion.fast);
+        let generation = self.next_generation();
+        let state = &mut self.review.sessions;
+        let open = !state.expanded.remove(id);
+        if open {
+            state.expanded.insert(id.to_string());
+            state.collapsing.remove(id);
+            state.entering.insert(id.to_string(), Opening::now());
+        } else if !reduced {
+            state.entering.remove(id);
+            state
+                .collapsing
+                .insert(id.to_string(), Closing::new(generation));
+            let id = id.to_string();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(motion::exit_delay(false, fast))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let closing = &mut this.review.sessions.collapsing;
+                    if closing.get(&id).is_some_and(|c| c.generation == generation) {
+                        closing.remove(&id);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        state.turn(id.to_string(), open, reduced, fast);
+        cx.notify();
+    }
+
+    fn toggle_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        let (reduced, fast) = (cx.theme().motion.reduced, cx.theme().motion.fast);
+        let state = &mut self.review.sessions;
+        if !state.folded.remove(&section) {
+            state.folded.insert(section);
+        }
+        let open = !section.folded(&state.folded);
+        let key = section_key(section);
+        if open {
+            state.entering.insert(key.clone(), Opening::now());
+        }
+        state.turn(key, open, reduced, fast);
+        cx.notify();
     }
 
     /// Focuses the terminal running the session, else resumes it in a new one.
@@ -682,6 +939,33 @@ mod tests {
         flipped.extend([Section::Older, Section::Today]);
         assert!(!Section::Older.folded(&flipped));
         assert!(Section::Today.folded(&flipped));
+    }
+
+    #[test]
+    fn the_spinner_turns_an_eighth_every_tick() {
+        let at = |ms| spin_step(Duration::from_millis(ms));
+        let eighth = TAU / 8.;
+        assert_eq!(at(0), 0.);
+        assert_eq!(at(124), 0.);
+        assert_eq!(at(125), eighth);
+        assert_eq!(at(1000), 0.);
+        assert_eq!(at(1125), eighth);
+    }
+
+    #[test]
+    fn the_spinner_runs_only_while_something_visible_runs_and_motion_is_on() {
+        assert!(should_spin(true, true, false));
+        assert!(!should_spin(false, true, false));
+        assert!(!should_spin(true, false, false));
+        assert!(!should_spin(true, true, true));
+    }
+
+    #[test]
+    fn children_sweep_to_the_sum_of_their_row_heights() {
+        assert_eq!(expand_height(2, 3, 1.), Some(2. * 22. + 3. * 24.));
+        assert_eq!(expand_height(0, 1, 1.5), Some(36.));
+        assert_eq!(expand_height(4, 8, 1.), Some(4. * 22. + 8. * 24.));
+        assert_eq!(expand_height(4, 9, 1.), None);
     }
 
     #[test]
