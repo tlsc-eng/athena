@@ -45,7 +45,7 @@ pub struct Workspace {
     /// Claude Code may connect to Athena as its IDE, to show proposed edits and read diagnostics.
     #[serde(default)]
     pub ide_integration: bool,
-    #[serde(default)]
+    #[serde(default = "legacy_ui")]
     pub ui: UiState,
     /// Roots of closed projects, most recently closed first, for Open Recent.
     #[serde(default)]
@@ -110,6 +110,32 @@ pub struct UiState {
     pub zoom_level: i32,
     /// The project rail is the wide sidebar, with names and folders.
     pub sidebar_expanded: bool,
+    /// A workspace saved before this field existed keeps showing the file tree.
+    #[serde(default = "legacy_side_mode")]
+    pub side_mode: SideMode,
+}
+
+/// What the side panel lists.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideMode {
+    Sessions,
+    Outline,
+    Git,
+    /// Also what a value from a newer build falls back to, so it cannot make the file unreadable.
+    #[serde(other)]
+    Files,
+}
+
+fn legacy_side_mode() -> SideMode {
+    SideMode::Files
+}
+
+/// A saved file with no `ui` at all predates the side panel, so it opens as it always did.
+fn legacy_ui() -> UiState {
+    UiState {
+        side_mode: legacy_side_mode(),
+        ..UiState::default()
+    }
 }
 
 impl Default for UiState {
@@ -122,6 +148,7 @@ impl Default for UiState {
             font_zoom: 0,
             zoom_level: 0,
             sidebar_expanded: false,
+            side_mode: SideMode::Sessions,
         }
     }
 }

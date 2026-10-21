@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use athena_ui::{ContextMenu, InputEvent, MenuItem, TextInput};
-use athena_workspace::{Axis, DiffBase, ItemId, ItemKind, PaneId};
+use athena_workspace::{Axis, DiffBase, ItemId, ItemKind, PaneId, SideMode};
 use gpui::{
     App, ClipboardItem, Context, DismissEvent, Focusable, Pixels, Point, PromptLevel, SharedString,
     Window, prelude::*,
@@ -159,9 +159,7 @@ impl Shell {
             return;
         };
         self.tree.editing = None;
-        if !self.workspace.ui.tree_visible {
-            self.toggle_tree(cx);
-        }
+        self.select_side_mode(SideMode::Files, cx);
         let (placeholder, initial) = match kind {
             EditKind::NewFile => ("File name", String::new()),
             EditKind::NewFolder => ("Folder name", String::new()),
@@ -560,9 +558,7 @@ impl Shell {
         if !path.starts_with(&root) {
             return;
         }
-        if !self.workspace.ui.tree_visible {
-            self.toggle_tree(cx);
-        }
+        self.select_side_mode(SideMode::Files, cx);
         self.tree.reveal(&root, path);
         cx.notify();
     }

@@ -12,7 +12,7 @@ pub struct WindowEntry {
     pub active: Option<PathBuf>,
     #[serde(default)]
     pub window: Option<WindowState>,
-    #[serde(default)]
+    #[serde(default = "crate::legacy_ui")]
     pub ui: UiState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed: Vec<Vec<String>>,
