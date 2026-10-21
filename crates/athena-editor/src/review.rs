@@ -32,7 +32,7 @@ pub struct ReviewMark {
 /// How a gutter dot looks; a line with several comments shows the loudest of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MarkState {
-    /// Filled muted, as something done with.
+    /// Filled muted, as something done with; the stale ring is hollow, so shape tells them apart.
     Sent,
     /// A hollow ring: the comment lost its lines.
     Stale,
@@ -641,6 +641,26 @@ mod tests {
         assert_eq!(state.dot(15), Some(MarkState::Sent), "sent wins over stale");
         assert_eq!(state.dot(5), None, "its last line has none");
         assert_eq!(state.here(4).len(), 2);
+    }
+
+    #[test]
+    fn turning_comments_off_keeps_the_reserved_column() {
+        let mut state = ReviewState {
+            enabled: true,
+            reserved: true,
+            marks: vec![mark(1, 4, false, false)],
+            ..Default::default()
+        };
+        state.set_enabled(false);
+        assert!(state.reserved && state.column_shown());
+        assert_eq!(state.dot(4), None, "but its dots are gone");
+        state.reserved = false;
+        assert!(!state.column_shown());
+        state.set_enabled(true);
+        assert!(
+            state.column_shown(),
+            "an enabled file always has its column"
+        );
     }
 
     #[test]

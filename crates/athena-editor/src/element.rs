@@ -1288,7 +1288,7 @@ fn review_mark(
                 MarkState::Stale => fill(bounds, gpui::transparent_black())
                     .border_widths(px(1.5))
                     .border_color(theme.color.content_muted),
-                MarkState::Sent => fill(bounds, theme.color.content_disabled),
+                MarkState::Sent => fill(bounds, theme.color.content_muted),
                 MarkState::Active => fill(bounds, theme.color.accent),
             };
             frame.gutter_marks.push(mark.corner_radii(d / 2.));

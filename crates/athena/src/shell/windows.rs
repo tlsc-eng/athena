@@ -392,6 +392,7 @@ pub(super) fn new_window(
             let _ = handle.update(cx, |shell, window, cx| {
                 shell.review.sessions.absorb(std::mem::take(bindings));
                 shell.open_views(cx);
+                shell.sync_review_columns(cx);
                 shell.schedule_save(cx);
                 shell.save_now(cx);
                 window.activate_window();
@@ -577,6 +578,7 @@ pub(super) fn unbind_elsewhere(session: String, except: AnyWindowHandle, cx: &mu
         }
         let _ = handle.update(cx, |shell, _, cx| {
             if shell.review.sessions.unbind(&session) {
+                shell.rewatch_comment_editors(cx);
                 cx.notify();
             }
         });
@@ -1043,6 +1045,7 @@ impl Shell {
             self.focus_pending = true;
             self.switch_count += 1;
         }
+        self.rewatch_comment_editors(cx);
         // Now, since the window taking the project saves at once and a crash could list it twice.
         self.schedule_save(cx);
         self.save_now(cx);
@@ -1067,6 +1070,7 @@ impl Shell {
         if front.is_some() {
             self.workspace.active = front;
         }
+        self.sync_review_columns(cx);
         self.group_worktrees();
         self.switch_count += 1;
         self.focus_pending = true;

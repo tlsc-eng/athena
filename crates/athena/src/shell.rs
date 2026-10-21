@@ -404,7 +404,9 @@ impl Shell {
         let index = match windows::take_parked(&root, cx) {
             Some((project, bindings)) => {
                 self.review.sessions.absorb(bindings);
-                self.workspace.adopt_project(project)
+                let index = self.workspace.adopt_project(project);
+                self.sync_review_columns(cx);
+                index
             }
             None => self.workspace.add_project(root),
         };

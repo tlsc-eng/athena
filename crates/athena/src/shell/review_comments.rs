@@ -99,6 +99,12 @@ fn marks(text: &str, comments: &[ReviewComment]) -> Vec<ReviewMark> {
         .collect()
 }
 
+/// Whether a file gets the empty comment column: it is in one of the window's projects and
+/// Claude runs in a terminal here or a session is bound to a pane here.
+fn column_reserved(in_project: bool, claude_terminal: bool, bound_session: bool) -> bool {
+    in_project && (claude_terminal || bound_session)
+}
+
 /// Stores what the popover asked for; true when it was text the box can let go of.
 fn apply(
     dir: &Path,
@@ -184,27 +190,45 @@ impl Shell {
         }
     }
 
-    /// Whether `path` gets the empty comment column: a session runs in this window and the file
-    /// is in one of its projects, so the text moves when a session starts, not when it edits.
-    fn review_reserved(&self, path: &Path) -> bool {
-        !self.review.sessions.bound_sessions().is_empty()
-            && self
-                .workspace
+    fn review_reserved(&self, path: &Path, cx: &App) -> bool {
+        column_reserved(
+            self.workspace
                 .projects
                 .iter()
-                .any(|p| path.starts_with(&p.root))
+                .any(|p| path.starts_with(&p.root)),
+            self.items.values().any(|v| v.claude_state(cx).is_some()),
+            !self.review.sessions.bound_sessions().is_empty(),
+        )
     }
 
+    /// Sets an opened editor's comment column from scratch.
     pub(super) fn reserve_review_column(
         &mut self,
         editor: &Entity<EditorView>,
         cx: &mut Context<Self>,
     ) {
-        let reserved = self.review_reserved(editor.read(cx).path());
+        let reserved = self.review_reserved(editor.read(cx).path(), cx);
         editor.update(cx, |e, cx| e.set_review_reserved(reserved, cx));
     }
 
-    /// Every open editor takes or gives up the comment column, after a session bound.
+    /// Decides again, for every open editor, whether its file is under review and by which
+    /// session, after a session's home changed.
+    pub(super) fn rewatch_comment_editors(&mut self, cx: &mut Context<Self>) {
+        let editors: Vec<Entity<EditorView>> = self
+            .items
+            .values()
+            .filter_map(|v| match v {
+                ItemView::Editor(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        for editor in editors {
+            self.watch_editor_comments(&editor, cx);
+        }
+    }
+
+    /// Gives open editors the comment column once Claude shows up. It is never taken back, so
+    /// the text moves at most once, however the sessions come and go.
     pub(super) fn sync_review_columns(&mut self, cx: &mut Context<Self>) {
         let editors: Vec<Entity<EditorView>> = self
             .items
@@ -215,7 +239,9 @@ impl Shell {
             })
             .collect();
         for editor in editors {
-            self.reserve_review_column(&editor, cx);
+            if self.review_reserved(editor.read(cx).path(), cx) {
+                editor.update(cx, |e, cx| e.set_review_reserved(true, cx));
+            }
         }
     }
 
@@ -316,15 +342,25 @@ impl Shell {
         let text = w.view.text(cx);
         let released = match apply(&dir, &session, &path, text.as_deref(), event) {
             Ok(released) => released,
-            // The box keeps what was typed, so the user can try again.
+            // The box keeps what was typed. A comment gone from the store, deleted in another
+            // view, must also go from the views so the next save adds a new one.
             Err(err) => {
+                self.reload_comments(&dir, &session, &path, cx);
                 return self.transient_notice("Could not save the comment", format!("{err:#}"), cx);
             }
         };
         if released && let Some(w) = self.review.comments.watched.get(&id) {
             w.view.saved(cx);
         }
-        let fresh = store::for_file(&dir, &session, &path).unwrap_or_default();
+        self.reload_comments(&dir, &session, &path, cx);
+    }
+
+    /// Reads a file's comments again and shows them in every view of it; an unreadable store
+    /// leaves the views as they are.
+    fn reload_comments(&mut self, dir: &Path, session: &str, path: &Path, cx: &mut Context<Self>) {
+        let Ok(fresh) = store::for_file(dir, session, path) else {
+            return;
+        };
         let sharing: Vec<EntityId> = self
             .review
             .comments
@@ -470,6 +506,20 @@ mod tests {
         }
         assert_eq!(shown[0].lines, 3..=3);
         assert!(shown[2].stale);
+    }
+
+    #[test]
+    fn the_column_needs_a_project_file_and_claude_running_or_bound_here() {
+        assert!(
+            column_reserved(true, true, false),
+            "a restored Claude terminal"
+        );
+        assert!(column_reserved(true, false, true));
+        assert!(!column_reserved(true, false, false));
+        assert!(
+            !column_reserved(false, true, true),
+            "a file outside the projects"
+        );
     }
 
     #[test]

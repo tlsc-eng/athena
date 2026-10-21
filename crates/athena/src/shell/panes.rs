@@ -225,6 +225,9 @@ impl Shell {
                                 ..ClaudeMark::default()
                             };
                             this.claude_marks.insert(view.entity_id(), after);
+                            if before.state.is_none() && after.state.is_some() {
+                                this.sync_review_columns(cx);
+                            }
                             let on_screen = this
                                 .terminal_key(&view)
                                 .is_some_and(|(root, _)| Some(root) == this.active_root());

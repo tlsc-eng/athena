@@ -524,7 +524,8 @@ impl DiffView {
         cx.notify();
     }
 
-    fn step_change(&mut self, forward: bool, cx: &mut Context<Self>) {
+    fn step_change(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_review_on_scroll(window, cx);
         let Some(count) = self.loaded.as_ref().map(|l| l.changes.len()) else {
             return;
         };
@@ -570,7 +571,8 @@ impl DiffView {
         (-f32::from(offset.y) / self.row_height(cx)).max(0.) as usize
     }
 
-    fn scroll_rows(&mut self, rows: isize, cx: &mut Context<Self>) {
+    fn scroll_rows(&mut self, rows: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_review_on_scroll(window, cx);
         let h = self.row_height(cx);
         let handle = self.scroll.0.borrow().base_handle.clone();
         let offset = handle.offset();
@@ -598,9 +600,8 @@ impl DiffView {
         if dy != 0. {
             self.current = None;
         }
-        if dy != 0. && self.review.close() {
-            window.focus(&self.focus);
-            cx.notify();
+        if dy != 0. {
+            self.dismiss_review_on_scroll(window, cx);
         }
         if dx.abs() > dy.abs()
             && let Some(loaded) = &self.loaded
@@ -1251,12 +1252,14 @@ impl DiffView {
             .child(div().flex_1())
             .child(div().text_color(t.color.content_muted).child(position))
             .child(
-                tool("diff-prev", "↑", "Previous change (⇧⌥F5)")
-                    .on_click(cx.listener(|this, _, _, cx| this.step_change(false, cx))),
+                tool("diff-prev", "↑", "Previous change (⇧⌥F5)").on_click(
+                    cx.listener(|this, _, window, cx| this.step_change(false, window, cx)),
+                ),
             )
             .child(
-                tool("diff-next", "↓", "Next change (⌥F5)")
-                    .on_click(cx.listener(|this, _, _, cx| this.step_change(true, cx))),
+                tool("diff-next", "↓", "Next change (⌥F5)").on_click(
+                    cx.listener(|this, _, window, cx| this.step_change(true, window, cx)),
+                ),
             )
             .child(
                 tool(
@@ -1361,6 +1364,15 @@ impl DiffView {
         cx.notify();
     }
 
+    /// Closes the popover when the view moves under it, so keys typed in its box cannot scroll
+    /// the view while the box stays on screen.
+    fn dismiss_review_on_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review.close() {
+            window.focus(&self.focus);
+            cx.notify();
+        }
+    }
+
     fn close_review_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.review.close();
         window.focus(&self.focus);
@@ -1391,7 +1403,7 @@ impl DiffView {
                 let (fill, ring) = match state {
                     MarkState::Active => (Some(t.color.accent), t.color.accent),
                     MarkState::Stale => (None, t.color.content_muted),
-                    MarkState::Sent => (Some(t.color.content_disabled), t.color.content_disabled),
+                    MarkState::Sent => (Some(t.color.content_muted), t.color.content_muted),
                 };
                 div()
                     .size(px(7.))
@@ -1617,21 +1629,33 @@ impl Render for DiffView {
             .bg(t.color.surface_sunken)
             .track_focus(&self.focus)
             .key_context("DiffView")
-            .on_action(cx.listener(|this, _: &NextChange, _, cx| this.step_change(true, cx)))
-            .on_action(cx.listener(|this, _: &PrevChange, _, cx| this.step_change(false, cx)))
+            .on_action(
+                cx.listener(|this, _: &NextChange, window, cx| this.step_change(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PrevChange, window, cx| this.step_change(false, window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ToggleInline, _, cx| this.toggle_inline(cx)))
-            .on_action(cx.listener(|this, _: &LineUp, _, cx| this.scroll_rows(-1, cx)))
-            .on_action(cx.listener(|this, _: &LineDown, _, cx| this.scroll_rows(1, cx)))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| {
+            .on_action(cx.listener(|this, _: &LineUp, window, cx| this.scroll_rows(-1, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &LineDown, window, cx| this.scroll_rows(1, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &PageUp, window, cx| {
                 let n = this.page_rows(cx);
-                this.scroll_rows(-n, cx)
+                this.scroll_rows(-n, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| {
+            .on_action(cx.listener(|this, _: &PageDown, window, cx| {
                 let n = this.page_rows(cx);
-                this.scroll_rows(n, cx)
+                this.scroll_rows(n, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &Top, _, cx| this.scroll_rows(isize::MIN / 2, cx)))
-            .on_action(cx.listener(|this, _: &Bottom, _, cx| this.scroll_rows(isize::MAX / 2, cx)))
+            .on_action(
+                cx.listener(|this, _: &Top, window, cx| {
+                    this.scroll_rows(isize::MIN / 2, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &Bottom, window, cx| {
+                this.scroll_rows(isize::MAX / 2, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &AcceptProposal, _, cx| this.decide(true, cx)))
             .on_action(cx.listener(|this, _: &RejectProposal, _, cx| this.decide(false, cx)))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(cx)))
