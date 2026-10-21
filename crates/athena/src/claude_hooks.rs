@@ -38,7 +38,7 @@ const PLAN_TOOLS: &str = "TodoWrite|ExitPlanMode";
 /// Notifications that wait on the user; `idle_prompt` is only a reminder after Claude finished.
 const ASKS: &str = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|worker_permission_prompt";
 
-fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 11] {
+fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 12] {
     let athena = athena.display();
     // Settings are shared with Claude sessions outside Athena, where the hook must stay silent.
     let cmd = |event: &str| {
@@ -48,6 +48,8 @@ fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 11] {
     };
     [
         ("UserPromptSubmit", None, cmd("claude-running")),
+        // Only a submitted prompt is known to leave Claude's prompt box empty.
+        ("UserPromptSubmit", None, cmd("claude-prompt")),
         ("Stop", None, cmd("claude-stop")),
         // As the permission dialog opens; its Notification comes some seconds later.
         ("PermissionRequest", None, cmd("claude-needs-input")),
@@ -295,6 +297,25 @@ mod tests {
             out["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
             command("claude-needs-input")
         );
+    }
+
+    #[test]
+    fn an_install_from_before_the_prompt_hook_gets_it_beside_the_running_one() {
+        let dir = temp("prompt");
+        let mut old = merge(json!({}), Path::new(ATHENA), true).unwrap();
+        let submit = old["hooks"]["UserPromptSubmit"].as_array_mut().unwrap();
+        submit.retain(|e| e["hooks"][0]["command"] == command("claude-running"));
+        fs::write(settings_path(&dir), old.to_string()).unwrap();
+        assert!(!enabled(&settings_path(&dir)));
+        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        assert!(enabled(&settings_path(&dir)));
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
+        let submit = written["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(submit.len(), 2);
+        assert_eq!(submit[0]["hooks"][0]["command"], command("claude-running"));
+        assert_eq!(submit[1]["hooks"][0]["command"], command("claude-prompt"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

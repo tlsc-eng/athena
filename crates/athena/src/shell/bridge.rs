@@ -121,6 +121,10 @@ impl Shell {
                 self.sync_review_columns(cx);
                 AppReply::Ok
             }
+            AppMsg::ClaudePrompt => {
+                self.claude_prompt_submitted(caller, cx);
+                AppReply::Ok
+            }
             msg @ (AppMsg::ClaudeTodos { .. } | AppMsg::ClaudePlan { .. }) => {
                 self.claude_plan_event(msg, caller, cx);
                 AppReply::Ok

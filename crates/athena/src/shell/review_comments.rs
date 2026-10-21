@@ -425,9 +425,17 @@ impl Shell {
         }
     }
 
-    /// The session the focused tab's comments belong to, else the window's most recently active
-    /// one.
-    fn current_comment_session(&self, dir: &Path) -> Option<String> {
+    /// The session the focused terminal runs or the focused tab's comments belong to, else the
+    /// window's most recently active one.
+    fn current_comment_session(&self, dir: &Path, cx: &App) -> Option<String> {
+        if let Some(ItemView::Terminal(t)) = self.focused_item_view()
+            && let Some(session) = t
+                .read(cx)
+                .session()
+                .and_then(|pane| self.review.sessions.session_of(pane))
+        {
+            return Some(session.to_string());
+        }
         let focused = match self.focused_item_view() {
             Some(ItemView::Editor(e)) => Some(e.entity_id()),
             Some(ItemView::Diff(d)) => Some(d.entity_id()),
@@ -440,11 +448,11 @@ impl Shell {
     }
 
     /// The unsent comments of [`Self::current_comment_session`].
-    pub(super) fn comment_rows(&self) -> Vec<CommentRow> {
+    pub(super) fn comment_rows(&self, cx: &App) -> Vec<CommentRow> {
         let Ok(dir) = snapshots::store() else {
             return Vec::new();
         };
-        let Some(session) = self.current_comment_session(&dir) else {
+        let Some(session) = self.current_comment_session(&dir, cx) else {
             return Vec::new();
         };
         let root = self.active_root();

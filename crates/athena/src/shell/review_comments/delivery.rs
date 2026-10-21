@@ -1,10 +1,11 @@
 //! Sending a session's unsent review comments to its Claude Code terminal as one pasted message.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
+use athena_proto::PaneId;
 use athena_term::{ClaudeState, TerminalView};
 use gpui::{Context, Entity};
 
@@ -19,6 +20,8 @@ use crate::snapshots;
 /// Enter waits for the paste to be taken in.
 const SUBMIT_DELAY: Duration = Duration::from_millis(80);
 
+const NOT_RUNNING: &str = "Claude isn't running for that session. Resume it first.";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Gate {
     Send,
@@ -27,53 +30,125 @@ enum Gate {
 }
 
 /// Whether Enter may be pressed in Claude's prompt now: not while it asks a question, which Enter
-/// would answer, and not over text the user is typing.
-fn gate(state: Option<ClaudeState>, typed_since_hook: bool) -> Gate {
+/// would answer, and not over text the user may have typed.
+fn gate(state: Option<ClaudeState>, prompt_may_have_text: bool) -> Gate {
     match state {
         None => Gate::NotRunning,
         Some(ClaudeState::NeedsInput) => Gate::Wait,
-        Some(_) if typed_since_hook => Gate::Wait,
+        Some(_) if prompt_may_have_text => Gate::Wait,
         Some(ClaudeState::Running | ClaudeState::Finished) => Gate::Send,
     }
 }
 
-struct Batch {
+/// The gate for a terminal as it is now; a Claude that has sent no hook yet is not ready.
+fn terminal_gate(view: &TerminalView) -> Gate {
+    if !view.is_claude() {
+        return Gate::NotRunning;
+    }
+    let Some(reported) = view.claude_hook_state() else {
+        return Gate::Wait;
+    };
+    gate(
+        view.claude_state().or(Some(reported)),
+        view.prompt_may_have_text(),
+    )
+}
+
+/// A send waiting for one Claude process to be ready; the message is built when it goes out.
+#[derive(Debug, PartialEq, Eq)]
+struct Pending {
     session: String,
-    text: String,
-    ids: Vec<u64>,
+    pid: i32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Action {
-    Send(Batch),
+    Send(Pending),
 }
 
-/// The batch each session is waiting to send, one at most.
+/// The send each session is waiting on, one at most.
 #[derive(Default)]
 pub(super) struct Queue {
-    batches: HashMap<String, Batch>,
+    pending: HashMap<String, Pending>,
 }
 
 impl Queue {
-    /// Queues `batch` in place of the session's older one.
-    fn enqueue(&mut self, batch: Batch) {
-        self.batches.insert(batch.session.clone(), batch);
+    /// Queues `pending` in place of the session's older one.
+    fn enqueue(&mut self, pending: Pending) {
+        self.pending.insert(pending.session.clone(), pending);
     }
 
-    fn cancel(&mut self, session: &str) -> Option<Batch> {
-        self.batches.remove(session)
+    fn get(&self, session: &str) -> Option<&Pending> {
+        self.pending.get(session)
     }
 
-    /// What to do after the session's Claude changed: send its queued batch once the gate opens.
+    fn cancel(&mut self, session: &str) -> Option<Pending> {
+        self.pending.remove(session)
+    }
+
+    /// What to do after the session's Claude changed: send once the gate opens.
     fn on_change(&mut self, session: &str, gate: Gate) -> Option<Action> {
         match gate {
-            Gate::Send => self.batches.remove(session).map(Action::Send),
+            Gate::Send => self.pending.remove(session).map(Action::Send),
             Gate::Wait | Gate::NotRunning => None,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.batches.is_empty()
+        self.pending.is_empty()
     }
+}
+
+/// Why a message cannot be pasted into a terminal.
+#[derive(Debug, PartialEq, Eq)]
+enum Refusal {
+    NotClaude,
+    Restarted,
+    NoBracketedPaste,
+}
+
+impl Refusal {
+    fn notice(&self) -> &'static str {
+        match self {
+            Self::NotClaude => "Claude exited; queued comments were not sent.",
+            Self::Restarted => "Claude was restarted; the comments were not sent.",
+            Self::NoBracketedPaste => {
+                "This terminal isn't taking pastes safely. Try again once Claude has redrawn."
+            }
+        }
+    }
+}
+
+/// Whether the terminal still runs the Claude the send was for, and can take a paste.
+fn refusal(
+    is_claude: bool,
+    expected_pid: i32,
+    pid: Option<i32>,
+    bracketed: bool,
+) -> Option<Refusal> {
+    if !is_claude {
+        Some(Refusal::NotClaude)
+    } else if pid != Some(expected_pid) {
+        Some(Refusal::Restarted)
+    } else if !bracketed {
+        Some(Refusal::NoBracketedPaste)
+    } else {
+        None
+    }
+}
+
+fn refusal_of(view: &TerminalView, expected_pid: i32) -> Option<Refusal> {
+    refusal(
+        view.is_claude(),
+        expected_pid,
+        view.foreground_pid(),
+        view.bracketed_paste(),
+    )
+}
+
+struct Batch {
+    text: String,
+    ids: Vec<u64>,
 }
 
 /// Each comment with where it is in its file now; one whose file cannot be read is stale at its
@@ -82,7 +157,7 @@ fn place_all(
     comments: Vec<ReviewComment>,
     read: impl Fn(&Path) -> Option<String>,
 ) -> Vec<(ReviewComment, Placement)> {
-    let mut texts: HashMap<std::path::PathBuf, Option<String>> = HashMap::new();
+    let mut texts: HashMap<PathBuf, Option<String>> = HashMap::new();
     comments
         .into_iter()
         .map(|c| {
@@ -136,13 +211,43 @@ fn format_batch(comments: &[(ReviewComment, Placement)], root: &Path) -> String 
     out
 }
 
+/// The message for what the store holds unsent for `session` right now; `None` when nothing is.
+fn batch_from_store(
+    dir: &Path,
+    session: &str,
+    root: &Path,
+    read: impl Fn(&Path) -> Option<String>,
+) -> Option<Batch> {
+    let unsent = store::unsent(dir, session).ok()?;
+    if unsent.is_empty() {
+        return None;
+    }
+    let placed = place_all(unsent, read);
+    Some(Batch {
+        text: format_batch(&placed, root),
+        ids: placed.iter().map(|(c, _)| c.id).collect(),
+    })
+}
+
 impl Shell {
+    /// The project and terminal that run `session` in this window.
+    fn session_terminal(&self, session: &str) -> Option<(PathBuf, Entity<TerminalView>)> {
+        let pane = self.review.sessions.pane_of(session)?;
+        let key = self.find_session(pane)?;
+        match self.items.get(&key)? {
+            ItemView::Terminal(view) => Some((key.0, view.clone())),
+            _ => None,
+        }
+    }
+
+    fn current_session_here(&self, cx: &gpui::App) -> Option<String> {
+        let dir = snapshots::store().ok()?;
+        self.current_comment_session(&dir, cx)
+    }
+
     /// Sends the unsent comments of the session the focused tab belongs to.
     pub(in crate::shell) fn send_current_review_comments(&mut self, cx: &mut Context<Self>) {
-        let session = snapshots::store()
-            .ok()
-            .and_then(|dir| self.current_comment_session(&dir));
-        match session {
+        match self.current_session_here(cx) {
             Some(session) => self.send_review_comments(session, cx),
             None => self.transient_notice(
                 "Comments not sent",
@@ -152,15 +257,14 @@ impl Shell {
         }
     }
 
-    /// Drops the batch waiting for Claude to be ready, if any.
+    /// Drops the send waiting for Claude to be ready, if any; the comments stay unsent.
     pub(in crate::shell) fn cancel_queued_review_comments(&mut self, cx: &mut Context<Self>) {
-        let session = snapshots::store()
-            .ok()
-            .and_then(|dir| self.current_comment_session(&dir));
-        let batch = session.and_then(|s| self.review.comments.queue.cancel(&s));
-        let (title, body) = match batch {
-            Some(b) => ("Canceled", format!("{} comments stay unsent.", b.ids.len())),
-            None => ("Nothing to cancel", "No comments are waiting.".to_string()),
+        let queued = self
+            .current_session_here(cx)
+            .and_then(|s| self.review.comments.queue.cancel(&s));
+        let (title, body) = match queued {
+            Some(_) => ("Canceled", "The comments stay unsent."),
+            None => ("Nothing to cancel", "No comments are waiting."),
         };
         self.transient_notice(title, body, cx);
     }
@@ -174,54 +278,38 @@ impl Shell {
         let Ok(dir) = snapshots::store() else {
             return;
         };
-        let unsent = store::unsent(&dir, &session).unwrap_or_default();
-        if unsent.is_empty() {
+        let count = store::unsent(&dir, &session).map_or(0, |u| u.len());
+        if count == 0 {
             return self.transient_notice(
                 "Comments not sent",
                 "There are no unsent review comments.",
                 cx,
             );
         }
-        let Some(pane) = self.review.sessions.pane_of(&session) else {
+        let Some((_, view)) = self.session_terminal(&session) else {
             let elsewhere = windows::session_bound_elsewhere(&session, self.window_handle, cx);
             let body = match elsewhere {
                 true => "That session is in another window.",
-                false => "Claude isn't running for that session. Resume it first.",
+                false => NOT_RUNNING,
             };
             return self.transient_notice("Comments not sent", body, cx);
         };
-        let Some((project, item)) = self.find_session(pane) else {
-            return self.transient_notice(
-                "Comments not sent",
-                "Claude isn't running for that session. Resume it first.",
-                cx,
-            );
+        let (gate, pid) = {
+            let v = view.read(cx);
+            (terminal_gate(v), v.foreground_pid())
         };
-        let Some(ItemView::Terminal(view)) = self.items.get(&(project.clone(), item)).cloned()
-        else {
-            return;
+        let Some(pid) = pid.filter(|_| gate != Gate::NotRunning) else {
+            return self.transient_notice("Comments not sent", NOT_RUNNING, cx);
         };
-        let root = self
-            .review
-            .sessions
-            .cwd_of(&session)
-            .map_or(project, Path::to_path_buf);
-        let placed = place_all(unsent, |p| std::fs::read_to_string(p).ok());
-        let batch = Batch {
-            text: format_batch(&placed, &root),
-            ids: placed.iter().map(|(c, _)| c.id).collect(),
-            session,
+        let pending = Pending {
+            session: session.clone(),
+            pid,
         };
-        match terminal_gate(&view, cx) {
-            Gate::Send => self.deliver(batch, view, cx),
-            Gate::NotRunning => self.transient_notice(
-                "Comments not sent",
-                "Claude isn't running for that session. Resume it first.",
-                cx,
-            ),
+        match gate {
+            Gate::Send => self.deliver(pending, view, true, cx),
+            Gate::NotRunning => {}
             Gate::Wait => {
-                let (count, session) = (batch.ids.len(), batch.session.clone());
-                self.review.comments.queue.enqueue(batch);
+                self.review.comments.queue.enqueue(pending);
                 let action = ToastAction {
                     label: "Paste Now (don't send)",
                     run: Rc::new(move |shell, _, cx| shell.paste_queued(&session, cx)),
@@ -236,7 +324,8 @@ impl Shell {
         }
     }
 
-    /// A terminal's Claude changed or reported a hook; sends what waits for it once it is ready.
+    /// A terminal's Claude changed; drops what waits for a Claude that is gone, else sends it once
+    /// the Claude is ready.
     pub(in crate::shell) fn retry_queued_comments(
         &mut self,
         view: &Entity<TerminalView>,
@@ -253,46 +342,87 @@ impl Shell {
         else {
             return;
         };
-        let gate = terminal_gate(view, cx);
-        if let Some(Action::Send(batch)) = self.review.comments.queue.on_change(&session, gate) {
-            self.deliver(batch, view.clone(), cx);
+        let Some(pid) = self.review.comments.queue.get(&session).map(|p| p.pid) else {
+            return;
+        };
+        let (gone, gate) = {
+            let v = view.read(cx);
+            (
+                refusal_of(v, pid).filter(|r| *r != Refusal::NoBracketedPaste),
+                terminal_gate(v),
+            )
+        };
+        if let Some(gone) = gone {
+            self.review.comments.queue.cancel(&session);
+            return self.transient_notice("Comments not sent", gone.notice(), cx);
+        }
+        if let Some(Action::Send(pending)) = self.review.comments.queue.on_change(&session, gate) {
+            self.deliver(pending, view.clone(), true, cx);
         }
     }
 
-    /// Pastes the waiting batch without pressing Enter, for the user to send themselves.
+    /// Pastes what the session has unsent without pressing Enter, for the user to send.
     fn paste_queued(&mut self, session: &str, cx: &mut Context<Self>) {
-        let Some(batch) = self.review.comments.queue.cancel(session) else {
+        let Some(pending) = self.review.comments.queue.cancel(session) else {
             return;
         };
-        let view = self
-            .review
-            .sessions
-            .pane_of(session)
-            .and_then(|pane| self.find_session(pane))
-            .and_then(|key| self.items.get(&key).cloned());
-        let Some(ItemView::Terminal(view)) = view else {
-            return;
-        };
-        view.update(cx, |v, cx| v.paste_text(&batch.text, cx));
-        self.mark_comments_sent(&batch, cx);
-        self.transient_notice("Pasted", "Press Enter in Claude to send.", cx);
+        match self.session_terminal(session) {
+            Some((_, view)) => self.deliver(pending, view, false, cx),
+            None => self.transient_notice(
+                "Comments not sent",
+                "That session is no longer in a terminal here. The comments stay unsent.",
+                cx,
+            ),
+        }
     }
 
-    /// Pastes the batch, and presses Enter a moment later unless Claude stopped being ready.
-    fn deliver(&mut self, batch: Batch, view: Entity<TerminalView>, cx: &mut Context<Self>) {
+    /// Pastes the session's unsent comments, and presses Enter a moment later when `submit` and
+    /// Claude is still ready. What is sent is read from the store now.
+    fn deliver(
+        &mut self,
+        pending: Pending,
+        view: Entity<TerminalView>,
+        submit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(why) = refusal_of(view.read(cx), pending.pid) {
+            return self.transient_notice("Comments not sent", why.notice(), cx);
+        }
+        let Some(root) = self.comment_root(&pending.session) else {
+            return;
+        };
+        let Ok(dir) = snapshots::store() else {
+            return;
+        };
+        let read = |p: &Path| std::fs::read_to_string(p).ok();
+        let Some(batch) = batch_from_store(&dir, &pending.session, &root, read) else {
+            return self.transient_notice(
+                "Comments not sent",
+                "There are no unsent review comments.",
+                cx,
+            );
+        };
         view.update(cx, |v, cx| v.paste_text(&batch.text, cx));
         let pasted_at = view.read(cx).last_input();
         // Marked now rather than after the Enter, so a second click in the delay cannot send it twice.
-        self.mark_comments_sent(&batch, cx);
+        self.mark_comments_sent(&pending.session, &batch.ids, cx);
+        if !submit {
+            return self.transient_notice("Pasted", "Press Enter in Claude to send.", cx);
+        }
         let count = batch.ids.len();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SUBMIT_DELAY).await;
             let _ = this.update(cx, |this, cx| {
-                let typed_since_paste = view.read(cx).last_input() != pasted_at;
-                let state = view.read(cx).claude_state();
-                if gate(state, typed_since_paste) == Gate::Send {
+                let ready = {
+                    let v = view.read(cx);
+                    let typed = v.last_input() != pasted_at;
+                    let state = v.claude_state().or(v.claude_hook_state());
+                    refusal_of(v, pending.pid).is_none() && gate(state, typed) == Gate::Send
+                };
+                if ready {
                     view.update(cx, |v, cx| v.submit(cx));
-                    this.transient_notice("Sent", format!("Sent {count} comments to Claude"), cx);
+                    let sent = format!("Sent {count} comments to Claude");
+                    this.transient_notice("Sent", sent, cx);
                 } else {
                     this.transient_notice("Pasted", "Press Enter in Claude to send.", cx);
                 }
@@ -301,11 +431,18 @@ impl Shell {
         .detach();
     }
 
-    fn mark_comments_sent(&mut self, batch: &Batch, cx: &mut Context<Self>) {
+    /// Where paths in the message start: the session's folder, else its project's.
+    fn comment_root(&self, session: &str) -> Option<PathBuf> {
+        let cwd = self.review.sessions.cwd_of(session);
+        cwd.map(Path::to_path_buf)
+            .or_else(|| Some(self.session_terminal(session)?.0))
+    }
+
+    fn mark_comments_sent(&mut self, session: &str, ids: &[u64], cx: &mut Context<Self>) {
         let Ok(dir) = snapshots::store() else {
             return;
         };
-        if let Err(err) = store::mark_sent(&dir, &batch.session, &batch.ids) {
+        if let Err(err) = store::mark_sent(&dir, session, ids) {
             return self.transient_notice(
                 "Could not mark the comments sent",
                 format!("{err:#}"),
@@ -317,18 +454,25 @@ impl Shell {
             .comments
             .watched
             .values()
-            .filter(|w| w.session == batch.session)
+            .filter(|w| w.session == session)
             .map(|w| w.path.clone())
             .collect();
         for path in paths {
-            self.reload_comments(&dir, &batch.session, &path, cx);
+            self.reload_comments(&dir, session, &path, cx);
         }
     }
-}
 
-fn terminal_gate(view: &Entity<TerminalView>, cx: &gpui::App) -> Gate {
-    let view = view.read(cx);
-    gate(view.claude_state(), view.typed_since_hook())
+    /// A UserPromptSubmit hook came from `pane`'s Claude: its prompt box is empty now.
+    pub(in crate::shell) fn claude_prompt_submitted(
+        &mut self,
+        pane: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = pane.and_then(|p| self.find_session(p));
+        if let Some(ItemView::Terminal(view)) = key.and_then(|k| self.items.get(&k)).cloned() {
+            view.update(cx, |v, cx| v.note_prompt_submit(cx));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -336,7 +480,6 @@ mod tests {
     use super::*;
     use crate::review_comments::ReviewComment;
     use std::ops::RangeInclusive;
-    use std::path::PathBuf;
 
     fn comment(
         id: u64,
@@ -413,6 +556,33 @@ mod tests {
     }
 
     #[test]
+    fn the_message_is_built_from_the_store_as_it_is_when_it_goes_out() {
+        let dir = std::env::temp_dir().join(format!("athena-delivery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Path::new("/p/a.rs");
+        let add = |line: u32, body: &str| {
+            store::add(&dir, "s", path, line..=line, "x".into(), body.into()).unwrap()
+        };
+        let (first, second) = (add(1, "first"), add(2, "second"));
+        let read = |_: &Path| Some("x\nx\nx\n".to_string());
+        let build = || batch_from_store(&dir, "s", Path::new("/p"), read);
+        let queued = build().unwrap();
+        assert_eq!(queued.ids, vec![first.id, second.id]);
+
+        store::update_body(&dir, "s", first.id, "first, reworded".into()).unwrap();
+        store::delete(&dir, "s", second.id).unwrap();
+        let third = add(3, "third");
+        let sent = build().unwrap();
+        assert_eq!(sent.ids, vec![first.id, third.id]);
+        assert!(sent.text.contains("first, reworded") && sent.text.contains("third"));
+        assert!(!sent.text.contains("second"));
+
+        store::mark_sent(&dir, "s", &sent.ids).unwrap();
+        assert!(build().is_none(), "nothing unsent is nothing to send");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn the_gate_opens_for_a_running_or_finished_claude_with_an_empty_prompt() {
         use ClaudeState::*;
         let cases = [
@@ -430,47 +600,58 @@ mod tests {
         }
     }
 
-    fn batch(session: &str, text: &str) -> Batch {
-        Batch {
+    fn pending(session: &str, pid: i32) -> Pending {
+        Pending {
             session: session.into(),
-            text: text.into(),
-            ids: vec![1],
+            pid,
         }
     }
 
     #[test]
-    fn a_queued_batch_waits_then_sends_once() {
+    fn a_queued_send_waits_then_goes_out_once() {
         let mut q = Queue::default();
-        q.enqueue(batch("s", "one"));
+        q.enqueue(pending("s", 7));
         assert!(q.on_change("s", Gate::Wait).is_none());
         assert!(q.on_change("s", Gate::NotRunning).is_none());
         assert!(!q.is_empty(), "still queued");
         assert!(q.on_change("other", Gate::Send).is_none());
-        let Some(Action::Send(sent)) = q.on_change("s", Gate::Send) else {
-            panic!("the open gate sends");
-        };
-        assert_eq!(sent.text, "one");
+        assert_eq!(
+            q.on_change("s", Gate::Send),
+            Some(Action::Send(pending("s", 7)))
+        );
         assert!(q.on_change("s", Gate::Send).is_none(), "sent only once");
         assert!(q.is_empty());
     }
 
     #[test]
-    fn a_newer_request_replaces_the_queued_batch() {
+    fn a_newer_request_replaces_the_queued_one() {
         let mut q = Queue::default();
-        q.enqueue(batch("s", "old"));
-        q.enqueue(batch("s", "new"));
-        let Some(Action::Send(sent)) = q.on_change("s", Gate::Send) else {
-            panic!("the open gate sends");
-        };
-        assert_eq!(sent.text, "new");
+        q.enqueue(pending("s", 7));
+        q.enqueue(pending("s", 8));
+        assert_eq!(
+            q.on_change("s", Gate::Send),
+            Some(Action::Send(pending("s", 8)))
+        );
     }
 
     #[test]
-    fn a_canceled_batch_never_sends() {
+    fn a_canceled_send_never_goes_out() {
         let mut q = Queue::default();
-        q.enqueue(batch("s", "one"));
+        q.enqueue(pending("s", 7));
         assert!(q.cancel("s").is_some());
         assert!(q.cancel("s").is_none());
         assert!(q.on_change("s", Gate::Send).is_none());
+    }
+
+    #[test]
+    fn only_the_same_claude_in_bracketed_paste_mode_gets_the_message() {
+        assert_eq!(refusal(true, 7, Some(7), true), None);
+        assert_eq!(refusal(false, 7, Some(7), true), Some(Refusal::NotClaude));
+        assert_eq!(refusal(true, 7, Some(8), true), Some(Refusal::Restarted));
+        assert_eq!(refusal(true, 7, None, true), Some(Refusal::Restarted));
+        assert_eq!(
+            refusal(true, 7, Some(7), false),
+            Some(Refusal::NoBracketedPaste)
+        );
     }
 }

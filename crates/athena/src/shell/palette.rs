@@ -724,7 +724,7 @@ impl Shell {
             Mode::Projects => self.project_entries(),
             Mode::Tasks => self.task_entries(),
             Mode::Checks => self.check_entries(),
-            Mode::ReviewComments => self.review_comment_entries(),
+            Mode::ReviewComments => self.review_comment_entries(cx),
         };
         let files = matches!(mode, Mode::Files | Mode::FilesBeside);
         window.focus(&input.focus_handle(cx));
@@ -847,8 +847,8 @@ impl Shell {
             .collect()
     }
 
-    fn review_comment_entries(&self) -> Vec<Entry> {
-        self.comment_rows()
+    fn review_comment_entries(&self, cx: &gpui::App) -> Vec<Entry> {
+        self.comment_rows(cx)
             .into_iter()
             .map(|row| Entry {
                 key: format!("{} {}", row.label, row.detail),

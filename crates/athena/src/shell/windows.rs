@@ -760,6 +760,7 @@ fn target(
         | AppMsg::ClaudeTodos { .. }
         | AppMsg::ClaudePlan { .. }
         | AppMsg::ClaudeSession { .. }
+        | AppMsg::ClaudePrompt
         | AppMsg::RunTests { .. }
         | AppMsg::TestResults
         | AppMsg::DebugState => Target::Window(caller.unwrap_or(focused)),
@@ -845,6 +846,7 @@ fn serve(request: Request, cx: &mut App) {
     let binds = matches!(
         request.msg,
         AppMsg::ClaudeSession { .. }
+            | AppMsg::ClaudePrompt
             | AppMsg::ClaudeEdited { .. }
             | AppMsg::ClaudeTodos { .. }
             | AppMsg::ClaudePlan { .. }

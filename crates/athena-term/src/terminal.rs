@@ -622,13 +622,18 @@ impl Terminal {
     pub fn paste(&mut self, text: &str) {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if self.mode().contains(TermMode::BRACKETED_PASTE) {
-            // Strip any embedded end marker so pasted text cannot break out of the bracket.
-            let inner = text.replace("\x1b[201~", "");
+            // Every ESC goes, as stripping only the end marker lets one split around another
+            // reassemble into it.
+            let inner = text.replace('\x1b', "");
             format!("\x1b[200~{inner}\x1b[201~").into_bytes()
         } else {
             text.into_bytes()
         };
         self.input(bytes);
+    }
+
+    pub fn bracketed_paste(&self) -> bool {
+        self.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     /// Presses Enter.
@@ -804,7 +809,10 @@ mod tests {
         sent.0.borrow_mut().clear();
         feed(&mut t, b"\x1b[?2004h");
         t.paste("a\r\nb\x1b[201~c");
-        assert_eq!(sent.0.borrow().as_slice(), b"\x1b[200~a\rbc\x1b[201~");
+        assert_eq!(sent.0.borrow().as_slice(), b"\x1b[200~a\rb[201~c\x1b[201~");
+        sent.0.borrow_mut().clear();
+        t.paste("\x1b[20\x1b[201~1~");
+        assert_eq!(sent.0.borrow().as_slice(), b"\x1b[200~[20[201~1~\x1b[201~");
     }
 
     #[test]
