@@ -9,14 +9,17 @@ pub mod motion;
 mod theme;
 
 pub use assets::Assets;
-pub use components::{Button, ButtonKind, Tooltip, empty_state};
+pub use components::{
+    Badge, Button, ButtonKind, DotState, IconButton, ListRow, SegmentedControl, StatusDot, Tab,
+    TabBar, Tooltip, empty_state,
+};
 pub use icons::{FileIcon, ICON_SIZE, file_icon, icon_for};
 pub use input::{InputEvent, TextInput};
 pub use logo::{Glyph, Lockup};
 pub use menu::{ContextMenu, MenuItem};
 pub use theme::{
-    Appearance, CODE_SIZE, CODE_ZOOM, Colors, Motion, Shape, SyntaxColors, TerminalColors, Theme,
-    Typography, UI_ZOOM,
+    Appearance, CODE_SIZE, CODE_ZOOM, Colors, Motion, Shape, Size, Space, SyntaxColors,
+    TerminalColors, Theme, Typography, UI_ZOOM,
 };
 
 use gpui::{App, WindowAppearance};
