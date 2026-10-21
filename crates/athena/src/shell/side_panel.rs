@@ -105,13 +105,15 @@ impl Shell {
     fn render_git_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let changes = (!self.side_panel.changes_collapsed).then(|| self.render_changes(cx));
         let timeline = (!self.side_panel.timeline_collapsed).then(|| self.render_timeline(cx));
+        let changes_count = self.render_changes_count(cx);
+        let timeline_title = self.render_timeline_title(cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(self.git_section(
                 "side-changes",
-                "Changes",
+                ("Changes", changes_count),
                 changes,
                 |s| &mut s.changes_collapsed,
                 false,
@@ -119,7 +121,7 @@ impl Shell {
             ))
             .child(self.git_section(
                 "side-timeline",
-                "Timeline",
+                ("Timeline", timeline_title),
                 timeline,
                 |s| &mut s.timeline_collapsed,
                 true,
@@ -128,11 +130,12 @@ impl Shell {
             .into_any_element()
     }
 
-    /// A header that folds its `body`; a folded section keeps only the header's height.
+    /// A header that folds its `body`, with a summary beside its title; a folded section keeps
+    /// only the header's height.
     fn git_section(
         &self,
         id: &'static str,
-        title: &'static str,
+        (title, summary): (&'static str, Option<AnyElement>),
         body: Option<AnyElement>,
         collapsed: fn(&mut SidePanelState) -> &mut bool,
         divider: bool,
@@ -167,7 +170,16 @@ impl Shell {
                         cx.notify();
                     }))
                     .child(if open { "▾" } else { "▸" })
-                    .child(title),
+                    .child(title)
+                    .children(summary.map(|summary| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .font_weight(FontWeight::NORMAL)
+                            .child(summary)
+                    })),
             )
             .children(body.map(|body| div().flex_1().min_h_0().overflow_hidden().child(body)))
             .into_any_element()

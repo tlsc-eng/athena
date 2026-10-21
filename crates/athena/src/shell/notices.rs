@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
 use athena_ui::motion::{self, Closing};
-use athena_ui::{ActiveTheme, IconButton, Size, Space};
+use athena_ui::{ActiveTheme, Button, ButtonKind, IconButton, Size, Space};
 use athena_workspace::{ItemId, ItemKind, Panel, Project, Rect};
 use gpui::{
     Animation, AnyElement, App, Bounds, ClickEvent, Context, Corner, FocusHandle, FontWeight, Hsla,
@@ -391,7 +391,36 @@ impl Shell {
                 this.bell.dismissed_by = Some(event.position);
                 this.close_bell(window, cx);
             }))
-            .child(self.render_notifications(cx));
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(t.size(Size::Row))
+                    .flex_none()
+                    .px(t.space(Space::Md))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(t.color.border)
+                    .child(
+                        div()
+                            .text_size(t.typography.caption)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.color.content_secondary)
+                            .child("Notifications"),
+                    )
+                    .child(
+                        Button::new("notices-clear", "Clear", ButtonKind::Ghost)
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_notifications(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_notifications(cx)),
+            );
         Some(
             deferred(
                 anchored()
@@ -971,6 +1000,11 @@ impl Shell {
                 )
             })
             .into_any_element()
+    }
+
+    pub(super) fn clear_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notices.borrow_mut().list.clear();
+        self.notices_changed(cx);
     }
 
     pub(super) fn mark_all_read(&mut self, cx: &mut Context<Self>) {

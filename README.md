@@ -682,7 +682,7 @@ information rather than triggering the install dialog).
 - The drawer under the panes has the tabs Terminal, Problems, Tests, Debug, Search and References,
   and a **Tools** menu at the end of the bar holding Containers and Playwright (the bar then reads
   "Containers ▾" or "Playwright ▾"). Notifications live in the bell in the title bar (View >
-  Notifications opens it); Changes and Timeline in the side panel's Git view, Claude sessions in
+  Notifications opens it, and its Clear button empties the list); Changes and Timeline in the side panel's Git view, Claude sessions in
   its Sessions view. View > Side Panel, Drawer and Tools list each group. A `keymap.json` entry
   for the old `ToggleNotifications` command binds `ToggleDrawer`.
 - Workspace layout, open projects and tabs are restored on launch, each editor with its cursor,
