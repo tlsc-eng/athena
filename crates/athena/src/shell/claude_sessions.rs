@@ -24,6 +24,10 @@ use super::review::backup_dir;
 use crate::snapshots::{self, Before};
 use crate::transcripts::{self, Profile, Tokens};
 
+#[allow(dead_code)]
+// Read by the Sessions list, rail counts and title chip, which are not built yet.
+pub(super) mod live;
+
 actions!(
     athena,
     [
@@ -54,6 +58,8 @@ pub(super) struct SessionsState {
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.
     panes: HashMap<PaneId, String>,
+    /// Where each session started, as its SessionStart hook said.
+    cwds: HashMap<String, PathBuf>,
     review: Option<Review>,
 }
 
@@ -65,6 +71,13 @@ impl SessionsState {
         }
         self.panes.retain(|p, s| *p == pane || *s != session);
         self.panes.insert(pane, session);
+    }
+
+    /// Forgets which pane runs `session`, as another window now does.
+    pub(super) fn unbind(&mut self, session: &str) -> bool {
+        let before = self.panes.len();
+        self.panes.retain(|_, s| s != session);
+        self.panes.len() != before
     }
 }
 
@@ -310,7 +323,7 @@ impl Shell {
             _ => return,
         };
         if let Some(pane) = caller {
-            state.bind(pane, session);
+            self.bind_session(pane, session, cx);
         }
         cx.notify();
     }
@@ -319,13 +332,21 @@ impl Shell {
     pub(super) fn claude_session_started(
         &mut self,
         session: String,
+        cwd: PathBuf,
         caller: Option<PaneId>,
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = caller {
-            self.review.sessions.bind(pane, session);
+            self.review.sessions.cwds.insert(session.clone(), cwd);
+            self.bind_session(pane, session, cx);
             cx.notify();
         }
+    }
+
+    /// Binds `session` to `pane` here and drops it from every other window, which cannot run it too.
+    pub(super) fn bind_session(&mut self, pane: PaneId, session: String, cx: &mut Context<Self>) {
+        super::windows::unbind_elsewhere(session.clone(), self.window_handle, cx);
+        self.review.sessions.bind(pane, session);
     }
 
     /// Something changed on disk or in a session: read the list again when it next draws.

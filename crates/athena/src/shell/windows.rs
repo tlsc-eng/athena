@@ -15,6 +15,7 @@ use gpui::{
 
 use super::Shell;
 use super::bridge::hook_claude_holds_terminal;
+use super::claude_sessions::live::attention_count;
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
@@ -533,6 +534,31 @@ pub(super) fn claude_root_elsewhere(
         .into_iter()
         .filter(|h| AnyWindowHandle::from(*h) != except)
         .find_map(|h| h.read(cx).ok()?.claude_terminal(pid, cx).map(|(r, _)| r))
+}
+
+/// Drops `session` from the panes every window but `except` has bound, as it runs in one terminal.
+pub(super) fn unbind_elsewhere(session: String, except: AnyWindowHandle, cx: &mut App) {
+    for handle in handles(cx) {
+        if AnyWindowHandle::from(handle) == except {
+            continue;
+        }
+        let _ = handle.update(cx, |shell, _, cx| {
+            if shell.review.sessions.unbind(&session) {
+                cx.notify();
+            }
+        });
+    }
+}
+
+/// Sessions needing you in every window but `except`; that window cannot be read mid-update.
+#[allow(dead_code)] // The title chip, which is not built yet, adds its own window's count.
+pub(super) fn attention_elsewhere(except: AnyWindowHandle, cx: &App) -> usize {
+    handles(cx)
+        .into_iter()
+        .filter(|h| AnyWindowHandle::from(*h) != except)
+        .filter_map(|h| h.read(cx).ok())
+        .map(|shell| attention_count(&shell.live_sessions(cx)))
+        .sum()
 }
 
 fn route_ide(event: ide::Event, cx: &mut App) {

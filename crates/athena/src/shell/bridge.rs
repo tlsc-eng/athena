@@ -116,8 +116,8 @@ impl Shell {
                 session: caller,
                 project: caller.and_then(|s| self.session_root(s)),
             },
-            AppMsg::ClaudeSession { session, .. } => {
-                self.claude_session_started(session, caller, cx);
+            AppMsg::ClaudeSession { session, cwd, .. } => {
+                self.claude_session_started(session, cwd, caller, cx);
                 AppReply::Ok
             }
             msg @ (AppMsg::ClaudeTodos { .. } | AppMsg::ClaudePlan { .. }) => {
