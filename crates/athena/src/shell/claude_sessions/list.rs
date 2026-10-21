@@ -94,32 +94,54 @@ impl Section {
     }
 }
 
-/// The section a session sits in; `midnight` is the start of today in unix seconds.
-fn section(live: bool, modified: i64, midnight: i64) -> Section {
+/// Where the date sections start, in unix seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cutoffs {
+    today: i64,
+    yesterday: i64,
+    week: i64,
+}
+
+impl Cutoffs {
+    fn at(now: SystemTime) -> Self {
+        Self {
+            today: local_midnight(now, 0),
+            yesterday: local_midnight(now, 1),
+            week: local_midnight(now, 7),
+        }
+    }
+}
+
+/// The section a session sits in.
+fn section(live: bool, modified: i64, cuts: Cutoffs) -> Section {
     if live {
         Section::Active
-    } else if modified >= midnight {
+    } else if modified >= cuts.today {
         Section::Today
-    } else if modified >= midnight - DAY {
+    } else if modified >= cuts.yesterday {
         Section::Yesterday
-    } else if modified >= midnight - 7 * DAY {
+    } else if modified >= cuts.week {
         Section::Week
     } else {
         Section::Older
     }
 }
 
-/// The start of the local day containing `now`, in unix seconds.
-fn local_midnight(now: SystemTime) -> i64 {
-    let secs = unix_secs(now);
-    let t = secs as libc::time_t;
-    // SAFETY: localtime_r only writes the tm it is given.
-    let tm = unsafe {
+/// The start of the local day `days_back` before the one containing `now`, in unix seconds.
+fn local_midnight(now: SystemTime, days_back: i32) -> i64 {
+    let t = unix_secs(now) as libc::time_t;
+    // SAFETY: localtime_r and mktime only touch the tm they are given.
+    unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
-        tm
-    };
-    secs - i64::from(tm.tm_hour * 3_600 + tm.tm_min * 60 + tm.tm_sec)
+        tm.tm_hour = 0;
+        tm.tm_min = 0;
+        tm.tm_sec = 0;
+        tm.tm_mday -= days_back;
+        // mktime picks the zone's offset for that day, so a DST change does not shift it.
+        tm.tm_isdst = -1;
+        libc::mktime(&mut tm) as i64
+    }
 }
 
 fn unix_secs(time: SystemTime) -> i64 {
@@ -219,17 +241,13 @@ impl Shell {
             out.push(bar);
         }
         let now = SystemTime::now();
-        let (now_secs, midnight) = (unix_secs(now), local_midnight(now));
+        let (now_secs, cuts) = (unix_secs(now), Cutoffs::at(now));
         let (active, mut history): (Vec<_>, Vec<_>) =
             sessions.iter().partition(|s| s.state.is_some());
         history.sort_by_key(|s| std::cmp::Reverse(s.modified));
         let mut sections: Vec<(Section, Vec<(usize, &LiveSession)>)> = Vec::new();
         for (i, session) in active.into_iter().chain(history).enumerate() {
-            let at = section(
-                session.state.is_some(),
-                unix_secs(session.modified),
-                midnight,
-            );
+            let at = section(session.state.is_some(), unix_secs(session.modified), cuts);
             match sections.last_mut() {
                 Some((last, rows)) if *last == at => rows.push((i, session)),
                 _ => sections.push((at, vec![(i, session)])),
@@ -394,7 +412,7 @@ impl Shell {
                                 .ellipsis()
                                 .px(t.space(Space::Sm))
                                 .rounded(t.shape.radius_control)
-                                .bg(c.surface_active)
+                                .when(!selected, |el| el.bg(c.surface_active))
                                 .text_color(c.content_secondary)
                                 .child(branch),
                         )
@@ -639,17 +657,21 @@ mod tests {
     }
 
     #[test]
-    fn sections_split_at_local_midnight() {
-        let midnight = 1_000_000;
-        let at = |modified| section(false, modified, midnight);
-        assert_eq!(section(true, 0, midnight), Section::Active);
-        assert_eq!(at(midnight), Section::Today);
-        assert_eq!(at(midnight - 1), Section::Yesterday);
-        assert_eq!(at(midnight - 86_400), Section::Yesterday);
-        assert_eq!(at(midnight - 86_401), Section::Week);
-        assert_eq!(at(midnight - 6 * 86_400), Section::Week);
-        assert_eq!(at(midnight - 7 * 86_400), Section::Week);
-        assert_eq!(at(midnight - 8 * 86_400), Section::Older);
+    fn sections_split_at_the_cutoffs() {
+        let cuts = Cutoffs {
+            today: 1_000_000,
+            yesterday: 1_000_000 - 86_400,
+            week: 1_000_000 - 7 * 86_400,
+        };
+        let at = |modified| section(false, modified, cuts);
+        assert_eq!(section(true, 0, cuts), Section::Active);
+        assert_eq!(at(cuts.today), Section::Today);
+        assert_eq!(at(cuts.today - 1), Section::Yesterday);
+        assert_eq!(at(cuts.yesterday), Section::Yesterday);
+        assert_eq!(at(cuts.yesterday - 1), Section::Week);
+        assert_eq!(at(cuts.today - 6 * 86_400), Section::Week);
+        assert_eq!(at(cuts.week), Section::Week);
+        assert_eq!(at(cuts.today - 8 * 86_400), Section::Older);
     }
 
     #[test]
@@ -663,9 +685,14 @@ mod tests {
     }
 
     #[test]
-    fn local_midnight_is_at_most_a_day_before_now() {
+    fn midnights_step_back_a_day_at_a_time() {
         let now = SystemTime::now();
-        let back = unix_secs(now) - local_midnight(now);
+        let today = local_midnight(now, 0);
+        let back = unix_secs(now) - today;
         assert!((0..=DAY + 3_600).contains(&back), "{back}");
+        for days in 1..=7 {
+            let step = local_midnight(now, days - 1) - local_midnight(now, days);
+            assert!((DAY - 3_600..=DAY + 3_600).contains(&step), "{step}");
+        }
     }
 }

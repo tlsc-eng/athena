@@ -6,7 +6,7 @@ use gpui::{
 use super::{ClickHandler, Tooltip};
 use crate::{ActiveTheme, Ellipsis, Size, Space};
 
-/// One row of a list or tree: indent, a leading icon or dot, a label, meta text and trailing
+/// One row of a list or tree: indent, a leading icon or dot, a label and trailing
 /// controls, with an optional second line of detail.
 #[derive(IntoElement)]
 pub struct ListRow {
@@ -14,7 +14,6 @@ pub struct ListRow {
     label: SharedString,
     indent: usize,
     leading: Option<AnyElement>,
-    meta: Option<SharedString>,
     trailing: Option<AnyElement>,
     detail: Option<AnyElement>,
     emphasized: bool,
@@ -36,7 +35,6 @@ impl ListRow {
             label: label.into(),
             indent: 0,
             leading: None,
-            meta: None,
             trailing: None,
             detail: None,
             emphasized: false,
@@ -60,12 +58,7 @@ impl ListRow {
         self
     }
 
-    pub fn meta(mut self, meta: impl Into<SharedString>) -> Self {
-        self.meta = Some(meta.into());
-        self
-    }
-
-    /// Controls after the meta text, which keep their own clicks.
+    /// Controls after the label, which keep their own clicks.
     pub fn trailing(mut self, trailing: impl IntoElement) -> Self {
         self.trailing = Some(trailing.into_any_element());
         self
@@ -147,10 +140,6 @@ impl RenderOnce for ListRow {
                     .ellipsis()
                     .when(self.emphasized, |el| el.font_weight(FontWeight::SEMIBOLD))
                     .child(self.label),
-            )
-            .children(
-                self.meta
-                    .map(|m| div().flex_none().text_color(c.content_muted).child(m)),
             )
             .children(self.trailing);
         let tooltip = self.tooltip;
