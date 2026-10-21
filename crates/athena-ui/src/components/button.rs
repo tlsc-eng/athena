@@ -1,8 +1,9 @@
 use gpui::{
-    AnyView, App, ClickEvent, Context, ElementId, FontWeight, IntoElement, Render, RenderOnce,
-    SharedString, Window, div, prelude::*, px,
+    App, ClickEvent, ElementId, FontWeight, IntoElement, RenderOnce, SharedString, Window, div,
+    prelude::*,
 };
 
+use super::ClickHandler;
 use crate::ActiveTheme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -12,8 +13,6 @@ pub enum ButtonKind {
     Ghost,
     Danger,
 }
-
-type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 #[derive(IntoElement)]
 pub struct Button {
@@ -82,62 +81,4 @@ impl RenderOnce for Button {
             None => styled,
         }
     }
-}
-
-/// Inverse caption tooltip, shown after gpui's hover delay without animation.
-pub struct Tooltip {
-    text: SharedString,
-}
-
-impl Tooltip {
-    pub fn view(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
-        let text = text.into();
-        cx.new(|_| Self { text }).into()
-    }
-}
-
-impl Render for Tooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.theme();
-        div()
-            .px(t.ui(8.))
-            .py(t.ui(4.))
-            .rounded(t.shape.radius_control)
-            .bg(t.color.tooltip_bg)
-            .text_color(t.color.tooltip_fg)
-            .font_family(t.typography.ui.clone())
-            .text_size(t.typography.caption)
-            .child(self.text.clone())
-    }
-}
-
-/// Centred empty state: what the area is for, and the one action that fills it.
-pub fn empty_state(
-    title: impl Into<SharedString>,
-    body: impl Into<SharedString>,
-    action: Option<Button>,
-    cx: &App,
-) -> gpui::Div {
-    let t = cx.theme();
-    div()
-        .max_w(t.ui(360.))
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(8.))
-        .child(
-            div()
-                .text_size(t.typography.body)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(t.color.content)
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_size(t.typography.caption)
-                .text_color(t.color.content_muted)
-                .text_center()
-                .child(body.into()),
-        )
-        .children(action.map(|a| div().pt(px(8.)).child(a)))
 }

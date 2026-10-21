@@ -64,6 +64,52 @@ pub struct Shape {
     pub hairline: Pixels,
 }
 
+/// Gaps and padding, in default-zoom pixels; resolve with [`Theme::space`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Space {
+    Xxs,
+    Xs,
+    Sm,
+    Md,
+    Lg,
+    Xl,
+    Xxl,
+}
+
+impl Space {
+    pub const fn value(self) -> f32 {
+        match self {
+            Space::Xxs => 2.,
+            Space::Xs => 4.,
+            Space::Sm => 6.,
+            Space::Md => 8.,
+            Space::Lg => 12.,
+            Space::Xl => 16.,
+            Space::Xxl => 24.,
+        }
+    }
+}
+
+/// Fixed heights of chrome, in default-zoom pixels; resolve with [`Theme::size`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    Row,
+    Control,
+    TabBar,
+    TitleBar,
+}
+
+impl Size {
+    pub const fn value(self) -> f32 {
+        match self {
+            Size::Row => 22.,
+            Size::Control => 24.,
+            Size::TabBar => 32.,
+            Size::TitleBar => 36.,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Motion {
     pub reduced: bool,
@@ -420,6 +466,14 @@ impl Theme {
         px(size * self.ui_scale)
     }
 
+    pub fn space(&self, space: Space) -> Pixels {
+        self.ui(space.value())
+    }
+
+    pub fn size(&self, size: Size) -> Pixels {
+        self.ui(size.value())
+    }
+
     pub fn popover_shadow(&self) -> BoxShadow {
         BoxShadow {
             color: match self.appearance {
@@ -706,6 +760,31 @@ mod tests {
         theme.set_ui_zoom(0);
         assert_eq!(theme.typography.heading, px(HEADING));
         assert_eq!(theme.ui(32.), px(32.));
+    }
+
+    #[test]
+    fn spacing_and_sizes_scale_with_window_zoom() {
+        let mut theme = Theme::dark(false);
+        assert_eq!(theme.space(Space::Lg), px(12.));
+        assert_eq!(theme.size(Size::TitleBar), px(36.));
+        theme.set_ui_zoom(5);
+        assert_eq!(theme.space(Space::Lg), px(12. * 1.5));
+        assert_eq!(theme.space(Space::Xxs), px(2. * 1.5));
+        assert_eq!(theme.size(Size::Row), px(22. * 1.5));
+    }
+
+    #[test]
+    fn spacing_steps_grow() {
+        let steps = [
+            Space::Xxs,
+            Space::Xs,
+            Space::Sm,
+            Space::Md,
+            Space::Lg,
+            Space::Xl,
+            Space::Xxl,
+        ];
+        assert!(steps.windows(2).all(|w| w[0].value() < w[1].value()));
     }
 
     #[test]
