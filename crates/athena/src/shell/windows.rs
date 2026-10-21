@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_proto::{AppMsg, AppReply, Notice, PaneId};
-use athena_workspace::{ItemId, Project, WindowMode, WindowState, Workspace};
+use athena_workspace::{ItemId, ItemKind, Project, WindowMode, WindowState, Workspace};
 use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, Context, Global, PromptLevel, Task, TitlebarOptions,
     Window, WindowBounds, WindowHandle, WindowOptions, point, px, size,
@@ -613,6 +613,28 @@ pub(super) fn focus_item_in(window: usize, root: PathBuf, item: ItemId, cx: &mut
             shell.focus_item(&root, item, window, cx);
         });
     });
+}
+
+/// The window other than `except` showing `session`'s panel, numbered as `focus_item_in` takes it,
+/// with the project and tab holding it.
+pub(super) fn session_view_elsewhere(
+    session: &str,
+    except: AnyWindowHandle,
+    cx: &App,
+) -> Option<(usize, PathBuf, ItemId)> {
+    let kind = ItemKind::Session {
+        id: session.to_string(),
+    };
+    handles(cx).into_iter().enumerate().find_map(|(n, h)| {
+        if AnyWindowHandle::from(h) == except {
+            return None;
+        }
+        let shell = h.read(cx).ok()?;
+        shell.workspace.projects.iter().find_map(|p| {
+            let item = p.items().find(|i| i.kind == kind)?;
+            Some((n, p.root.clone(), item.id))
+        })
+    })
 }
 
 /// Redraws every window but `except`, whose title bar counts the sessions needing you in all.

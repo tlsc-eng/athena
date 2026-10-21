@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use athena_lsp::Position;
-use athena_ui::{ActiveTheme, Badge, Button, ButtonKind, Space, StatusDot, Theme, empty_state};
-use athena_workspace::{Axis, DiffBase, ItemKind, git};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Space, StatusDot, Theme, empty_state};
+use athena_workspace::git::{self, Since};
+use athena_workspace::{Axis, DiffBase, ItemKind};
 use gpui::{AnyElement, Context, FontWeight, Task, Window, div, prelude::*};
 
 use super::list::{bare_row, dot_state, row_text};
@@ -12,6 +13,7 @@ use crate::review_comments::{self as store, Placement, ReviewComment};
 use crate::shell::Shell;
 use crate::shell::item::{ItemView, SessionTab};
 use crate::shell::review_comments::delivery::place_all;
+use crate::shell::windows;
 use crate::snapshots;
 use crate::worktree_forks::worktree_fork;
 
@@ -27,6 +29,8 @@ struct Loaded {
     /// The snapshot files plus those changed since the worktree branched; `None` outside a
     /// worktree with a fork record, where the snapshot files stand alone.
     changes: Option<Vec<FileChange>>,
+    /// Files changed since the fork beyond what `changes` lists.
+    more: usize,
     comments: Vec<SessionComment>,
 }
 
@@ -90,57 +94,88 @@ fn real(path: &Path) -> PathBuf {
 fn union(
     top: &Path,
     rev: &str,
-    changed: &[String],
+    changed: &[(Since, String)],
     untracked: &[String],
     snapshot: &[FileChange],
-) -> Vec<FileChange> {
+) -> (Vec<FileChange>, usize) {
     let known: HashSet<PathBuf> = snapshot.iter().map(|f| real(&f.path)).collect();
-    let mut extra: BTreeMap<&str, bool> = BTreeMap::new();
-    extra.extend(changed.iter().map(|rel| (rel.as_str(), false)));
-    extra.extend(untracked.iter().map(|rel| (rel.as_str(), true)));
-    let mut out = snapshot.to_vec();
-    out.extend(
-        extra
-            .into_iter()
-            .map(|(rel, created)| (top.join(rel), rel, created))
-            .filter(|(path, ..)| !known.contains(&real(path)))
-            .take(MAX_FORK_FILES)
-            .map(|(path, rel, created)| FileChange {
-                path,
-                counts: None,
-                created,
-                base: Some(DiffBase::Revision {
-                    rev: rev.to_string(),
-                    at: rel.to_string(),
-                }),
+    let mut extra: BTreeMap<&str, Since> = BTreeMap::new();
+    extra.extend(changed.iter().map(|(since, rel)| (rel.as_str(), *since)));
+    extra.extend(untracked.iter().map(|rel| (rel.as_str(), Since::Added)));
+    let mut added: Vec<FileChange> = extra
+        .into_iter()
+        .map(|(rel, since)| (top.join(rel), rel, since))
+        .filter(|(path, ..)| !known.contains(&real(path)))
+        .map(|(path, rel, since)| FileChange {
+            path,
+            counts: None,
+            created: since == Since::Added,
+            deleted: since == Since::Deleted,
+            base: Some(DiffBase::Revision {
+                rev: rev.to_string(),
+                at: rel.to_string(),
             }),
-    );
-    out
+        })
+        .collect();
+    let more = added.len().saturating_sub(MAX_FORK_FILES);
+    added.truncate(MAX_FORK_FILES);
+    let mut out = snapshot.to_vec();
+    out.extend(added);
+    (out, more)
 }
 
-fn fork_changes(top: &Path, rev: &str, snapshot: &[FileChange]) -> anyhow::Result<Vec<FileChange>> {
+fn fork_changes(
+    top: &Path,
+    rev: &str,
+    snapshot: &[FileChange],
+) -> anyhow::Result<(Vec<FileChange>, usize)> {
     let (changed, untracked) = git::changed_since(top, rev)?;
     Ok(union(top, rev, &changed, &untracked, snapshot))
+}
+
+/// The number beside a section's title: nothing for none, `500+` when more exist than are listed.
+fn count_label(count: usize, more: usize) -> Option<String> {
+    match (count, more) {
+        (0, _) => None,
+        (n, 0) => Some(n.to_string()),
+        (n, _) => Some(format!("{n}+")),
+    }
+}
+
+/// `3 files`, with a `+` when the list is cut off.
+fn files_label(count: usize, more: usize) -> Option<String> {
+    let n = count_label(count, more)?;
+    Some(match (count, more) {
+        (1, 0) => "1 file".to_string(),
+        _ => format!("{n} files"),
+    })
 }
 
 /// Reads what the panel shows that is not in memory: the worktree's changes and the comments.
 fn read_session(session: &str, cwd: &Path, snapshot: &[FileChange], store_dir: &Path) -> Loaded {
     let top = git::work_tree(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let fork = git::main_worktree(&top).and_then(|_| worktree_fork(&top));
-    let changes = fork.and_then(|f| fork_changes(&top, &f.fork_sha, snapshot).ok());
+    let (changes, more) = match fork.and_then(|f| fork_changes(&top, &f.fork_sha, snapshot).ok()) {
+        Some((changes, more)) => (Some(changes), more),
+        None => (None, 0),
+    };
     let all = store::load(store_dir, session).unwrap_or_default();
     let mut comments: Vec<SessionComment> = place_all(all, |p| std::fs::read_to_string(p).ok())
         .iter()
         .map(|(c, placed)| comment_row(c, placed, &top))
         .collect();
     comments.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
-    Loaded { changes, comments }
+    Loaded {
+        changes,
+        more,
+        comments,
+    }
 }
 
 fn section_header(
     id: &'static str,
     title: &'static str,
-    count: usize,
+    count: Option<String>,
     action: Option<AnyElement>,
     t: &Theme,
 ) -> AnyElement {
@@ -158,7 +193,15 @@ fn section_header(
                 .text_color(t.color.content)
                 .child(title),
         )
-        .child(Badge::new(count))
+        .children(count.map(|count| {
+            div()
+                .flex_none()
+                .px(t.space(Space::Sm))
+                .rounded(t.shape.radius_control)
+                .bg(t.color.surface_active)
+                .text_color(t.color.content_muted)
+                .child(count)
+        }))
         .child(div().flex_1())
         .children(action)
         .into_any_element()
@@ -263,6 +306,11 @@ impl Shell {
         if let Some((root, item)) = open {
             return self.focus_item(&root, item, window, cx);
         }
+        if let Some((at, root, item)) =
+            windows::session_view_elsewhere(&session, self.window_handle, cx)
+        {
+            return windows::focus_item_in(at, root, item, cx);
+        }
         let terminal = self
             .review
             .sessions
@@ -350,6 +398,7 @@ impl Shell {
         if let Some(changes) = loaded.as_ref().and_then(|l| l.changes.clone()) {
             row.files = changes;
         }
+        let more = loaded.as_ref().map_or(0, |l| l.more);
         let comments = loaded.map(|l| l.comments).unwrap_or_default();
         let unsent = comments.iter().filter(|c| !c.sent).count();
         let reviewing = state.review.as_ref().is_some_and(|r| r.session == id);
@@ -413,11 +462,11 @@ impl Shell {
                     .children(text.branch.map(chip))
                     .children(text.cost)
                     .children(text.todos.map(|todos| format!("{todos} todos")))
-                    .children(text.files),
+                    .children(files_label(row.files.len(), more)),
             );
 
         let mut out: Vec<AnyElement> = Vec::new();
-        out.push(section_header("session-plan", "Plan", 0, None, &t));
+        out.push(section_header("session-plan", "Plan", None, None, &t));
         let plan = self.render_live_plan(ID_BASE / 10_000, &row, &t);
         if plan.is_empty() {
             let hint = "No todos or plan reported yet.";
@@ -436,7 +485,7 @@ impl Shell {
         out.push(section_header(
             "session-changes",
             "Changes",
-            row.files.len(),
+            count_label(row.files.len(), more),
             review_all,
             &t,
         ));
@@ -449,6 +498,10 @@ impl Shell {
         }
         for (j, file) in row.files.iter().enumerate() {
             out.push(self.render_file_row(ID_BASE + j, &row.id, file, &session.cwd, true, &t, cx));
+        }
+        if more > 0 {
+            let text = format!("… {more} more files");
+            out.push(detail_line(("session-changes-more", 0), text, &t).into_any_element());
         }
 
         let send = (unsent > 0).then(|| {
@@ -464,7 +517,7 @@ impl Shell {
         out.push(section_header(
             "session-comments",
             "Comments",
-            comments.len(),
+            count_label(comments.len(), 0),
             send,
             &t,
         ));
@@ -590,6 +643,7 @@ mod tests {
             path,
             counts: Some((1, 0)),
             created: false,
+            deleted: false,
             base: None,
         }
     }
@@ -603,7 +657,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let top = dir.canonicalize().unwrap();
-        for name in ["committed", "uncommitted", "snapshot-only", "both"] {
+        for name in [
+            "committed",
+            "uncommitted",
+            "snapshot-only",
+            "both",
+            "removed",
+        ] {
             fs::write(top.join(name), "one\n").unwrap();
         }
         fs::write(top.join(".gitignore"), "ignored.log\n").unwrap();
@@ -614,7 +674,10 @@ mod tests {
 
         fs::write(top.join("committed"), "two\n").unwrap();
         fs::write(top.join("both"), "two\n").unwrap();
+        fs::write(top.join("added"), "new\n").unwrap();
+        sh(&top, &["add", "added"]);
         sh(&top, &["commit", "-qam", "work"]);
+        fs::remove_file(top.join("removed")).unwrap();
         fs::write(top.join("uncommitted"), "two\n").unwrap();
         fs::write(top.join("untracked"), "new\n").unwrap();
         fs::write(top.join("ignored.log"), "x\n").unwrap();
@@ -623,26 +686,34 @@ mod tests {
             snapshot_file(top.join("snapshot-only")),
             snapshot_file(top.join("both")),
         ];
-        let found = fork_changes(&top, &fork, &snapshot).unwrap();
+        let (found, more) = fork_changes(&top, &fork, &snapshot).unwrap();
+        assert_eq!(more, 0);
         let at = |rel: &str| DiffBase::Revision {
             rev: fork.clone(),
             at: rel.to_string(),
         };
-        let seen: Vec<(String, Option<DiffBase>, bool)> = found
+        let seen: Vec<(String, Option<DiffBase>, char)> = found
             .iter()
             .map(|f| {
                 let name = f.path.strip_prefix(&top).unwrap().display().to_string();
-                (name, f.base.clone(), f.created)
+                let mark = match (f.created, f.deleted) {
+                    (_, true) => 'D',
+                    (true, _) => 'A',
+                    _ => 'M',
+                };
+                (name, f.base.clone(), mark)
             })
             .collect();
         assert_eq!(
             seen,
             [
-                ("snapshot-only".to_string(), None, false),
-                ("both".to_string(), None, false),
-                ("committed".to_string(), Some(at("committed")), false),
-                ("uncommitted".to_string(), Some(at("uncommitted")), false),
-                ("untracked".to_string(), Some(at("untracked")), true),
+                ("snapshot-only".to_string(), None, 'M'),
+                ("both".to_string(), None, 'M'),
+                ("added".to_string(), Some(at("added")), 'A'),
+                ("committed".to_string(), Some(at("committed")), 'M'),
+                ("removed".to_string(), Some(at("removed")), 'D'),
+                ("uncommitted".to_string(), Some(at("uncommitted")), 'M'),
+                ("untracked".to_string(), Some(at("untracked")), 'A'),
             ]
         );
         fs::remove_dir_all(&top).unwrap();
@@ -659,12 +730,26 @@ mod tests {
         let found = union(
             &top,
             "abcd",
-            &["sub/a".into()],
+            &[(Since::Modified, "sub/a".into())],
             &[],
             &[snapshot_file(roundabout)],
         );
-        assert_eq!(found.len(), 1);
+        assert_eq!(found.0.len(), 1);
         fs::remove_dir_all(&top).unwrap();
+    }
+
+    #[test]
+    fn a_long_change_list_is_cut_off_and_says_by_how_much() {
+        let untracked: Vec<String> = (0..MAX_FORK_FILES + 3)
+            .map(|n| format!("f{n:04}"))
+            .collect();
+        let (found, more) = union(Path::new("/w"), "abcd", &[], &untracked, &[]);
+        assert_eq!((found.len(), more), (MAX_FORK_FILES, 3));
+        assert_eq!(count_label(found.len(), more).as_deref(), Some("500+"));
+        assert_eq!(count_label(2, 0).as_deref(), Some("2"));
+        assert_eq!(count_label(0, 0), None);
+        assert_eq!(files_label(1, 0).as_deref(), Some("1 file"));
+        assert_eq!(files_label(500, 3).as_deref(), Some("500+ files"));
     }
 
     #[test]

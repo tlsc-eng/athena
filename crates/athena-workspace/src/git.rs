@@ -949,20 +949,43 @@ pub fn show_at(root: &Path, rev: &str, top: &str) -> Result<Option<Vec<u8>>> {
     run(cmd, None).map(Some)
 }
 
+/// How a file differs from an earlier commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Since {
+    Added,
+    Modified,
+    Deleted,
+}
+
+/// What [`changed_since`] found: the tracked files that differ, then the untracked ones.
+pub type ChangedSince = (Vec<(Since, String)>, Vec<String>);
+
+/// The entries of `git diff --name-status -z`: a status letter, then the path.
+fn parse_name_status(out: &[u8]) -> Vec<(Since, String)> {
+    let fields: Vec<&[u8]> = out.split(|&b| b == 0).collect();
+    fields
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let since = match pair[0] {
+                b"A" => Since::Added,
+                b"D" => Since::Deleted,
+                _ => Since::Modified,
+            };
+            (since, String::from_utf8_lossy(pair[1]).into_owned())
+        })
+        .collect()
+}
+
 /// The files whose contents differ from commit `rev`, committed or not, and then the untracked
 /// ones git does not ignore; all named from the repository's top.
-pub fn changed_since(root: &Path, rev: &str) -> Result<(Vec<String>, Vec<String>)> {
+pub fn changed_since(root: &Path, rev: &str) -> Result<ChangedSince> {
     if !is_commit_id(rev) {
         bail!("{rev} is not a commit id");
     }
-    let names = |out: Vec<u8>| -> Vec<String> {
-        out.split(|&b| b == 0)
-            .filter(|n| !n.is_empty())
-            .map(|n| String::from_utf8_lossy(n).into_owned())
-            .collect()
-    };
     let mut diff = git(root);
-    diff.args(["diff", "--name-only", "--no-renames", "-z", rev, "--"]);
+    diff.args(["diff", "--name-status", "--no-renames", "-z", rev, "--"]);
     let mut untracked = git(root);
     untracked.args([
         "ls-files",
@@ -971,7 +994,12 @@ pub fn changed_since(root: &Path, rev: &str) -> Result<(Vec<String>, Vec<String>
         "--full-name",
         "-z",
     ]);
-    Ok((names(run(diff, None)?), names(run(untracked, None)?)))
+    let untracked: Vec<String> = run(untracked, None)?
+        .split(|&b| b == 0)
+        .filter(|n| !n.is_empty())
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .collect();
+    Ok((parse_name_status(&run(diff, None)?), untracked))
 }
 
 /// Commands that rewrite the index or worktree can take minutes on a big tree, and a kill

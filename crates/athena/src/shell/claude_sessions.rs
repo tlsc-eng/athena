@@ -185,6 +185,32 @@ struct Review {
     index: usize,
 }
 
+impl Review {
+    /// A review of `row`'s files from the first; `None` when it changed none.
+    fn of(row: &SessionRow) -> Option<Self> {
+        (!row.files.is_empty()).then(|| Self {
+            session: row.id.clone(),
+            label: row.label.clone(),
+            files: row.files.clone(),
+            index: 0,
+        })
+    }
+
+    /// Moves `by` files, stopping at either end, and returns the file now shown.
+    fn step(&mut self, by: isize) -> &FileChange {
+        let last = self.files.len().saturating_sub(1) as isize;
+        self.index = (self.index as isize + by).clamp(0, last) as usize;
+        &self.files[self.index]
+    }
+}
+
+/// What a session's file is compared with: the commit named for it, else its snapshot.
+fn change_base(session: &str, base: Option<DiffBase>) -> DiffBase {
+    base.unwrap_or_else(|| DiffBase::Snapshot {
+        session: session.to_string(),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SessionRow {
     id: String,
@@ -205,6 +231,7 @@ pub(super) struct FileChange {
     /// Lines added and removed since before the session, when known.
     counts: Option<(usize, usize)>,
     created: bool,
+    deleted: bool,
     /// What the diff compares for a file no snapshot covers; `None` compares with the snapshot.
     base: Option<DiffBase>,
 }
@@ -289,6 +316,7 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
             .map(|path| FileChange {
                 counts: line_counts(store, &stored.session, path),
                 created: snapshots::created(store, &stored.session, path),
+                deleted: false,
                 path: path.clone(),
                 base: None,
             })
@@ -621,22 +649,15 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let base = base.unwrap_or_else(|| DiffBase::Snapshot {
-            session: session.to_string(),
-        });
-        self.open_diff(path.to_path_buf(), base, window, cx);
+        self.open_diff(path.to_path_buf(), change_base(session, base), window, cx);
     }
 
     fn start_review(&mut self, row: &SessionRow, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(first) = row.files.first().cloned() else {
+        let Some(review) = Review::of(row) else {
             return;
         };
-        self.review.sessions.review = Some(Review {
-            session: row.id.clone(),
-            label: row.label.clone(),
-            files: row.files.clone(),
-            index: 0,
-        });
+        let first = review.files[0].clone();
+        self.review.sessions.review = Some(review);
         self.open_session_file(&row.id, &first.path, first.base, window, cx);
         cx.notify();
     }
@@ -654,9 +675,8 @@ impl Shell {
         let Some(review) = self.review.sessions.review.as_mut() else {
             return;
         };
-        let last = review.files.len().saturating_sub(1) as isize;
-        review.index = (review.index as isize + by).clamp(0, last) as usize;
-        let (session, file) = (review.session.clone(), review.files[review.index].clone());
+        let session = review.session.clone();
+        let file = review.step(by).clone();
         self.open_session_file(&session, &file.path, file.base, window, cx);
         cx.notify();
     }
@@ -1259,12 +1279,16 @@ impl Shell {
                 div()
                     .w(px(10.))
                     .flex_none()
-                    .text_color(if file.created {
-                        t.color.success
-                    } else {
-                        t.color.warning
+                    .text_color(match (file.created, file.deleted) {
+                        (_, true) => t.color.danger,
+                        (true, _) => t.color.success,
+                        _ => t.color.warning,
                     })
-                    .child(if file.created { "A" } else { "M" }),
+                    .child(match (file.created, file.deleted) {
+                        (_, true) => "D",
+                        (true, _) => "A",
+                        _ => "M",
+                    }),
             )
             .child(
                 div()
@@ -1491,6 +1515,7 @@ mod tests {
                 path: edited,
                 counts: Some((2, 1)),
                 created: false,
+                deleted: false,
                 base: None
             }]
         );
@@ -1539,6 +1564,44 @@ mod tests {
         assert!(same_file(&dir.join("gone.go"), &dir.join("gone.go")));
         assert!(!same_file(&dir.join("a.go"), &dir.join("gone.go")));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_review_opens_each_file_against_the_base_its_change_carries() {
+        let fork = DiffBase::Revision {
+            rev: "abcd".into(),
+            at: "src/b.rs".into(),
+        };
+        let file = |name: &str, base| FileChange {
+            path: PathBuf::from(name),
+            counts: None,
+            created: false,
+            deleted: false,
+            base,
+        };
+        let mut session = row("s-1", "/p", true);
+        session.files = vec![
+            file("/p/a.rs", None),
+            file("/p/src/b.rs", Some(fork.clone())),
+        ];
+        let mut review = Review::of(&session).unwrap();
+        let first = review.files[0].clone();
+        assert_eq!(
+            change_base("s-1", first.base),
+            DiffBase::Snapshot {
+                session: "s-1".into()
+            }
+        );
+        let second = review.step(1).clone();
+        assert_eq!(second.path, PathBuf::from("/p/src/b.rs"));
+        assert_eq!(change_base("s-1", second.base), fork);
+        assert_eq!(
+            review.step(1).path,
+            PathBuf::from("/p/src/b.rs"),
+            "stops at the end"
+        );
+        session.files.clear();
+        assert!(Review::of(&session).is_none());
     }
 
     #[test]
