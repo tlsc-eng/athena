@@ -18,9 +18,9 @@ pub(super) struct SidePanelState {
     timeline_collapsed: bool,
 }
 
-/// Whether ShowChanges hides the panel: only when it is already showing Git.
-fn hides_git_panel(panel_visible: bool, mode: SideMode) -> bool {
-    panel_visible && mode == SideMode::Git
+/// Whether ShowChanges hides the panel: only when Git is showing with Changes open.
+fn hides_git_panel(panel_visible: bool, mode: SideMode, changes_collapsed: bool) -> bool {
+    panel_visible && mode == SideMode::Git && !changes_collapsed
 }
 
 impl Shell {
@@ -49,7 +49,12 @@ impl Shell {
     }
 
     pub(super) fn toggle_changes(&mut self, cx: &mut Context<Self>) {
-        if hides_git_panel(self.workspace.ui.tree_visible, self.workspace.ui.side_mode) {
+        let ui = &self.workspace.ui;
+        if hides_git_panel(
+            ui.tree_visible,
+            ui.side_mode,
+            self.side_panel.changes_collapsed,
+        ) {
             self.toggle_tree(cx);
         } else {
             self.show_changes(cx);
@@ -191,12 +196,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn show_changes_hides_the_panel_only_when_it_is_visible_on_git() {
-        assert!(hides_git_panel(true, SideMode::Git));
-        assert!(!hides_git_panel(false, SideMode::Git));
+    fn show_changes_hides_the_panel_only_when_it_is_visible_on_git_with_changes_open() {
+        assert!(hides_git_panel(true, SideMode::Git, false));
+        assert!(!hides_git_panel(true, SideMode::Git, true));
+        assert!(!hides_git_panel(false, SideMode::Git, false));
         for mode in [SideMode::Sessions, SideMode::Files, SideMode::Outline] {
-            assert!(!hides_git_panel(true, mode));
-            assert!(!hides_git_panel(false, mode));
+            assert!(!hides_git_panel(true, mode, false));
+            assert!(!hides_git_panel(false, mode, false));
         }
     }
 }

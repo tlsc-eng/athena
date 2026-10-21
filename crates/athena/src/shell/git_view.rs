@@ -1215,7 +1215,6 @@ impl Shell {
         Some(change_rows(root, repo.prefix.as_deref()?, &repo.entries))
     }
 
-    /// The branch, the changed-file count and any conflicts, beside the Changes header.
     pub(super) fn render_changes_count(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let root = &self.workspace.active_project()?.root;
         let repo = self.git.repos.get(root)?;

@@ -14,7 +14,6 @@ use gpui::{
 };
 
 use super::Shell;
-use super::git_view::row_button;
 use super::item::{ItemView, file_label};
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::menus::shell_item;
@@ -818,12 +817,7 @@ impl Shell {
         self.open_context_menu(position, items, window, cx);
     }
 
-    fn render_review_bar(
-        &self,
-        compact: bool,
-        t: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_review_bar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let review = self.review.sessions.review.as_ref()?;
         let n = review.files.len();
         let at = review.index;
@@ -858,16 +852,13 @@ impl Shell {
                 )
                 .when(at > 0, |el| {
                     el.child(
-                        button(
-                            "claude-review-prev",
-                            if compact { "‹" } else { "‹ Previous" },
-                        )
-                        .on_click(cx.listener(|this, _, w, cx| this.step_review(-1, w, cx))),
+                        button("claude-review-prev", "‹")
+                            .on_click(cx.listener(|this, _, w, cx| this.step_review(-1, w, cx))),
                     )
                 })
                 .when(at + 1 < n, |el| {
                     el.child(
-                        button("claude-review-next", if compact { "›" } else { "Next ›" })
+                        button("claude-review-next", "›")
                             .on_click(cx.listener(|this, _, w, cx| this.step_review(1, w, cx))),
                     )
                 })
@@ -923,18 +914,15 @@ impl Shell {
         out
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_file_row(
         &self,
         id: usize,
         session: &str,
         file: &FileChange,
         root: &Path,
-        compact: bool,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let group = format!("claude-file-{id}");
         let rel = file
             .path
             .strip_prefix(root)
@@ -943,15 +931,12 @@ impl Shell {
             .to_string();
         let tip = rel.clone();
         let (s_open, p_open, b_open) = (session.to_string(), file.path.clone(), file.base.clone());
-        let (s_diff, p_diff, b_diff) = (session.to_string(), file.path.clone(), file.base.clone());
-        let (s_rev, p_rev) = (session.to_string(), file.path.clone());
         let (s_menu, p_menu, b_menu) = (session.to_string(), file.path.clone(), file.base.clone());
         let reviewing = self.review.sessions.review.as_ref().is_some_and(|r| {
             r.session == session && r.files.get(r.index).map(|f| &f.path) == Some(&file.path)
         });
         div()
             .id(("claude-file", id))
-            .group(group.clone())
             .h(t.ui(ROW_HEIGHT - 2.))
             .pl(px(48.))
             .pr(px(12.))
@@ -1001,33 +986,9 @@ impl Shell {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(t.color.content)
-                    .when(compact, |el| {
-                        el.tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
-                    })
+                    .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
                     .child(rel),
             )
-            .when(!compact, |el| {
-                el.child(row_button(
-                    ("claude-file-diff", id),
-                    "Open Changes",
-                    group.clone(),
-                    t,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_session_file(&s_diff, &p_diff, b_diff.clone(), window, cx)
-                    }),
-                ))
-                .child(row_button(
-                    ("claude-file-revert", id),
-                    "Revert",
-                    group,
-                    t,
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.revert_session_file(s_rev.clone(), p_rev.clone(), window, cx)
-                    }),
-                ))
-            })
             .children(file.counts.map(|(added, removed)| {
                 div()
                     .flex_none()
