@@ -7,7 +7,7 @@ use athena_term::ClaudeState;
 use athena_workspace::git;
 use gpui::App;
 
-use super::{SessionRow, short_id};
+use super::{SessionRow, SessionsState, short_id};
 use crate::shell::Shell;
 use crate::shell::item::ItemView;
 use crate::transcripts::Tokens;
@@ -54,16 +54,27 @@ impl LiveSession {
     }
 }
 
+/// Whether a session waits on the user: asking, or finished and not yet looked at.
+fn needs_you(state: Option<ClaudeState>, unread: bool) -> bool {
+    match state {
+        Some(ClaudeState::NeedsInput) => true,
+        Some(ClaudeState::Finished) => unread,
+        _ => false,
+    }
+}
+
 /// Sessions that need the user: waiting for an answer, or finished and not yet seen.
 pub(crate) fn attention_count(sessions: &[LiveSession]) -> usize {
     sessions
         .iter()
-        .filter(|s| match s.state {
-            Some(ClaudeState::NeedsInput) => true,
-            Some(ClaudeState::Finished) => s.unread,
-            _ => false,
-        })
+        .filter(|s| needs_you(s.state, s.unread))
         .count()
+}
+
+/// A session stopped or asked while nobody looked, and the terminal has not been looked at since;
+/// the bell is what records that, and a running session has not stopped yet.
+fn unread(state: Option<ClaudeState>, bell: bool) -> bool {
+    bell && matches!(state, Some(s) if s != ClaudeState::Running)
 }
 
 /// Sessions that need you first, then the running ones, then the rest by recency.
@@ -79,12 +90,13 @@ fn sort(sessions: &mut [LiveSession]) {
 
 /// The main checkout `cwd` belongs to, and its branch when `cwd` is a linked worktree.
 fn locate(cwd: &Path) -> (PathBuf, Option<String>) {
-    match cwd
-        .ancestors()
-        .find_map(|dir| Some((dir, git::main_worktree(dir)?)))
-    {
-        Some((tree, main)) => (main, branch_of(tree)),
-        None => (cwd.to_path_buf(), None),
+    let top = git::work_tree(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    match git::main_worktree(&top) {
+        Some(main) => {
+            let branch = branch_of(&top);
+            (main, branch)
+        }
+        None => (top, None),
     }
 }
 
@@ -110,16 +122,45 @@ struct Running {
     bell: bool,
 }
 
+impl SessionsState {
+    /// `locate(cwd)`, remembered until a hook or a reload clears it.
+    pub(super) fn place(&self, cwd: &Path) -> (PathBuf, Option<String>) {
+        let mut places = self.places.borrow_mut();
+        places
+            .entry(cwd.to_path_buf())
+            .or_insert_with(|| locate(cwd))
+            .clone()
+    }
+}
+
 impl Shell {
+    /// The project root and terminal view of `pane`, if this window holds it.
+    fn pane_view(&self, pane: PaneId) -> Option<(PathBuf, &ItemView)> {
+        let (root, item) = self.find_session(pane)?;
+        let view = self.items.get(&(root.clone(), item))?;
+        matches!(view, ItemView::Terminal(_)).then_some((root, view))
+    }
+
+    /// This window's sessions that need you, from its terminals alone so it is cheap per frame.
+    pub(crate) fn attention_here(&self, cx: &App) -> usize {
+        self.review
+            .sessions
+            .panes
+            .keys()
+            .filter_map(|pane| self.pane_view(*pane))
+            .filter(|(_, view)| {
+                let state = view.claude_state(cx);
+                needs_you(state, unread(state, view.has_bell(cx)))
+            })
+            .count()
+    }
+
     /// One entry per session this window knows: those its terminals run, then its project's recent ones.
     pub(crate) fn live_sessions(&self, cx: &App) -> Vec<LiveSession> {
         let state = &self.review.sessions;
         let mut running: HashMap<&str, Running> = HashMap::new();
         for (pane, id) in &state.panes {
-            let Some((root, item)) = self.find_session(*pane) else {
-                continue;
-            };
-            let Some(view @ ItemView::Terminal(_)) = self.items.get(&(root.clone(), item)) else {
+            let Some((root, view)) = self.pane_view(*pane) else {
                 continue;
             };
             running.insert(
@@ -138,6 +179,7 @@ impl Shell {
             .keys()
             .copied()
             .chain(rows.keys().copied().filter(|id| !running.contains_key(id)));
+        let now = SystemTime::now();
         let mut out: Vec<LiveSession> = ids
             .map(|id| {
                 let (row, term) = (rows.get(id), running.get(id));
@@ -148,7 +190,7 @@ impl Shell {
                     .or(state.root.as_ref())
                     .cloned()
                     .unwrap_or_default();
-                let (main_root, branch) = locate(&cwd);
+                let (main_root, branch) = state.place(&cwd);
                 let live = state.live.get(id);
                 LiveSession {
                     id: id.to_string(),
@@ -159,13 +201,21 @@ impl Shell {
                     main_root,
                     branch,
                     state: term.and_then(|t| t.state),
-                    unread: term.is_some_and(|t| {
-                        t.bell && matches!(t.state, Some(s) if s != ClaudeState::Running)
-                    }),
+                    unread: term.is_some_and(|t| unread(t.state, t.bell)),
                     todos: live.and_then(|l| todo_counts(&l.todos)),
                     files: row.map_or(0, |r| r.files.len()),
                     usage: row.map(|r| r.tokens.clone()).unwrap_or_default(),
-                    modified: row.map_or(SystemTime::UNIX_EPOCH, |r| r.modified),
+                    // A live session with no transcript row yet is current, not the oldest.
+                    modified: row.map_or_else(
+                        || {
+                            if term.is_some() {
+                                now
+                            } else {
+                                SystemTime::UNIX_EPOCH
+                            }
+                        },
+                        |r| r.modified,
+                    ),
                 }
             })
             .collect();
@@ -175,14 +225,13 @@ impl Shell {
 
     /// Sessions needing you across all open windows, this one included.
     pub(crate) fn attention_total(&self, cx: &App) -> usize {
-        attention_count(&self.live_sessions(cx))
-            + crate::shell::windows::attention_elsewhere(self.window_handle, cx)
+        self.attention_here(cx) + crate::shell::windows::attention_elsewhere(self.window_handle, cx)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::SessionsState;
+    use super::super::LivePlan;
     use super::*;
     use std::time::Duration;
 
@@ -292,10 +341,22 @@ mod tests {
         let inside = tree.join("src");
         std::fs::create_dir_all(&inside).unwrap();
 
-        assert_eq!(locate(&tree), (main.clone(), Some("claude/fix".into())));
-        assert_eq!(locate(&inside), (main.clone(), Some("claude/fix".into())));
+        let branch = Some("claude/fix".to_string());
+        assert_eq!(locate(&tree), (main.clone(), branch.clone()));
+        assert_eq!(locate(&inside), (main.clone(), branch.clone()));
         assert_eq!(locate(&main), (main.clone(), None));
-        assert_eq!(locate(&main.join("nowhere")), (main.join("nowhere"), None));
+        let sub = main.join("crates");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(locate(&sub), (main.clone(), None));
+        assert_eq!(locate(&main.join("nowhere")), (main.clone(), None));
+
+        let nested = tree.join("vendor").join("dep");
+        std::fs::create_dir_all(&nested).unwrap();
+        sh(&nested, &["init", "-q", "-b", "main"]);
+        assert_eq!(locate(&nested), (nested.clone(), None));
+
+        let loose = std::env::temp_dir().join("athena-live-no-repo");
+        assert_eq!(locate(&loose), (loose.clone(), None));
 
         sh(&tree, &["switch", "-q", "--detach"]);
         assert_eq!(
@@ -349,5 +410,42 @@ mod tests {
             todo_counts(&[todo("completed"), todo("pending"), todo("completed")]),
             Some((2, 3))
         );
+    }
+
+    #[test]
+    fn only_a_session_that_has_stopped_or_asked_is_unread() {
+        use ClaudeState::*;
+        assert!(!unread(Some(Running), true));
+        assert!(unread(Some(Finished), true));
+        assert!(unread(Some(NeedsInput), true));
+        assert!(!unread(Some(Finished), false));
+        assert!(!unread(None, true));
+    }
+
+    #[test]
+    fn moved_panes_take_their_sessions_and_leave_the_rest() {
+        let plan = || LivePlan {
+            todos: Vec::new(),
+            plan: Some("p".into()),
+        };
+        let mut from = SessionsState::default();
+        from.bind(1, "a".into());
+        from.bind(2, "b".into());
+        from.cwds.insert("a".into(), "/x".into());
+        from.cwds.insert("b".into(), "/y".into());
+        from.live.insert("a".into(), plan());
+        from.live.insert("b".into(), plan());
+
+        let moved = from.split_off(&[1, 9]);
+        assert_eq!(from.panes.len(), 1);
+        assert_eq!(from.panes.get(&2).map(String::as_str), Some("b"));
+        assert!(!from.cwds.contains_key("a") && from.cwds.contains_key("b"));
+        assert!(!from.live.contains_key("a") && from.live.contains_key("b"));
+
+        let mut to = SessionsState::default();
+        to.absorb(moved);
+        assert_eq!(to.panes.get(&1).map(String::as_str), Some("a"));
+        assert_eq!(to.cwds.get("a"), Some(&PathBuf::from("/x")));
+        assert!(to.live.contains_key("a") && to.panes.len() == 1);
     }
 }
