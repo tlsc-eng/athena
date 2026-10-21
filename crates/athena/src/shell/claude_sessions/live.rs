@@ -23,6 +23,8 @@ pub(crate) struct LiveSession {
     pub cwd: PathBuf,
     /// The main checkout of `cwd`, so a worktree's sessions group under their repository.
     pub main_root: PathBuf,
+    /// `cwd` below the top of its own work tree, so the same package matches across worktrees.
+    pub rel: PathBuf,
     /// Set only when `cwd` is a linked worktree.
     pub branch: Option<String>,
     pub state: Option<ClaudeState>,
@@ -135,15 +137,34 @@ fn sort(sessions: &mut [LiveSession]) {
     });
 }
 
-/// The main checkout `cwd` belongs to, and its branch when `cwd` is a linked worktree.
-fn locate(cwd: &Path) -> (PathBuf, Option<String>) {
+/// Where a folder sits among the checkouts of a repository.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Place {
+    /// The main checkout the folder belongs to.
+    pub main_root: PathBuf,
+    /// Set only when the folder is in a linked worktree.
+    pub branch: Option<String>,
+    /// The folder below the top of its own work tree.
+    pub rel: PathBuf,
+}
+
+fn locate(cwd: &Path) -> Place {
     let top = git::work_tree(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let rel = cwd
+        .strip_prefix(&top)
+        .unwrap_or(Path::new(""))
+        .to_path_buf();
     match git::main_worktree(&top) {
-        Some(main) => {
-            let branch = branch_of(&top);
-            (main, branch)
-        }
-        None => (top, None),
+        Some(main) => Place {
+            branch: branch_of(&top),
+            main_root: main,
+            rel,
+        },
+        None => Place {
+            main_root: top,
+            branch: None,
+            rel,
+        },
     }
 }
 
@@ -170,17 +191,18 @@ struct Running {
 }
 
 /// `locate` for each of `cwds`, which reads the disk and so is for a background thread.
-pub(super) fn locate_all(cwds: &BTreeSet<PathBuf>) -> HashMap<PathBuf, (PathBuf, Option<String>)> {
+pub(super) fn locate_all(cwds: &BTreeSet<PathBuf>) -> HashMap<PathBuf, Place> {
     cwds.iter().map(|cwd| (cwd.clone(), locate(cwd))).collect()
 }
 
 impl SessionsState {
     /// Where `cwd` was last found to belong; until a load has looked, it is its own main checkout.
-    pub(super) fn place(&self, cwd: &Path) -> (PathBuf, Option<String>) {
-        self.places
-            .get(cwd)
-            .cloned()
-            .unwrap_or_else(|| (cwd.to_path_buf(), None))
+    pub(super) fn place(&self, cwd: &Path) -> Place {
+        self.places.get(cwd).cloned().unwrap_or_else(|| Place {
+            main_root: cwd.to_path_buf(),
+            branch: None,
+            rel: PathBuf::new(),
+        })
     }
 }
 
@@ -213,7 +235,7 @@ impl Shell {
         self.needing_you(cx).len()
     }
 
-    /// The project roots of this window's sessions that need you, one per session.
+    /// The project roots of this window's terminals that need you, one per terminal.
     pub(in crate::shell) fn attention_roots(&self, cx: &App) -> Vec<PathBuf> {
         self.needing_you(cx)
             .into_iter()
@@ -288,14 +310,18 @@ impl Shell {
                 let term = running.get(id);
                 let started_in = state.cwds.get(id).or(term.map(|t| &t.root));
                 let row = rows.get(id).and_then(|found| {
-                    pick_row(found.iter().copied(), started_in.map(PathBuf::as_path))
+                    pick_row(
+                        found.iter().copied(),
+                        started_in.map(PathBuf::as_path),
+                        state.root.as_deref(),
+                    )
                 });
                 let cwd = started_in
                     .or(row.map(|r| &r.root))
                     .or(state.root.as_ref())
                     .cloned()
                     .unwrap_or_default();
-                let (main_root, branch) = state.place(&cwd);
+                let place = state.place(&cwd);
                 let live = state.live.get(id);
                 LiveSession {
                     id: id.to_string(),
@@ -303,8 +329,9 @@ impl Shell {
                         .map_or_else(|| format!("Session {}", short_id(id)), |r| r.label.clone()),
                     pane: term.map(|t| t.pane),
                     cwd,
-                    main_root,
-                    branch,
+                    main_root: place.main_root,
+                    rel: place.rel,
+                    branch: place.branch,
                     state: term.and_then(|t| t.state),
                     unread: term.is_some_and(|t| unread(t.state, t.bell)),
                     todos: live.and_then(|l| todo_counts(&l.todos)),
@@ -347,6 +374,7 @@ mod tests {
             pane: state.map(|_| 1),
             cwd: PathBuf::new(),
             main_root: PathBuf::new(),
+            rel: PathBuf::new(),
             branch: None,
             state,
             unread,
@@ -532,6 +560,14 @@ mod tests {
         let inside = tree.join("src");
         std::fs::create_dir_all(&inside).unwrap();
 
+        let (rel_in_tree, rel_in_main) = (locate(&inside).rel, locate(&main.join("nowhere")).rel);
+        assert_eq!(rel_in_tree, Path::new("src"));
+        assert_eq!(locate(&tree).rel, Path::new(""));
+        assert_eq!(rel_in_main, Path::new("nowhere"));
+        let locate = |dir: &Path| {
+            let place = locate(dir);
+            (place.main_root, place.branch)
+        };
         let branch = Some("claude/fix".to_string());
         assert_eq!(locate(&tree), (main.clone(), branch.clone()));
         assert_eq!(locate(&inside), (main.clone(), branch.clone()));

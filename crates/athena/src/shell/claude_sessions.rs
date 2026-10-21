@@ -64,7 +64,7 @@ pub(super) struct SessionsState {
     /// Where each session started, as its SessionStart hook said.
     cwds: HashMap<String, PathBuf>,
     /// `live::locate` per cwd, read by a load in the background so drawing never touches the disk.
-    places: HashMap<PathBuf, (PathBuf, Option<String>)>,
+    places: HashMap<PathBuf, live::Place>,
     review: Option<Review>,
 }
 
@@ -129,10 +129,11 @@ impl SessionsState {
 
     /// The row read for `id`, from whichever project's list holds it.
     fn row(&self, id: &str) -> Option<&SessionRow> {
-        let all = self.elsewhere.iter().chain(self.rows.iter());
+        let all = self.rows.iter().chain(self.elsewhere.iter());
         pick_row(
             all.filter(|r| r.id == id),
             self.cwds.get(id).map(PathBuf::as_path),
+            self.root.as_deref(),
         )
     }
 
@@ -289,13 +290,20 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
 }
 
 /// Of the rows read for one session, the one with a transcript, then the one read for the folder
-/// the session ran in; a project's list also holds sessions that only edited files under it.
+/// the session ran in, then the active project's; a project's list also holds sessions that only
+/// edited files under it. Rows are given in the same order everywhere, so a tie falls the same way.
 fn pick_row<'a>(
     rows: impl IntoIterator<Item = &'a SessionRow>,
     cwd: Option<&Path>,
+    active: Option<&Path>,
 ) -> Option<&'a SessionRow> {
-    rows.into_iter()
-        .max_by_key(|r| (r.profile.is_some(), cwd == Some(r.root.as_path())))
+    rows.into_iter().max_by_key(|r| {
+        (
+            r.profile.is_some(),
+            cwd == Some(r.root.as_path()),
+            active == Some(r.root.as_path()),
+        )
+    })
 }
 
 /// Whether two spellings of a path name the same file.
@@ -1325,7 +1333,7 @@ mod tests {
         let (edits_only, own) = (row("s", "/main", false), row("s", "/wt", false));
         let transcript = row("s", "/wt", true);
         let picked = |rows: &[&SessionRow], cwd: &str| {
-            pick_row(rows.iter().copied(), Some(Path::new(cwd))).map(|r| r.label.clone())
+            pick_row(rows.iter().copied(), Some(Path::new(cwd)), None).map(|r| r.label.clone())
         };
         assert_eq!(
             picked(&[&edits_only, &transcript], "/main"),
@@ -1340,7 +1348,14 @@ mod tests {
             picked(&[&own, &edits_only], "/main"),
             Some("/main false".into())
         );
-        assert!(pick_row([], None).is_none());
+        assert!(pick_row([], None, None).is_none());
+        let (here, there) = (row("s", "/a", false), row("s", "/b", false));
+        let by_active = |active: &str| {
+            let rows = [&there, &here];
+            pick_row(rows, None, Some(Path::new(active))).map(|r| r.root.clone())
+        };
+        assert_eq!(by_active("/a"), Some(PathBuf::from("/a")));
+        assert_eq!(by_active("/b"), Some(PathBuf::from("/b")));
 
         let mut state = SessionsState {
             rows: Rc::new(vec![edits_only]),

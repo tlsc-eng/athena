@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
@@ -8,7 +7,7 @@ use athena_ui::{
 };
 use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*, px};
 
-use super::live::LiveSession;
+use super::live::{LiveSession, Place};
 use super::{SessionRow, Shell};
 use crate::transcripts::Price;
 
@@ -45,14 +44,11 @@ fn dot_state(state: Option<ClaudeState>) -> DotState {
     }
 }
 
-/// Whether a session shows in the project at `root`, whose repository's main checkout is `main`:
-/// it ran under the project or in a linked worktree of the repository, so a monorepo's other
-/// packages are left out.
-fn in_project(session: &LiveSession, root: &Path, main: &Path) -> bool {
-    session.main_root == main
-        && (session.cwd.starts_with(root)
-            || session.branch.is_some()
-            || !session.cwd.starts_with(main))
+/// Whether a session shows in the project at `active`: it is in the same repository and below the
+/// same folder of its work tree, so a project at a work tree's top lists every checkout's sessions
+/// and a package lists that package's in any checkout, not its siblings'.
+fn in_project(session: &LiveSession, active: &Place) -> bool {
+    session.main_root == active.main_root && session.rel.starts_with(&active.rel)
 }
 
 /// What a session with no row read yet offers a menu: its id.
@@ -80,7 +76,7 @@ fn centered(el: impl IntoElement) -> AnyElement {
 }
 
 impl Shell {
-    /// Sessions mode: the sessions of the active project, and of its worktrees, as one list.
+    /// Sessions mode: the active project's sessions, in the main checkout and every worktree.
     pub(in crate::shell) fn render_sessions_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let Some(root) = self.active_root() else {
@@ -92,11 +88,11 @@ impl Shell {
             ));
         };
         self.refresh_sessions(&root, cx);
-        let main_root = self.review.sessions.place(&root).0;
+        let active = self.review.sessions.place(&root);
         let sessions: Vec<LiveSession> = self
             .live_sessions(cx)
             .into_iter()
-            .filter(|s| in_project(s, &root, &main_root))
+            .filter(|s| in_project(s, &active))
             .collect();
         if sessions.is_empty() {
             if self.review.sessions.loading.is_some() {
@@ -266,6 +262,7 @@ mod tests {
             pane: None,
             cwd: PathBuf::new(),
             main_root: PathBuf::new(),
+            rel: PathBuf::new(),
             branch: None,
             state: None,
             unread: false,
@@ -278,23 +275,45 @@ mod tests {
 
     #[test]
     fn a_monorepo_package_lists_its_own_sessions_and_its_worktrees_only() {
-        let (root, main) = (Path::new("/repo/pkg-a"), Path::new("/repo"));
-        let at = |cwd: &str, main: &str, branch: Option<&str>| {
+        let at = |main: &str, rel: &str, branch: Option<&str>| {
             let mut s = session();
-            s.cwd = cwd.into();
             s.main_root = main.into();
+            s.rel = rel.into();
             s.branch = branch.map(String::from);
             s
         };
-        let shown = |s: &LiveSession| in_project(s, root, main);
-        assert!(shown(&at("/repo/pkg-a", "/repo", None)));
-        assert!(shown(&at("/repo/pkg-a/src", "/repo", None)));
-        assert!(!shown(&at("/repo/pkg-b", "/repo", None)));
-        assert!(!shown(&at("/repo", "/repo", None)));
-        assert!(shown(&at("/repo-wt/fix", "/repo", Some("fix"))));
-        assert!(shown(&at("/repo-wt/detached", "/repo", None)));
-        assert!(!shown(&at("/other", "/other", None)));
-        assert!(!shown(&at("/other-wt", "/other", Some("x"))));
+        let place = |main: &str, rel: &str| Place {
+            main_root: main.into(),
+            branch: None,
+            rel: rel.into(),
+        };
+        let package = place("/repo", "pkg-a");
+        assert!(in_project(&at("/repo", "pkg-a", None), &package));
+        assert!(in_project(&at("/repo", "pkg-a/src", None), &package));
+        assert!(in_project(&at("/repo", "pkg-a", Some("fix")), &package));
+        assert!(!in_project(&at("/repo", "pkg-b", None), &package));
+        assert!(
+            !in_project(&at("/repo", "pkg-b", Some("nested")), &package),
+            "a sibling package in a nested worktree on a branch"
+        );
+        assert!(!in_project(&at("/repo", "pkg-ab", None), &package));
+        assert!(!in_project(&at("/repo", "", None), &package));
+        assert!(!in_project(&at("/other", "pkg-a", None), &package));
+
+        let top = place("/repo", "");
+        assert!(in_project(&at("/repo", "", None), &top));
+        assert!(in_project(&at("/repo", "pkg-b", Some("nested")), &top));
+        assert!(
+            in_project(&at("/repo", "", None), &top),
+            "a detached nested worktree"
+        );
+        assert!(!in_project(&at("/other", "", None), &top));
+
+        let worktree = place("/repo", "");
+        assert!(
+            in_project(&at("/repo", "", None), &worktree),
+            "a worktree project lists the main checkout's sessions"
+        );
     }
 
     #[test]
