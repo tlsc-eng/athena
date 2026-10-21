@@ -60,6 +60,11 @@ impl Shell {
         self.drawer_changed(cx);
     }
 
+    /// Shows the changes view, unlike ShowChanges, which closes it when it is already showing.
+    pub(super) fn show_changes(&mut self, cx: &mut Context<Self>) {
+        self.show_drawer_tab(DrawerTab::Changes, cx);
+    }
+
     /// Cmd+J: reopens the last tab, or closes the drawer.
     pub(super) fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
         self.drawer = match self.drawer {

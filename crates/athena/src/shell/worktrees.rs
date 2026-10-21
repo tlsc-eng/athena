@@ -8,7 +8,6 @@ use gpui::{Context, PromptButton, PromptLevel, Window, actions};
 
 use super::Shell;
 use super::branches::{BranchEntry, BranchPick};
-use super::drawer::DrawerTab;
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::ToastAction;
@@ -595,14 +594,31 @@ impl Shell {
             let probe = root.clone();
             let read = cx
                 .background_executor()
-                .spawn(async move { git::summary(&probe, true) })
+                .spawn(async move {
+                    let summary = git::summary(&probe, true)?;
+                    anyhow::Ok((summary, git::unresolved(&probe)?))
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| match read {
-                Ok(git::Summary {
-                    branch: Some(branch),
-                    dirty,
-                    ..
-                }) => {
+                Ok((
+                    git::Summary {
+                        branch: Some(branch),
+                        ..
+                    },
+                    true,
+                )) => this.transient_notice(
+                    "Unresolved conflicts",
+                    format!("{branch} has unresolved conflicts. Resolve or abort them first."),
+                    cx,
+                ),
+                Ok((
+                    git::Summary {
+                        branch: Some(branch),
+                        dirty,
+                        ..
+                    },
+                    false,
+                )) => {
                     let message = bring_message(&branch);
                     this.git.bring = Some(Bring { root, main, branch });
                     if dirty {
@@ -714,11 +730,21 @@ impl Shell {
         stopped: Option<git::Underway>,
         cx: &mut Context<Self>,
     ) {
-        self.open_folder(main.clone(), cx);
-        // Another window may hold the main checkout; its Changes are not this window's to show.
-        let opened = self.active_root().and_then(|r| r.canonicalize().ok());
-        if opened.is_some() && opened == main.canonicalize().ok() {
-            self.show_drawer_tab(DrawerTab::Changes, cx);
+        match super::windows::holder_of(&main, self.window_handle, cx) {
+            Some(holder) => {
+                let main = main.clone();
+                cx.defer(move |cx| {
+                    let _ = holder.update(cx, |shell, window, cx| {
+                        window.activate_window();
+                        shell.open_folder(main, cx);
+                        shell.show_changes(cx);
+                    });
+                });
+            }
+            None => {
+                self.open_folder(main.clone(), cx);
+                self.show_changes(cx);
+            }
         }
         if stopped.is_some() {
             return;
