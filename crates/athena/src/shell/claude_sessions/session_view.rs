@@ -402,8 +402,7 @@ impl Shell {
         let comments = loaded.map(|l| l.comments).unwrap_or_default();
         let unsent = comments.iter().filter(|c| !c.sent).count();
         let reviewing = state.review.as_ref().is_some_and(|r| r.session == id);
-        let prices = self.settings.file.claude_prices.clone();
-        let text = row_text(&session, &prices);
+        let text = row_text(&session);
 
         let focus = session.pane.map(|pane| {
             let id = id.clone();
@@ -460,7 +459,6 @@ impl Shell {
                     .gap(t.space(Space::Sm))
                     .text_color(t.color.content_muted)
                     .children(text.branch.map(chip))
-                    .children(text.cost)
                     .children(text.todos.map(|todos| format!("{todos} todos")))
                     .children(files_label(row.files.len(), more)),
             );

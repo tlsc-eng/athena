@@ -1,7 +1,7 @@
 //! Claude Code's session transcripts (`~/.claude*/projects/<folder>/<session>.jsonl`), read for
-//! the session list: title, activity, message count and token usage.
+//! the session list: title, activity and message count.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -71,36 +71,6 @@ pub fn project_folder(root: &Path) -> String {
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Tokens {
-    pub input: u64,
-    pub output: u64,
-    pub cache_write_5m: u64,
-    pub cache_write_1h: u64,
-    pub cache_read: u64,
-}
-
-impl Tokens {
-    pub fn total(&self) -> u64 {
-        [
-            self.output,
-            self.cache_write_5m,
-            self.cache_write_1h,
-            self.cache_read,
-        ]
-        .into_iter()
-        .fold(self.input, u64::saturating_add)
-    }
-
-    fn add(&mut self, other: &Tokens) {
-        self.input = self.input.saturating_add(other.input);
-        self.output = self.output.saturating_add(other.output);
-        self.cache_write_5m = self.cache_write_5m.saturating_add(other.cache_write_5m);
-        self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
-        self.cache_read = self.cache_read.saturating_add(other.cache_read);
-    }
-}
-
 /// What a transcript says about its session.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Summary {
@@ -109,8 +79,6 @@ pub struct Summary {
     pub first_prompt: Option<String>,
     /// Prompts typed plus replies, each streamed reply counted once.
     pub messages: usize,
-    /// Token usage by model id, subagents included.
-    pub tokens: BTreeMap<String, Tokens>,
     /// Lines that were not JSON, such as one cut off mid-write.
     pub malformed: usize,
 }
@@ -125,8 +93,8 @@ impl Summary {
 #[derive(Clone, Debug, Default)]
 struct Reader {
     summary: Summary,
-    /// Each reply's model and usage; a streamed reply repeats them on every line.
-    replies: HashMap<String, (String, Tokens)>,
+    /// A streamed reply repeats its id on every line.
+    replies: HashSet<String>,
     prompts: usize,
 }
 
@@ -146,48 +114,7 @@ struct Line {
 #[derive(Deserialize)]
 struct Message {
     id: Option<String>,
-    model: Option<String>,
-    usage: Option<Usage>,
     content: Option<IgnoredAny>,
-}
-
-#[derive(Deserialize)]
-struct Usage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    cache_creation_input_tokens: u64,
-    #[serde(default)]
-    cache_read_input_tokens: u64,
-    cache_creation: Option<CacheCreation>,
-}
-
-#[derive(Deserialize)]
-struct CacheCreation {
-    #[serde(default)]
-    ephemeral_5m_input_tokens: u64,
-    #[serde(default)]
-    ephemeral_1h_input_tokens: u64,
-}
-
-impl Usage {
-    fn tokens(&self) -> Tokens {
-        let (five, hour) = match &self.cache_creation {
-            Some(c) if c.ephemeral_5m_input_tokens > 0 || c.ephemeral_1h_input_tokens > 0 => {
-                (c.ephemeral_5m_input_tokens, c.ephemeral_1h_input_tokens)
-            }
-            _ => (self.cache_creation_input_tokens, 0),
-        };
-        Tokens {
-            input: self.input_tokens,
-            output: self.output_tokens,
-            cache_write_5m: five,
-            cache_write_1h: hour,
-            cache_read: self.cache_read_input_tokens,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -245,7 +172,7 @@ fn one_line(text: &str) -> String {
 }
 
 impl Reader {
-    fn line(&mut self, text: &str, count_messages: bool) {
+    fn line(&mut self, text: &str) {
         let Ok(line) = serde_json::from_str::<Line>(text) else {
             if !text.trim().is_empty() {
                 self.summary.malformed += 1;
@@ -263,19 +190,17 @@ impl Reader {
                     return;
                 };
                 let id = message.id.unwrap_or_default();
-                let model = message.model.unwrap_or_default();
-                let tokens = message.usage.map(|u| u.tokens()).unwrap_or_default();
-                if count_messages && !self.replies.contains_key(&id) {
+                if !self.replies.contains(&id) {
                     self.summary.messages += 1;
                 }
                 if id.is_empty() {
                     let key = format!("line-{}", self.replies.len());
-                    self.replies.insert(key, (model, tokens));
+                    self.replies.insert(key);
                 } else {
-                    self.replies.insert(id, (model, tokens));
+                    self.replies.insert(id);
                 }
             }
-            Some("user") if count_messages && !line.is_meta && !line.is_compact_summary => {
+            Some("user") if !line.is_meta && !line.is_compact_summary => {
                 if line.message.as_ref().is_none_or(|m| m.content.is_none()) {
                     return;
                 }
@@ -293,46 +218,6 @@ impl Reader {
             _ => {}
         }
     }
-
-    fn tokens(&self) -> BTreeMap<String, Tokens> {
-        let mut out: BTreeMap<String, Tokens> = BTreeMap::new();
-        for (model, tokens) in self.replies.values() {
-            if tokens.total() > 0 {
-                out.entry(model.clone()).or_default().add(tokens);
-            }
-        }
-        out
-    }
-}
-
-/// A subagent's transcript, whose token usage counts toward its session, as far as it was read.
-#[derive(Default)]
-struct Subagent {
-    len: u64,
-    modified: Option<SystemTime>,
-    offset: u64,
-    reader: Reader,
-}
-
-/// Reads a subagent's transcript on from where `cached` stopped, or from the start if it shrank.
-fn read_subagent(path: &Path, cached: Option<Subagent>) -> Option<Subagent> {
-    let meta = fs::metadata(path).ok()?;
-    let (len, modified) = (meta.len(), meta.modified().ok());
-    let mut sub = match cached {
-        Some(s) if s.len == len && s.modified == modified => return Some(s),
-        Some(s) if s.offset <= len => s,
-        _ => Subagent::default(),
-    };
-    let mut file = fs::File::open(path).ok()?;
-    file.seek(SeekFrom::Start(sub.offset)).ok()?;
-    let (mut input, mut buf) = (BufReader::new(file), Vec::new());
-    while let Some(n) = next_line(&mut input, &mut buf) {
-        sub.offset += n;
-        sub.reader.line(&String::from_utf8_lossy(&buf), false);
-    }
-    sub.len = len;
-    sub.modified = modified;
-    Some(sub)
 }
 
 /// Reads the next whole line into `buf` and returns its length on disk, or `None` at the end or
@@ -379,7 +264,6 @@ struct Cached {
     /// Where the next unread line starts.
     offset: u64,
     reader: Reader,
-    subagents: HashMap<PathBuf, Subagent>,
 }
 
 static CACHE: Mutex<Option<HashMap<PathBuf, Cached>>> = Mutex::new(None);
@@ -390,7 +274,7 @@ fn read_cached(path: &Path, len: u64, modified: SystemTime) -> Summary {
     let cache = guard.get_or_insert_with(HashMap::new);
     let mut entry = match cache.remove(path) {
         Some(c) if c.len == len && c.modified == modified => {
-            let summary = summarize(&c);
+            let summary = c.reader.summary.clone();
             cache.insert(path.to_path_buf(), c);
             return summary;
         }
@@ -400,7 +284,6 @@ fn read_cached(path: &Path, len: u64, modified: SystemTime) -> Summary {
             modified,
             offset: 0,
             reader: Reader::default(),
-            subagents: HashMap::new(),
         },
     };
     drop(guard);
@@ -412,37 +295,16 @@ fn read_cached(path: &Path, len: u64, modified: SystemTime) -> Summary {
         // A line still being written is read again next time.
         while let Some(n) = next_line(&mut input, &mut buf) {
             entry.offset += n;
-            entry.reader.line(&String::from_utf8_lossy(&buf), true);
+            entry.reader.line(&String::from_utf8_lossy(&buf));
         }
     }
     entry.len = len;
     entry.modified = modified;
-    let mut read = std::mem::take(&mut entry.subagents);
-    let dir = path.with_extension("").join("subagents");
-    for file in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let file = file.path();
-        if file.extension().is_some_and(|e| e == "jsonl")
-            && let Some(sub) = read_subagent(&file, read.remove(&file))
-        {
-            entry.subagents.insert(file, sub);
-        }
-    }
-    let summary = summarize(&entry);
+    let summary = entry.reader.summary.clone();
     let mut guard = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .get_or_insert_with(HashMap::new)
         .insert(path.to_path_buf(), entry);
-    summary
-}
-
-fn summarize(cached: &Cached) -> Summary {
-    let mut summary = cached.reader.summary.clone();
-    summary.tokens = cached.reader.tokens();
-    for sub in cached.subagents.values() {
-        for (model, tokens) in sub.reader.tokens() {
-            summary.tokens.entry(model).or_default().add(&tokens);
-        }
-    }
     summary
 }
 
@@ -542,94 +404,6 @@ pub fn sessions(home: &Path, root: &Path, limit: usize) -> Vec<Session> {
         .collect()
 }
 
-/// USD per million tokens.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Price {
-    pub input: f64,
-    pub output: f64,
-    pub cache_write_5m: f64,
-    pub cache_write_1h: f64,
-    pub cache_read: f64,
-}
-
-impl Price {
-    /// A model's price with the usual cache multiples of its input price.
-    pub const fn of(input: f64, output: f64) -> Self {
-        Self {
-            input,
-            output,
-            cache_write_5m: input * 1.25,
-            cache_write_1h: input * 2.,
-            cache_read: input * 0.1,
-        }
-    }
-
-    fn cost(&self, t: &Tokens) -> f64 {
-        (t.input as f64 * self.input
-            + t.output as f64 * self.output
-            + t.cache_write_5m as f64 * self.cache_write_5m
-            + t.cache_write_1h as f64 * self.cache_write_1h
-            + t.cache_read as f64 * self.cache_read)
-            / 1_000_000.
-    }
-}
-
-/// List prices as Claude Code's own cost tally applied them when this was written; an estimate.
-const PRICES: &[(&str, Price)] = &[
-    (
-        "claude-opus-5-5",
-        Price {
-            cache_read: 0.2,
-            ..Price::of(4., 20.)
-        },
-    ),
-    ("claude-opus-5", Price::of(5., 25.)),
-    ("claude-haiku-5-5", Price::of(0.1, 0.5)),
-    ("claude-opus-4-5", Price::of(5., 25.)),
-    ("claude-opus-4-1", Price::of(15., 75.)),
-    ("claude-opus-4", Price::of(15., 75.)),
-    ("claude-sonnet-4-5", Price::of(3., 15.)),
-    ("claude-sonnet-4", Price::of(3., 15.)),
-    ("claude-haiku-4-5", Price::of(1., 5.)),
-    ("claude-3-7-sonnet", Price::of(3., 15.)),
-    ("claude-3-5-haiku", Price::of(0.8, 4.)),
-];
-
-/// A model id without a trailing `-YYYYMMDD` release date.
-fn base_model(model: &str) -> &str {
-    match model.rsplit_once('-') {
-        Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
-        _ => model,
-    }
-}
-
-/// The price of `model`: the user's from settings first, then the built-in table.
-pub fn price_of(model: &str, overrides: &HashMap<String, Price>) -> Option<Price> {
-    let base = base_model(model);
-    [model, base].into_iter().find_map(|id| {
-        overrides
-            .get(id)
-            .copied()
-            .or_else(|| PRICES.iter().find(|(m, _)| *m == id).map(|(_, p)| *p))
-    })
-}
-
-/// The estimated cost in USD of `tokens`, and the models it has no price for.
-pub fn cost(
-    tokens: &BTreeMap<String, Tokens>,
-    overrides: &HashMap<String, Price>,
-) -> (f64, Vec<String>) {
-    let mut total = 0.;
-    let mut unpriced = Vec::new();
-    for (model, t) in tokens {
-        match price_of(model, overrides) {
-            Some(price) => total += price.cost(t),
-            None => unpriced.push(model.clone()),
-        }
-    }
-    (total, unpriced)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,9 +412,8 @@ mod tests {
     fn parse(input: impl std::io::Read) -> Summary {
         let mut reader = Reader::default();
         for line in BufReader::new(input).split(b'\n').map_while(Result::ok) {
-            reader.line(&String::from_utf8_lossy(&line), true);
+            reader.line(&String::from_utf8_lossy(&line));
         }
-        reader.summary.tokens = reader.tokens();
         reader.summary
     }
 
@@ -668,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn a_streamed_reply_is_counted_once_and_its_last_usage_wins() {
+    fn a_streamed_reply_is_counted_once() {
         let text = lines(&[
             prompt(json!("fix the parser")),
             reply("msg_1", "claude-opus-5", 10, 1),
@@ -677,20 +450,6 @@ mod tests {
         ]);
         let s = parse(text.as_bytes());
         assert_eq!(s.messages, 3);
-        let opus = s.tokens["claude-opus-5"];
-        assert_eq!(
-            opus,
-            Tokens {
-                input: 10,
-                output: 50,
-                cache_write_5m: 100,
-                cache_write_1h: 200,
-                cache_read: 1000
-            }
-        );
-        assert_eq!(s.tokens["claude-haiku-4-5-20251001"].input, 5);
-        let total: u64 = s.tokens.values().map(Tokens::total).sum();
-        assert_eq!(total, opus.total() + 5 + 5 + 300 + 1000);
     }
 
     #[test]
@@ -726,7 +485,6 @@ mod tests {
         let s = parse(text.as_bytes());
         assert_eq!(s.malformed, 3);
         assert_eq!(s.messages, 2);
-        assert_eq!(s.tokens.len(), 1);
     }
 
     #[test]
@@ -759,26 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn token_sums_saturate_instead_of_overflowing() {
-        let mut t = Tokens {
-            input: u64::MAX,
-            output: 1,
-            ..Tokens::default()
-        };
-        assert_eq!(t.total(), u64::MAX);
-        t.add(&t.clone());
-        assert_eq!(t.input, u64::MAX);
-        let usage: Usage = serde_json::from_value(json!({
-            "cache_creation": {
-                "ephemeral_5m_input_tokens": u64::MAX,
-                "ephemeral_1h_input_tokens": 1
-            }
-        }))
-        .unwrap();
-        assert_eq!(usage.tokens().cache_write_5m, u64::MAX);
-    }
-
-    #[test]
     fn folders_are_named_as_claude_code_names_them() {
         assert_eq!(
             project_folder(Path::new("/Users/me/code/hobby/athena")),
@@ -799,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn sessions_come_from_every_profile_newest_first_with_subagents_counted() {
+    fn sessions_come_from_every_profile_newest_first() {
         let home = temp("home");
         let root = Path::new("/work/app");
         let folder = project_folder(root);
@@ -824,13 +562,6 @@ mod tests {
             ]),
         )
         .unwrap();
-        let sub = work.join(new).join("subagents");
-        fs::create_dir_all(&sub).unwrap();
-        fs::write(
-            sub.join("agent-1.jsonl"),
-            lines(&[reply("b", "claude-opus-5", 100, 0)]),
-        )
-        .unwrap();
         fs::write(work.join("not-a-session.txt"), "x").unwrap();
 
         let names: Vec<String> = profiles(&home).into_iter().map(|p| p.name).collect();
@@ -842,11 +573,7 @@ mod tests {
         );
         assert_eq!(list[0].profile.config_dir, Some(home.join(".claude-work")));
         assert_eq!(list[1].profile.config_dir, None);
-        assert_eq!(list[0].summary.tokens["claude-opus-5"].input, 110);
-        assert_eq!(
-            list[0].summary.messages, 2,
-            "subagent replies are not messages"
-        );
+        assert_eq!(list[0].summary.messages, 2);
         assert_eq!(sessions(&home, root, 1).len(), 1);
         assert_eq!(
             latest_profile(&home, root).map(|p| p.name),
@@ -883,60 +610,6 @@ mod tests {
         let (len, at) = meta(&path);
         let s = read_cached(&path, len, at);
         assert_eq!((s.messages, s.malformed), (2, 0));
-        assert_eq!(s.tokens["claude-opus-5"].input, 7);
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_subagent_transcript_is_read_on_from_where_it_stopped() {
-        let dir = temp("sub");
-        let path = dir.join("agent-1.jsonl");
-        let first = reply("a", "claude-opus-5", 10, 0).to_string() + "\n";
-        fs::write(&path, &first).unwrap();
-        let sub = read_subagent(&path, None).unwrap();
-        assert_eq!(sub.offset, first.len() as u64);
-        // The first line is overwritten, so only reading on from the offset still counts it.
-        let mut text = " ".repeat(first.len() - 1) + "\n";
-        text += &lines(&[reply("b", "claude-opus-5", 5, 0)]);
-        text += r#"{"type":"assist"#;
-        fs::write(&path, &text).unwrap();
-        let sub = read_subagent(&path, Some(sub)).unwrap();
-        assert_eq!(sub.reader.tokens()["claude-opus-5"].input, 15);
-        assert_eq!(
-            sub.offset,
-            text.rfind('\n').unwrap() as u64 + 1,
-            "a half line waits"
-        );
-        assert!(read_subagent(&dir.join("gone.jsonl"), Some(sub)).is_none());
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn cost_uses_the_users_prices_first_and_names_models_without_one() {
-        let mut tokens = BTreeMap::new();
-        tokens.insert(
-            "claude-haiku-4-5-20251001".to_string(),
-            Tokens {
-                input: 909,
-                output: 11,
-                ..Tokens::default()
-            },
-        );
-        tokens.insert(
-            "claude-new-9".to_string(),
-            Tokens {
-                input: 1,
-                ..Tokens::default()
-            },
-        );
-        let (usd, unpriced) = cost(&tokens, &HashMap::new());
-        assert!((usd - 0.000964).abs() < 1e-9, "{usd}");
-        assert_eq!(unpriced, ["claude-new-9"]);
-
-        let mut mine = HashMap::new();
-        mine.insert("claude-new-9".to_string(), Price::of(1_000_000., 0.));
-        mine.insert("claude-haiku-4-5".to_string(), Price::of(0., 0.));
-        let (usd, unpriced) = cost(&tokens, &mine);
-        assert_eq!((usd, unpriced.len()), (1., 0));
     }
 }

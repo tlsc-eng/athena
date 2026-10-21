@@ -554,7 +554,6 @@ mod tests {
             unread: false,
             todos: None,
             files: 0,
-            usage: Default::default(),
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1000 - age),
         }
     }

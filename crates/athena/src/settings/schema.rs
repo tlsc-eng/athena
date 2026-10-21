@@ -140,23 +140,6 @@ impl Setting {
             ["window", "zoom_level"] => s.zoom_level.map(Value::from),
             ["eslint", "fixOnSave"] => flag(s.eslint_fix_on_save),
             ["claude", "hooks"] => flag(s.claude_hooks),
-            ["claude", "prices"] => (!s.claude_prices.is_empty()).then(|| {
-                let prices: Map<String, Value> = s
-                    .claude_prices
-                    .iter()
-                    .map(|(model, p)| {
-                        let price = json!({
-                            "input": p.input,
-                            "output": p.output,
-                            "cache_write": p.cache_write_5m,
-                            "cache_write_1h": p.cache_write_1h,
-                            "cache_read": p.cache_read,
-                        });
-                        (model.clone(), price)
-                    })
-                    .collect();
-                Value::Object(prices)
-            }),
             ["claude", "profiles"] => (!s.claude_profiles.is_empty()).then(|| {
                 Value::Object(
                     s.claude_profiles
@@ -524,30 +507,6 @@ pub static SETTINGS: &[Setting] = &[
                       whether Claude is running, needs input or is done, and notify you.",
         group: Group::Claude,
         kind: TOGGLE_ON,
-        user_only: true,
-        also: None,
-    },
-    Setting {
-        keys: &["claude", "prices"],
-        aliases: &[],
-        title: "Prices",
-        description: "USD per million tokens by model id, over the built-in list prices the \
-                      Claude tab estimates costs with.",
-        group: Group::Claude,
-        kind: Kind::Json {
-            schema: r#"{"type": "object", "additionalProperties": {
-                "type": "object",
-                "required": ["input", "output"],
-                "properties": {
-                    "input": {"type": "number", "minimum": 0},
-                    "output": {"type": "number", "minimum": 0},
-                    "cache_write": {"type": "number", "minimum": 0},
-                    "cache_write_1h": {"type": "number", "minimum": 0},
-                    "cache_read": {"type": "number", "minimum": 0}
-                }
-            }}"#,
-            example: r#"{"claude-sonnet-5": {"input": 3, "output": 15}}"#,
-        },
         user_only: true,
         also: None,
     },

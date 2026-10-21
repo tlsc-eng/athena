@@ -8,7 +8,7 @@ encoding (and files over 50 MB read-only), a Go debugger on Delve, a git diff vi
 staging, file history and blame, a commit box and fetch, pull and push, worktrees, CI status and
 pull requests through the GitHub CLI, a test runner for Go, Vitest and Jest, a browser preview, and
 read-only views of Playwright results and Docker containers. Claude Code sessions show their state
-and todo progress on the tab, the Sessions list lists each session's changed files, cost estimate and
+and todo progress on the tab, the Sessions list lists each session's changed files and
 plan with Resume, each file Claude edits can be reviewed as one diff against the version from
 before the session, and an MCP server lets Claude read the editor, language servers, tests, the
 debugger and terminals.
@@ -656,8 +656,8 @@ information rather than triggering the install dialog).
   opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
 - The side panel's **Sessions** view (palette: **Claude: Show sessions**) lists the project's recent
-  sessions from `~/.claude` and every `~/.claude-*` profile: title, todo progress, messages,
-  tokens and an estimated cost. A session expands to its todo list and plan and to each file it
+  sessions from `~/.claude` and every `~/.claude-*` profile: title, todo progress
+  and changed files. A session expands to its todo list and plan and to each file it
   changed with +/− line counts; open a file's diff, step through them all with **Review All**
   (palette: **Claude: Review next/previous changed file**), or **Revert** one file to before the
   session (a copy of the current file is kept in `discarded/` for 30 days). Revert is refused
@@ -666,11 +666,6 @@ information rather than triggering the install dialog).
   Review next changed file** starts a review of it from the keyboard. **Resume** opens a terminal
   running `claude --resume <id>` in the project folder, with `CLAUDE_CONFIG_DIR` set for a
   profile other than `~/.claude`.
-- Costs are estimates from built-in list prices, not a bill; models without a price show
-  "cost n/a". Set your own in settings.json, in USD per million tokens:
-  `"claude": { "prices": { "claude-sonnet-5": { "input": 3, "output": 15 } } }` (cache prices
-  default to 1.25×, 2× and 0.1× the input price; `cache_write`, `cache_write_1h` and `cache_read`
-  override them).
 - Optional title-bar indicator for Claude plan usage (5-hour and weekly windows).
 
 **Also**
@@ -1240,7 +1235,7 @@ every setting Athena reads, grouped as Editor, Workbench, Explorer, Git, Claude 
 Servers, each with its title, description, key and a control: a checkbox, a number field (written
 once you pause typing or press Return; a value it cannot take is explained under the field and
 not written), a
-dropdown, or, for settings that hold structured values (`lsp`, `claude.prices`,
+dropdown, or, for settings that hold structured values (`lsp`,
 `claude.profiles`, `editor.codeActionsOnSave`), a link to the JSON file. Search matches titles, descriptions, keys
 and VS Code's spellings.
 **User** edits your settings.json; **Project · name** edits the active project's

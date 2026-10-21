@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, PoisonError};
@@ -19,7 +19,7 @@ use super::lsp::{CONFIRMED, confirm_buttons};
 use super::menus::shell_item;
 use super::review::backup_dir;
 use crate::snapshots::{self, Before};
-use crate::transcripts::{self, Profile, Tokens};
+use crate::transcripts::{self, Profile};
 
 mod list;
 pub(super) mod live;
@@ -218,7 +218,6 @@ pub(super) struct SessionRow {
     profile: Option<Profile>,
     modified: SystemTime,
     messages: usize,
-    tokens: BTreeMap<String, Tokens>,
     files: Vec<FileChange>,
 }
 
@@ -302,7 +301,6 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
             profile: Some(s.profile),
             modified: s.modified,
             messages: s.summary.messages,
-            tokens: s.summary.tokens,
             files: Vec::new(),
         })
         .collect();
@@ -327,7 +325,6 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
                 profile: None,
                 modified: stored.modified,
                 messages: 0,
-                tokens: BTreeMap::new(),
                 files,
             }),
         }
@@ -380,20 +377,6 @@ fn todo_lines(todos: &[TodoInfo]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn cost_label(
-    tokens: &BTreeMap<String, Tokens>,
-    prices: &HashMap<String, transcripts::Price>,
-) -> String {
-    if tokens.is_empty() {
-        return String::new();
-    }
-    match transcripts::cost(tokens, prices) {
-        (_, unpriced) if unpriced.len() == tokens.len() => "cost n/a".into(),
-        (usd, unpriced) if unpriced.is_empty() => format!("≈ ${usd:.2}"),
-        (usd, _) => format!("≈ ${usd:.2}+"),
-    }
 }
 
 /// What Resume types: the profile's config folder, then Claude Code resuming the session.
@@ -1050,7 +1033,6 @@ mod tests {
             }),
             modified: SystemTime::UNIX_EPOCH,
             messages: 0,
-            tokens: BTreeMap::new(),
             files: Vec::new(),
         }
     }

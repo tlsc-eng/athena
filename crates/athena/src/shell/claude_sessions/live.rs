@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
@@ -11,7 +11,6 @@ use gpui::{App, Context};
 use super::{SessionRow, SessionsState, pick_row, short_id};
 use crate::shell::Shell;
 use crate::shell::item::ItemView;
-use crate::transcripts::Tokens;
 
 /// A Claude session one window knows, whether or not a terminal runs it now.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,16 +32,10 @@ pub(crate) struct LiveSession {
     /// Todos done out of all of them.
     pub todos: Option<(usize, usize)>,
     pub files: usize,
-    /// By model, for pricing.
-    pub usage: BTreeMap<String, Tokens>,
     pub modified: SystemTime,
 }
 
 impl LiveSession {
-    pub fn cost_label(&self, prices: &HashMap<String, crate::transcripts::Price>) -> String {
-        super::cost_label(&self.usage, prices)
-    }
-
     fn rank(&self) -> u8 {
         match self.state {
             Some(ClaudeState::NeedsInput) => 0,
@@ -218,7 +211,6 @@ fn with_terminals(
             unread: false,
             todos: None,
             files: 0,
-            usage: BTreeMap::new(),
             modified: SystemTime::UNIX_EPOCH,
         });
     }
@@ -398,7 +390,6 @@ impl Shell {
                     unread: term.is_some_and(|t| unread(t.state, t.bell)),
                     todos: live.and_then(|l| todo_counts(&l.todos)),
                     files: row.map_or(0, |r| r.files.len()),
-                    usage: row.map(|r| r.tokens.clone()).unwrap_or_default(),
                     // A live session with no transcript row yet is current, not the oldest.
                     modified: row.map_or_else(
                         || {
@@ -497,7 +488,6 @@ mod tests {
             unread,
             todos: None,
             files: 0,
-            usage: BTreeMap::new(),
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(1000 - age),
         }
     }

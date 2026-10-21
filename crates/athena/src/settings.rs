@@ -44,8 +44,6 @@ pub struct Settings {
     pub zoom_level: Option<i32>,
     /// VS Code ESLint's `eslint.fixOnSave`-style switch: Cmd+S applies ESLint's fixes first.
     pub eslint_fix_on_save: Option<bool>,
-    /// `claude.prices`: USD per million tokens by model id, over the built-in estimates.
-    pub claude_prices: HashMap<String, crate::transcripts::Price>,
     /// `claude.hooks`: Athena's hooks in every Claude Code config folder; on unless turned off.
     pub claude_hooks: Option<bool>,
     /// `claude.profiles`: folder prefix (`/` or `~/`) to config folder name, such as `claude-tlsc`.
@@ -485,10 +483,6 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
         ),
         ("window.zoom_level", s.zoom_level.take().is_some()),
         ("editor.font_size", s.editor.font_size.take().is_some()),
-        (
-            "claude.prices",
-            !std::mem::take(&mut s.claude_prices).is_empty(),
-        ),
         ("claude.hooks", s.claude_hooks.take().is_some()),
         (
             "claude.profiles",
@@ -723,17 +717,15 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                     block
                         .iter()
                         .try_for_each(|(name, value)| match name.as_str() {
-                            "prices" => claude_prices(&mut settings, value),
+                            "prices" => Ok(()),
                             "hooks" => claude_hooks(&mut settings, value),
                             "profiles" => claude_profiles(&mut settings, value),
                             _ => Err(format!("has no setting \"{name}\"")),
                         })
                 }
-                _ => Err(
-                    "must be {\"prices\": {model id: prices}, \"hooks\": true or false, \
+                _ => Err("must be {\"hooks\": true or false, \
                           \"profiles\": {folder: profile}}"
-                        .into(),
-                ),
+                    .into()),
             },
             k if k.len() > 2 && k.starts_with('[') && k.ends_with(']') => {
                 let lang = settings
@@ -770,7 +762,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                     settings.lsp.insert(server_name(name).into(), value.clone());
                     Ok(())
                 }
-                Some(("claude", "prices")) => claude_prices(&mut settings, value),
+                Some(("claude", "prices")) => Ok(()),
                 Some(("claude", "hooks")) => claude_hooks(&mut settings, value),
                 Some(("claude", "profiles")) => claude_profiles(&mut settings, value),
                 _ => Err("is not a setting".into()),
@@ -813,31 +805,6 @@ fn claude_profiles(settings: &mut Settings, value: &Value) -> Result<(), String>
         };
         settings.claude_profiles.retain(|(f, _)| f != folder);
         settings.claude_profiles.push((folder.clone(), name));
-    }
-    Ok(())
-}
-
-/// Reads `{"claude-opus-5": {"input": 5, "output": 25}}`; cache prices default to the usual
-/// multiples of the input price.
-fn claude_prices(settings: &mut Settings, value: &Value) -> Result<(), String> {
-    let models = value
-        .as_object()
-        .ok_or("must be an object of prices by model id")?;
-    for (model, price) in models {
-        let field = |name: &str| match price.get(name) {
-            None => Ok(None),
-            Some(v) => v.as_f64().filter(|n| *n >= 0.).map(Some).ok_or(format!(
-                "\"{model}\".\"{name}\" must be a number of USD per million tokens"
-            )),
-        };
-        let (Some(input), Some(output)) = (field("input")?, field("output")?) else {
-            return Err(format!("\"{model}\" needs \"input\" and \"output\" prices"));
-        };
-        let mut p = crate::transcripts::Price::of(input, output);
-        p.cache_write_5m = field("cache_write")?.unwrap_or(p.cache_write_5m);
-        p.cache_write_1h = field("cache_write_1h")?.unwrap_or(p.cache_write_1h);
-        p.cache_read = field("cache_read")?.unwrap_or(p.cache_read);
-        settings.claude_prices.insert(model.clone(), p);
     }
     Ok(())
 }
@@ -1576,35 +1543,29 @@ pub(crate) mod tests {
         assert!(!Settings::default().eslint_fix_on_save(), "off by default");
         let (dotted, _) = parse(r#"{"eslint.fixOnSave": true}"#).unwrap();
         assert!(dotted.eslint_fix_on_save());
-        assert_eq!(s.claude_prices["claude-sonnet-5"].cache_read, 0.3);
     }
 
     #[test]
-    fn claude_prices_fill_cache_prices_from_the_input_price_and_reject_bad_ones() {
-        let (s, problems) =
-            parse(r#"{"claude.prices": {"m-1": {"input": 2, "output": 10, "cache_write_1h": 3}}}"#)
-                .unwrap();
-        assert!(problems.is_empty(), "{problems:?}");
-        let p = s.claude_prices["m-1"];
-        assert_eq!(
-            (
-                p.input,
-                p.output,
-                p.cache_write_5m,
-                p.cache_write_1h,
-                p.cache_read
-            ),
-            (2., 10., 2.5, 3., 0.2)
-        );
+    fn the_retired_claude_prices_key_loads_without_a_notice() {
+        for old in [
+            r#"{"claude.prices": {"m": {"input": 1, "output": 2}}}"#,
+            r#"{"claude": {"prices": {"m": {"input": 1, "output": 2}}}}"#,
+        ] {
+            let (s, problems) = parse(old).unwrap();
+            assert!(problems.is_empty(), "{old}: {problems:?}");
+            assert_eq!(s, Settings::default());
+        }
+    }
+
+    #[test]
+    fn the_claude_block_still_reports_unknown_keys_and_bad_hooks() {
         for bad in [
-            r#"{"claude": {"prices": {"m": {"input": 1}}}}"#,
-            r#"{"claude": {"prices": {"m": {"input": -1, "output": 1}}}}"#,
-            r#"{"claude": {"prices": {"m": {"input": 1, "output": "x"}}}}"#,
-            r#"{"claude": {"prices": []}}"#,
-            r#"{"claude": {"price": {}}}"#,
+            r#"{"claude": {"pricess": {}}}"#,
+            r#"{"claude": {"hooks": "no"}}"#,
+            r#"{"claude.hooks": "no"}"#,
         ] {
             let (_, problems) = parse(bad).unwrap();
-            assert_eq!(problems.len(), 1, "{bad}");
+            assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
         }
     }
 
@@ -2406,12 +2367,12 @@ pub(crate) mod tests {
                 "[go]": {"format_on_save": false},
                 "lsp": {"gopls": {"hints": {"assignVariableTypes": true}}},
                 "theme": "dark", "window.zoom_level": 2,
-                "claude": {"prices": {"claude-x": {"input": 1, "output": 2}}}}"#,
+                "claude": {"hooks": false}}"#,
         )
         .unwrap();
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert_eq!(project.theme, None);
-        assert!(project.claude_prices.is_empty());
+        assert_eq!(project.claude_hooks, None);
         let both = user.overlaid(&project);
         assert_eq!(both.editor.tab_size, Some(2));
         let go = both.editor_for(Some(Lang::Go));
