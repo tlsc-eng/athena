@@ -394,7 +394,10 @@ impl Shell {
         }
         let previous = self.workspace.active;
         let index = match windows::take_parked(&root, cx) {
-            Some(project) => self.workspace.adopt_project(project),
+            Some((project, bindings)) => {
+                self.review.sessions.absorb(bindings);
+                self.workspace.adopt_project(project)
+            }
             None => self.workspace.add_project(root),
         };
         let root = self.workspace.projects[index].root.clone();

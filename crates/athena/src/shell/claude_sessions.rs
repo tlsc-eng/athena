@@ -61,8 +61,8 @@ pub(super) struct SessionsState {
     panes: HashMap<PaneId, String>,
     /// Where each session started, as its SessionStart hook said.
     cwds: HashMap<String, PathBuf>,
-    /// `live::locate` per cwd, as the title chip asks on every frame; dropped when hooks or a
-    /// reload say the checkout may have changed.
+    /// `live::locate` per cwd, as the session list redraws often; dropped when a hook, a reload
+    /// or a branch move says the checkout may have changed.
     places: RefCell<HashMap<PathBuf, (PathBuf, Option<String>)>>,
     review: Option<Review>,
 }
@@ -385,16 +385,10 @@ impl Shell {
         if let Some(pane) = caller {
             // A relative path would resolve against Athena's own folder when located.
             let cwd = cwd.is_absolute().then_some(cwd);
-            if let Some(cwd) = &cwd {
-                self.review
-                    .sessions
-                    .cwds
-                    .insert(session.clone(), cwd.clone());
+            if let Some(cwd) = cwd {
+                self.review.sessions.cwds.insert(session.clone(), cwd);
             }
             self.bind_session(pane, session, cx);
-            if let Some(cwd) = cwd {
-                self.review.sessions.place(&cwd);
-            }
             cx.notify();
         }
     }
@@ -403,9 +397,7 @@ impl Shell {
     pub(super) fn bind_session(&mut self, pane: PaneId, session: String, cx: &mut Context<Self>) {
         super::windows::unbind_elsewhere(session.clone(), self.window_handle, cx);
         let state = &mut self.review.sessions;
-        if let Some(cwd) = state.cwds.get(&session) {
-            state.places.get_mut().remove(cwd);
-        }
+        state.places.get_mut().clear();
         state.bind(pane, session);
     }
 
@@ -476,7 +468,6 @@ impl Shell {
                     state.loading = None;
                     state.hooks_on = hooks_on;
                     state.places.get_mut().clear();
-                    state.place(&root);
                     // The newest session opens on first view: it is usually the one to review.
                     if state.rows.is_empty()
                         && state.expanded.is_empty()

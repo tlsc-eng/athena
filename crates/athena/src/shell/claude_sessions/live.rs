@@ -100,7 +100,7 @@ fn locate(cwd: &Path) -> (PathBuf, Option<String>) {
     }
 }
 
-/// Read from HEAD on disk, as this runs on every draw and must not start git.
+/// Read from HEAD on disk, as this must not start git.
 fn branch_of(tree: &Path) -> Option<String> {
     let head = std::fs::read_to_string(git::git_dirs(tree)?.git_dir.join("HEAD")).ok()?;
     head.trim()
@@ -123,6 +123,10 @@ struct Running {
 }
 
 impl SessionsState {
+    pub(in crate::shell) fn forget_places(&mut self) {
+        self.places.get_mut().clear();
+    }
+
     /// `locate(cwd)`, remembered until a hook or a reload clears it.
     pub(super) fn place(&self, cwd: &Path) -> (PathBuf, Option<String>) {
         let mut places = self.places.borrow_mut();
@@ -355,7 +359,8 @@ mod tests {
         sh(&nested, &["init", "-q", "-b", "main"]);
         assert_eq!(locate(&nested), (nested.clone(), None));
 
-        let loose = std::env::temp_dir().join("athena-live-no-repo");
+        let loose = main.with_extension("loose");
+        std::fs::create_dir_all(&loose).unwrap();
         assert_eq!(locate(&loose), (loose.clone(), None));
 
         sh(&tree, &["switch", "-q", "--detach"]);
@@ -370,6 +375,7 @@ mod tests {
             &["worktree", "remove", "--force", tree.to_str().unwrap()],
         );
         std::fs::remove_dir_all(&main).unwrap();
+        std::fs::remove_dir_all(&loose).unwrap();
     }
 
     #[test]
@@ -442,8 +448,11 @@ mod tests {
         assert!(!from.cwds.contains_key("a") && from.cwds.contains_key("b"));
         assert!(!from.live.contains_key("a") && from.live.contains_key("b"));
 
+        let mut parked = SessionsState::default();
+        parked.absorb(moved);
         let mut to = SessionsState::default();
-        to.absorb(moved);
+        to.absorb(parked.split_off(&[1]));
+        assert!(parked.panes.is_empty() && parked.cwds.is_empty() && parked.live.is_empty());
         assert_eq!(to.panes.get(&1).map(String::as_str), Some("a"));
         assert_eq!(to.cwds.get("a"), Some(&PathBuf::from("/x")));
         assert!(to.live.contains_key("a") && to.panes.len() == 1);

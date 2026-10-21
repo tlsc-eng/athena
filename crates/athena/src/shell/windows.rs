@@ -15,7 +15,7 @@ use gpui::{
 
 use super::Shell;
 use super::bridge::hook_claude_holds_terminal;
-use super::claude_sessions::Bindings;
+use super::claude_sessions::{Bindings, SessionsState};
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
@@ -33,6 +33,8 @@ pub(super) struct Windows {
     /// The window the user was last in, which commands from outside act on.
     focused: Option<AnyWindowHandle>,
     parked: Vec<Project>,
+    /// What the parked projects' terminals ran, to give back with them; the same shape a window keeps.
+    parked_sessions: SessionsState,
     app: AppFields,
     pub notices: Rc<RefCell<Log>>,
     ide: Option<ide::Server>,
@@ -85,6 +87,7 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         open: Vec::new(),
         focused: None,
         parked,
+        parked_sessions: SessionsState::default(),
         app: AppFields::of(&windows[0]),
         ide: None,
         ide_clients: HashMap::new(),
@@ -326,8 +329,21 @@ pub(super) fn focus_project(handle: WindowHandle<Shell>, root: PathBuf, cx: &mut
 }
 
 /// The project a window closed earlier left running at `root`, to reopen with its tabs.
-pub(super) fn take_parked(root: &Path, cx: &mut App) -> Option<Project> {
-    athena_workspace::take_parked(&mut cx.global_mut::<Windows>().parked, root)
+pub(super) fn take_parked(root: &Path, cx: &mut App) -> Option<(Project, Bindings)> {
+    let windows = cx.global_mut::<Windows>();
+    let project = athena_workspace::take_parked(&mut windows.parked, root)?;
+    let bindings = windows.parked_sessions.split_off(&terminal_panes(&project));
+    Some((project, bindings))
+}
+
+fn terminal_panes(project: &Project) -> Vec<PaneId> {
+    project
+        .items()
+        .filter_map(|i| match i.kind {
+            athena_workspace::ItemKind::Terminal { session } => session,
+            _ => None,
+        })
+        .collect()
 }
 
 /// Roots open in windows other than `except`, for the IDE server's lock file and breakpoints.
@@ -434,9 +450,14 @@ pub(super) fn is_last(cx: &App) -> bool {
 
 /// Closes a window whose unsaved files are settled; its projects are parked with their shells
 /// still running, and go to Open Recent.
-pub(super) fn close(window: AnyWindowHandle, projects: Vec<Project>, cx: &mut App) {
+pub(super) fn close(
+    window: AnyWindowHandle,
+    projects: Vec<Project>,
+    bindings: Bindings,
+    cx: &mut App,
+) {
     forget(window, cx);
-    park_projects(Some(window), projects, cx);
+    park_projects(Some(window), projects, bindings, cx);
     cx.defer(move |cx| {
         if let Some(next) = focused(cx) {
             let _ = next.update(cx, |shell, _, cx| shell.save_now(cx));
@@ -445,8 +466,14 @@ pub(super) fn close(window: AnyWindowHandle, projects: Vec<Project>, cx: &mut Ap
     });
 }
 
-fn park_projects(from: Option<AnyWindowHandle>, projects: Vec<Project>, cx: &mut App) {
+fn park_projects(
+    from: Option<AnyWindowHandle>,
+    projects: Vec<Project>,
+    bindings: Bindings,
+    cx: &mut App,
+) {
     let windows = cx.global_mut::<Windows>();
+    windows.parked_sessions.absorb(bindings);
     let mut recent = windows.app.recent.clone();
     athena_workspace::park(&mut windows.parked, &mut recent, projects);
     let fields = AppFields {
@@ -940,8 +967,8 @@ impl Shell {
             dirty.retain(|e| !e.update(cx, |e, cx| e.save(cx)));
         }
         self.settle_unsaved(dirty, "closing the window", window, cx, |this, cx| {
-            let (projects, ..) = this.detach_all(cx);
-            close(this.window_handle, projects, cx);
+            let (projects, _, bindings) = this.detach_all(cx);
+            close(this.window_handle, projects, bindings, cx);
         });
     }
 
@@ -999,14 +1026,7 @@ impl Shell {
         self.debug_project_closed(root, cx);
         self.debug.forget_project(root);
         let project = self.workspace.detach_project(index)?;
-        let panes: Vec<PaneId> = project
-            .items()
-            .filter_map(|i| match i.kind {
-                athena_workspace::ItemKind::Terminal { session } => session,
-                _ => None,
-            })
-            .collect();
-        let bindings = self.review.sessions.split_off(&panes);
+        let bindings = self.review.sessions.split_off(&terminal_panes(&project));
         let project = Workspace {
             projects: vec![project],
             ..Workspace::default()
@@ -1092,7 +1112,7 @@ impl Shell {
                     );
                 });
                 if back.is_err() {
-                    park_projects(None, vec![kept], cx);
+                    park_projects(None, vec![kept], Bindings::default(), cx);
                 }
             }
             drop(views);
@@ -1225,12 +1245,11 @@ impl Shell {
                 }) {
                     return focus_project(holder, root, cx);
                 }
-                let project = take_parked(&root, cx).unwrap_or_else(|| Project::new(root));
+                let (project, mut bindings) = take_parked(&root, cx)
+                    .unwrap_or_else(|| (Project::new(root), Bindings::default()));
                 // Parked rather than dropped, so its tabs and shells can still be reopened.
-                if let Some(project) =
-                    new_window(Some(project), &mut Bindings::default(), Some(near), cx)
-                {
-                    park_projects(None, vec![project], cx);
+                if let Some(project) = new_window(Some(project), &mut bindings, Some(near), cx) {
+                    park_projects(None, vec![project], bindings, cx);
                 }
             });
         })
