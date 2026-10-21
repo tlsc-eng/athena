@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -23,6 +24,10 @@ use super::menus::shell_item;
 use super::review::backup_dir;
 use crate::snapshots::{self, Before};
 use crate::transcripts::{self, Profile, Tokens};
+
+#[allow(dead_code)]
+// Read by the Sessions list, rail counts and title chip, which are not built yet.
+pub(super) mod live;
 
 actions!(
     athena,
@@ -54,7 +59,28 @@ pub(super) struct SessionsState {
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.
     panes: HashMap<PaneId, String>,
+    /// Where each session started, as its SessionStart hook said.
+    cwds: HashMap<String, PathBuf>,
+    /// `live::locate` per cwd, as the session list redraws often; dropped when a hook, a reload
+    /// or a branch move says the checkout may have changed.
+    places: RefCell<HashMap<PathBuf, (PathBuf, Option<String>)>>,
     review: Option<Review>,
+}
+
+/// What follows a terminal's sessions when its project moves to another window.
+#[derive(Default)]
+pub(super) struct Bindings {
+    panes: HashMap<PaneId, String>,
+    cwds: HashMap<String, PathBuf>,
+    live: HashMap<String, LivePlan>,
+}
+
+impl Bindings {
+    pub(super) fn extend(&mut self, other: Bindings) {
+        self.panes.extend(other.panes);
+        self.cwds.extend(other.cwds);
+        self.live.extend(other.live);
+    }
 }
 
 impl SessionsState {
@@ -65,6 +91,39 @@ impl SessionsState {
         }
         self.panes.retain(|p, s| *p == pane || *s != session);
         self.panes.insert(pane, session);
+    }
+
+    /// Takes out what is known of the sessions the `moved` panes run.
+    pub(super) fn split_off(&mut self, moved: &[PaneId]) -> Bindings {
+        let mut out = Bindings::default();
+        for pane in moved {
+            let Some(session) = self.panes.remove(pane) else {
+                continue;
+            };
+            if let Some(cwd) = self.cwds.remove(&session) {
+                out.cwds.insert(session.clone(), cwd);
+            }
+            if let Some(live) = self.live.remove(&session) {
+                out.live.insert(session.clone(), live);
+            }
+            out.panes.insert(*pane, session);
+        }
+        out
+    }
+
+    pub(super) fn absorb(&mut self, moved: Bindings) {
+        for (pane, session) in moved.panes {
+            self.bind(pane, session);
+        }
+        self.cwds.extend(moved.cwds);
+        self.live.extend(moved.live);
+    }
+
+    /// Forgets which pane runs `session`, as another window now does.
+    pub(super) fn unbind(&mut self, session: &str) -> bool {
+        let before = self.panes.len();
+        self.panes.retain(|_, s| s != session);
+        self.panes.len() != before
     }
 }
 
@@ -310,7 +369,7 @@ impl Shell {
             _ => return,
         };
         if let Some(pane) = caller {
-            state.bind(pane, session);
+            self.bind_session(pane, session, cx);
         }
         cx.notify();
     }
@@ -319,13 +378,27 @@ impl Shell {
     pub(super) fn claude_session_started(
         &mut self,
         session: String,
+        cwd: PathBuf,
         caller: Option<PaneId>,
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = caller {
-            self.review.sessions.bind(pane, session);
+            // A relative path would resolve against Athena's own folder when located.
+            let cwd = cwd.is_absolute().then_some(cwd);
+            if let Some(cwd) = cwd {
+                self.review.sessions.cwds.insert(session.clone(), cwd);
+            }
+            self.bind_session(pane, session, cx);
             cx.notify();
         }
+    }
+
+    /// Binds `session` to `pane` here and drops it from every other window, which cannot run it too.
+    pub(super) fn bind_session(&mut self, pane: PaneId, session: String, cx: &mut Context<Self>) {
+        super::windows::unbind_elsewhere(session.clone(), self.window_handle, cx);
+        let state = &mut self.review.sessions;
+        state.places.get_mut().clear();
+        state.bind(pane, session);
     }
 
     /// Something changed on disk or in a session: read the list again when it next draws.
@@ -400,6 +473,7 @@ impl Shell {
                 if state.root.as_ref() == Some(&root) {
                     state.loading = None;
                     state.hooks_on = hooks_on;
+                    state.places.get_mut().clear();
                     // The newest session opens on first view: it is usually the one to review.
                     if state.rows.is_empty()
                         && state.expanded.is_empty()
