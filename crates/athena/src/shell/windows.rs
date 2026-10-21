@@ -349,6 +349,7 @@ pub(super) fn new_window(
         .and_then(|f| windows.open.iter().find(|o| o.handle == f))
         .map(|o| o.saved.clone())
         .unwrap_or_default();
+    let side_mode = base.ui.side_mode;
     let mut workspace = Workspace {
         projects: Vec::new(),
         active: None,
@@ -362,6 +363,7 @@ pub(super) fn new_window(
     };
     workspace.ui.font_zoom = app.font_zoom;
     workspace.ui.zoom_level = app.zoom_level;
+    workspace.ui.side_mode = side_mode;
     if let Some(project) = project {
         workspace.adopt_project(project);
     }

@@ -216,7 +216,7 @@ impl Shell {
             DrawerTab::Problems => self.render_problems(cx),
             DrawerTab::Terminal => self.render_terminal_panel(cx),
             DrawerTab::Timeline => self.render_timeline(cx),
-            DrawerTab::Claude => self.render_claude_sessions(cx),
+            DrawerTab::Claude => self.render_claude_sessions(false, cx),
             DrawerTab::Debug => self.render_debug(window, cx),
         };
         // Only the search field, panel terminal and Debug fields take focus; once hidden, none can.

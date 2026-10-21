@@ -5,8 +5,8 @@ use std::rc::Rc;
 use athena_lsp::{Position, Symbol, symbol_kind_label};
 use athena_ui::{ActiveTheme, InputEvent, TextInput, Tooltip};
 use gpui::{
-    AnyElement, Context, Entity, Focusable, FontWeight, MouseButton, ScrollStrategy, Subscription,
-    UniformListScrollHandle, Window, actions, div, prelude::*, px, uniform_list,
+    AnyElement, Context, Entity, MouseButton, ScrollStrategy, Subscription,
+    UniformListScrollHandle, div, prelude::*, px, uniform_list,
 };
 
 use super::Shell;
@@ -14,16 +14,12 @@ use super::breadcrumbs::symbol_chain;
 use super::calls::symbol_badge;
 use super::lsp::document_key;
 
-actions!(athena, [ShowOutline, ShowExplorer]);
-
 const ROW_HEIGHT: f32 = 22.;
 const INDENT: f32 = 12.;
 
 /// The tree area's Outline view: the active editor's symbols, as VS Code's Outline lists them.
 #[derive(Default)]
 pub(super) struct OutlineState {
-    /// The tree area shows the outline instead of the files.
-    pub(super) showing: bool,
     filter: Option<Entity<TextInput>>,
     _subscriptions: Vec<Subscription>,
     /// Closed symbols by file and the names leading to them, which survive edits that renumber.
@@ -122,25 +118,7 @@ fn outline_rows(symbols: &[Symbol], filter: &str, closed: impl Fn(usize) -> bool
 }
 
 impl Shell {
-    /// Explorer or Outline in the tree area, showing the tree first if it was hidden.
-    pub(super) fn show_outline(
-        &mut self,
-        outline: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.outline.showing = outline;
-        if !self.workspace.ui.tree_visible {
-            self.toggle_tree(cx);
-        }
-        if outline {
-            let filter = self.outline_filter(cx);
-            window.focus(&filter.focus_handle(cx));
-        }
-        cx.notify();
-    }
-
-    fn outline_filter(&mut self, cx: &mut Context<Self>) -> Entity<TextInput> {
+    pub(super) fn outline_filter(&mut self, cx: &mut Context<Self>) -> Entity<TextInput> {
         if let Some(filter) = &self.outline.filter {
             return filter.clone();
         }
@@ -221,45 +199,6 @@ impl Shell {
         let s = &symbols[row.index];
         self.lsp.jump = Some((self.project_spelling(&s.path), s.range.start));
         cx.notify();
-    }
-
-    /// The Explorer / Outline switch at the top of the tree area.
-    pub(super) fn render_tree_switch(&self, cx: &mut Context<Self>) -> AnyElement {
-        let t = cx.theme().clone();
-        let option = |id: &'static str, label: &'static str, outline: bool| {
-            let active = self.outline.showing == outline;
-            div()
-                .id(id)
-                .h(t.ui(22.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .rounded(t.shape.radius_control)
-                .cursor_pointer()
-                .text_color(if active {
-                    t.color.content
-                } else {
-                    t.color.content_muted
-                })
-                .when(active, |el| {
-                    el.bg(t.color.surface_active)
-                        .font_weight(FontWeight::MEDIUM)
-                })
-                .when(!active, |el| {
-                    el.hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-                })
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.show_outline(outline, window, cx)),
-                )
-                .child(label)
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .child(option("tree-explorer", "Explorer", false))
-            .child(option("tree-outline", "Outline", true))
-            .into_any_element()
     }
 
     /// The Outline view: a filter, then the symbols, the one holding the cursor highlighted.

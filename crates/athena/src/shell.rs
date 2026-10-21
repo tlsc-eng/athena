@@ -39,6 +39,7 @@ mod settings;
 mod settings_ui;
 mod shortcuts;
 mod shortcuts_ui;
+mod side_panel;
 mod sidebar;
 mod snippets;
 mod status_bar;
@@ -62,7 +63,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, empty_state, motion};
-use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
+use athena_workspace::{
+    Axis, Direction, ItemId, PaneId, SideMode, WindowMode, WindowState, Workspace,
+};
 use gpui::{
     Animation, AnyElement, Bounds, Context, ExternalPaths, FocusHandle, FontWeight, IntoElement,
     MouseButton, NavigationDirection, PathPromptOptions, Pixels, Render, Subscription, Task,
@@ -130,6 +133,7 @@ pub struct Shell {
     settings: settings::SettingsState,
     breadcrumbs: breadcrumbs::BreadcrumbState,
     outline: outline::OutlineState,
+    side_panel: side_panel::SidePanelState,
     problems: problems::ProblemsState,
     code_actions: code_actions::CodeActionState,
     git: git_view::GitState,
@@ -266,6 +270,7 @@ impl Shell {
             settings,
             breadcrumbs: breadcrumbs::BreadcrumbState::default(),
             outline: outline::OutlineState::default(),
+            side_panel: side_panel::SidePanelState::default(),
             problems: problems::ProblemsState::default(),
             code_actions: code_actions::CodeActionState::default(),
             git: git_view::GitState::default(),
@@ -784,13 +789,24 @@ impl Render for Shell {
                 this.next_claude_attention(window, cx)
             }))
             .on_action(
-                cx.listener(|this, _: &outline::ShowOutline, w, cx| this.show_outline(true, w, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &outline::ShowExplorer, w, cx| {
-                    this.show_outline(false, w, cx)
+                cx.listener(|this, _: &crate::actions::ShowSessions, w, cx| {
+                    this.show_side_mode(SideMode::Sessions, w, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &crate::actions::ShowFiles, w, cx| {
+                this.show_side_mode(SideMode::Files, w, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::ShowExplorer, w, cx| {
+                    this.show_side_mode(SideMode::Files, w, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::actions::ShowOutline, w, cx| {
+                this.show_side_mode(SideMode::Outline, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ShowGit, w, cx| {
+                this.show_side_mode(SideMode::Git, w, cx)
+            }))
             .on_action(cx.listener(|this, _: &FindInProject, w, cx| this.find_in_project(w, cx)))
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| {
                 this.toggle_drawer_tab(drawer::DrawerTab::Changes, cx)

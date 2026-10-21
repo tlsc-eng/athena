@@ -97,6 +97,11 @@ actions!(athena, [GitOpenTimeline, GitToggleFileBlame]);
 
 actions!(
     athena,
+    [ShowSessions, ShowFiles, ShowOutline, ShowExplorer, ShowGit]
+);
+
+actions!(
+    athena,
     [
         GitFetch,
         GitPull,
@@ -194,6 +199,8 @@ pub fn init(cx: &mut App) {
         // VS Code's chord; a terminal keeps ⌘K for clearing its scrollback at once.
         KeyBinding::new("cmd-k cmd-s", OpenKeyboardShortcuts, Some("!Terminal")),
         KeyBinding::new("cmd-b", ToggleFileTree, None),
+        KeyBinding::new("cmd-shift-e", ShowFiles, None),
+        KeyBinding::new("ctrl-shift-g", ShowGit, None),
         KeyBinding::new("cmd-alt-b", ToggleSidebar, None),
         KeyBinding::new("cmd-j", ToggleNotifications, None),
         KeyBinding::new("cmd-alt-j", NextClaudeAttention, None),
@@ -368,6 +375,10 @@ fn menus(recent: &[PathBuf]) -> Vec<Menu> {
                 MenuItem::action("Forward", NavigateForward),
                 MenuItem::action("Find in Project…", FindInProject),
                 MenuItem::action("Toggle File Tree", ToggleFileTree),
+                MenuItem::action("Show Sessions", ShowSessions),
+                MenuItem::action("Show Files", ShowFiles),
+                MenuItem::action("Show Outline", ShowOutline),
+                MenuItem::action("Show Git", ShowGit),
                 MenuItem::action("Toggle Project Sidebar", ToggleSidebar),
                 MenuItem::action("Switch Project…", SwitchProject),
                 MenuItem::action("Next Claude Session Needing You", NextClaudeAttention),
