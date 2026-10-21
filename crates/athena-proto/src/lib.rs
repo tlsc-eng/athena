@@ -104,6 +104,14 @@ pub enum AppMsg {
     TestResults,
     /// Where the caller's project's debug session is paused, its stack and top-frame locals.
     DebugState,
+    /// A Claude Code session started, resumed, cleared or compacted in the caller's terminal.
+    /// `source` is Claude's word for which, passed on as it came. Last in the enum because
+    /// postcard encodes variants by position and older clients outlive an update.
+    ClaudeSession {
+        session: String,
+        cwd: PathBuf,
+        source: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

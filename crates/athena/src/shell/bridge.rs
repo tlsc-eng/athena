@@ -67,7 +67,7 @@ impl Shell {
                 }
             }
             AppMsg::ClaudeEdited { path, session } => {
-                self.claude_edited(path, session, cx);
+                self.claude_edited(path, session, caller, cx);
                 AppReply::Ok
             }
             AppMsg::OpenDiff { path, staged } => {
@@ -102,6 +102,10 @@ impl Shell {
                 session: caller,
                 project: caller.and_then(|s| self.session_root(s)),
             },
+            AppMsg::ClaudeSession { session, .. } => {
+                self.claude_session_started(session, caller, cx);
+                AppReply::Ok
+            }
             msg @ (AppMsg::ClaudeTodos { .. } | AppMsg::ClaudePlan { .. }) => {
                 self.claude_plan_event(msg, caller, cx);
                 AppReply::Ok

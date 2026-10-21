@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
 use athena_editor::{DiffEvent, DiffView, FileEncoding, HunkActions};
+use athena_proto::PaneId;
 use athena_workspace::git::{self, Rev};
 use athena_workspace::{DiffBase, ItemKind};
 use gpui::{AppContext as _, Context, Entity, EntityId, Window};
@@ -620,7 +621,18 @@ impl Shell {
     }
 
     /// A Claude Code hook reported an edit: refresh its diffs.
-    pub(super) fn claude_edited(&mut self, path: PathBuf, session: String, cx: &mut Context<Self>) {
+    pub(super) fn claude_edited(
+        &mut self,
+        path: PathBuf,
+        session: String,
+        caller: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane) = caller
+            && !session.is_empty()
+        {
+            self.review.sessions.bind(pane, session.clone());
+        }
         let Some(root) = self
             .workspace
             .projects

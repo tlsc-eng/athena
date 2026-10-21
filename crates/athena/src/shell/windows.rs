@@ -688,6 +688,7 @@ fn target(
         | AppMsg::Identify { .. }
         | AppMsg::ClaudeTodos { .. }
         | AppMsg::ClaudePlan { .. }
+        | AppMsg::ClaudeSession { .. }
         | AppMsg::RunTests { .. }
         | AppMsg::TestResults
         | AppMsg::DebugState => Target::Window(caller.unwrap_or(focused)),

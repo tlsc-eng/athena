@@ -57,6 +57,13 @@ pub(super) struct SessionsState {
     review: Option<Review>,
 }
 
+impl SessionsState {
+    /// Makes `session` the one `pane` runs, dropping the one before it.
+    pub(super) fn bind(&mut self, pane: PaneId, session: String) {
+        self.panes.insert(pane, session);
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct LivePlan {
     todos: Vec<TodoInfo>,
@@ -302,6 +309,19 @@ impl Shell {
             state.panes.insert(pane, session);
         }
         cx.notify();
+    }
+
+    /// A SessionStart hook reported in: the terminal it came from now runs that session.
+    pub(super) fn claude_session_started(
+        &mut self,
+        session: String,
+        caller: Option<PaneId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane) = caller {
+            self.review.sessions.bind(pane, session);
+            cx.notify();
+        }
     }
 
     /// Something changed on disk or in a session: read the list again when it next draws.
@@ -1091,6 +1111,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn binding_a_pane_again_leaves_only_the_newest_session() {
+        let mut state = SessionsState::default();
+        let pane = PaneId::default();
+        state.bind(pane, "a".into());
+        state.bind(pane, "b".into());
+        assert_eq!(state.panes.len(), 1);
+        assert_eq!(state.panes.get(&pane).map(String::as_str), Some("b"));
     }
 
     #[test]

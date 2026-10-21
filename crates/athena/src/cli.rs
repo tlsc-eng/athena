@@ -6,7 +6,7 @@ use std::process::Command;
 
 use athena_proto::{AppMsg, ClientMsg, ConnectError, NoticeKind, ServerMsg};
 
-const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
+const USAGE: &str = "usage: athena [<folder> | --version | mcp-stdio | mux status | mux stop | notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan|claude-session> | notify --edited <file> [--session <id>] | notify --title <t> [--body <b>]]";
 
 /// Hook input past this is cut off; a Write of a file up to the snapshot limit fits easily.
 const MAX_HOOK_INPUT: u64 = 256 * 1024 * 1024;
@@ -21,6 +21,8 @@ const MAX_PLAN: usize = 64 * 1024;
 struct HookInput {
     session_id: Option<String>,
     cwd: Option<String>,
+    /// On SessionStart: startup, resume, clear or compact.
+    source: Option<String>,
     message: Option<String>,
     tool_name: Option<String>,
     tool_input: Option<ToolInput>,
@@ -105,6 +107,23 @@ fn stop_notice(input: &HookInput) -> NoticeKind {
     } else {
         NoticeKind::ClaudeStopped
     }
+}
+
+/// What a SessionStart hook tells the window; a `source` Claude adds later is passed on as is.
+fn session_message(input: HookInput) -> Option<AppMsg> {
+    let session = input
+        .session_id
+        .filter(|s| crate::snapshots::valid_session(s))?;
+    let cwd = input
+        .cwd
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    Some(AppMsg::ClaudeSession {
+        session,
+        cwd,
+        source: input.source.unwrap_or_default(),
+    })
 }
 
 fn read_hook_input(input: impl Read) -> HookInput {
@@ -219,6 +238,12 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
     }
     if event.as_deref() == Some("claude-plan") {
         if let Some(msg) = plan_message(hook_input()) {
+            let _ = tell_window(msg);
+        }
+        return Ok(());
+    }
+    if event.as_deref() == Some("claude-session") {
+        if let Some(msg) = session_message(hook_input()) {
             let _ = tell_window(msg);
         }
         return Ok(());
@@ -370,6 +395,31 @@ mod tests {
 
     fn hook_input(value: serde_json::Value) -> HookInput {
         read_hook_input(value.to_string().as_bytes())
+    }
+
+    #[test]
+    fn session_start_input_becomes_a_message_and_tolerates_unknown_sources() {
+        let msg = |source: serde_json::Value| {
+            session_message(hook_input(serde_json::json!({
+                "session_id": "abc-123", "cwd": "/work/app", "source": source
+            })))
+        };
+        for source in ["startup", "resume", "clear", "compact", "from-the-future"] {
+            assert_eq!(
+                msg(source.into()),
+                Some(AppMsg::ClaudeSession {
+                    session: "abc-123".into(),
+                    cwd: "/work/app".into(),
+                    source: source.into(),
+                })
+            );
+        }
+        let Some(AppMsg::ClaudeSession { source, .. }) = msg(serde_json::Value::Null) else {
+            panic!("a missing source still binds");
+        };
+        assert_eq!(source, "");
+        assert!(session_message(hook_input(serde_json::json!({ "source": "clear" }))).is_none());
+        assert!(session_message(hook_input(serde_json::json!({ "session_id": "../x" }))).is_none());
     }
 
     #[test]
