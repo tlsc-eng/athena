@@ -628,8 +628,9 @@ impl Shell {
         caller: Option<PaneId>,
         cx: &mut Context<Self>,
     ) {
+        // The caller may live in another window than the file's project.
         if let Some(pane) = caller
-            && !session.is_empty()
+            && self.find_session(pane).is_some()
         {
             self.review.sessions.bind(pane, session.clone());
         }

@@ -12,6 +12,17 @@ const MAX_LINES: u32 = 2000;
 const MAX_SELECTION: usize = 64 * 1024;
 const MAX_RUN: usize = 4096;
 const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+/// How far up the hook client's ancestry the pane's foreground program may be: the client, the
+/// shell Claude runs hooks in, Claude, and a launcher script around it. A `claude -p` started
+/// by Claude's Bash tool puts its own process and the tool's shell in between, so it is farther.
+const HOOK_DEPTH: usize = 3;
+
+fn runs_hook_of(lineage: &[i32], foreground: i32) -> bool {
+    lineage
+        .iter()
+        .position(|&p| p == foreground)
+        .is_some_and(|at| at <= HOOK_DEPTH)
+}
 
 impl Shell {
     /// Answers a request from `athena` or the MCP bridge.
@@ -130,13 +141,28 @@ impl Shell {
         cx: &gpui::App,
     ) -> Option<PaneId> {
         let session = claimed?;
-        let foreground = self.items.values().find_map(|v| match v {
+        let foreground = self.foreground_pid(session, cx)?;
+        lineage.contains(&foreground).then_some(session)
+    }
+
+    /// Like `verify_caller`, for a hook: Claude itself must be the pane's foreground program.
+    pub(super) fn verify_hook_caller(
+        &self,
+        claimed: PaneId,
+        lineage: &[i32],
+        cx: &gpui::App,
+    ) -> Option<PaneId> {
+        let foreground = self.foreground_pid(claimed, cx)?;
+        runs_hook_of(lineage, foreground).then_some(claimed)
+    }
+
+    fn foreground_pid(&self, session: PaneId, cx: &gpui::App) -> Option<i32> {
+        self.items.values().find_map(|v| match v {
             ItemView::Terminal(t) if t.read(cx).session() == Some(session) => {
                 t.read(cx).foreground_pid()
             }
             _ => None,
-        })?;
-        lineage.contains(&foreground).then_some(session)
+        })
     }
 
     /// Asks the user before typing anything Claude sends into a terminal; no answer means no.
@@ -333,5 +359,23 @@ impl Shell {
                 "terminal {session} is not open in Athena; open its tab first"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hook_belongs_to_the_foreground_program_not_to_a_nested_claude() {
+        // hook client, its shell, claude, then the pane's shell
+        assert!(runs_hook_of(&[40, 35, 30, 20], 30));
+        assert!(
+            runs_hook_of(&[40, 35, 31, 30, 20], 30),
+            "a launcher around claude"
+        );
+        // `claude -p` under claude's Bash tool: client, shell, nested claude, tool shell, claude
+        assert!(!runs_hook_of(&[40, 35, 33, 32, 30, 20], 30));
+        assert!(!runs_hook_of(&[40, 35, 30], 99), "not an ancestor at all");
     }
 }

@@ -58,8 +58,12 @@ pub(super) struct SessionsState {
 }
 
 impl SessionsState {
-    /// Makes `session` the one `pane` runs, dropping the one before it.
+    /// Makes `session` the one `pane` runs; a session lives in one pane, the latest to claim it.
     pub(super) fn bind(&mut self, pane: PaneId, session: String) {
+        if session.is_empty() {
+            return;
+        }
+        self.panes.retain(|p, s| *p == pane || *s != session);
         self.panes.insert(pane, session);
     }
 }
@@ -306,7 +310,7 @@ impl Shell {
             _ => return,
         };
         if let Some(pane) = caller {
-            state.panes.insert(pane, session);
+            state.bind(pane, session);
         }
         cx.notify();
     }
@@ -1113,14 +1117,35 @@ mod tests {
         dir.canonicalize().unwrap()
     }
 
+    fn bound(state: &SessionsState) -> Vec<(PaneId, &str)> {
+        let mut all: Vec<_> = state.panes.iter().map(|(p, s)| (*p, s.as_str())).collect();
+        all.sort();
+        all
+    }
+
     #[test]
-    fn binding_a_pane_again_leaves_only_the_newest_session() {
+    fn a_pane_runs_one_session_and_a_session_lives_in_one_pane() {
         let mut state = SessionsState::default();
-        let pane = PaneId::default();
-        state.bind(pane, "a".into());
-        state.bind(pane, "b".into());
-        assert_eq!(state.panes.len(), 1);
-        assert_eq!(state.panes.get(&pane).map(String::as_str), Some("b"));
+        state.bind(1, "a".into());
+        state.bind(1, "b".into());
+        assert_eq!(
+            bound(&state),
+            [(1, "b")],
+            "rebinding a pane replaces its session"
+        );
+        state.bind(2, "b".into());
+        assert_eq!(
+            bound(&state),
+            [(2, "b")],
+            "resuming elsewhere moves the session"
+        );
+        state.bind(1, "a".into());
+        state.bind(2, "".into());
+        assert_eq!(
+            bound(&state),
+            [(1, "a"), (2, "b")],
+            "an empty id binds nothing"
+        );
     }
 
     #[test]
