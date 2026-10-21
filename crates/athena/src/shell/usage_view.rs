@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use athena_proto::NoticeKind;
 use athena_ui::motion::{self, Closing};
-use athena_ui::{ActiveTheme, ButtonKind, Tooltip};
+use athena_ui::{ActiveTheme, ButtonKind, IconButton, Space};
 use gpui::{
     Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, PromptLevel, Window, div,
     prelude::*, px,
@@ -240,19 +240,10 @@ impl Shell {
     pub(super) fn render_usage_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         if !self.workspace.usage_indicator {
-            return div()
-                .id("usage-enable")
-                .h(px(24.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .rounded(t.shape.radius_control)
-                .cursor_pointer()
-                .text_color(t.color.content_muted)
-                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-                .tooltip(|_, cx| Tooltip::view("Show Claude plan usage", cx))
+            return IconButton::new("usage-enable")
+                .label("Usage")
+                .tooltip("Show Claude plan usage")
                 .on_click(cx.listener(|this, _, window, cx| this.enable_usage(window, cx)))
-                .child("Usage")
                 .into_any_element();
         }
         let preferred = self.preferred_profile();
@@ -300,19 +291,25 @@ impl Shell {
             };
             div().text_color(t.color.content_muted).child(label)
         };
-        div()
-            .id("usage")
-            .h(px(24.))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .rounded(t.shape.radius_control)
-            .cursor_pointer()
-            .hover(|s| s.bg(t.color.surface_hover))
-            .when(!self.usage_open(), |el| {
-                el.tooltip(|_, cx| Tooltip::view("Claude plan usage, 5-hour and weekly", cx))
-            })
+        let button = IconButton::new("usage")
+            .icon(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(t.space(Space::Md))
+                    .when(five.is_some() || week.is_some(), |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(t.space(Space::Xxs))
+                                .children(five.map(|f| self.bar(f, 24., cx)))
+                                .children(week.map(|w| self.bar(w, 24., cx))),
+                        )
+                    })
+                    .child(summary),
+            )
+            .active(self.usage_open())
             .on_click(cx.listener(|this, _, _, cx| {
                 // An open popover already closed on this click's mouse-down; don't reopen it.
                 if this.usage_open() {
@@ -321,19 +318,14 @@ impl Shell {
                 this.usage.open = true;
                 this.usage.opened = this.next_generation();
                 cx.notify();
-            }))
-            .when(five.is_some() || week.is_some(), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .children(five.map(|f| self.bar(f, 24., cx)))
-                        .children(week.map(|w| self.bar(w, 24., cx))),
-                )
-            })
-            .child(summary)
-            .into_any_element()
+            }));
+        if self.usage_open() {
+            button.into_any_element()
+        } else {
+            button
+                .tooltip("Claude plan usage, 5-hour and weekly")
+                .into_any_element()
+        }
     }
 
     /// The profile `claude.profiles` names for the active project, else its newest session's.
@@ -381,6 +373,7 @@ impl Shell {
             return None;
         }
         let t = cx.theme().clone();
+        let rise = t.ui(super::status_bar::HEIGHT) + t.space(Space::Xs);
         let preferred = self.preferred_profile();
         let sections: Vec<AnyElement> =
             self.usage
@@ -471,8 +464,8 @@ impl Shell {
         let popover = div()
             .id("usage-popover")
             .absolute()
-            .top(px(40.))
-            .right(px(8.))
+            .bottom(rise)
+            .right(t.space(Space::Md))
             .w(px(300.))
             .p(px(16.))
             .flex()
@@ -504,14 +497,14 @@ impl Shell {
                 popover,
                 ("usage-close", closing.generation),
                 t.motion.fast,
-                |el, d| el.opacity(1. - d).top(px(40. - 4. * d)),
+                move |el, d| el.opacity(1. - d).bottom(rise - px(4.) * d),
             ),
             None => motion::animate_if(
                 t.motion.reduced,
                 popover,
                 ("usage-open", self.usage.opened),
                 Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
-                |el, d| el.opacity(d).top(px(36. + 4. * d)),
+                move |el, d| el.opacity(d).bottom(rise - px(4.) * (1. - d)),
             ),
         })
     }

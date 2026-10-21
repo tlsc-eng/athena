@@ -1,14 +1,15 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
-use athena_ui::ActiveTheme;
 use athena_ui::motion::{self, Closing};
+use athena_ui::{ActiveTheme, IconButton, Size, Space};
 use athena_workspace::{ItemId, ItemKind, Panel, Project, Rect};
 use gpui::{
-    Animation, AnyElement, App, Bounds, Context, FontWeight, Hsla, Pixels, Task, Window, canvas,
-    div, prelude::*, px,
+    Animation, AnyElement, App, Bounds, Context, Corner, FocusHandle, FontWeight, Hsla,
+    KeyDownEvent, Pixels, Task, Window, anchored, canvas, deferred, div, point, prelude::*, px,
+    svg,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,8 @@ const RECOVERY_TOAST_FOR: Duration = Duration::from_secs(30);
 const ACTION_TOAST_FOR: Duration = Duration::from_secs(15);
 const MAX_TOASTS: usize = 3;
 const RECONNECT_AFTER: Duration = Duration::from_secs(2);
+/// An outside click closes the popover on mouse-down, so the same click on the bell must not reopen it.
+const BELL_REOPEN_GUARD: Duration = Duration::from_millis(300);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(super) struct Notification {
@@ -226,7 +229,160 @@ pub(super) fn subscribe(cx: &mut App) -> Task<()> {
     })
 }
 
+/// The notifications popover under the bell.
+pub(super) struct BellState {
+    open: bool,
+    /// Receives Escape while the popover is open.
+    focus: FocusHandle,
+    restore: Option<FocusHandle>,
+    dismissed: Option<Instant>,
+}
+
+impl BellState {
+    pub(super) fn new(cx: &mut App) -> Self {
+        Self {
+            open: false,
+            focus: cx.focus_handle(),
+            restore: None,
+            dismissed: None,
+        }
+    }
+}
+
+/// How many of the given Claude states are waiting for an answer.
+fn needing_input(states: impl IntoIterator<Item = Option<ClaudeState>>) -> usize {
+    states
+        .into_iter()
+        .filter(|s| matches!(s, Some(ClaudeState::NeedsInput)))
+        .count()
+}
+
 impl Shell {
+    /// Claude terminals, across this window's projects, waiting for an answer.
+    pub(super) fn claude_attention_count(&self) -> usize {
+        needing_input(self.items.values().filter_map(|view| match view {
+            ItemView::Terminal(t) => Some(self.claude_marks.get(&t.entity_id())?.state),
+            _ => None,
+        }))
+    }
+
+    pub(super) fn render_attention_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let count = self.claude_attention_count();
+        if count == 0 {
+            return None;
+        }
+        let t = cx.theme();
+        Some(
+            div()
+                .ml(t.space(Space::Lg))
+                .child(
+                    IconButton::new("attention-chip")
+                        .icon(
+                            div()
+                                .text_color(t.color.accent)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(count.to_string()),
+                        )
+                        .label("need you")
+                        .tooltip("Next Claude session needing you  ⌥⌘J")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.next_claude_attention(window, cx)
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        div().mr(t.space(Space::Md)).child(
+            IconButton::new("bell")
+                .icon(svg().path("ui/bell.svg").size(t.space(Space::Xl)))
+                .badge(self.unread())
+                .active(self.bell.open)
+                .tooltip("Notifications")
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_bell(window, cx))),
+        )
+    }
+
+    fn toggle_bell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bell.open {
+            return self.close_bell(window, cx);
+        }
+        if self
+            .bell
+            .dismissed
+            .is_some_and(|at| at.elapsed() < BELL_REOPEN_GUARD)
+        {
+            return;
+        }
+        self.bell.open = true;
+        self.bell.restore = window.focused(cx);
+        window.focus(&self.bell.focus);
+        cx.notify();
+    }
+
+    fn close_bell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.bell.open {
+            return;
+        }
+        self.bell.open = false;
+        if let Some(handle) = self.bell.restore.take() {
+            window.focus(&handle);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn render_bell_popover(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.bell.open {
+            return None;
+        }
+        let t = cx.theme().clone();
+        let under_bell = point(
+            window.viewport_size().width - t.space(Space::Md),
+            t.size(Size::TitleBar) + t.space(Space::Xxs),
+        );
+        let panel = div()
+            .id("bell-popover")
+            .track_focus(&self.bell.focus)
+            .occlude()
+            .w(t.ui(380.))
+            .h(t.ui(320.))
+            .overflow_hidden()
+            .bg(t.color.surface)
+            .border_1()
+            .border_color(t.color.border)
+            .rounded(t.shape.radius_panel)
+            .shadow(vec![t.popover_shadow()])
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_bell(window, cx);
+                }
+            }))
+            // Capture phase and no stop_propagation: the click that dismisses still reaches its target.
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.bell.open = false;
+                this.bell.dismissed = Some(Instant::now());
+                cx.notify();
+            }))
+            .child(self.render_notifications(cx));
+        Some(
+            deferred(
+                anchored()
+                    .position(under_bell)
+                    .anchor(Corner::TopRight)
+                    .snap_to_window_with_margin(t.space(Space::Md))
+                    .child(panel),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
+    }
+
     /// Project and tab showing a daemon session, if any project holds it.
     pub(super) fn find_session(&self, session: Session) -> Option<(PathBuf, ItemId)> {
         find_session(&self.workspace.projects, session)
@@ -453,6 +609,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_bell(window, cx);
         let (files, action) = self
             .toasts
             .iter_mut()
@@ -854,6 +1011,19 @@ mod tests {
     use super::*;
     use athena_workspace::Item;
     use gpui::{point, size};
+
+    #[test]
+    fn only_sessions_waiting_for_an_answer_need_you() {
+        let states = [
+            Some(ClaudeState::NeedsInput),
+            Some(ClaudeState::Running),
+            Some(ClaudeState::Finished),
+            None,
+            Some(ClaudeState::NeedsInput),
+        ];
+        assert_eq!(needing_input(states), 2);
+        assert_eq!(needing_input([]), 0);
+    }
 
     #[test]
     fn a_notice_finds_its_terminal_after_it_moves_and_not_the_one_reusing_its_id() {

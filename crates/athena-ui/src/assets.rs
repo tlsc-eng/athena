@@ -92,6 +92,7 @@ assets!(
     "icons/yml.svg",
     "icons/zig.svg",
     "icons/zip.svg",
+    "ui/bell.svg",
 );
 
 /// The `'static` name of a bundled asset.

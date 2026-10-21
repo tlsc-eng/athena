@@ -61,7 +61,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, Tooltip, empty_state, motion};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Lockup, empty_state, motion};
 use athena_workspace::{Axis, Direction, ItemId, PaneId, WindowMode, WindowState, Workspace};
 use gpui::{
     Animation, AnyElement, Bounds, Context, ExternalPaths, FocusHandle, FontWeight, IntoElement,
@@ -144,6 +144,7 @@ pub struct Shell {
     pending_open: Option<PathBuf>,
     ide: claude_ide::IdeState,
     usage: usage_view::UsageState,
+    bell: notices::BellState,
     _usage: Option<Task<()>>,
     zoomed: Option<PaneId>,
     entering: Option<PaneId>,
@@ -277,6 +278,7 @@ impl Shell {
             pending_open: None,
             ide: claude_ide::IdeState::default(),
             usage: usage_view::UsageState::default(),
+            bell: notices::BellState::new(cx),
             _usage: None,
             zoomed: None,
             entering: None,
@@ -506,62 +508,10 @@ impl Shell {
                             .child(format!("· {branch}"))
                     }))
             }))
+            .children(self.render_attention_chip(cx))
             .children(self.render_debug_toolbar(cx))
             .child(div().flex_1())
-            .child(self.render_problems_button(cx))
-            .child(self.render_usage_button(cx))
-            .child(
-                self.drawer_button("containers-button", drawer::DrawerTab::Containers, cx)
-                    .tooltip(|_, cx| Tooltip::view("Docker containers for this project", cx))
-                    .child("Containers"),
-            )
-            .child(
-                self.drawer_button("playwright-button", drawer::DrawerTab::Playwright, cx)
-                    .tooltip(|_, cx| Tooltip::view("Playwright test runs", cx))
-                    .child("Playwright"),
-            )
-            .child(div().mr(px(8.)).child(self.render_notice_button(cx)))
-    }
-
-    fn render_notice_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let unread = self.unread();
-        let accent = cx.theme().color.accent;
-        self.drawer_button("notices-button", drawer::DrawerTab::Notifications, cx)
-            .tooltip(|_, cx| Tooltip::view("Notifications  ⌘J", cx))
-            .child("Notifications")
-            .when(unread > 0, |el| {
-                el.child(
-                    div()
-                        .text_color(accent)
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(unread.to_string()),
-                )
-            })
-    }
-
-    fn drawer_button(
-        &self,
-        id: &'static str,
-        tab: drawer::DrawerTab,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let t = cx.theme();
-        div()
-            .id(id)
-            .h(t.ui(24.))
-            .px(t.ui(8.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .rounded(t.shape.radius_control)
-            .cursor_pointer()
-            .text_color(if self.drawer == Some(tab) {
-                t.color.content
-            } else {
-                t.color.content_muted
-            })
-            .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_drawer_tab(tab, cx)))
+            .child(self.render_bell(cx))
     }
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1004,6 +954,7 @@ impl Render for Shell {
             .child(body)
             .child(self.render_status_bar(cx))
             .children(self.render_usage_popover(cx))
+            .children(self.render_bell_popover(window, cx))
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
             .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
