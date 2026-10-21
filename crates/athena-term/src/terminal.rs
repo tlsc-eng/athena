@@ -76,6 +76,8 @@ pub struct Terminal {
     /// Last live output that was not the echo of the user's own typing.
     pub last_activity: Instant,
     pub last_input: Option<Instant>,
+    /// Last time the user sent Enter; pastes and `submit` do not count.
+    pub last_enter: Option<Instant>,
     pub clipboard_write: Option<String>,
     marks: Scanner,
     commands: Commands,
@@ -135,6 +137,7 @@ impl Terminal {
             bell: false,
             last_activity: Instant::now(),
             last_input: None,
+            last_enter: None,
             clipboard_write: None,
             marks: Scanner::default(),
             commands: Commands::default(),
@@ -480,6 +483,14 @@ impl Terminal {
 
     /// Sends user input, snapping the view back to the live screen first.
     pub fn input(&mut self, bytes: Vec<u8>) {
+        let enter = bytes.contains(&b'\r');
+        self.send(bytes);
+        if enter && self.exit.is_none() {
+            self.last_enter = self.last_input;
+        }
+    }
+
+    fn send(&mut self, bytes: Vec<u8>) {
         if self.exit.is_some() {
             return;
         }
@@ -629,7 +640,7 @@ impl Terminal {
         } else {
             text.into_bytes()
         };
-        self.input(bytes);
+        self.send(bytes);
     }
 
     pub fn bracketed_paste(&self) -> bool {
@@ -638,7 +649,7 @@ impl Terminal {
 
     /// Presses Enter.
     pub fn submit(&mut self) {
-        self.input(b"\r".to_vec());
+        self.send(b"\r".to_vec());
     }
 
     pub fn scroll(&mut self, lines: i32) {
@@ -820,6 +831,18 @@ mod tests {
         let (mut t, sent) = terminal();
         t.submit();
         assert_eq!(sent.0.borrow().as_slice(), b"\r");
+    }
+
+    #[test]
+    fn only_the_users_own_enter_counts_as_one() {
+        let (mut t, _) = terminal();
+        t.input(b"a".to_vec());
+        t.paste("a\nb");
+        t.submit();
+        assert!(t.last_enter.is_none());
+        t.input(b"\r".to_vec());
+        assert!(t.last_enter.is_some());
+        assert_eq!(t.last_enter, t.last_input);
     }
 
     #[test]
