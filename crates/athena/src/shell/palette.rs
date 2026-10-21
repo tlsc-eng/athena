@@ -417,6 +417,10 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(super::claude_sessions::ClaudeReviewPreviousFile),
         ),
         (
+            "Claude: Open Session View",
+            Box::new(super::claude_sessions::ClaudeOpenSessionView),
+        ),
+        (
             "Claude: Review Comments for Session…",
             Box::new(super::review_comments::ClaudeReviewComments),
         ),

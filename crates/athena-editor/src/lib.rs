@@ -59,7 +59,7 @@ pub use merge_conflicts::{
     resolve_all,
 };
 pub use peek::{ShowNextChange, ShowPreviousChange};
-pub use review::{ReviewEvent, ReviewMark};
+pub use review::{ReviewEvent, ReviewMark, send_label};
 pub use run_marks::{Coverage, RunMark, RunState, RunTestAt, TestSymbol, find_tests, is_test_file};
 pub use save::{SaveSettings, Tidy, resolve_tidy};
 pub use signature::Signature;

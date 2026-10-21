@@ -13,7 +13,7 @@ use super::item::ItemView;
 use crate::review_comments::{self as store, ReviewComment};
 use crate::snapshots;
 
-mod delivery;
+pub(super) mod delivery;
 
 actions!(
     athena,
@@ -423,6 +423,7 @@ impl Shell {
             }
             self.refresh_comment_marks(id, cx);
         }
+        self.refresh_session_views(cx);
     }
 
     /// The session the focused terminal runs or the focused tab's comments belong to, else the

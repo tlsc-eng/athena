@@ -99,7 +99,8 @@ pub(crate) fn selection_lines(first: usize, last: usize, end_col: usize) -> Rang
     first as u32 + 1..=last as u32 + 1
 }
 
-fn send_label(unsent: usize) -> String {
+/// The send button's text for `unsent` comments.
+pub fn send_label(unsent: usize) -> String {
     match unsent {
         1 => "Send 1 Comment to Claude".to_string(),
         n => format!("Send {n} Comments to Claude"),

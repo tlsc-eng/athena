@@ -60,10 +60,14 @@ fn never_saved(kind: &ItemKind) -> bool {
     )
 }
 
-/// Tabs workspace.json leaves out: those above, and the settings and shortcut editors, whose
+/// Tabs workspace.json leaves out: those above, and the settings, shortcut and session tabs, whose
 /// kinds a v0.9 build cannot read and would set the whole file aside for.
 fn not_on_disk(kind: &ItemKind) -> bool {
-    never_saved(kind) || matches!(kind, ItemKind::Settings | ItemKind::Shortcuts)
+    never_saved(kind)
+        || matches!(
+            kind,
+            ItemKind::Settings | ItemKind::Shortcuts | ItemKind::Session { .. }
+        )
 }
 
 /// The file on disk as diff text, in the encoding the editor would read it in; a FIFO or device
@@ -815,6 +819,52 @@ mod tests {
             without_proposals(&workspace).is_none(),
             "a project moving to another window keeps them"
         );
+    }
+
+    #[test]
+    fn a_session_tab_is_left_out_of_the_file_and_the_file_still_loads() {
+        use athena_workspace::{Axis, Layout};
+        let dir = std::env::temp_dir().join(format!("athena-session-tab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("workspace.json");
+        let mut workspace = Workspace::default();
+        workspace.add_project(PathBuf::from("/p"));
+        let mut layout = Layout::new(ItemKind::Terminal { session: Some(7) });
+        let terminal = layout.focused;
+        layout
+            .add_item(terminal, ItemKind::Session { id: "s-1".into() })
+            .unwrap();
+        let session_pane = layout
+            .split(
+                terminal,
+                Axis::Horizontal,
+                ItemKind::Session { id: "s-2".into() },
+            )
+            .unwrap();
+        workspace.projects[0].layout = Some(layout);
+
+        let saved = without(&workspace, not_on_disk).unwrap();
+        athena_workspace::save(&file, &saved).unwrap();
+        let loaded = athena_workspace::load(&file).unwrap();
+        let layout = loaded.projects[0].layout.as_ref().unwrap();
+        let kinds: Vec<&ItemKind> = layout.items().map(|i| &i.kind).collect();
+        assert_eq!(kinds, [&ItemKind::Terminal { session: Some(7) }]);
+        assert!(
+            layout.pane(session_pane).is_none(),
+            "a pane of only sessions closes"
+        );
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("\"Session\""),
+            "an older build never meets the kind"
+        );
+        assert!(
+            std::fs::read_dir(&dir).unwrap().count() == 1,
+            "nothing was set aside"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -20,7 +20,7 @@ use gpui::{
 
 use super::Shell;
 use super::dnd::{DropZone, TabDrag, TabGhost, strip_drop_index, zone_for};
-use super::item::{ItemView, file_label};
+use super::item::{ItemView, SessionTab, file_label};
 use crate::actions::NewTerminal;
 
 const TAB_STRIP_HEIGHT: f32 = 32.;
@@ -411,6 +411,13 @@ impl Shell {
             ItemKind::Diff { path, base } => self.new_diff_view(root, path, base, cx),
             ItemKind::Settings => self.new_settings_view(root, cx),
             ItemKind::Shortcuts => self.new_shortcuts_view(cx),
+            ItemKind::Session { id } => {
+                self.refresh_session_view(id, cx);
+                ItemView::Session(SessionTab {
+                    id: id.clone(),
+                    focus: cx.focus_handle(),
+                })
+            }
             ItemKind::Preview { url } => {
                 let view = cx.new(|cx| PreviewView::new(root.to_path_buf(), url.clone(), cx));
                 let (project_root, item_id) = key.clone();
@@ -503,6 +510,7 @@ impl Shell {
 
     pub(super) fn item_label(&self, root: &Path, item: &Item, cx: &Context<Self>) -> String {
         match (self.items.get(&(root.to_path_buf(), item.id)), &item.kind) {
+            (_, ItemKind::Session { id }) => self.session_tab_label(id),
             (Some(view), _) => view.label(cx),
             (None, ItemKind::Terminal { .. }) => file_label(root),
             (None, ItemKind::Editor { path } | ItemKind::Image { path }) => file_label(path),
@@ -756,7 +764,7 @@ impl Shell {
     }
 
     /// Opens `kind` as a new tab in the focused pane.
-    fn add_item(&mut self, kind: ItemKind, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn add_item(&mut self, kind: ItemKind, window: &mut Window, cx: &mut Context<Self>) {
         let Some(i) = self.workspace.active else {
             return;
         };
@@ -1826,6 +1834,7 @@ impl Shell {
             .as_ref()
             .and_then(|item| self.item_view(root, item, cx))
         {
+            Some(ItemView::Session(tab)) => self.render_session_view(&tab, cx),
             Some(view) => view.element(!fading),
             None => div().into_any_element(),
         };

@@ -949,6 +949,31 @@ pub fn show_at(root: &Path, rev: &str, top: &str) -> Result<Option<Vec<u8>>> {
     run(cmd, None).map(Some)
 }
 
+/// The files whose contents differ from commit `rev`, committed or not, and then the untracked
+/// ones git does not ignore; all named from the repository's top.
+pub fn changed_since(root: &Path, rev: &str) -> Result<(Vec<String>, Vec<String>)> {
+    if !is_commit_id(rev) {
+        bail!("{rev} is not a commit id");
+    }
+    let names = |out: Vec<u8>| -> Vec<String> {
+        out.split(|&b| b == 0)
+            .filter(|n| !n.is_empty())
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect()
+    };
+    let mut diff = git(root);
+    diff.args(["diff", "--name-only", "--no-renames", "-z", rev, "--"]);
+    let mut untracked = git(root);
+    untracked.args([
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--full-name",
+        "-z",
+    ]);
+    Ok((names(run(diff, None)?), names(run(untracked, None)?)))
+}
+
 /// Commands that rewrite the index or worktree can take minutes on a big tree, and a kill
 /// halfway leaves `index.lock` behind.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(600);

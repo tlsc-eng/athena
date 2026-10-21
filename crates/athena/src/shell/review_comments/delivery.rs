@@ -153,7 +153,7 @@ struct Batch {
 
 /// Each comment with where it is in its file now; one whose file cannot be read is stale at its
 /// old lines.
-fn place_all(
+pub(in crate::shell) fn place_all(
     comments: Vec<ReviewComment>,
     read: impl Fn(&Path) -> Option<String>,
 ) -> Vec<(ReviewComment, Placement)> {
@@ -459,6 +459,7 @@ impl Shell {
         for path in paths {
             self.reload_comments(&dir, session, &path, cx);
         }
+        self.refresh_session_views(cx);
     }
 
     /// A UserPromptSubmit hook came from `pane`'s Claude: its prompt box is empty now.

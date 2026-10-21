@@ -56,6 +56,10 @@ pub enum ItemKind {
     Settings,
     /// The keyboard shortcuts editor.
     Shortcuts,
+    /// One Claude session's plan, changes and review comments; never saved with the workspace.
+    Session {
+        id: String,
+    },
 }
 
 /// What a diff tab compares, VS Code's way: the staged change, the unstaged change, or a
@@ -97,7 +101,11 @@ impl ItemKind {
             | Self::Image { path }
             | Self::Rendered { path }
             | Self::Diff { path, .. } => Some(path),
-            Self::Terminal { .. } | Self::Preview { .. } | Self::Settings | Self::Shortcuts => None,
+            Self::Terminal { .. }
+            | Self::Preview { .. }
+            | Self::Settings
+            | Self::Shortcuts
+            | Self::Session { .. } => None,
         }
     }
 }

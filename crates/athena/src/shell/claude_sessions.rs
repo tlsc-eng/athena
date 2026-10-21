@@ -26,13 +26,15 @@ use crate::transcripts::{self, Profile, Tokens};
 
 mod list;
 pub(super) mod live;
+mod session_view;
 
 actions!(
     athena,
     [
         ShowClaudeSessions,
         ClaudeReviewNextFile,
-        ClaudeReviewPreviousFile
+        ClaudeReviewPreviousFile,
+        ClaudeOpenSessionView
     ]
 );
 
@@ -66,6 +68,7 @@ pub(super) struct SessionsState {
     /// `live::locate` per cwd, read by a load in the background so drawing never touches the disk.
     places: HashMap<PathBuf, live::Place>,
     review: Option<Review>,
+    views: session_view::Views,
 }
 
 /// What follows a terminal's sessions when its project moves to another window.
@@ -178,7 +181,7 @@ struct LivePlan {
 struct Review {
     session: String,
     label: String,
-    files: Vec<PathBuf>,
+    files: Vec<FileChange>,
     index: usize,
 }
 
@@ -202,6 +205,8 @@ pub(super) struct FileChange {
     /// Lines added and removed since before the session, when known.
     counts: Option<(usize, usize)>,
     created: bool,
+    /// What the diff compares for a file no snapshot covers; `None` compares with the snapshot.
+    base: Option<DiffBase>,
 }
 
 type CountKey = (String, PathBuf, u64, SystemTime);
@@ -285,6 +290,7 @@ pub(super) fn load(home: &Path, store: &Path, root: &Path) -> Vec<SessionRow> {
                 counts: line_counts(store, &stored.session, path),
                 created: snapshots::created(store, &stored.session, path),
                 path: path.clone(),
+                base: None,
             })
             .collect();
         match rows.iter_mut().find(|r| r.id == stored.session) {
@@ -468,15 +474,17 @@ impl Shell {
     /// Something changed on disk or in a session: read the list again when it next draws.
     pub(super) fn claude_sessions_stale(&mut self, cx: &mut Context<Self>) {
         self.review.sessions.loaded_at = None;
+        self.refresh_session_views(cx);
         if self.sessions_visible() {
             cx.notify();
         }
     }
 
-    /// Whether the session list is on screen, in the drawer or in the side panel.
+    /// Whether the session list or a session's panel is on screen.
     fn sessions_visible(&self) -> bool {
         self.drawer == Some(DrawerTab::Claude)
             || (self.workspace.ui.tree_visible && self.workspace.ui.side_mode == SideMode::Sessions)
+            || !self.open_session_views().is_empty()
     }
 
     fn terminal_session(&self, view: &ItemView, cx: &gpui::App) -> Option<&LivePlan> {
@@ -547,7 +555,8 @@ impl Shell {
                 if state.root.as_ref() == Some(&root) {
                     let (rows, elsewhere): (Vec<_>, Vec<_>) =
                         loaded.into_iter().partition(|r| r.root == root);
-                    if *state.elsewhere != elsewhere {
+                    let mut changed = *state.elsewhere != elsewhere;
+                    if changed {
                         state.elsewhere = Rc::new(elsewhere);
                     }
                     state.loading = None;
@@ -562,6 +571,10 @@ impl Shell {
                     }
                     if *state.rows != rows {
                         state.rows = Rc::new(rows);
+                        changed = true;
+                    }
+                    if changed {
+                        this.refresh_session_views(cx);
                     }
                     cx.notify();
                 }
@@ -604,27 +617,27 @@ impl Shell {
         &mut self,
         session: &str,
         path: &Path,
+        base: Option<DiffBase>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let base = DiffBase::Snapshot {
+        let base = base.unwrap_or_else(|| DiffBase::Snapshot {
             session: session.to_string(),
-        };
+        });
         self.open_diff(path.to_path_buf(), base, window, cx);
     }
 
     fn start_review(&mut self, row: &SessionRow, window: &mut Window, cx: &mut Context<Self>) {
-        let files: Vec<PathBuf> = row.files.iter().map(|f| f.path.clone()).collect();
-        let Some(first) = files.first().cloned() else {
+        let Some(first) = row.files.first().cloned() else {
             return;
         };
         self.review.sessions.review = Some(Review {
             session: row.id.clone(),
             label: row.label.clone(),
-            files,
+            files: row.files.clone(),
             index: 0,
         });
-        self.open_session_file(&row.id, &first, window, cx);
+        self.open_session_file(&row.id, &first.path, first.base, window, cx);
         cx.notify();
     }
 
@@ -643,8 +656,8 @@ impl Shell {
         };
         let last = review.files.len().saturating_sub(1) as isize;
         review.index = (review.index as isize + by).clamp(0, last) as usize;
-        let (session, path) = (review.session.clone(), review.files[review.index].clone());
-        self.open_session_file(&session, &path, window, cx);
+        let (session, file) = (review.session.clone(), review.files[review.index].clone());
+        self.open_session_file(&session, &file.path, file.base, window, cx);
         cx.notify();
     }
 
@@ -771,6 +784,10 @@ impl Shell {
                 this.start_review(&review, w, cx)
             }));
         }
+        let view_id = row.id.clone();
+        items.push(shell_item("Open Session View", cx, move |this, w, cx| {
+            this.open_session_view(view_id.clone(), w, cx)
+        }));
         if !items.is_empty() {
             items.push(MenuItem::separator());
         }
@@ -785,6 +802,7 @@ impl Shell {
         &mut self,
         session: String,
         path: PathBuf,
+        base: Option<DiffBase>,
         position: gpui::Point<gpui::Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -796,18 +814,22 @@ impl Shell {
             session,
             path.clone(),
         );
-        let items = vec![
+        let b1 = base.clone();
+        let mut items = vec![
             shell_item("Open Changes", cx, move |this, w, cx| {
-                this.open_session_file(&s1, &p1, w, cx)
+                this.open_session_file(&s1, &p1, b1.clone(), w, cx)
             }),
             shell_item("Open File", cx, move |this, w, cx| {
                 this.open_file(p2.clone(), w, cx)
             }),
-            MenuItem::separator(),
-            shell_item("Revert File…", cx, move |this, w, cx| {
-                this.revert_session_file(s3.clone(), p3.clone(), w, cx)
-            }),
         ];
+        // Only a snapshot can put a file back to how it was before the session.
+        if base.is_none() {
+            items.push(MenuItem::separator());
+            items.push(shell_item("Revert File…", cx, move |this, w, cx| {
+                this.revert_session_file(s3.clone(), p3.clone(), w, cx)
+            }));
+        }
         self.open_context_menu(position, items, window, cx);
     }
 
@@ -939,7 +961,7 @@ impl Shell {
             "Reviewing {} · file {} of {n}: {}",
             review.label,
             at + 1,
-            file_label(&review.files[at])
+            file_label(&review.files[at].path)
         );
         let tip = text.clone();
         Some(
@@ -1197,16 +1219,13 @@ impl Shell {
             .display()
             .to_string();
         let tip = rel.clone();
-        let (s_open, p_open) = (session.to_string(), file.path.clone());
-        let (s_diff, p_diff) = (session.to_string(), file.path.clone());
+        let (s_open, p_open, b_open) = (session.to_string(), file.path.clone(), file.base.clone());
+        let (s_diff, p_diff, b_diff) = (session.to_string(), file.path.clone(), file.base.clone());
         let (s_rev, p_rev) = (session.to_string(), file.path.clone());
-        let (s_menu, p_menu) = (session.to_string(), file.path.clone());
-        let reviewing = self
-            .review
-            .sessions
-            .review
-            .as_ref()
-            .is_some_and(|r| r.session == session && r.files.get(r.index) == Some(&file.path));
+        let (s_menu, p_menu, b_menu) = (session.to_string(), file.path.clone(), file.base.clone());
+        let reviewing = self.review.sessions.review.as_ref().is_some_and(|r| {
+            r.session == session && r.files.get(r.index).map(|f| &f.path) == Some(&file.path)
+        });
         div()
             .id(("claude-file", id))
             .group(group.clone())
@@ -1220,7 +1239,7 @@ impl Shell {
             .when(reviewing, |el| el.bg(t.color.surface_active))
             .hover(|s| s.bg(t.color.surface_hover))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.open_session_file(&s_open, &p_open, window, cx)
+                this.open_session_file(&s_open, &p_open, b_open.clone(), window, cx)
             }))
             .on_mouse_down(
                 MouseButton::Right,
@@ -1229,6 +1248,7 @@ impl Shell {
                     this.open_session_file_menu(
                         s_menu.clone(),
                         p_menu.clone(),
+                        b_menu.clone(),
                         ev.position,
                         window,
                         cx,
@@ -1267,7 +1287,7 @@ impl Shell {
                     t,
                     cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.open_session_file(&s_diff, &p_diff, window, cx)
+                        this.open_session_file(&s_diff, &p_diff, b_diff.clone(), window, cx)
                     }),
                 ))
                 .child(row_button(
@@ -1320,6 +1340,9 @@ pub(super) fn bind_claude_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpu
     el.on_action(cx.listener(|this, _: &ShowClaudeSessions, _, cx| {
         this.toggle_drawer_tab(DrawerTab::Claude, cx)
     }))
+    .on_action(
+        cx.listener(|this, _: &ClaudeOpenSessionView, w, cx| this.open_current_session_view(w, cx)),
+    )
     .on_action(cx.listener(|this, _: &ClaudeReviewNextFile, w, cx| this.step_review(1, w, cx)))
     .on_action(cx.listener(|this, _: &ClaudeReviewPreviousFile, w, cx| this.step_review(-1, w, cx)))
 }
@@ -1467,7 +1490,8 @@ mod tests {
             [FileChange {
                 path: edited,
                 counts: Some((2, 1)),
-                created: false
+                created: false,
+                base: None
             }]
         );
         let silent_row = rows.iter().find(|r| r.id == silent).unwrap();

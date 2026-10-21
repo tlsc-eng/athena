@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
 use athena_ui::{
-    ActiveTheme, Button, ButtonKind, DotState, ListRow, Space, StatusDot, empty_state,
+    ActiveTheme, Button, ButtonKind, DotState, IconButton, ListRow, Space, StatusDot, empty_state,
 };
 use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*, px};
 
@@ -13,15 +13,15 @@ use crate::transcripts::Price;
 
 /// What a row says besides its label, as shown in its detail line.
 #[derive(Debug, PartialEq)]
-struct RowText {
+pub(super) struct RowText {
     /// `3/7`: finished todos out of all of them.
-    todos: Option<String>,
-    files: Option<String>,
-    cost: Option<String>,
-    branch: Option<String>,
+    pub todos: Option<String>,
+    pub files: Option<String>,
+    pub cost: Option<String>,
+    pub branch: Option<String>,
 }
 
-fn row_text(session: &LiveSession, prices: &HashMap<String, Price>) -> RowText {
+pub(super) fn row_text(session: &LiveSession, prices: &HashMap<String, Price>) -> RowText {
     let cost = session.cost_label(prices);
     RowText {
         todos: session.todos.map(|(done, all)| format!("{done}/{all}")),
@@ -35,7 +35,7 @@ fn row_text(session: &LiveSession, prices: &HashMap<String, Price>) -> RowText {
     }
 }
 
-fn dot_state(state: Option<ClaudeState>) -> DotState {
+pub(super) fn dot_state(state: Option<ClaudeState>) -> DotState {
     match state {
         Some(ClaudeState::Running) => DotState::Running,
         Some(ClaudeState::NeedsInput) => DotState::NeedsInput,
@@ -52,7 +52,7 @@ fn in_project(session: &LiveSession, active: &Place) -> bool {
 }
 
 /// What a session with no row read yet offers a menu: its id.
-fn bare_row(session: &LiveSession) -> SessionRow {
+pub(super) fn bare_row(session: &LiveSession) -> SessionRow {
     SessionRow {
         id: session.id.clone(),
         root: session.cwd.clone(),
@@ -162,7 +162,9 @@ impl Shell {
         let text = row_text(session, prices);
         let expandable = session.files > 0;
         let open = expandable && self.review.sessions.expanded.contains(&session.id);
-        let (toggle_id, open_id) = (session.id.clone(), session.id.clone());
+        let (toggle_id, open_id, view_id) =
+            (session.id.clone(), session.id.clone(), session.id.clone());
+        let group = format!("claude-live-session-{i}");
         let menu_for = session.clone();
         let pane = session.pane;
         let chevron = div()
@@ -204,7 +206,20 @@ impl Shell {
                     .children(text.files.map(|files| div().flex_none().child(files)))
                     .children(text.cost.map(|cost| div().flex_none().child(cost)))
             });
+        let open_view = div()
+            .invisible()
+            .group_hover(group.clone(), |s| s.visible())
+            .child(
+                IconButton::new(("session-view-open", i))
+                    .label("◧")
+                    .tooltip("Open Session View")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_session_view(view_id.clone(), window, cx)
+                    })),
+            );
         ListRow::new(("claude-live-session", i), session.label.clone())
+            .group(group)
             .leading(
                 div()
                     .flex()
@@ -223,13 +238,14 @@ impl Shell {
                 let row = row.unwrap_or_else(|| bare_row(&menu_for));
                 this.open_session_menu(row, ev.position, window, cx)
             }))
+            .trailing(open_view)
             .when_some(text.todos, |row, todos| row.meta(todos))
             .when_some(detail, |row, detail| row.detail(detail))
             .into_any_element()
     }
 
     /// Focuses the terminal running the session, else resumes it in a new one.
-    fn open_live_session(
+    pub(super) fn open_live_session(
         &mut self,
         id: &str,
         pane: Option<PaneId>,

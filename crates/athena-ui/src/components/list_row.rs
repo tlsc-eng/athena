@@ -20,6 +20,7 @@ pub struct ListRow {
     emphasized: bool,
     tooltip: Option<SharedString>,
     selected: bool,
+    group: Option<SharedString>,
     on_click: Option<ClickHandler>,
     on_context_menu: Option<MenuHandler>,
 }
@@ -39,6 +40,7 @@ impl ListRow {
             emphasized: false,
             tooltip: None,
             selected: false,
+            group: None,
             on_click: None,
             on_context_menu: None,
         }
@@ -87,6 +89,12 @@ impl ListRow {
         self
     }
 
+    /// Names the row, so a control inside it can appear only while the row is hovered.
+    pub fn group(mut self, group: impl Into<SharedString>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(f));
         self
@@ -132,6 +140,7 @@ impl RenderOnce for ListRow {
         let tooltip = self.tooltip;
         let row = div()
             .id(self.id)
+            .when_some(self.group, |el, group| el.group(group))
             .w_full()
             .flex_none()
             .flex()

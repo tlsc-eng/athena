@@ -96,7 +96,6 @@ pub fn remove(store: Option<&Path>, repo: &Path, worktree: &Path, force: bool) -
 
 /// Where the worktree at `worktree` branched from; `None` for one Athena did not start from the
 /// main checkout.
-#[allow(dead_code)] // Called by "bring changes back", which is not built yet.
 pub fn worktree_fork(worktree: &Path) -> Option<Fork> {
     fork_in(&store().ok()?, worktree)
 }

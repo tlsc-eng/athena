@@ -196,6 +196,7 @@ impl Shell {
                 .iter()
                 .any(|p| affects_git(root, &in_root(p), decorations.as_deref(), watched))
         {
+            self.refresh_session_views(cx);
             if active {
                 self.git_kick(cx);
             } else {

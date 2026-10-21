@@ -340,6 +340,7 @@ impl Shell {
 
     /// Re-reads git state for `root`: all of it when it is the active project, else its summary.
     pub(super) fn git_changed(&mut self, root: &Path, cx: &mut Context<Self>) {
+        self.refresh_session_views(cx);
         if self
             .workspace
             .active_project()
