@@ -538,13 +538,6 @@ impl Shell {
                     state.loading = None;
                     state.hooks_on = hooks_on;
                     state.places = places;
-                    // The newest session opens on first view: it is usually the one to review.
-                    if state.rows.is_empty()
-                        && state.expanded.is_empty()
-                        && let Some(first) = rows.first()
-                    {
-                        state.expanded.insert(first.id.clone());
-                    }
                     if *state.rows != rows {
                         state.rows = Rc::new(rows);
                         changed = true;
