@@ -111,7 +111,7 @@ pub struct UiState {
     /// The project rail is the wide sidebar, with names and folders.
     pub sidebar_expanded: bool,
     /// A workspace saved before this field existed keeps showing the file tree.
-    #[serde(default = "legacy_side_mode")]
+    #[serde(default = "legacy_side_mode", deserialize_with = "lenient_side_mode")]
     pub side_mode: SideMode,
 }
 
@@ -121,9 +121,14 @@ pub enum SideMode {
     Sessions,
     Outline,
     Git,
-    /// Also what a value from a newer build falls back to, so it cannot make the file unreadable.
-    #[serde(other)]
     Files,
+}
+
+/// Anything but a known mode name, whatever its shape, reads as Files, so a newer build's value
+/// cannot make the file unreadable.
+fn lenient_side_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<SideMode, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or(SideMode::Files))
 }
 
 fn legacy_side_mode() -> SideMode {

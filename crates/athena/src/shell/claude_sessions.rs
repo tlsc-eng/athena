@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime};
 use athena_editor::{EditorView, diff};
 use athena_proto::{AppMsg, PaneId, TodoInfo};
 use athena_ui::{ActiveTheme, ButtonKind, MenuItem, Theme, Tooltip, empty_state};
-use athena_workspace::DiffBase;
 use athena_workspace::git::relative_time;
+use athena_workspace::{DiffBase, SideMode};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
     PromptLevel, Task, Window, actions, div, prelude::*, px,
@@ -331,9 +331,15 @@ impl Shell {
     /// Something changed on disk or in a session: read the list again when it next draws.
     pub(super) fn claude_sessions_stale(&mut self, cx: &mut Context<Self>) {
         self.review.sessions.loaded_at = None;
-        if self.drawer == Some(DrawerTab::Claude) {
+        if self.sessions_visible() {
             cx.notify();
         }
+    }
+
+    /// Whether the session list is on screen, in the drawer or in the side panel.
+    fn sessions_visible(&self) -> bool {
+        self.drawer == Some(DrawerTab::Claude)
+            || (self.workspace.ui.tree_visible && self.workspace.ui.side_mode == SideMode::Sessions)
     }
 
     fn terminal_session(&self, view: &ItemView, cx: &gpui::App) -> Option<&LivePlan> {

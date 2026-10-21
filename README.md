@@ -240,8 +240,8 @@ its shells running.
   fixes first), go to implementation (`cmd-f12`) and go to type definition (editor menu and
   palette). A dot in the gutter marks the cursor's line when a diagnostic there has a quick fix;
   clicking it opens the same menu. Several implementations are listed in the References tab.
-- An **Outline** view: the Explorer / Outline switch at the top of the tree area (or the
-  palette's **Focus outline**) lists the active editor's symbols as a tree, highlights the one
+- An **Outline** view: the Sessions / Files / Outline / Git switch at the top of the side panel
+  (or the palette's **Focus outline**) lists the active editor's symbols as a tree, highlights the one
   holding the cursor and follows it, opens a symbol on click, folds with the chevrons, and filters
   by name as you type (Up/Down pick, Enter opens, Escape clears).
 - Call hierarchy (`shift-alt-h`, the editor menu or the palette): the callers of the function at
@@ -987,6 +987,8 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | ``ctrl-` `` | Show and focus the terminal panel, or hide it when it has focus |
 | ``ctrl-shift-` `` | New terminal in the panel (bound as `ctrl-~` too, which is what macOS reports for it) |
 | `cmd-b` | Toggle file tree |
+| `cmd-shift-e` | Show the side panel on Files |
+| `ctrl-shift-g` | Show the side panel on Git |
 | `cmd-alt-b` | Toggle project sidebar |
 | `cmd-shift-s` | Save as |
 | `cmd-shift-v` | Markdown preview beside the editor / back to the source |

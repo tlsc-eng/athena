@@ -453,19 +453,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_side_mode_falls_back_to_files_without_losing_the_workspace() {
+    fn an_unrecognised_side_mode_of_any_shape_falls_back_to_files_without_losing_the_workspace() {
         let dir = std::env::temp_dir().join(format!("athena-sidemode-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
-        fs::write(
-            &path,
-            r#"{"projects":[],"active":null,"window":null,"word_wrap":true,"ui":{"side_mode":"Tasks","tree_width":300}}"#,
-        )
-        .unwrap();
-        let w = load(&path).unwrap();
-        assert_eq!(w.ui.side_mode, SideMode::Files);
-        assert_eq!(w.ui.tree_width, 300.);
-        assert!(w.word_wrap);
+        for value in [r#""Tasks""#, "null", "7", r#"{"Tasks":1}"#] {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"projects":[],"active":null,"window":null,"word_wrap":true,"ui":{{"side_mode":{value},"tree_width":300}}}}"#
+                ),
+            )
+            .unwrap();
+            let w = load(&path).unwrap();
+            assert_eq!(w.ui.side_mode, SideMode::Files, "{value}");
+            assert_eq!(w.ui.tree_width, 300., "{value}");
+            assert!(w.word_wrap, "{value}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }

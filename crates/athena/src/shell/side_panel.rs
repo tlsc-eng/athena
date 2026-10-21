@@ -72,7 +72,7 @@ impl Shell {
         }
     }
 
-    /// The one place Sessions mode takes its content from, so S3 can swap in its own list.
+    /// The one call site Sessions mode renders through.
     fn render_sessions_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.render_claude_sessions(true, cx)
     }
