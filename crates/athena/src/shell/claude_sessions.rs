@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -7,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use athena_editor::{EditorView, diff};
 use athena_proto::{AppMsg, PaneId, TodoInfo};
 use athena_ui::{ActiveTheme, ButtonKind, MenuItem, Theme, Tooltip, empty_state};
-use athena_workspace::DiffBase;
 use athena_workspace::git::relative_time;
+use athena_workspace::{DiffBase, SideMode};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
     PromptLevel, Task, Window, actions, div, prelude::*, px,
@@ -23,6 +24,10 @@ use super::menus::shell_item;
 use super::review::backup_dir;
 use crate::snapshots::{self, Before};
 use crate::transcripts::{self, Profile, Tokens};
+
+#[allow(dead_code)]
+// Read by the Sessions list, rail counts and title chip, which are not built yet.
+pub(super) mod live;
 
 actions!(
     athena,
@@ -54,7 +59,28 @@ pub(super) struct SessionsState {
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.
     panes: HashMap<PaneId, String>,
+    /// Where each session started, as its SessionStart hook said.
+    cwds: HashMap<String, PathBuf>,
+    /// `live::locate` per cwd, as the session list redraws often; dropped when a hook, a reload
+    /// or a branch move says the checkout may have changed.
+    places: RefCell<HashMap<PathBuf, (PathBuf, Option<String>)>>,
     review: Option<Review>,
+}
+
+/// What follows a terminal's sessions when its project moves to another window.
+#[derive(Default)]
+pub(super) struct Bindings {
+    panes: HashMap<PaneId, String>,
+    cwds: HashMap<String, PathBuf>,
+    live: HashMap<String, LivePlan>,
+}
+
+impl Bindings {
+    pub(super) fn extend(&mut self, other: Bindings) {
+        self.panes.extend(other.panes);
+        self.cwds.extend(other.cwds);
+        self.live.extend(other.live);
+    }
 }
 
 impl SessionsState {
@@ -65,6 +91,39 @@ impl SessionsState {
         }
         self.panes.retain(|p, s| *p == pane || *s != session);
         self.panes.insert(pane, session);
+    }
+
+    /// Takes out what is known of the sessions the `moved` panes run.
+    pub(super) fn split_off(&mut self, moved: &[PaneId]) -> Bindings {
+        let mut out = Bindings::default();
+        for pane in moved {
+            let Some(session) = self.panes.remove(pane) else {
+                continue;
+            };
+            if let Some(cwd) = self.cwds.remove(&session) {
+                out.cwds.insert(session.clone(), cwd);
+            }
+            if let Some(live) = self.live.remove(&session) {
+                out.live.insert(session.clone(), live);
+            }
+            out.panes.insert(*pane, session);
+        }
+        out
+    }
+
+    pub(super) fn absorb(&mut self, moved: Bindings) {
+        for (pane, session) in moved.panes {
+            self.bind(pane, session);
+        }
+        self.cwds.extend(moved.cwds);
+        self.live.extend(moved.live);
+    }
+
+    /// Forgets which pane runs `session`, as another window now does.
+    pub(super) fn unbind(&mut self, session: &str) -> bool {
+        let before = self.panes.len();
+        self.panes.retain(|_, s| s != session);
+        self.panes.len() != before
     }
 
     /// The sessions bound to a pane here, each with when it last changed (`UNIX_EPOCH` while the
@@ -323,7 +382,7 @@ impl Shell {
             _ => return,
         };
         if let Some(pane) = caller {
-            state.bind(pane, session);
+            self.bind_session(pane, session, cx);
         }
         cx.notify();
     }
@@ -332,21 +391,41 @@ impl Shell {
     pub(super) fn claude_session_started(
         &mut self,
         session: String,
+        cwd: PathBuf,
         caller: Option<PaneId>,
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = caller {
-            self.review.sessions.bind(pane, session);
+            // A relative path would resolve against Athena's own folder when located.
+            let cwd = cwd.is_absolute().then_some(cwd);
+            if let Some(cwd) = cwd {
+                self.review.sessions.cwds.insert(session.clone(), cwd);
+            }
+            self.bind_session(pane, session, cx);
             cx.notify();
         }
+    }
+
+    /// Binds `session` to `pane` here and drops it from every other window, which cannot run it too.
+    pub(super) fn bind_session(&mut self, pane: PaneId, session: String, cx: &mut Context<Self>) {
+        super::windows::unbind_elsewhere(session.clone(), self.window_handle, cx);
+        let state = &mut self.review.sessions;
+        state.places.get_mut().clear();
+        state.bind(pane, session);
     }
 
     /// Something changed on disk or in a session: read the list again when it next draws.
     pub(super) fn claude_sessions_stale(&mut self, cx: &mut Context<Self>) {
         self.review.sessions.loaded_at = None;
-        if self.drawer == Some(DrawerTab::Claude) {
+        if self.sessions_visible() {
             cx.notify();
         }
+    }
+
+    /// Whether the session list is on screen, in the drawer or in the side panel.
+    fn sessions_visible(&self) -> bool {
+        self.drawer == Some(DrawerTab::Claude)
+            || (self.workspace.ui.tree_visible && self.workspace.ui.side_mode == SideMode::Sessions)
     }
 
     fn terminal_session(&self, view: &ItemView, cx: &gpui::App) -> Option<&LivePlan> {
@@ -407,6 +486,7 @@ impl Shell {
                 if state.root.as_ref() == Some(&root) {
                     state.loading = None;
                     state.hooks_on = hooks_on;
+                    state.places.get_mut().clear();
                     // The newest session opens on first view: it is usually the one to review.
                     if state.rows.is_empty()
                         && state.expanded.is_empty()
@@ -667,7 +747,12 @@ impl Shell {
         )
     }
 
-    pub(super) fn render_claude_sessions(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// `compact` is for the side panel's narrow column: fewer columns, the full text in tooltips.
+    pub(super) fn render_claude_sessions(
+        &mut self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = cx.theme().clone();
         let centered = |el: gpui::Div| {
             div()
@@ -712,12 +797,12 @@ impl Shell {
         let rows = state.rows.clone();
         let prices = self.settings.file.claude_prices.clone();
         let mut out: Vec<AnyElement> = Vec::new();
-        if let Some(bar) = self.render_review_bar(&t, cx) {
+        if let Some(bar) = self.render_review_bar(compact, &t, cx) {
             out.push(bar);
         }
         let now = SystemTime::now();
         for (i, row) in rows.iter().enumerate() {
-            out.push(self.render_session_row(i, row, &prices, now, &t, cx));
+            out.push(self.render_session_row(i, row, compact, &prices, now, &t, cx));
             if !self.review.sessions.expanded.contains(&row.id) {
                 continue;
             }
@@ -732,7 +817,15 @@ impl Shell {
                 out.push(detail_line(("claude-nofiles", i), hint, &t).into_any_element());
             }
             for (j, file) in row.files.iter().enumerate() {
-                out.push(self.render_file_row(i * 10_000 + j, &row.id, file, &root, &t, cx));
+                out.push(self.render_file_row(
+                    i * 10_000 + j,
+                    &row.id,
+                    file,
+                    &root,
+                    compact,
+                    &t,
+                    cx,
+                ));
             }
         }
         div()
@@ -744,13 +837,25 @@ impl Shell {
             .into_any_element()
     }
 
-    fn render_review_bar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_review_bar(
+        &self,
+        compact: bool,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let review = self.review.sessions.review.as_ref()?;
         let n = review.files.len();
         let at = review.index;
         let button = |id: &'static str, label: &'static str| {
             athena_ui::Button::new(id, label, ButtonKind::Ghost)
         };
+        let text = format!(
+            "Reviewing {} · file {} of {n}: {}",
+            review.label,
+            at + 1,
+            file_label(&review.files[at])
+        );
+        let tip = text.clone();
         Some(
             div()
                 .h(t.ui(ROW_HEIGHT + 4.))
@@ -761,27 +866,27 @@ impl Shell {
                 .bg(t.color.surface_active)
                 .child(
                     div()
+                        .id("claude-review-label")
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_color(t.color.content)
-                        .child(format!(
-                            "Reviewing {} · file {} of {n}: {}",
-                            review.label,
-                            at + 1,
-                            file_label(&review.files[at])
-                        )),
+                        .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
+                        .child(text),
                 )
                 .when(at > 0, |el| {
                     el.child(
-                        button("claude-review-prev", "‹ Previous")
-                            .on_click(cx.listener(|this, _, w, cx| this.step_review(-1, w, cx))),
+                        button(
+                            "claude-review-prev",
+                            if compact { "‹" } else { "‹ Previous" },
+                        )
+                        .on_click(cx.listener(|this, _, w, cx| this.step_review(-1, w, cx))),
                     )
                 })
                 .when(at + 1 < n, |el| {
                     el.child(
-                        button("claude-review-next", "Next ›")
+                        button("claude-review-next", if compact { "›" } else { "Next ›" })
                             .on_click(cx.listener(|this, _, w, cx| this.step_review(1, w, cx))),
                     )
                 })
@@ -795,10 +900,12 @@ impl Shell {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_session_row(
         &self,
         i: usize,
         row: &SessionRow,
+        compact: bool,
         prices: &HashMap<String, transcripts::Price>,
         now: SystemTime,
         t: &Theme,
@@ -809,7 +916,10 @@ impl Shell {
         let running = self.session_running(&row.id, cx);
         let live = self.review.sessions.live.get(&row.id);
         let todo_progress = live.and_then(|l| progress(&l.todos));
-        let tip = usage_tooltip(row, prices);
+        let tip = match compact {
+            true => format!("{}\n{}", row.label, usage_tooltip(row, prices)),
+            false => usage_tooltip(row, prices),
+        };
         let id = row.id.clone();
         let menu = row.clone();
         let review = row.clone();
@@ -881,7 +991,7 @@ impl Shell {
                     .text_color(t.color.content_secondary)
                     .child(p)
             }))
-            .when(!row.files.is_empty(), |el| {
+            .when(!compact && !row.files.is_empty(), |el| {
                 el.child(row_button(
                     ("claude-review-all", i),
                     "Review All",
@@ -893,7 +1003,7 @@ impl Shell {
                     }),
                 ))
             })
-            .children(resume.map(|profile| {
+            .children(resume.filter(|_| !compact).map(|profile| {
                 row_button(
                     ("claude-resume", i),
                     "Resume",
@@ -913,24 +1023,24 @@ impl Shell {
             .children(
                 row.profile
                     .as_ref()
-                    .filter(|p| p.config_dir.is_some())
+                    .filter(|p| p.config_dir.is_some() && !compact)
                     .map(|p| muted(p.name.clone())),
             )
-            .when(!row.files.is_empty(), |el| {
+            .when(!compact && !row.files.is_empty(), |el| {
                 let n = row.files.len();
                 el.child(muted(format!("{n} file{}", if n == 1 { "" } else { "s" })))
             })
-            .when(row.messages > 0, |el| {
+            .when(!compact && row.messages > 0, |el| {
                 el.child(muted(format!("{} msgs", row.messages)))
             })
-            .when(!row.tokens.is_empty(), |el| {
+            .when(!compact && !row.tokens.is_empty(), |el| {
                 let total = row.tokens.values().map(Tokens::total).sum();
                 el.child(muted(format!("{} tok", transcripts::short_count(total))))
                     .child(muted(cost_label(&row.tokens, prices)))
             })
             .child(
                 div()
-                    .w(px(88.))
+                    .when(!compact, |el| el.w(px(88.)))
                     .flex_none()
                     .flex()
                     .justify_end()
@@ -982,12 +1092,14 @@ impl Shell {
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_file_row(
         &self,
         id: usize,
         session: &str,
         file: &FileChange,
         root: &Path,
+        compact: bool,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -998,6 +1110,7 @@ impl Shell {
             .unwrap_or(&file.path)
             .display()
             .to_string();
+        let tip = rel.clone();
         let (s_open, p_open) = (session.to_string(), file.path.clone());
         let (s_diff, p_diff) = (session.to_string(), file.path.clone());
         let (s_rev, p_rev) = (session.to_string(), file.path.clone());
@@ -1049,33 +1162,39 @@ impl Shell {
             )
             .child(
                 div()
+                    .id(("claude-file-path", id))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(t.color.content)
+                    .when(compact, |el| {
+                        el.tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
+                    })
                     .child(rel),
             )
-            .child(row_button(
-                ("claude-file-diff", id),
-                "Open Changes",
-                group.clone(),
-                t,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.open_session_file(&s_diff, &p_diff, window, cx)
-                }),
-            ))
-            .child(row_button(
-                ("claude-file-revert", id),
-                "Revert",
-                group,
-                t,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.revert_session_file(s_rev.clone(), p_rev.clone(), window, cx)
-                }),
-            ))
+            .when(!compact, |el| {
+                el.child(row_button(
+                    ("claude-file-diff", id),
+                    "Open Changes",
+                    group.clone(),
+                    t,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_session_file(&s_diff, &p_diff, window, cx)
+                    }),
+                ))
+                .child(row_button(
+                    ("claude-file-revert", id),
+                    "Revert",
+                    group,
+                    t,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.revert_session_file(s_rev.clone(), p_rev.clone(), window, cx)
+                    }),
+                ))
+            })
             .children(file.counts.map(|(added, removed)| {
                 div()
                     .flex_none()

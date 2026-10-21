@@ -4,7 +4,7 @@ use gpui::{
     App, ElementId, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*,
 };
 
-use crate::{ActiveTheme, Size, Space};
+use crate::{ActiveTheme, Size, Space, Tooltip};
 
 type SelectHandler = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 
@@ -13,7 +13,8 @@ fn clamp_selected(selected: usize, len: usize) -> usize {
     selected.min(len.saturating_sub(1))
 }
 
-/// A switch of N labelled segments, one selected.
+/// A switch of N labelled segments, one selected. It fills its container; segments share the
+/// width and truncate their labels, which a tooltip spells out.
 #[derive(IntoElement)]
 pub struct SegmentedControl {
     id: ElementId,
@@ -49,6 +50,7 @@ impl RenderOnce for SegmentedControl {
         let selected = clamp_selected(self.selected, self.segments.len());
         div()
             .id(self.id.clone())
+            .w_full()
             .flex()
             .items_center()
             .gap(t.space(Space::Xxs))
@@ -58,9 +60,13 @@ impl RenderOnce for SegmentedControl {
                 div()
                     .id((self.id.clone(), ix.to_string()))
                     .h(t.size(Size::Row))
+                    .flex_1()
+                    .min_w_0()
                     .px(t.space(Space::Md))
                     .flex()
                     .items_center()
+                    .justify_center()
+                    .overflow_hidden()
                     .rounded(t.shape.radius_control)
                     .cursor_pointer()
                     .text_color(if active { c.content } else { c.content_muted })
@@ -73,7 +79,18 @@ impl RenderOnce for SegmentedControl {
                     .when_some(on_select, |el, f| {
                         el.on_click(move |_, window, cx| f(ix, window, cx))
                     })
-                    .child(label)
+                    .tooltip({
+                        let label = label.clone();
+                        move |_, cx| Tooltip::view(label.clone(), cx)
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label),
+                    )
             }))
     }
 }

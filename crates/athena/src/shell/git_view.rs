@@ -87,6 +87,8 @@ pub(super) struct GitState {
     pub(super) worktree_mains: HashMap<PathBuf, Option<PathBuf>>,
     /// The next worktree created from the picker starts a Claude session.
     pub(super) claude_in_new_worktree: bool,
+    /// The worktree Bring Changes Back is working through.
+    pub(super) bring: Option<super::worktrees::Bring>,
     /// The linked worktrees of each open main repository, for the sidebar to offer the unopened ones.
     pub(super) listed_worktrees: HashMap<PathBuf, Vec<git::Worktree>>,
     pub(super) worktree_lists_asked: u64,
@@ -1895,6 +1897,11 @@ pub(super) fn bind_git_actions(el: gpui::Div, cx: &mut Context<Shell>) -> gpui::
     .on_action(
         cx.listener(|this, _: &super::worktrees::GitFinishWorktree, w, cx| {
             this.finish_worktree(w, cx)
+        }),
+    )
+    .on_action(
+        cx.listener(|this, _: &super::worktrees::GitBringWorktreeBack, w, cx| {
+            this.bring_back(w, cx)
         }),
     )
     .on_action(

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use athena_ui::motion::{self, Closing, Opening};
-use athena_ui::{ActiveTheme, TextInput};
-use athena_workspace::{Axis, UiState};
+use athena_ui::{ActiveTheme, Size, Space, TextInput};
+use athena_workspace::{Axis, SideMode, UiState};
 use gpui::{
     Animation, AnyElement, ClickEvent, Context, Entity, FontWeight, MouseButton, MouseDownEvent,
     ScrollStrategy, Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
@@ -526,30 +526,31 @@ impl Shell {
         .track_scroll(self.tree.scroll.clone())
         .flex_1();
         let w = clamp_tree_width(self.workspace.ui.tree_width);
-        let switch = self.render_tree_switch(cx);
-        let body = match self.outline.showing {
-            true => self.render_outline(cx),
-            false => list.into_any_element(),
-        };
+        let switch = self.render_side_switch(cx);
+        let body = self.render_side_body(list.into_any_element(), cx);
+        let files = self.workspace.ui.side_mode == SideMode::Files;
         let panel = div()
             .w(px(w))
             .h_full()
             .flex()
             .flex_col()
             .bg(t.color.surface)
-            .drag_over::<gpui::ExternalPaths>({
-                let tint = t.color.surface_accent;
-                move |s, _, _, _| s.bg(tint)
+            .when(files, |el| {
+                el.drag_over::<gpui::ExternalPaths>({
+                    let tint = t.color.surface_accent;
+                    move |s, _, _, _| s.bg(tint)
+                })
             })
             .border_r_1()
             .border_color(t.color.border)
             .child(
                 div()
-                    .h(px(32.))
+                    .h(t.size(Size::TabBar))
                     .flex_none()
-                    .px(px(8.))
+                    .px(t.space(Space::Md))
                     .flex()
                     .items_center()
+                    .overflow_hidden()
                     .border_b_1()
                     .border_color(t.color.border)
                     .text_size(t.typography.caption)
@@ -557,15 +558,17 @@ impl Shell {
                     .child(switch),
             )
             .child(body)
-            .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
-                this.drop_tree_entry(drag, drop_root.clone(), window, cx)
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.open_tree_menu(None, event.position, window, cx)
-                }),
-            );
+            .when(files, |el| {
+                el.on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
+                    this.drop_tree_entry(drag, drop_root.clone(), window, cx)
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        this.open_tree_menu(None, event.position, window, cx)
+                    }),
+                )
+            });
         // The box keeps its width throughout, so the panes beside it resize once, not per frame.
         let panel = match self.tree_closing {
             Some(closing) => motion::animate_exit(

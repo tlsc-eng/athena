@@ -77,8 +77,8 @@ pub fn set_aside(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::{
-        FolderIcon, FolderStyle, ItemId, ItemKind, PaneId, UiState, ViewState, WindowMode,
-        WindowState,
+        FolderIcon, FolderStyle, ItemId, ItemKind, PaneId, SideMode, UiState, ViewState,
+        WindowMode, WindowState,
     };
 
     #[test]
@@ -106,6 +106,7 @@ mod tests {
             font_zoom: -2,
             zoom_level: 3,
             sidebar_expanded: true,
+            side_mode: SideMode::Git,
         };
         w.projects[0].folder = vec!["work".into(), "clients".into()];
         w.collapsed = vec![vec!["work".into()]];
@@ -404,12 +405,71 @@ mod tests {
     fn missing_ui_state_loads_defaults() {
         let w: Workspace =
             serde_json::from_str(r#"{"projects":[],"active":null,"window":null}"#).unwrap();
-        assert_eq!(w.ui, UiState::default());
+        assert_eq!(
+            w.ui,
+            UiState {
+                side_mode: SideMode::Files,
+                ..UiState::default()
+            }
+        );
         let ui: UiState = serde_json::from_str(r#"{"tree_width":320}"#).unwrap();
         assert_eq!(ui.tree_width, 320.);
         assert_eq!(ui.drawer_height, 240.);
         assert!(ui.tree_visible);
         assert!(!ui.terminal_panel_open);
         assert_eq!(ui.font_zoom, 0);
+    }
+
+    #[test]
+    fn every_side_mode_survives_a_round_trip() {
+        for mode in [
+            SideMode::Sessions,
+            SideMode::Files,
+            SideMode::Outline,
+            SideMode::Git,
+        ] {
+            let ui = UiState {
+                side_mode: mode,
+                ..UiState::default()
+            };
+            let back: UiState = serde_json::from_str(&serde_json::to_string(&ui).unwrap()).unwrap();
+            assert_eq!(back.side_mode, mode);
+        }
+    }
+
+    #[test]
+    fn a_workspace_saved_before_side_modes_opens_on_files_and_a_fresh_one_on_sessions() {
+        assert_eq!(UiState::default().side_mode, SideMode::Sessions);
+        assert_eq!(Workspace::default().ui.side_mode, SideMode::Sessions);
+        let old: Workspace = serde_json::from_str(
+            r#"{"projects":[],"active":null,"window":null,"ui":{"tree_width":320}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.ui.side_mode, SideMode::Files);
+        assert_eq!(old.ui.tree_width, 320.);
+        let no_ui: Workspace =
+            serde_json::from_str(r#"{"projects":[],"active":null,"window":null}"#).unwrap();
+        assert_eq!(no_ui.ui.side_mode, SideMode::Files);
+    }
+
+    #[test]
+    fn an_unrecognised_side_mode_of_any_shape_falls_back_to_files_without_losing_the_workspace() {
+        let dir = std::env::temp_dir().join(format!("athena-sidemode-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("workspace.json");
+        for value in [r#""Tasks""#, "null", "7", r#"{"Tasks":1}"#] {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"projects":[],"active":null,"window":null,"word_wrap":true,"ui":{{"side_mode":{value},"tree_width":300}}}}"#
+                ),
+            )
+            .unwrap();
+            let w = load(&path).unwrap();
+            assert_eq!(w.ui.side_mode, SideMode::Files, "{value}");
+            assert_eq!(w.ui.tree_width, 300., "{value}");
+            assert!(w.word_wrap, "{value}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -230,7 +230,7 @@ impl Shell {
         let active = self.drawer == Some(DrawerTab::Problems);
         div()
             .id("problems-button")
-            .h(px(24.))
+            .h_full()
             .px(px(8.))
             .flex()
             .items_center()

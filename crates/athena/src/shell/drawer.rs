@@ -60,6 +60,11 @@ impl Shell {
         self.drawer_changed(cx);
     }
 
+    /// Shows the changes view, unlike ShowChanges, which closes it when it is already showing.
+    pub(super) fn show_changes(&mut self, cx: &mut Context<Self>) {
+        self.show_drawer_tab(DrawerTab::Changes, cx);
+    }
+
     /// Cmd+J: reopens the last tab, or closes the drawer.
     pub(super) fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
         self.drawer = match self.drawer {
@@ -211,7 +216,7 @@ impl Shell {
             DrawerTab::Problems => self.render_problems(cx),
             DrawerTab::Terminal => self.render_terminal_panel(cx),
             DrawerTab::Timeline => self.render_timeline(cx),
-            DrawerTab::Claude => self.render_claude_sessions(cx),
+            DrawerTab::Claude => self.render_claude_sessions(false, cx),
             DrawerTab::Debug => self.render_debug(window, cx),
         };
         // Only the search field, panel terminal and Debug fields take focus; once hidden, none can.

@@ -99,6 +99,10 @@ pub(super) enum Mode {
     NewTag,
     /// The repository's recent history.
     Log,
+    /// The message a worktree's pending changes are committed with before it is brought back.
+    BringCommit,
+    /// Squash or merge, for bringing a worktree back.
+    BringBack,
     /// A Claude session's review comments that were not sent yet.
     ReviewComments,
 }
@@ -138,6 +142,8 @@ fn placeholder_hint(mode: Mode) -> &'static str {
         Mode::RenameBranch => "Type the branch's new name",
         Mode::NewTag => "Type a name for the tag",
         Mode::Log => "No matching commits",
+        Mode::BringCommit => "Type a commit message",
+        Mode::BringBack => "No matching choices",
         _ => "No matching commands",
     }
 }
@@ -210,6 +216,9 @@ pub(super) struct Palette {
     symbols_task: Option<Task<()>>,
     _subscription: Subscription,
 }
+
+/// Only a linked worktree has changes to bring back, so the palette hides it elsewhere.
+const BRING_BACK: &str = "Git: Bring Worktree Changes Back…";
 
 /// Commands offered in the palette, in the order shown before any typing.
 pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
@@ -363,6 +372,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Git: Finish worktree…",
             Box::new(super::worktrees::GitFinishWorktree),
         ),
+        (BRING_BACK, Box::new(super::worktrees::GitBringWorktreeBack)),
         (
             "Git: Prune worktrees",
             Box::new(super::worktrees::GitPruneWorktrees),
@@ -441,8 +451,11 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Next Claude session needing you",
             Box::new(actions::NextClaudeAttention),
         ),
-        ("Focus outline", Box::new(super::outline::ShowOutline)),
-        ("Show explorer", Box::new(super::outline::ShowExplorer)),
+        ("Show sessions", Box::new(actions::ShowSessions)),
+        ("Show files", Box::new(actions::ShowFiles)),
+        ("Focus outline", Box::new(actions::ShowOutline)),
+        ("Show explorer", Box::new(actions::ShowExplorer)),
+        ("Show git", Box::new(actions::ShowGit)),
         ("Problems", Box::new(actions::ShowProblems)),
         ("Go to next problem", Box::new(actions::NextProblem)),
         ("Go to previous problem", Box::new(actions::PrevProblem)),
@@ -550,6 +563,24 @@ fn project_files(root: &Path) -> Vec<String> {
     out
 }
 
+/// Byte ranges in `label` for the matched `positions` of `key`, which the label ends (files)
+/// or equals. A label longer than its key can't be a suffix, so nothing is highlighted.
+fn label_highlights(key: &str, label: &str, positions: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let Some(offset) = key.chars().count().checked_sub(label.chars().count()) else {
+        return Vec::new();
+    };
+    let label_bytes: Vec<usize> = label.char_indices().map(|(b, _)| b).collect();
+    positions
+        .iter()
+        .filter(|&&p| p >= offset)
+        .filter_map(|&p| {
+            let b = *label_bytes.get(p - offset)?;
+            let len = label[b..].chars().next()?.len_utf8();
+            Some(b..b + len)
+        })
+        .collect()
+}
+
 /// The entries matching `query`, best first, as (score, entry index, matched positions). The
 /// Claude worktree picker then has its Claude row pinned.
 fn rank_entries(
@@ -641,6 +672,8 @@ impl Shell {
             Mode::RenameBranch => "New name for the current branch…",
             Mode::NewTag => "Tag the current commit as…",
             Mode::Log => "Search history; pick a commit to copy its id…",
+            Mode::BringCommit => "Commit message for the worktree's changes…",
+            Mode::BringBack => "Bring the worktree's changes back as…",
         };
         let input = cx.new(|cx| TextInput::new(placeholder, cx));
         let subscription = cx.subscribe_in(
@@ -673,6 +706,8 @@ impl Shell {
             | Mode::RenameBranch
             | Mode::NewTag
             | Mode::Log
+            | Mode::BringCommit
+            | Mode::BringBack
             | Mode::Symbols
             | Mode::WorkspaceSymbols => Vec::new(),
             Mode::Claude => claude_entries(""),
@@ -718,6 +753,7 @@ impl Shell {
         });
         let mcp_on = root.is_some_and(athena_playwright::mcp_enabled);
         let playwright = root.is_some_and(|r| athena_playwright::find_config(r).is_some());
+        let linked = root.is_some_and(|r| athena_workspace::git::main_worktree(r).is_some());
         let mut commands = commands();
         // The editor's own actions, so they only mean something with an editor focused.
         if self.focused_editor().is_some() {
@@ -744,7 +780,8 @@ impl Shell {
                 !(label.starts_with("Remove Athena's old Claude Code hooks") && !hooks_any
                     || label.starts_with("Enable Playwright MCP") && (mcp_on || !playwright)
                     || label.starts_with("Disable Playwright MCP") && !mcp_on
-                    || *label == "Run Playwright tests" && !playwright)
+                    || *label == "Run Playwright tests" && !playwright
+                    || *label == BRING_BACK && !linked)
             })
             .map(|(label, action)| Entry {
                 kind: None,
@@ -862,15 +899,12 @@ impl Shell {
                     (Some(place), Some(caption)) => Some(format!("{place} · {caption}")),
                     (place, caption) => place.or(caption),
                 };
+                let label = if linked { format!("↳ {name}") } else { name };
                 let entry = Entry {
-                    label: if linked {
-                        format!("↳ {name}")
-                    } else {
-                        name.clone()
-                    },
+                    key: label.clone(),
+                    label,
                     detail,
                     kind,
-                    key: name,
                     target: Target::Project(project.root.clone()),
                 };
                 (urgency, entry)
@@ -1188,6 +1222,12 @@ impl Shell {
                 ))
             }
             Mode::Log => Some(super::branches::log_entries(&self.git.commits, now_secs())),
+            Mode::BringCommit => Some(super::worktrees::commit_entries(&query)),
+            Mode::BringBack => self
+                .git
+                .bring
+                .as_ref()
+                .map(|b| super::worktrees::bring_entries(&b.main)),
             _ => None,
         };
         let folder_rows = match (palette.mode, &self.sidebar_subject) {
@@ -1353,26 +1393,20 @@ impl Shell {
             .map(|(row, (index, positions))| {
                 let entry = &palette.entries[*index];
                 let selected = row == palette.selected;
-                // Positions index `key`; for files the label is the name at the end of it.
-                let offset = entry.key.chars().count() - entry.label.chars().count();
-                let label_bytes: Vec<usize> = entry.label.char_indices().map(|(b, _)| b).collect();
                 let preview = match &entry.target {
                     Target::SidebarFolder(pick) => self.folder_pick_preview(pick, &t),
                     _ => None,
                 };
-                let bold: Vec<_> = positions
-                    .iter()
-                    .filter(|&&p| p >= offset)
-                    .filter_map(|&p| {
-                        let b = *label_bytes.get(p - offset)?;
-                        let len = entry.label[b..].chars().next()?.len_utf8();
-                        Some((
-                            b..b + len,
+                let bold: Vec<_> = label_highlights(&entry.key, &entry.label, positions)
+                    .into_iter()
+                    .map(|range| {
+                        (
+                            range,
                             HighlightStyle {
                                 font_weight: Some(FontWeight::SEMIBOLD),
                                 ..Default::default()
                             },
-                        ))
+                        )
                     })
                     .collect();
                 div()
@@ -1597,6 +1631,43 @@ fn claude_entries(query: &str) -> Vec<Entry> {
 mod tests {
     use super::*;
     use athena_lsp::Range;
+
+    #[test]
+    fn highlights_land_on_the_label_characters_the_key_matched() {
+        let key = "src/main.rs";
+        let (_, positions) = fuzzy::score("mn", key).unwrap();
+        assert_eq!(
+            label_highlights(key, "main.rs", &positions),
+            vec![0..1, 3..4]
+        );
+    }
+
+    #[test]
+    fn a_label_longer_than_its_key_highlights_nothing_instead_of_underflowing() {
+        assert!(label_highlights("name", "↳ name", &[0, 1]).is_empty());
+    }
+
+    #[test]
+    fn a_linked_project_row_highlights_the_name_after_the_arrow() {
+        let entry = |label: &str| Entry {
+            label: label.into(),
+            detail: None,
+            kind: None,
+            key: label.into(),
+            target: Target::Project(std::path::PathBuf::from("/p")),
+        };
+        let entries = [entry("other"), entry("↳ feature")];
+        let (_, index, positions) = rank_entries(&entries, "fea", Mode::Projects, false)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(index, 1);
+        // The arrow is three bytes and the space one, so the name starts at byte 4.
+        assert_eq!(
+            label_highlights(&entries[1].key, &entries[1].label, &positions),
+            vec![4..5, 5..6, 6..7]
+        );
+    }
 
     #[test]
     fn multi_cursor_and_wrap_commands_name_real_editor_actions() {

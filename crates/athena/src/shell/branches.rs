@@ -52,6 +52,12 @@ pub(super) enum BranchPick {
     Tag(String),
     /// Copies a commit's id.
     CopyCommit(String),
+    /// Bringing a worktree back: the message its pending changes are committed with first.
+    BringCommit(String),
+    /// Bringing a worktree back: squash its branch into main, or merge it keeping its commits.
+    Bring {
+        squash: bool,
+    },
 }
 
 /// One picker row: label, detail, the text the query is matched against, and what it does.
@@ -327,6 +333,7 @@ impl Shell {
             );
         }
         self.run_merge_like(
+            root.clone(),
             "continue the rebase".into(),
             Some(Underway::Rebase),
             move || git::continue_rebase(&root),
@@ -340,6 +347,7 @@ impl Shell {
             return;
         };
         self.run_merge_like(
+            root.clone(),
             "skip the rebase step".into(),
             Some(Underway::Rebase),
             move || git::skip_rebase_step(&root),
@@ -393,18 +401,30 @@ impl Shell {
         .detach();
     }
 
-    /// A merge, rebase or rebase step: stopping on conflicts is reported as that, not a failure.
-    /// `expected` is what must be under way first: nothing for a new merge or rebase.
-    fn run_merge_like(
+    /// A merge, rebase or rebase step in `root`: stopping on conflicts is reported as that, not a
+    /// failure. `expected` is what must be under way first: nothing for a new merge or rebase.
+    pub(super) fn run_merge_like(
         &mut self,
+        root: PathBuf,
         what: String,
         expected: Option<Underway>,
         op: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        let Some(root) = self.active_root() else {
-            return;
-        };
+        self.run_merge_like_then(root, what, expected, op, |_, _, _| {}, cx)
+    }
+
+    /// [`Self::run_merge_like`], then `then` with what it stopped on, `None` when it finished
+    /// cleanly. A plain failure does not call it.
+    pub(super) fn run_merge_like_then(
+        &mut self,
+        root: PathBuf,
+        what: String,
+        expected: Option<Underway>,
+        op: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+        then: impl FnOnce(&mut Self, Option<Underway>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(busy) = git::underway(&root).filter(|_| expected.is_none()) {
             return self.transient_notice(
                 format!("A {} is under way", busy.name()),
@@ -416,15 +436,19 @@ impl Shell {
             let done = cx.background_executor().spawn(async move { op() }).await;
             let _ = this.update(cx, |this, cx| {
                 match (done, git::underway(&root)) {
-                    (Ok(()), _) => {}
-                    (Err(_), Some(stopped)) => this.transient_notice(
-                        format!("The {} stopped on conflicts", stopped.name()),
-                        match stopped {
-                            Underway::Merge => "Resolve them in Changes, then commit. Git: Abort merge or rebase gives up.",
-                            Underway::Rebase => "Resolve and stage them in Changes, then run Git: Continue rebase. A step with nothing left to commit needs Git: Skip rebase step; Git: Abort merge or rebase gives up.",
-                        },
-                        cx,
-                    ),
+                    (Ok(()), _) => then(this, None, cx),
+                    (Err(_), Some(stopped)) => {
+                        this.transient_notice(
+                            format!("The {} stopped on conflicts", stopped.name()),
+                            match stopped {
+                                Underway::Merge => "Resolve them in Changes, then commit. Git: Abort merge or rebase gives up.",
+                                Underway::Rebase => "Resolve and stage them in Changes, then run Git: Continue rebase. A step with nothing left to commit needs Git: Skip rebase step; Git: Abort merge or rebase gives up.",
+                                Underway::Squash => "Resolve and stage them in Changes, then commit. Git: Abort merge or rebase gives up.",
+                            },
+                            cx,
+                        );
+                        then(this, Some(stopped), cx)
+                    }
                     (Err(err), None) => {
                         this.transient_notice(format!("Could not {what}"), format!("{err:#}"), cx)
                     }
@@ -569,11 +593,13 @@ impl Shell {
             }
             BranchPick::Merge(name) => {
                 let what = format!("merge {name}");
-                return self.run_merge_like(what, None, move || git::merge(&root, &name), cx);
+                let at = root.clone();
+                return self.run_merge_like(at, what, None, move || git::merge(&root, &name), cx);
             }
             BranchPick::Rebase(name) => {
                 let what = format!("rebase onto {name}");
-                return self.run_merge_like(what, None, move || git::rebase(&root, &name), cx);
+                let at = root.clone();
+                return self.run_merge_like(at, what, None, move || git::rebase(&root, &name), cx);
             }
             BranchPick::Delete(name) => return self.delete_branch(name, window, cx),
             BranchPick::Rename { from, to } => {
@@ -595,6 +621,10 @@ impl Shell {
                 let short: String = sha.chars().take(7).collect();
                 return self.transient_notice("Commit id copied", short, cx);
             }
+            BranchPick::BringCommit(message) => {
+                return self.bring_commit(message, window, cx);
+            }
+            BranchPick::Bring { squash } => return self.bring_run(squash, cx),
         };
         cx.spawn(async move |this, cx| {
             let task_name = name.clone();

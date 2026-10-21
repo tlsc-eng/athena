@@ -640,7 +640,7 @@ impl Shell {
         if let Some(pane) = caller
             && self.find_session(pane).is_some()
         {
-            self.review.sessions.bind(pane, session.clone());
+            self.bind_session(pane, session.clone(), cx);
         }
         self.sync_review_columns(cx);
         let Some(root) = self

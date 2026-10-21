@@ -11,7 +11,7 @@ use super::Shell;
 use super::git_view::Remote;
 use super::lsp::LspStatus;
 
-const HEIGHT: f32 = 22.;
+pub(super) const HEIGHT: f32 = 22.;
 
 /// "Ln 12, Col 5", with the selection's size when there is one, or the caret count when there are
 /// several, as VS Code words it.
@@ -286,7 +286,14 @@ impl Shell {
             .text_size(t.typography.caption)
             .text_color(t.color.content_muted)
             .child(div().flex().h_full().children(left).children(elsewhere))
-            .child(div().flex().h_full().children(right))
+            .child(
+                div()
+                    .flex()
+                    .h_full()
+                    .child(self.render_problems_button(cx))
+                    .child(self.render_usage_button(cx))
+                    .children(right),
+            )
     }
 }
 

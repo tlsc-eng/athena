@@ -15,6 +15,7 @@ use gpui::{
 
 use super::Shell;
 use super::bridge::hook_claude_holds_terminal;
+use super::claude_sessions::{Bindings, SessionsState};
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
@@ -32,6 +33,8 @@ pub(super) struct Windows {
     /// The window the user was last in, which commands from outside act on.
     focused: Option<AnyWindowHandle>,
     parked: Vec<Project>,
+    /// What the parked projects' terminals ran, to give back with them; the same shape a window keeps.
+    parked_sessions: SessionsState,
     app: AppFields,
     pub notices: Rc<RefCell<Log>>,
     ide: Option<ide::Server>,
@@ -84,6 +87,7 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         open: Vec::new(),
         focused: None,
         parked,
+        parked_sessions: SessionsState::default(),
         app: AppFields::of(&windows[0]),
         ide: None,
         ide_clients: HashMap::new(),
@@ -108,7 +112,7 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
     ];
     cx.global_mut::<Windows>()._tasks = tasks;
     cx.on_action(|_: &crate::actions::NewWindow, cx| {
-        let _ = new_window(None, None, cx);
+        let _ = new_window(None, &mut Bindings::default(), None, cx);
     });
     cx.on_window_closed(|cx| {
         if cx.windows().is_empty() {
@@ -325,8 +329,21 @@ pub(super) fn focus_project(handle: WindowHandle<Shell>, root: PathBuf, cx: &mut
 }
 
 /// The project a window closed earlier left running at `root`, to reopen with its tabs.
-pub(super) fn take_parked(root: &Path, cx: &mut App) -> Option<Project> {
-    athena_workspace::take_parked(&mut cx.global_mut::<Windows>().parked, root)
+pub(super) fn take_parked(root: &Path, cx: &mut App) -> Option<(Project, Bindings)> {
+    let windows = cx.global_mut::<Windows>();
+    let project = athena_workspace::take_parked(&mut windows.parked, root)?;
+    let bindings = windows.parked_sessions.split_off(&terminal_panes(&project));
+    Some((project, bindings))
+}
+
+fn terminal_panes(project: &Project) -> Vec<PaneId> {
+    project
+        .items()
+        .filter_map(|i| match i.kind {
+            athena_workspace::ItemKind::Terminal { session } => session,
+            _ => None,
+        })
+        .collect()
 }
 
 /// Roots open in windows other than `except`, for the IDE server's lock file and breakpoints.
@@ -339,6 +356,7 @@ pub(super) fn other_roots(except: AnyWindowHandle, cx: &App) -> Vec<PathBuf> {
 #[must_use]
 pub(super) fn new_window(
     project: Option<Project>,
+    bindings: &mut Bindings,
     near: Option<AnyWindowHandle>,
     cx: &mut App,
 ) -> Option<Project> {
@@ -349,6 +367,7 @@ pub(super) fn new_window(
         .and_then(|f| windows.open.iter().find(|o| o.handle == f))
         .map(|o| o.saved.clone())
         .unwrap_or_default();
+    let side_mode = base.ui.side_mode;
     let mut workspace = Workspace {
         projects: Vec::new(),
         active: None,
@@ -362,6 +381,7 @@ pub(super) fn new_window(
     };
     workspace.ui.font_zoom = app.font_zoom;
     workspace.ui.zoom_level = app.zoom_level;
+    workspace.ui.side_mode = side_mode;
     if let Some(project) = project {
         workspace.adopt_project(project);
     }
@@ -370,6 +390,7 @@ pub(super) fn new_window(
     match open_window(workspace, near, cx) {
         Some(handle) => {
             let _ = handle.update(cx, |shell, window, cx| {
+                shell.review.sessions.absorb(std::mem::take(bindings));
                 shell.open_views(cx);
                 shell.schedule_save(cx);
                 shell.save_now(cx);
@@ -391,20 +412,22 @@ pub(super) fn merge_into(into: AnyWindowHandle, cx: &mut App) {
     };
     let mut moved = Vec::new();
     let mut kept_alive = Vec::new();
+    let mut bindings = Bindings::default();
     for handle in handles(cx) {
         if handle == target {
             continue;
         }
         let taken = handle.update(cx, |shell, _, cx| shell.detach_all(cx));
-        if let Ok((projects, views)) = taken {
+        if let Ok((projects, views, bound)) = taken {
             moved.extend(projects);
             kept_alive.extend(views);
+            bindings.extend(bound);
         }
         forget(handle.into(), cx);
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
     let _ = target.update(cx, |shell, window, cx| {
-        shell.adopt_projects(moved, cx);
+        shell.adopt_projects(moved, bindings, cx);
         shell.open_views(cx);
         shell.save_now(cx);
         window.activate_window();
@@ -429,9 +452,14 @@ pub(super) fn is_last(cx: &App) -> bool {
 
 /// Closes a window whose unsaved files are settled; its projects are parked with their shells
 /// still running, and go to Open Recent.
-pub(super) fn close(window: AnyWindowHandle, projects: Vec<Project>, cx: &mut App) {
+pub(super) fn close(
+    window: AnyWindowHandle,
+    projects: Vec<Project>,
+    bindings: Bindings,
+    cx: &mut App,
+) {
     forget(window, cx);
-    park_projects(Some(window), projects, cx);
+    park_projects(Some(window), projects, bindings, cx);
     cx.defer(move |cx| {
         if let Some(next) = focused(cx) {
             let _ = next.update(cx, |shell, _, cx| shell.save_now(cx));
@@ -440,8 +468,14 @@ pub(super) fn close(window: AnyWindowHandle, projects: Vec<Project>, cx: &mut Ap
     });
 }
 
-fn park_projects(from: Option<AnyWindowHandle>, projects: Vec<Project>, cx: &mut App) {
+fn park_projects(
+    from: Option<AnyWindowHandle>,
+    projects: Vec<Project>,
+    bindings: Bindings,
+    cx: &mut App,
+) {
     let windows = cx.global_mut::<Windows>();
+    windows.parked_sessions.absorb(bindings);
     let mut recent = windows.app.recent.clone();
     athena_workspace::park(&mut windows.parked, &mut recent, projects);
     let fields = AppFields {
@@ -533,6 +567,31 @@ pub(super) fn claude_root_elsewhere(
         .into_iter()
         .filter(|h| AnyWindowHandle::from(*h) != except)
         .find_map(|h| h.read(cx).ok()?.claude_terminal(pid, cx).map(|(r, _)| r))
+}
+
+/// Drops `session` from the panes every window but `except` has bound, as it runs in one terminal.
+pub(super) fn unbind_elsewhere(session: String, except: AnyWindowHandle, cx: &mut App) {
+    for handle in handles(cx) {
+        if AnyWindowHandle::from(handle) == except {
+            continue;
+        }
+        let _ = handle.update(cx, |shell, _, cx| {
+            if shell.review.sessions.unbind(&session) {
+                cx.notify();
+            }
+        });
+    }
+}
+
+/// Sessions needing you in every window but `except`; that window cannot be read mid-update.
+#[allow(dead_code)] // The title chip, which is not built yet, adds its own window's count.
+pub(super) fn attention_elsewhere(except: AnyWindowHandle, cx: &App) -> usize {
+    handles(cx)
+        .into_iter()
+        .filter(|h| AnyWindowHandle::from(*h) != except)
+        .filter_map(|h| h.read(cx).ok())
+        .map(|shell| shell.attention_here(cx))
+        .sum()
 }
 
 fn route_ide(event: ide::Event, cx: &mut App) {
@@ -910,13 +969,16 @@ impl Shell {
             dirty.retain(|e| !e.update(cx, |e, cx| e.save(cx)));
         }
         self.settle_unsaved(dirty, "closing the window", window, cx, |this, cx| {
-            let (projects, _views) = this.detach_all(cx);
-            close(this.window_handle, projects, cx);
+            let (projects, _, bindings) = this.detach_all(cx);
+            close(this.window_handle, projects, bindings, cx);
         });
     }
 
     /// Takes every project out, with their shells still running, and stops what ran for them.
-    pub(super) fn detach_all(&mut self, cx: &mut Context<Self>) -> (Vec<Project>, Vec<ItemView>) {
+    pub(super) fn detach_all(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (Vec<Project>, Vec<ItemView>, Bindings) {
         let roots: Vec<PathBuf> = self
             .workspace
             .projects
@@ -925,20 +987,26 @@ impl Shell {
             .collect();
         let mut projects = Vec::new();
         let mut views = Vec::new();
+        let mut bindings = Bindings::default();
         for root in roots {
-            if let Some((project, kept)) = self.detach(&root, cx) {
+            if let Some((project, kept, bound)) = self.detach(&root, cx) {
                 projects.push(project);
                 views.extend(kept);
+                bindings.extend(bound);
             }
         }
         self.tests_quit();
         self.debug_quit();
-        (projects, views)
+        (projects, views, bindings)
     }
 
     /// Takes the project at `root` out of this window without closing its tabs' shells; the
     /// editors returned hold their unsaved text until the window taking the project opens them.
-    fn detach(&mut self, root: &Path, cx: &mut Context<Self>) -> Option<(Project, Vec<ItemView>)> {
+    fn detach(
+        &mut self,
+        root: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<(Project, Vec<ItemView>, Bindings)> {
         let index = self
             .workspace
             .projects
@@ -960,6 +1028,7 @@ impl Shell {
         self.debug_project_closed(root, cx);
         self.debug.forget_project(root);
         let project = self.workspace.detach_project(index)?;
+        let bindings = self.review.sessions.split_off(&terminal_panes(&project));
         let project = Workspace {
             projects: vec![project],
             ..Workspace::default()
@@ -978,11 +1047,17 @@ impl Shell {
         self.schedule_save(cx);
         self.save_now(cx);
         cx.notify();
-        Some((project, views))
+        Some((project, views, bindings))
     }
 
     /// Takes in projects moved from other windows, keeping the project that was in front.
-    pub(super) fn adopt_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
+    pub(super) fn adopt_projects(
+        &mut self,
+        projects: Vec<Project>,
+        bindings: Bindings,
+        cx: &mut Context<Self>,
+    ) {
+        self.review.sessions.absorb(bindings);
         let front = self.workspace.active;
         for project in projects {
             let root = project.root.clone();
@@ -1020,17 +1095,17 @@ impl Shell {
     }
 
     pub(super) fn move_to_new_window(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        let Some((project, views)) = self.detach(&root, cx) else {
+        let Some((project, views, mut bindings)) = self.detach(&root, cx) else {
             return;
         };
         let near = self.window_handle;
         let source = cx.entity().downgrade();
         cx.defer(move |cx| {
-            if let Some(project) = new_window(Some(project), Some(near), cx) {
+            if let Some(project) = new_window(Some(project), &mut bindings, Some(near), cx) {
                 // Back while its editors' views still hold their unsaved text.
                 let kept = project.clone();
                 let back = source.update(cx, |this, cx| {
-                    this.adopt_projects(vec![project], cx);
+                    this.adopt_projects(vec![project], bindings, cx);
                     this.open_views(cx);
                     this.transient_notice(
                         "Could not open a new window",
@@ -1039,7 +1114,7 @@ impl Shell {
                     );
                 });
                 if back.is_err() {
-                    park_projects(None, vec![kept], cx);
+                    park_projects(None, vec![kept], Bindings::default(), cx);
                 }
             }
             drop(views);
@@ -1101,6 +1176,16 @@ impl Shell {
             }));
         }
         items.push(athena_ui::MenuItem::separator());
+        if worktree {
+            items.push(super::menus::shell_item(
+                "Bring Changes Back…",
+                cx,
+                move |this, w, cx| {
+                    this.switch_to(index, cx);
+                    this.bring_back(w, cx)
+                },
+            ));
+        }
         items.push(match worktree {
             true => super::menus::shell_item("Finish Worktree…", cx, move |this, w, cx| {
                 this.switch_to(index, cx);
@@ -1172,10 +1257,11 @@ impl Shell {
                 }) {
                     return focus_project(holder, root, cx);
                 }
-                let project = take_parked(&root, cx).unwrap_or_else(|| Project::new(root));
+                let (project, mut bindings) = take_parked(&root, cx)
+                    .unwrap_or_else(|| (Project::new(root), Bindings::default()));
                 // Parked rather than dropped, so its tabs and shells can still be reopened.
-                if let Some(project) = new_window(Some(project), Some(near), cx) {
-                    park_projects(None, vec![project], cx);
+                if let Some(project) = new_window(Some(project), &mut bindings, Some(near), cx) {
+                    park_projects(None, vec![project], bindings, cx);
                 }
             });
         })

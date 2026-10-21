@@ -14,6 +14,7 @@ pub struct IconButton {
     label: Option<SharedString>,
     badge: Option<usize>,
     active: bool,
+    fill: bool,
     tooltip: Option<SharedString>,
     on_click: Option<ClickHandler>,
 }
@@ -26,6 +27,7 @@ impl IconButton {
             label: None,
             badge: None,
             active: false,
+            fill: false,
             tooltip: None,
             on_click: None,
         }
@@ -52,6 +54,12 @@ impl IconButton {
         self
     }
 
+    /// Fills the height of its container with square corners, for a status bar's flush cells.
+    pub fn fill(mut self) -> Self {
+        self.fill = true;
+        self
+    }
+
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.tooltip = Some(text.into());
         self
@@ -69,12 +77,17 @@ impl RenderOnce for IconButton {
         let c = &t.color;
         let button = div()
             .id(self.id)
-            .h(t.size(Size::Control))
+            .map(|el| {
+                if self.fill {
+                    el.h_full()
+                } else {
+                    el.h(t.size(Size::Control)).rounded(t.shape.radius_control)
+                }
+            })
             .px(t.space(Space::Md))
             .flex()
             .items_center()
             .gap(t.space(Space::Sm))
-            .rounded(t.shape.radius_control)
             .cursor_pointer()
             .text_color(if self.active {
                 c.content

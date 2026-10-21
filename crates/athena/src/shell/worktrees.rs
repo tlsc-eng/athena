@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use athena_workspace::git::{self, Branch, NewWorktree, Worktree};
 use gpui::{Context, PromptButton, PromptLevel, Window, actions};
@@ -9,6 +10,7 @@ use super::Shell;
 use super::branches::{BranchEntry, BranchPick};
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
+use super::notices::ToastAction;
 use super::palette::Mode;
 use crate::actions::display_path;
 use crate::worktree_forks;
@@ -21,9 +23,18 @@ actions!(
         GitDeleteWorktree,
         GitNewWorktreeWithClaude,
         GitFinishWorktree,
+        GitBringWorktreeBack,
         GitPruneWorktrees
     ]
 );
+
+/// The worktree being brought back into its main checkout, kept while its palettes are open.
+#[derive(Clone)]
+pub(super) struct Bring {
+    root: PathBuf,
+    pub(super) main: PathBuf,
+    branch: String,
+}
 
 const MAX_SLUG: usize = 40;
 
@@ -152,6 +163,75 @@ fn finish_detail(root: &Path, summary: &git::Summary, unique: u32) -> String {
         detail.push('.');
     }
     detail
+}
+
+/// The commit message offered for a worktree's pending changes: its branch, read as words.
+fn bring_message(branch: &str) -> String {
+    branch
+        .strip_prefix("claude/")
+        .unwrap_or(branch)
+        .replace('-', " ")
+}
+
+/// The one row a typed commit message makes.
+pub(super) fn commit_entries(query: &str) -> Vec<BranchEntry> {
+    let message = query.trim();
+    if message.is_empty() {
+        return Vec::new();
+    }
+    let label = format!("Commit the worktree's changes as “{message}”");
+    vec![BranchEntry {
+        key: label.clone(),
+        label,
+        detail: Some("Every change in the worktree, new files included".into()),
+        pick: BranchPick::BringCommit(message.to_string()),
+    }]
+}
+
+/// Squash comes first, as it leaves the changes for review rather than committing them.
+pub(super) fn bring_entries(main: &Path) -> Vec<BranchEntry> {
+    let rows = [
+        (
+            "Squash into main (staged)",
+            format!(
+                "Stages the changes in {} to review and commit",
+                display_path(main)
+            ),
+            true,
+        ),
+        (
+            "Merge into main (keep commits)",
+            "Adds the branch's commits with a merge commit".to_string(),
+            false,
+        ),
+    ];
+    rows.into_iter()
+        .map(|(label, detail, squash)| BranchEntry {
+            key: label.to_string(),
+            label: label.to_string(),
+            detail: Some(detail),
+            pick: BranchPick::Bring { squash },
+        })
+        .collect()
+}
+
+/// Title and body for what keeps a branch from being brought into `main`.
+fn bring_stop_notice(stop: git::BringStop, branch: &str, main: &Path) -> (String, String) {
+    let main = display_path(main);
+    match stop {
+        git::BringStop::Dirty => (
+            "The main checkout has uncommitted changes".into(),
+            format!("Commit or stash them in {main}, then bring the changes back."),
+        ),
+        git::BringStop::Busy(what) => (
+            format!("A {what} is under way in the main checkout"),
+            format!("Finish or abort it in {main}, then bring the changes back."),
+        ),
+        git::BringStop::Nothing => (
+            "Nothing to bring back".into(),
+            format!("{branch} has no commits that {main} lacks."),
+        ),
+    }
 }
 
 /// Rows of "Open worktree…": every worktree with a folder, then creating one.
@@ -493,11 +573,221 @@ impl Shell {
         .detach();
     }
 
+    /// Brings the active worktree's branch into its main checkout: commits what is pending, checks
+    /// the main checkout can take it, then asks squash or merge.
+    pub(super) fn bring_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let Some(main) = git::main_worktree(&root) else {
+            return self.transient_notice(
+                "Not a linked worktree",
+                "Bring changes back works on a project open in a linked worktree, not a \
+                 repository's main one.",
+                cx,
+            );
+        };
+        if !git::available() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let probe = root.clone();
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    let summary = git::summary(&probe, true)?;
+                    anyhow::Ok((summary, git::unresolved(&probe)?))
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match read {
+                Ok((
+                    git::Summary {
+                        branch: Some(branch),
+                        ..
+                    },
+                    true,
+                )) => this.transient_notice(
+                    "Unresolved conflicts",
+                    format!("{branch} has unresolved conflicts. Resolve or abort them first."),
+                    cx,
+                ),
+                Ok((
+                    git::Summary {
+                        branch: Some(branch),
+                        dirty,
+                        ..
+                    },
+                    false,
+                )) => {
+                    let message = bring_message(&branch);
+                    this.git.bring = Some(Bring { root, main, branch });
+                    if dirty {
+                        this.open_palette_with(Mode::BringCommit, &message, window, cx);
+                    } else {
+                        this.bring_check(window, cx);
+                    }
+                }
+                Ok(_) => this.transient_notice(
+                    "No branch to bring back",
+                    "The worktree has no branch checked out.",
+                    cx,
+                ),
+                Err(err) => {
+                    this.transient_notice("Could not read the worktree", format!("{err:#}"), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn bring_commit(
+        &mut self,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.git.bring.as_ref().map(|b| b.root.clone()) else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let done = cx
+                .background_executor()
+                .spawn(async move { git::commit_all(&root, &message) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match done {
+                Ok(()) => this.bring_check(window, cx),
+                Err(err) => this.transient_notice(
+                    "Could not commit the worktree's changes",
+                    format!("{err:#}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    /// Offers squash or merge when the main checkout can take the branch, else says why not.
+    fn bring_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Bring { main, branch, .. }) = self.git.bring.clone() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let (repo, name) = (main.clone(), branch.clone());
+            let stop = cx
+                .background_executor()
+                .spawn(async move { git::bring_stop(&repo, &name) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match stop {
+                Ok(None) => this.open_palette(Mode::BringBack, window, cx),
+                Ok(Some(stop)) => {
+                    let (title, body) = bring_stop_notice(stop, &branch, &main);
+                    this.transient_notice(title, body, cx)
+                }
+                Err(err) => this.transient_notice(
+                    "Could not read the main checkout",
+                    format!("{err:#}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn bring_run(&mut self, squash: bool, cx: &mut Context<Self>) {
+        let Some(Bring { root, main, branch }) = self.git.bring.take() else {
+            return;
+        };
+        let what = if squash {
+            format!("squash {branch} into main")
+        } else {
+            format!("merge {branch}")
+        };
+        let (repo, name) = (main.clone(), branch.clone());
+        self.run_merge_like_then(
+            main.clone(),
+            what,
+            None,
+            move || {
+                if squash {
+                    git::merge_squash(&repo, &name)
+                } else {
+                    git::merge(&repo, &name)
+                }
+            },
+            move |this, stopped, cx| this.brought_back(root, main, branch, squash, stopped, cx),
+            cx,
+        );
+    }
+
+    /// Shows the main checkout's Changes, where conflicts or the staged result wait, and offers to
+    /// finish the worktree once the changes landed cleanly.
+    fn brought_back(
+        &mut self,
+        root: PathBuf,
+        main: PathBuf,
+        branch: String,
+        squash: bool,
+        stopped: Option<git::Underway>,
+        cx: &mut Context<Self>,
+    ) {
+        match super::windows::holder_of(&main, self.window_handle, cx) {
+            Some(holder) => {
+                let main = main.clone();
+                cx.defer(move |cx| {
+                    let _ = holder.update(cx, |shell, window, cx| {
+                        window.activate_window();
+                        shell.open_folder(main, cx);
+                        shell.show_changes(cx);
+                    });
+                });
+            }
+            None => {
+                self.open_folder(main.clone(), cx);
+                self.show_changes(cx);
+            }
+        }
+        if stopped.is_some() {
+            return;
+        }
+        let (title, body) = if squash {
+            (
+                "Worktree changes are staged".to_string(),
+                format!(
+                    "Changes from {branch} are staged in {}. Review and commit.",
+                    display_path(&main)
+                ),
+            )
+        } else {
+            (
+                "Worktree merged".to_string(),
+                format!("{branch} is merged into {}.", display_path(&main)),
+            )
+        };
+        let finish = Rc::new(
+            move |this: &mut Shell, w: &mut Window, cx: &mut Context<Shell>| {
+                this.finish_worktree_at(root.clone(), w, cx)
+            },
+        );
+        self.action_toast(
+            title,
+            body,
+            ToastAction {
+                label: "Finish Worktree…",
+                run: finish,
+            },
+            cx,
+        );
+    }
+
     /// Closes the active worktree's project and deletes the worktree, and its branch if asked.
     pub(super) fn finish_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.active_root() else {
             return;
         };
+        self.finish_worktree_at(root, window, cx)
+    }
+
+    fn finish_worktree_at(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(main) = git::main_worktree(&root) else {
             return self.transient_notice(
                 "Not a linked worktree",
@@ -1334,5 +1624,40 @@ mod tests {
             worktree_detail(&list[2], false),
             "detached at 0123456 · /r-gone"
         );
+    }
+
+    #[test]
+    fn the_commit_message_defaults_to_the_branch_read_as_words() {
+        assert_eq!(bring_message("claude/fix-login-bug"), "fix login bug");
+        assert_eq!(bring_message("feat/x-y"), "feat/x y");
+    }
+
+    #[test]
+    fn bringing_back_offers_the_squash_first_and_commits_only_a_typed_message() {
+        let picks: Vec<BranchPick> = bring_entries(Path::new("/r"))
+            .into_iter()
+            .map(|e| e.pick)
+            .collect();
+        assert_eq!(
+            picks,
+            [
+                BranchPick::Bring { squash: true },
+                BranchPick::Bring { squash: false }
+            ]
+        );
+        assert!(commit_entries("  ").is_empty());
+        assert_eq!(
+            commit_entries(" tidy up ")[0].pick,
+            BranchPick::BringCommit("tidy up".into())
+        );
+    }
+
+    #[test]
+    fn each_reason_to_refuse_bringing_back_is_named() {
+        let main = Path::new("/r");
+        let say = |stop| bring_stop_notice(stop, "claude/x", main);
+        assert!(say(git::BringStop::Dirty).0.contains("uncommitted"));
+        assert!(say(git::BringStop::Busy("squash")).0.contains("squash"));
+        assert_eq!(say(git::BringStop::Nothing).0, "Nothing to bring back");
     }
 }
