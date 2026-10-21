@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use athena_ui::{ActiveTheme, InputEvent, TextInput, empty_state};
+use athena_ui::{ActiveTheme, Ellipsis, InputEvent, TextInput, empty_state};
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, HighlightStyle, KeyBinding, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, Render, ScrollWheelEvent, StyledText, Subscription,
@@ -624,8 +624,7 @@ impl LargeFileView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .ellipsis()
                     .text_color(t.color.content_secondary)
                     .child(format!(
                         "Read-only: this file is {}, so highlighting, language features and \

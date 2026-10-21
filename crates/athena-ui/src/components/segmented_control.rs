@@ -4,7 +4,7 @@ use gpui::{
     App, ElementId, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*,
 };
 
-use crate::{ActiveTheme, Size, Space, Tooltip};
+use crate::{ActiveTheme, Ellipsis, Size, Space, Tooltip};
 
 type SelectHandler = Rc<dyn Fn(usize, &mut Window, &mut App) + 'static>;
 
@@ -83,14 +83,7 @@ impl RenderOnce for SegmentedControl {
                         let label = label.clone();
                         move |_, cx| Tooltip::view(label.clone(), cx)
                     })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(label),
-                    )
+                    .child(div().min_w_0().ellipsis().child(label))
             }))
     }
 }

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use athena_editor::{EditorView, diff};
 use athena_proto::{AppMsg, PaneId, TodoInfo};
-use athena_ui::{ButtonKind, MenuItem, Space, Theme, Tooltip};
+use athena_ui::{ButtonKind, Ellipsis, MenuItem, Space, Theme, Tooltip};
 use athena_workspace::{DiffBase, SideMode};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, MouseButton, MouseDownEvent, PromptLevel,
@@ -846,8 +846,7 @@ impl Shell {
                         .id("claude-review-label")
                         .flex_1()
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
+                        .ellipsis()
                         .text_color(t.color.content)
                         .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
                         .child(text),
@@ -985,8 +984,7 @@ impl Shell {
                     .id(("claude-file-path", id))
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .ellipsis()
                     .text_color(t.color.content)
                     .tooltip(move |_, cx| Tooltip::view(tip.clone(), cx))
                     .child(rel),
@@ -1020,9 +1018,8 @@ fn detail_line(
         .flex()
         .items_center()
         .overflow_hidden()
-        .whitespace_nowrap()
         .text_color(t.color.content_muted)
-        .child(text.into())
+        .child(div().min_w_0().ellipsis().child(text.into()))
 }
 
 /// Binds the Claude sessions commands on the shell's root element.

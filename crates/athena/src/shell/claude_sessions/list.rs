@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use athena_proto::PaneId;
 use athena_term::ClaudeState;
 use athena_ui::{
-    ActiveTheme, Button, ButtonKind, DotState, IconButton, ListRow, Space, StatusDot, empty_state,
+    ActiveTheme, Button, ButtonKind, DotState, Ellipsis, IconButton, ListRow, Space, StatusDot,
+    empty_state,
 };
 use gpui::{AnyElement, Context, MouseDownEvent, Window, div, prelude::*};
 
@@ -188,7 +189,7 @@ impl Shell {
                         div()
                             .min_w_0()
                             .max_w(t.ui(110.))
-                            .truncate()
+                            .ellipsis()
                             .px(t.space(Space::Sm))
                             .rounded(t.shape.radius_control)
                             .bg(t.color.surface_active)

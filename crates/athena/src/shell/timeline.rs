@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use athena_ui::{ActiveTheme, MenuItem, Space, Tooltip};
+use athena_ui::{ActiveTheme, Ellipsis, MenuItem, Space, Tooltip};
 use athena_workspace::DiffBase;
 use athena_workspace::git::{self, LogEntry};
 use gpui::{
@@ -252,8 +252,7 @@ impl Shell {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
+                                    .ellipsis()
                                     .text_color(t.color.content)
                                     .child(e.subject.clone()),
                             )

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use athena_dap::Variable;
-use athena_ui::{ActiveTheme, Button, ButtonKind, Theme, Tooltip, motion};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, Theme, Tooltip, motion};
 use std::ops::Range;
 
 use gpui::{
@@ -210,8 +210,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .child(thread.name.clone()),
                     )
                     .into_any_element(),
@@ -253,8 +252,7 @@ impl Shell {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
+                                .ellipsis()
                                 .text_color(if subtle {
                                     t.color.content_muted
                                 } else {
@@ -356,8 +354,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .text_color(t.color.content_muted)
                             .child(format!("{dir}  {detail}")),
                     )
@@ -485,8 +482,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .font_family(t.typography.mono.clone())
                             .text_color(t.color.content)
                             .child(v.value.clone()),
@@ -551,8 +547,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .font_family(t.typography.mono.clone())
                             .text_color(color)
                             .child(value),

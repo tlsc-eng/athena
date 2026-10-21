@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use athena_lsp::Position;
-use athena_ui::{ActiveTheme, Button, ButtonKind, Space, StatusDot, Theme, empty_state};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, Space, StatusDot, Theme, empty_state};
 use athena_workspace::git::{self, Since};
 use athena_workspace::{Axis, DiffBase, ItemKind};
 use gpui::{AnyElement, Context, FontWeight, Task, Window, div, prelude::*};
@@ -444,7 +444,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .ellipsis()
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(t.typography.body)
                             .text_color(t.color.content)
@@ -585,7 +585,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .ellipsis()
                             .text_color(match comment.sent {
                                 true => t.color.content_muted,
                                 false => t.color.content,
@@ -604,7 +604,7 @@ impl Shell {
             )
             .child(
                 div()
-                    .truncate()
+                    .ellipsis()
                     .text_color(t.color.content_muted)
                     .child(comment.title.clone()),
             )

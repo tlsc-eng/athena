@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
 use athena_ui::motion::{self, Closing};
-use athena_ui::{ActiveTheme, Button, ButtonKind, IconButton, Size, Space};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, IconButton, Size, Space};
 use athena_workspace::{ItemId, ItemKind, Panel, Project, Rect};
 use gpui::{
     Animation, AnyElement, App, Bounds, ClickEvent, Context, Corner, FocusHandle, FontWeight, Hsla,
@@ -965,8 +965,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .text_size(t.typography.caption)
                             .text_color(t.color.content_muted)
                             .child(body),

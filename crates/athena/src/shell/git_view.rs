@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use athena_editor::{EditorView, GutterMark, diff};
-use athena_ui::{ActiveTheme, Button, ButtonKind, InputEvent, TextInput, Theme, Tooltip};
+use athena_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, InputEvent, TextInput, Theme, Tooltip};
 use athena_workspace::DiffBase;
 use athena_workspace::git::{self, Decorations, Entry, FileStatus, GitDirs, Hunk};
 use gpui::{
@@ -1767,8 +1767,7 @@ impl Shell {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .ellipsis()
                                         .text_color(t.color.content_muted)
                                         .child(dir),
                                 )

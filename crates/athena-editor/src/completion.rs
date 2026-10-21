@@ -2,8 +2,8 @@ use std::cmp::Reverse;
 use std::ops::Range;
 use std::time::Duration;
 
-use athena_ui::ActiveTheme;
 use athena_ui::motion::{self, Opening};
+use athena_ui::{ActiveTheme, Ellipsis};
 use gpui::{
     Animation, AnyElement, Context, Corner, FontWeight, HighlightStyle, Hsla, IntoElement,
     ScrollWheelEvent, StyledText, Task, anchored, deferred, div, point, prelude::*, px,
@@ -598,8 +598,7 @@ impl EditorView {
                         div()
                             .flex_none()
                             .max_w(px(WIDTH * 0.6))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .text_color(t.color.content)
                             .child(StyledText::new(item.label.clone()).with_highlights(highlights)),
                     )
@@ -607,10 +606,8 @@ impl EditorView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .ellipsis()
                             .text_right()
-                            .text_ellipsis()
                             .text_color(t.color.content_muted)
                             .children(item.detail.clone()),
                     )

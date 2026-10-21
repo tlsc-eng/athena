@@ -22,7 +22,7 @@ pub use theme::{
     TerminalColors, Theme, Typography, UI_ZOOM,
 };
 
-use gpui::{App, WindowAppearance};
+use gpui::{App, Styled, WindowAppearance};
 
 /// Registers fonts and the theme global; call once before opening windows.
 pub fn init(cx: &mut App) {
@@ -62,3 +62,13 @@ impl ActiveTheme for App {
         self.global::<Theme>()
     }
 }
+
+/// Single-line text that ends in "…" when it overflows its box.
+/// The element must not be a flex container; gpui 0.2.2 never truncates `whitespace_nowrap` text.
+pub trait Ellipsis: Styled + Sized {
+    fn ellipsis(self) -> Self {
+        self.whitespace_normal().line_clamp(1).text_ellipsis()
+    }
+}
+
+impl<E: Styled> Ellipsis for E {}

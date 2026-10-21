@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use athena_ui::{ActiveTheme, Button, ButtonKind, ContextMenu, InputEvent, MenuItem, TextInput};
+use athena_ui::{
+    ActiveTheme, Button, ButtonKind, ContextMenu, Ellipsis, InputEvent, MenuItem, TextInput,
+};
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, KeyBinding, Keystroke, MouseButton, MouseDownEvent, Pixels,
@@ -681,8 +683,7 @@ impl ShortcutsView {
                                     div()
                                         .font_family(t.typography.mono.clone())
                                         .text_color(t.color.content)
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .ellipsis()
                                         .child(bad.text.clone()),
                                 )
                                 .child(
@@ -914,7 +915,7 @@ impl ShortcutsView {
                                             .child(
                                                 div()
                                                     .min_w_0()
-                                                    .overflow_hidden()
+                                                    .ellipsis()
                                                     .text_color(t.color.content_muted)
                                                     .child(r.command),
                                             ),
@@ -969,8 +970,7 @@ impl ShortcutsView {
                                         div()
                                             .w(t.ui(170.))
                                             .flex_none()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
+                                            .ellipsis()
                                             .font_family(t.typography.mono.clone())
                                             .text_color(t.color.content_secondary)
                                             .child(

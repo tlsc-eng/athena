@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use athena_playwright::{Outcome, Report, TestResult};
 use athena_proto::NoticeKind;
-use athena_ui::{ActiveTheme, ButtonKind, empty_state};
+use athena_ui::{ActiveTheme, ButtonKind, Ellipsis, empty_state};
 use athena_workspace::ItemId;
 use gpui::{AnyElement, Context, ObjectFit, PromptLevel, Window, div, img, prelude::*, px};
 
@@ -330,8 +330,7 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .ellipsis()
                     .text_color(t.color.content)
                     .child(test.title.clone()),
             )

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use athena_containers::{Container, Handle, Stats, Update};
-use athena_ui::{ActiveTheme, ButtonKind};
+use athena_ui::{ActiveTheme, ButtonKind, Ellipsis};
 use gpui::{
     AnyElement, Context, FontWeight, ListSizingBehavior, ScrollStrategy, Task,
     UniformListScrollHandle, div, prelude::*, px, uniform_list,
@@ -241,16 +241,14 @@ impl Shell {
                             div()
                                 .w(px(200.))
                                 .flex_none()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
+                                .ellipsis()
                                 .child(c.service.clone().unwrap_or(c.name.clone())),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
+                                .ellipsis()
                                 .font_family(t.typography.mono.clone())
                                 .text_size(t.typography.caption)
                                 .text_color(t.color.content_muted)
@@ -260,8 +258,7 @@ impl Shell {
                             div()
                                 .w(px(170.))
                                 .flex_none()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
+                                .ellipsis()
                                 .font_family(t.typography.mono.clone())
                                 .text_size(t.typography.caption)
                                 .text_color(t.color.content_secondary)
