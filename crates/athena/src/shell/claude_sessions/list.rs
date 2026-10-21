@@ -47,7 +47,7 @@ fn dot_state(state: Option<ClaudeState>) -> DotState {
 /// Whether a session shows in the project at `active`: it is in the same repository and below the
 /// same folder of its work tree, so a project at a work tree's top lists every checkout's sessions
 /// and a package lists that package's in any checkout, not its siblings'.
-fn in_project(session: &LiveSession, active: &Place) -> bool {
+pub(super) fn in_project(session: &LiveSession, active: &Place) -> bool {
     session.main_root == active.main_root && session.rel.starts_with(&active.rel)
 }
 

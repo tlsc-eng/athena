@@ -922,8 +922,9 @@ protocol is undocumented and may change between Claude Code releases. When it is
   Claude Code's own code shows, it asks this way only when it would otherwise ask for
   permission, so auto-accept modes skip it.
 - The editor selection goes with each prompt (Claude Code shows "N lines selected"), and
-  `cmd-alt-k` (**Send selection to Claude**) puts `@file#L3-7` into the prompt of the Claude
-  session running in that project's terminals and focuses it.
+  `cmd-alt-k` (**Send selection to Claude**) asks which of the project's running Claude
+  sessions (worktrees included), or a new one, should get `@file#L3-7` in its prompt, and focuses
+  it. A session without a connected IDE gets it pasted instead, unless it is asking a question.
 - Claude Code reads diagnostics from Athena's language servers before and after each edit.
 
 Quitting with a proposal open answers it as rejected.
@@ -1003,7 +1004,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-shift-m` | Problems tab |
 | `cmd-shift-o` | Go to symbol in file |
 | `cmd-alt-o` | Go to symbol in workspace |
-| `cmd-alt-k` | Send the file and selected lines to Claude (in an editor, with Claude Code integration on) |
+| `cmd-alt-k` | Send the file and selected lines, or the cursor line, to a Claude session you pick (in an editor) |
 | `f8` / `shift-f8` | Next / previous problem (in an editor only) |
 | `ctrl--` | Go back |
 | `ctrl-shift--` | Go forward (also bound as `ctrl-_`, which is what macOS reports for it) |

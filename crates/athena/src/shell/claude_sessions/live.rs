@@ -355,6 +355,27 @@ impl Shell {
         out
     }
 
+    /// The sessions the Sessions list shows for `root`, located from disk now because the list's
+    /// own background load may not have run yet.
+    pub(in crate::shell) fn project_sessions(&mut self, root: &Path, cx: &App) -> Vec<LiveSession> {
+        let mut sessions = self.live_sessions(cx);
+        let unplaced: BTreeSet<PathBuf> = sessions
+            .iter()
+            .map(|s| s.cwd.clone())
+            .chain([root.to_path_buf()])
+            .filter(|cwd| !self.review.sessions.places.contains_key(cwd))
+            .collect();
+        if !unplaced.is_empty() {
+            self.review.sessions.places.extend(locate_all(&unplaced));
+            sessions = self.live_sessions(cx);
+        }
+        let active = self.review.sessions.place(root);
+        sessions
+            .into_iter()
+            .filter(|s| super::list::in_project(s, &active))
+            .collect()
+    }
+
     /// Sessions needing you across all open windows, this one included.
     pub(crate) fn attention_total(&self, cx: &App) -> usize {
         self.attention_here(cx) + crate::shell::windows::attention_elsewhere(self.window_handle, cx)

@@ -678,7 +678,10 @@ fn route_ide(event: ide::Event, cx: &mut App) {
         ide::Event::Client { client, pid } => {
             cx.global_mut::<Windows>().ide_clients.insert(client, pid);
             for handle in handles(cx) {
-                let _ = handle.update(cx, |shell, _, cx| shell.watch_selection(cx));
+                let _ = handle.update(cx, |shell, _, cx| {
+                    shell.watch_selection(cx);
+                    shell.deliver_pending(cx);
+                });
             }
         }
         ide::Event::Disconnected { client } => {
