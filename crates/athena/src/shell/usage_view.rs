@@ -6,8 +6,8 @@ use athena_proto::NoticeKind;
 use athena_ui::motion::{self, Closing};
 use athena_ui::{ActiveTheme, ButtonKind, IconButton, Space};
 use gpui::{
-    Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, PromptLevel, Window, div,
-    prelude::*, px,
+    Animation, AnyElement, Context, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Point,
+    PromptLevel, Window, div, prelude::*, px,
 };
 
 use super::Shell;
@@ -29,6 +29,7 @@ pub(super) struct UsageState {
     /// Generation of the current opening, keying its enter animation.
     opened: u64,
     closing: Option<Closing>,
+    dismissed_by: Option<Point<Pixels>>,
     /// Highest threshold already announced per profile and window, reset when usage drops.
     announced: HashMap<(String, String), f32>,
 }
@@ -309,10 +310,10 @@ impl Shell {
                     })
                     .child(summary),
             )
+            .fill()
             .active(self.usage_open())
-            .on_click(cx.listener(|this, _, _, cx| {
-                // An open popover already closed on this click's mouse-down; don't reopen it.
-                if this.usage_open() {
+            .on_click(cx.listener(|this, click, _, cx| {
+                if super::notices::is_dismissing_click(click, &mut this.usage.dismissed_by) {
                     return;
                 }
                 this.usage.open = true;
@@ -373,7 +374,8 @@ impl Shell {
             return None;
         }
         let t = cx.theme().clone();
-        let rise = t.ui(super::status_bar::HEIGHT) + t.space(Space::Xs);
+        let step = t.space(Space::Xs);
+        let rise = t.ui(super::status_bar::HEIGHT) + step;
         let preferred = self.preferred_profile();
         let sections: Vec<AnyElement> =
             self.usage
@@ -478,7 +480,10 @@ impl Shell {
             .shadow(vec![t.popover_shadow()])
             .text_size(t.typography.caption)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_usage(cx)))
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.usage.dismissed_by = Some(event.position);
+                this.close_usage(cx)
+            }))
             .when(self.usage.closing.is_some(), |el| {
                 el.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
             })
@@ -497,14 +502,14 @@ impl Shell {
                 popover,
                 ("usage-close", closing.generation),
                 t.motion.fast,
-                move |el, d| el.opacity(1. - d).bottom(rise - px(4.) * d),
+                move |el, d| el.opacity(1. - d).bottom(rise - step * d),
             ),
             None => motion::animate_if(
                 t.motion.reduced,
                 popover,
                 ("usage-open", self.usage.opened),
                 Animation::new(t.motion.fast).with_easing(motion::ease_enter()),
-                move |el, d| el.opacity(d).bottom(rise - px(4.) * (1. - d)),
+                move |el, d| el.opacity(d).bottom(rise - step * (1. - d)),
             ),
         })
     }

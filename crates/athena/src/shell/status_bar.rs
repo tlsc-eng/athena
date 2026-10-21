@@ -290,16 +290,8 @@ impl Shell {
                 div()
                     .flex()
                     .h_full()
-                    .child(
-                        // The buttons are control-height, a little taller than the bar.
-                        div()
-                            .flex()
-                            .h_full()
-                            .items_center()
-                            .overflow_hidden()
-                            .child(self.render_problems_button(cx))
-                            .child(self.render_usage_button(cx)),
-                    )
+                    .child(self.render_problems_button(cx))
+                    .child(self.render_usage_button(cx))
                     .children(right),
             )
     }

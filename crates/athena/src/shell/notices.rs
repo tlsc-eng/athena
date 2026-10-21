@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use athena_proto::{ClientMsg, Notice, NoticeKind, PaneId as Session, ServerMsg};
 use athena_term::ClaudeState;
@@ -7,9 +7,9 @@ use athena_ui::motion::{self, Closing};
 use athena_ui::{ActiveTheme, IconButton, Size, Space};
 use athena_workspace::{ItemId, ItemKind, Panel, Project, Rect};
 use gpui::{
-    Animation, AnyElement, App, Bounds, Context, Corner, FocusHandle, FontWeight, Hsla,
-    KeyDownEvent, Pixels, Task, Window, anchored, canvas, deferred, div, point, prelude::*, px,
-    svg,
+    Animation, AnyElement, App, Bounds, ClickEvent, Context, Corner, FocusHandle, FontWeight, Hsla,
+    KeyDownEvent, MouseDownEvent, Pixels, Point, Task, Window, anchored, canvas, deferred, div,
+    point, prelude::*, px, svg,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,8 +24,6 @@ const RECOVERY_TOAST_FOR: Duration = Duration::from_secs(30);
 const ACTION_TOAST_FOR: Duration = Duration::from_secs(15);
 const MAX_TOASTS: usize = 3;
 const RECONNECT_AFTER: Duration = Duration::from_secs(2);
-/// An outside click closes the popover on mouse-down, so the same click on the bell must not reopen it.
-const BELL_REOPEN_GUARD: Duration = Duration::from_millis(300);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(super) struct Notification {
@@ -95,6 +93,13 @@ impl Log {
             .iter()
             .find(|n| n.id == id)
             .map(|n| n.project.clone())
+    }
+
+    /// Marks every notification read; false when none was unread.
+    fn read_all(&mut self) -> bool {
+        let unread = self.list.iter().any(|n| !n.read);
+        self.list.iter_mut().for_each(|n| n.read = true);
+        unread
     }
 
     /// Marks the session's unread notifications read and returns their ids.
@@ -235,7 +240,7 @@ pub(super) struct BellState {
     /// Receives Escape while the popover is open.
     focus: FocusHandle,
     restore: Option<FocusHandle>,
-    dismissed: Option<Instant>,
+    dismissed_by: Option<Point<Pixels>>,
 }
 
 impl BellState {
@@ -244,9 +249,22 @@ impl BellState {
             open: false,
             focus: cx.focus_handle(),
             restore: None,
-            dismissed: None,
+            dismissed_by: None,
         }
     }
+}
+
+/// Whether `click` is the press that just dismissed a popover; it must not toggle it back open.
+/// The recorded press is spent either way.
+pub(super) fn is_dismissing_click(
+    click: &ClickEvent,
+    dismissed_by: &mut Option<Point<Pixels>>,
+) -> bool {
+    let pressed = match click {
+        ClickEvent::Mouse(m) => Some(m.down.position),
+        ClickEvent::Keyboard(_) => None,
+    };
+    pressed.is_some() && pressed == dismissed_by.take()
 }
 
 /// How many of the given Claude states are waiting for an answer.
@@ -297,28 +315,36 @@ impl Shell {
         let t = cx.theme();
         div().mr(t.space(Space::Md)).child(
             IconButton::new("bell")
-                .icon(svg().path("ui/bell.svg").size(t.space(Space::Xl)))
+                .icon(
+                    svg()
+                        .path("ui/bell.svg")
+                        .size(t.space(Space::Xl))
+                        .text_color(if self.bell.open {
+                            t.color.content
+                        } else {
+                            t.color.content_muted
+                        }),
+                )
                 .badge(self.unread())
                 .active(self.bell.open)
                 .tooltip("Notifications")
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_bell(window, cx))),
+                .on_click(
+                    cx.listener(|this, click, window, cx| this.toggle_bell(click, window, cx)),
+                ),
         )
     }
 
-    fn toggle_bell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_bell(&mut self, click: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if is_dismissing_click(click, &mut self.bell.dismissed_by) {
+            return;
+        }
         if self.bell.open {
             return self.close_bell(window, cx);
-        }
-        if self
-            .bell
-            .dismissed
-            .is_some_and(|at| at.elapsed() < BELL_REOPEN_GUARD)
-        {
-            return;
         }
         self.bell.open = true;
         self.bell.restore = window.focused(cx);
         window.focus(&self.bell.focus);
+        self.mark_all_read(cx);
         cx.notify();
     }
 
@@ -364,10 +390,9 @@ impl Shell {
                 }
             }))
             // Capture phase and no stop_propagation: the click that dismisses still reaches its target.
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.bell.open = false;
-                this.bell.dismissed = Some(Instant::now());
-                cx.notify();
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.bell.dismissed_by = Some(event.position);
+                this.close_bell(window, cx);
             }))
             .child(self.render_notifications(cx));
         Some(
@@ -446,7 +471,9 @@ impl Shell {
             session: target.as_ref().and(notice.pane),
             kind: notice.kind,
             at: notice.at,
-            read: watching || self.drawer == Some(super::drawer::DrawerTab::Notifications),
+            read: watching
+                || self.bell.open
+                || self.drawer == Some(super::drawer::DrawerTab::Notifications),
         };
         if !watching {
             if let Some(ItemView::Terminal(view)) = &view {
@@ -974,13 +1001,7 @@ impl Shell {
     }
 
     pub(super) fn mark_all_read(&mut self, cx: &mut Context<Self>) {
-        let unread = self.notices.borrow().list.iter().any(|n| !n.read);
-        if unread {
-            self.notices
-                .borrow_mut()
-                .list
-                .iter_mut()
-                .for_each(|n| n.read = true);
+        if self.notices.borrow_mut().read_all() {
             self.notices_changed(cx);
         }
     }
@@ -1070,6 +1091,50 @@ mod tests {
         assert!(log.resolve(7).is_empty());
         let unread: Vec<u64> = log.list.iter().filter(|n| !n.read).map(|n| n.id).collect();
         assert_eq!(unread, vec![2, 4]);
+    }
+
+    #[test]
+    fn opening_the_list_marks_every_notification_read() {
+        let mut log = Log::default();
+        for read in [false, true, false] {
+            let id = log.next_id();
+            log.push(Notification {
+                id,
+                project: None,
+                session: None,
+                kind: NoticeKind::ClaudeStopped,
+                at: 0,
+                read,
+            });
+        }
+        assert!(log.read_all());
+        assert!(log.list.iter().all(|n| n.read));
+        assert!(!log.read_all(), "nothing left to change");
+    }
+
+    fn click_at(x: f32, y: f32) -> ClickEvent {
+        ClickEvent::Mouse(gpui::MouseClickEvent {
+            down: MouseDownEvent {
+                position: point(px(x), px(y)),
+                ..Default::default()
+            },
+            up: Default::default(),
+        })
+    }
+
+    #[test]
+    fn a_click_whose_press_dismissed_the_popover_is_ignored_once() {
+        let mut dismissed = Some(point(px(10.), px(20.)));
+        assert!(!is_dismissing_click(&click_at(11., 20.), &mut dismissed));
+        assert_eq!(
+            dismissed, None,
+            "a recorded press only matters to the next click"
+        );
+
+        let mut dismissed = Some(point(px(10.), px(20.)));
+        assert!(is_dismissing_click(&click_at(10., 20.), &mut dismissed));
+        assert!(!is_dismissing_click(&click_at(10., 20.), &mut dismissed));
+        assert!(!is_dismissing_click(&click_at(10., 20.), &mut None));
     }
 
     #[test]

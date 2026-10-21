@@ -508,8 +508,8 @@ impl Shell {
                             .child(format!("· {branch}"))
                     }))
             }))
-            .children(self.render_attention_chip(cx))
             .children(self.render_debug_toolbar(cx))
+            .children(self.render_attention_chip(cx))
             .child(div().flex_1())
             .child(self.render_bell(cx))
     }
