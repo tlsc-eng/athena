@@ -71,6 +71,8 @@ pub(super) struct SessionsState {
     looks: HashMap<String, (DotState, u64, Opening)>,
     /// The running spinner's start and its tick, held only while something visible spins.
     spin: Option<(Instant, Task<()>)>,
+    /// Set by each draw of the list; a tick that finds it clear stops the spinner.
+    spin_drawn: bool,
     /// Todo lists and plans the hooks reported, by session id.
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.

@@ -178,6 +178,17 @@ fn should_spin(visible: bool, any_running: bool, reduced: bool) -> bool {
     visible && any_running && !reduced
 }
 
+/// Whether a tick goes on: only if the list drew since the last one, else nothing shows it.
+fn keep_spinning(drawn: bool) -> bool {
+    drawn
+}
+
+/// The wait to the next tick boundary after `elapsed`, so ticks stay on the grid `spin_step` reads.
+fn until_next_tick(elapsed: Duration) -> Duration {
+    let tick = SPIN_TICK_MS as u64;
+    Duration::from_millis(tick - elapsed.as_millis() as u64 % tick)
+}
+
 /// The height the children of an expanding row reach, or None when there are too many to sweep.
 fn expand_height(lines: usize, files: usize, scale: f32) -> Option<f32> {
     (lines + files <= MAX_SWEPT_ROWS)
@@ -418,8 +429,9 @@ impl Shell {
                 out.extend(body);
             }
         }
-        self.review.sessions.spin = if should_spin(self.list_shown(), any_running, t.motion.reduced)
-        {
+        let spinning = should_spin(self.list_shown(), any_running, t.motion.reduced);
+        self.review.sessions.spin_drawn = spinning;
+        self.review.sessions.spin = if spinning {
             spin.or_else(|| Some(Self::start_spin(cx)))
         } else {
             None
@@ -641,21 +653,34 @@ impl Shell {
     }
 
     fn list_shown(&self) -> bool {
-        self.workspace.ui.tree_visible && self.workspace.ui.side_mode == SideMode::Sessions
+        self.workspace.active.is_some()
+            && self.workspace.ui.tree_visible
+            && self.workspace.ui.side_mode == SideMode::Sessions
     }
 
     /// Ticks the running glyph on a timer rather than an animation, so it costs eight frames a second.
     fn start_spin(cx: &mut Context<Self>) -> (Instant, Task<()>) {
-        let tick = Duration::from_millis(SPIN_TICK_MS as u64);
+        let start = Instant::now();
         let task = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(tick).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let wait = until_next_tick(start.elapsed());
+                cx.background_executor().timer(wait).await;
+                let kept = this.update(cx, |this, cx| {
+                    let state = &mut this.review.sessions;
+                    let kept = keep_spinning(std::mem::take(&mut state.spin_drawn));
+                    if kept {
+                        cx.notify();
+                    } else {
+                        state.spin = None;
+                    }
+                    kept
+                });
+                if !kept.unwrap_or(false) {
                     break;
                 }
             }
         });
-        (Instant::now(), task)
+        (start, task)
     }
 
     /// Notes each row's glyph state, so a change replays the fade under a new animation id.
@@ -950,6 +975,22 @@ mod tests {
         assert_eq!(at(125), eighth);
         assert_eq!(at(1000), 0.);
         assert_eq!(at(1125), eighth);
+    }
+
+    #[test]
+    fn a_tick_goes_on_only_if_the_list_drew_since_the_last() {
+        assert!(keep_spinning(true));
+        assert!(!keep_spinning(false));
+    }
+
+    #[test]
+    fn ticks_wait_for_the_next_boundary_from_the_start() {
+        let wait = |ms| until_next_tick(Duration::from_millis(ms));
+        assert_eq!(wait(0), Duration::from_millis(125));
+        assert_eq!(wait(1), Duration::from_millis(124));
+        assert_eq!(wait(124), Duration::from_millis(1));
+        assert_eq!(wait(125), Duration::from_millis(125));
+        assert_eq!(wait(130), Duration::from_millis(120));
     }
 
     #[test]
