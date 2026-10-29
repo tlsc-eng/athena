@@ -76,6 +76,8 @@ pub struct TextInput {
     max_rows: Option<usize>,
     /// The first line shown when the text has more lines than the box has rows.
     scroll_row: usize,
+    /// How far the text is scrolled left so the cursor stays inside the box.
+    scroll_x: Pixels,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -99,6 +101,7 @@ impl TextInput {
             bounds: None,
             max_rows: None,
             scroll_row: 0,
+            scroll_x: px(0.),
         }
     }
 
@@ -307,6 +310,7 @@ struct InputFrame {
     cursor: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
     scroll_row: usize,
+    scroll_x: Pixels,
 }
 
 /// Byte ranges of `text`'s lines without their breaks; a single-line box has one line.
@@ -333,6 +337,20 @@ fn scrolled_to(scroll: usize, line: usize, rows: usize) -> usize {
     } else {
         scroll
     }
+}
+
+/// The left offset of the visible window that keeps the one-pixel caret in view without scrolling past the end of the line.
+fn scrolled_x(scroll: Pixels, cursor_x: Pixels, line_width: Pixels, width: Pixels) -> Pixels {
+    let caret = px(1.);
+    let max = (line_width + caret - width).max(px(0.));
+    let wanted = if cursor_x < scroll {
+        cursor_x
+    } else if cursor_x + caret > scroll + width {
+        cursor_x + caret - width
+    } else {
+        scroll
+    };
+    wanted.clamp(px(0.), max)
 }
 
 impl IntoElement for InputElement {
@@ -396,9 +414,7 @@ impl Element for InputElement {
         let (cursor_line, _) = input.line_at(input.cursor);
         let scroll_row = scrolled_to(input.scroll_row, cursor_line, rows);
         let mut lines = Vec::new();
-        let mut selection = Vec::new();
-        let mut cursor = None;
-        for (i, range) in ranges.iter().enumerate() {
+        for range in ranges.iter() {
             let (text, color) = if input.text.is_empty() {
                 (input.placeholder.to_string(), theme.color.content_disabled)
             } else {
@@ -448,32 +464,50 @@ impl Element for InputElement {
             let line = window
                 .text_system()
                 .shape_line(text.into(), font_size, &runs, None);
-            let top = bounds.top() + lh * (i as f32 - scroll_row as f32);
-            if (scroll_row..scroll_row + rows).contains(&i) {
-                if focused && input.all_selected {
-                    selection.push(fill(
-                        Bounds::new(point(bounds.left(), top), size(line.width, lh)),
-                        theme.color.surface_accent,
-                    ));
-                }
-                if focused && i == cursor_line {
-                    let x = match input.text.is_empty() {
-                        true => px(0.),
-                        false => line.x_for_index(input.cursor - range.start),
-                    };
-                    cursor = Some(fill(
-                        Bounds::new(point(bounds.left() + x, top), size(px(1.), lh)),
-                        theme.color.accent,
-                    ));
-                }
-            }
             lines.push((range.start, line));
+        }
+        let cursor_x = |line: &ShapedLine, start: usize| match input.text.is_empty() {
+            true => px(0.),
+            false => line.x_for_index(input.cursor - start),
+        };
+        let scroll_x = match lines.get(cursor_line) {
+            Some((start, line)) if !input.text.is_empty() => scrolled_x(
+                input.scroll_x,
+                cursor_x(line, *start),
+                line.width,
+                bounds.size.width,
+            ),
+            _ => px(0.),
+        };
+        let mut selection = Vec::new();
+        let mut cursor = None;
+        for (i, (start, line)) in lines.iter().enumerate() {
+            if !(scroll_row..scroll_row + rows).contains(&i) {
+                continue;
+            }
+            let top = bounds.top() + lh * (i as f32 - scroll_row as f32);
+            if focused && input.all_selected {
+                selection.push(fill(
+                    Bounds::new(point(bounds.left() - scroll_x, top), size(line.width, lh)),
+                    theme.color.surface_accent,
+                ));
+            }
+            if focused && i == cursor_line {
+                cursor = Some(fill(
+                    Bounds::new(
+                        point(bounds.left() + cursor_x(line, *start) - scroll_x, top),
+                        size(px(1.), lh),
+                    ),
+                    theme.color.accent,
+                ));
+            }
         }
         InputFrame {
             lines,
             cursor,
             selection,
             scroll_row,
+            scroll_x,
         }
     }
 
@@ -493,25 +527,28 @@ impl Element for InputElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        for quad in frame.selection.drain(..) {
-            window.paint_quad(quad);
-        }
         let lh = window.line_height();
-        // Only a multi-line box clips: its scrolled-out lines sit above and below it.
-        let mask = (frame.lines.len() > 1).then_some(gpui::ContentMask { bounds });
-        window.with_content_mask(mask, |window| {
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for quad in frame.selection.drain(..) {
+                window.paint_quad(quad);
+            }
             for (i, (_, line)) in frame.lines.iter().enumerate() {
                 let top = bounds.top() + lh * (i as f32 - frame.scroll_row as f32);
-                let _ = line.paint(point(bounds.left(), top), lh, window, cx);
+                let _ = line.paint(point(bounds.left() - frame.scroll_x, top), lh, window, cx);
             }
         });
         if let Some(cursor) = frame.cursor.take() {
             window.paint_quad(cursor);
         }
-        let (lines, scroll_row) = (std::mem::take(&mut frame.lines), frame.scroll_row);
+        let (lines, scroll_row, scroll_x) = (
+            std::mem::take(&mut frame.lines),
+            frame.scroll_row,
+            frame.scroll_x,
+        );
         self.input.update(cx, |input, _| {
             input.layout = lines;
             input.scroll_row = scroll_row;
+            input.scroll_x = scroll_x;
             input.bounds = Some(bounds);
         });
     }
@@ -603,8 +640,8 @@ impl EntityInputHandler for TextInput {
         let top = bounds.top() + lh * (row as f32 - self.scroll_row as f32);
         let x = |b: usize| line.x_for_index(b.saturating_sub(*at).min(line.len()));
         Some(Bounds::from_corners(
-            point(bounds.left() + x(start), top),
-            point(bounds.left() + x(end), top + lh),
+            point(bounds.left() + x(start) - self.scroll_x, top),
+            point(bounds.left() + x(end) - self.scroll_x, top + lh),
         ))
     }
 
@@ -630,5 +667,16 @@ mod tests {
         assert_eq!(scrolled_to(0, 7, 6), 2);
         assert_eq!(scrolled_to(4, 1, 6), 1);
         assert_eq!(scrolled_to(2, 5, 6), 2);
+    }
+
+    #[test]
+    fn the_caret_scrolls_into_view_without_leaving_empty_space() {
+        let (w, line) = (px(100.), px(300.));
+        assert_eq!(scrolled_x(px(0.), px(50.), line, w), px(0.));
+        assert_eq!(scrolled_x(px(0.), px(99.), line, w), px(0.));
+        assert_eq!(scrolled_x(px(0.), px(120.), line, w), px(21.));
+        assert_eq!(scrolled_x(px(80.), px(30.), line, w), px(30.));
+        assert_eq!(scrolled_x(px(150.), px(300.), px(120.), w), px(21.));
+        assert_eq!(scrolled_x(px(40.), px(30.), px(60.), w), px(0.));
     }
 }
