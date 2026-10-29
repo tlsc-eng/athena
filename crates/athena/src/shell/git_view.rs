@@ -1490,40 +1490,18 @@ impl Shell {
         Some(
             div()
                 .flex_none()
-                .min_h(px(40.))
                 .px(px(12.))
                 .py(px(7.))
                 .flex()
-                .items_start()
-                .gap(px(8.))
+                .flex_col()
+                .gap(px(6.))
                 .border_b_1()
                 .border_color(t.color.border)
                 .text_size(t.typography.caption)
                 .child(
                     div()
-                        .id("git-branch")
-                        .h(px(26.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .flex_none()
-                        .rounded(t.shape.radius_control)
-                        .border_1()
-                        .border_color(t.color.border)
-                        .cursor_pointer()
-                        .text_color(t.color.content_secondary)
-                        .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
-                        .tooltip(|_, cx| Tooltip::view("Switch branch", cx))
-                        .on_click(cx.listener(|this, _, window, cx| this.open_branches(window, cx)))
-                        .child(format!(
-                            "⎇ {}",
-                            branch.unwrap_or_else(|| "no branch".into())
-                        )),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
+                        .w_full()
+                        .overflow_hidden()
                         .min_h(px(26.))
                         .px(px(8.))
                         .py(px(1.))
@@ -1538,43 +1516,76 @@ impl Shell {
                 )
                 .child(
                     div()
-                        .id("git-amend")
-                        .h(px(26.))
                         .flex()
-                        .flex_none()
                         .items_center()
-                        .gap(px(6.))
-                        .cursor_pointer()
-                        .text_color(if amend {
-                            t.color.content
-                        } else {
-                            t.color.content_muted
-                        })
-                        .tooltip(|_, cx| Tooltip::view("Rewrite the last commit", cx))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_amend(cx)))
+                        .gap(px(8.))
                         .child(
                             div()
-                                .size(px(12.))
+                                .id("git-branch")
+                                .h(px(26.))
+                                .px(px(8.))
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .rounded(px(2.))
+                                .min_w_0()
+                                .rounded(t.shape.radius_control)
                                 .border_1()
-                                .border_color(if amend {
-                                    t.color.accent
-                                } else {
-                                    t.color.border_strong
-                                })
-                                .when(amend, |el| el.bg(t.color.accent))
-                                .text_color(t.color.content_on_accent)
-                                .text_size(px(9.))
-                                .when(amend, |el| el.child("✓")),
+                                .border_color(t.color.border)
+                                .cursor_pointer()
+                                .text_color(t.color.content_secondary)
+                                .hover(|s| s.bg(t.color.surface_hover).text_color(t.color.content))
+                                .tooltip(|_, cx| Tooltip::view("Switch branch", cx))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.open_branches(window, cx)
+                                    }),
+                                )
+                                .child(div().min_w_0().ellipsis().child(format!(
+                                    "⎇ {}",
+                                    branch.unwrap_or_else(|| "no branch".into())
+                                ))),
                         )
-                        .child("Amend"),
-                )
-                .child(
-                    Button::new("git-commit", label, ButtonKind::Primary)
-                        .on_click(cx.listener(|this, _, window, cx| this.commit(window, cx))),
+                        .child(
+                            div()
+                                .id("git-amend")
+                                .ml_auto()
+                                .h(px(26.))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(px(6.))
+                                .cursor_pointer()
+                                .text_color(if amend {
+                                    t.color.content
+                                } else {
+                                    t.color.content_muted
+                                })
+                                .tooltip(|_, cx| Tooltip::view("Rewrite the last commit", cx))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_amend(cx)))
+                                .child(
+                                    div()
+                                        .size(px(12.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(2.))
+                                        .border_1()
+                                        .border_color(if amend {
+                                            t.color.accent
+                                        } else {
+                                            t.color.border_strong
+                                        })
+                                        .when(amend, |el| el.bg(t.color.accent))
+                                        .text_color(t.color.content_on_accent)
+                                        .text_size(px(9.))
+                                        .when(amend, |el| el.child("✓")),
+                                )
+                                .child("Amend"),
+                        )
+                        .child(
+                            Button::new("git-commit", label, ButtonKind::Primary).on_click(
+                                cx.listener(|this, _, window, cx| this.commit(window, cx)),
+                            ),
+                        ),
                 )
                 .into_any_element(),
         )
