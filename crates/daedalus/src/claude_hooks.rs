@@ -704,4 +704,19 @@ mod tests {
         fs::remove_dir_all(home).unwrap();
         fs::remove_dir_all(project).unwrap();
     }
+
+    #[test]
+    fn an_existing_athena_backup_stops_a_daedalus_backup_from_being_made() {
+        let dir = temp("athena-backup");
+        let user = settings_path(&dir);
+        fs::write(&user, user_settings().to_string()).unwrap();
+        let athena_backup = dir.join(".claude/settings.json.athena-backup");
+        fs::write(&athena_backup, "{}").unwrap();
+
+        write(&user, Path::new(DAEDALUS), true, true).unwrap();
+        assert!(enabled(&user));
+        assert!(!dir.join(".claude/settings.json.daedalus-backup").exists());
+        assert_eq!(fs::read_to_string(&athena_backup).unwrap(), "{}");
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
