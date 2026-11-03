@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 /// Every Daedalus hook command contains this, which is how they are found again.
-const MARKER: &str = "athena\" notify --event";
+const MARKER: &str = "daedalus\" notify --event";
+/// Hooks written by Athena, replaced on the next sync.
+const LEGACY_MARKER: &str = "athena\" notify --event";
 
 /// Where Daedalus 0.10 and earlier put its hooks, one project at a time.
 pub fn settings_path(root: &Path) -> PathBuf {
@@ -38,12 +40,12 @@ const PLAN_TOOLS: &str = "TodoWrite|ExitPlanMode";
 /// Notifications that wait on the user; `idle_prompt` is only a reminder after Claude finished.
 const ASKS: &str = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|worker_permission_prompt";
 
-fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 12] {
-    let athena = athena.display();
+fn hooks(daedalus: &Path) -> [(&'static str, Option<&'static str>, String); 12] {
+    let daedalus = daedalus.display();
     // Settings are shared with Claude sessions outside Daedalus, where the hook must stay silent.
     let cmd = |event: &str| {
         format!(
-            "[ -n \"$ATHENA_PANE_ID\" ] && [ -x \"{athena}\" ] && \"{athena}\" notify --event {event} || true"
+            "[ -n \"$DAEDALUS_PANE_ID$ATHENA_PANE_ID\" ] && [ -x \"{daedalus}\" ] && \"{daedalus}\" notify --event {event} || true"
         )
     };
     [
@@ -68,7 +70,9 @@ fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 12] {
 }
 
 fn is_ours_command(hook: &Value) -> bool {
-    hook["command"].as_str().is_some_and(|c| c.contains(MARKER))
+    hook["command"]
+        .as_str()
+        .is_some_and(|c| c.contains(MARKER) || c.contains(LEGACY_MARKER))
 }
 
 fn is_ours(entry: &Value) -> bool {
@@ -79,7 +83,7 @@ fn is_ours(entry: &Value) -> bool {
 
 /// Settings with Daedalus's hooks added (`enable`) or removed, leaving everything else as it was.
 /// Fails on settings whose shape it does not understand rather than guess.
-pub fn merge(mut settings: Value, athena: &Path, enable: bool) -> Result<Value> {
+pub fn merge(mut settings: Value, daedalus: &Path, enable: bool) -> Result<Value> {
     let Value::Object(top) = &mut settings else {
         bail!("the settings are not a JSON object");
     };
@@ -89,7 +93,7 @@ pub fn merge(mut settings: Value, athena: &Path, enable: bool) -> Result<Value> 
         Value::Object(m) => m,
         _ => bail!("\"hooks\" is not a JSON object"),
     };
-    let ours = hooks(athena);
+    let ours = hooks(daedalus);
     let mut events: Vec<&str> = ours.iter().map(|(event, ..)| *event).collect();
     events.dedup();
     for event in events {
@@ -156,7 +160,7 @@ pub fn enabled(path: &Path) -> bool {
     else {
         return false;
     };
-    hooks(Path::new("athena"))
+    hooks(Path::new("daedalus"))
         .iter()
         .all(|(event, _, command)| {
             let event_flag = command
@@ -171,7 +175,7 @@ pub fn enabled(path: &Path) -> bool {
                             hs.iter().any(|h| {
                                 h["command"].as_str().is_some_and(|c| {
                                     // Hooks from before the guard ran in every Claude session.
-                                    c.contains("$ATHENA_PANE_ID")
+                                    c.contains("$DAEDALUS_PANE_ID")
                                         && c.contains(&format!("--event {event_flag} "))
                                 })
                             })
@@ -183,7 +187,7 @@ pub fn enabled(path: &Path) -> bool {
 
 /// Adds or removes Daedalus's hooks in the Claude settings at `path`, keeping a copy of the
 /// file as it was before Daedalus first changed it when `backup` is set.
-pub fn write(path: &Path, athena: &Path, enable: bool, backup: bool) -> Result<()> {
+pub fn write(path: &Path, daedalus: &Path, enable: bool, backup: bool) -> Result<()> {
     let path = path.to_path_buf();
     // Write through a symlinked settings file to its target instead of replacing the link.
     let path = match fs::canonicalize(&path) {
@@ -200,26 +204,29 @@ pub fn write(path: &Path, athena: &Path, enable: bool, backup: bool) -> Result<(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Value::Object(Map::new()), None),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    let updated = merge(current.clone(), athena, enable)
+    let updated = merge(current.clone(), daedalus, enable)
         .with_context(|| format!("{} has an unexpected shape", path.display()))?;
     if updated == current {
         return Ok(());
     }
     fs::create_dir_all(path.parent().expect("settings path has a parent"))?;
-    let mut saved = path
-        .file_name()
-        .expect("settings path has a name")
-        .to_owned();
-    saved.push(".athena-backup");
-    let saved = path.with_file_name(saved);
-    if backup && perms.is_some() && !saved.exists() {
+    let backup_with = |suffix: &str| {
+        let mut name = path
+            .file_name()
+            .expect("settings path has a name")
+            .to_owned();
+        name.push(suffix);
+        path.with_file_name(name)
+    };
+    let saved = backup_with(".daedalus-backup");
+    if backup && perms.is_some() && !saved.exists() && !backup_with(".athena-backup").exists() {
         fs::copy(&path, &saved)?;
     }
     let mut name = path
         .file_name()
         .expect("settings path has a name")
         .to_owned();
-    name.push(".athena-tmp");
+    name.push(".daedalus-tmp");
     let tmp = path.with_file_name(name);
     let mut out = fs::File::create(&tmp)?;
     if let Some(perms) = perms {
@@ -233,16 +240,16 @@ pub fn write(path: &Path, athena: &Path, enable: bool, backup: bool) -> Result<(
 
 /// Brings Daedalus's hooks in every Claude Code config folder under `home` in line with `enable`,
 /// and takes the per-project hooks of older versions out of `projects`.
-pub fn sync(home: &Path, athena: &Path, enable: bool, projects: &[PathBuf]) -> Result<()> {
+pub fn sync(home: &Path, daedalus: &Path, enable: bool, projects: &[PathBuf]) -> Result<()> {
     let mut failed = Vec::new();
     for path in global_settings(home) {
-        if let Err(e) = write(&path, athena, enable, true) {
+        if let Err(e) = write(&path, daedalus, enable, true) {
             failed.push(format!("{}: {e:#}", path.display()));
         }
     }
     for path in projects.iter().map(|root| settings_path(root)) {
         if installed(&path)
-            && let Err(e) = write(&path, athena, false, false)
+            && let Err(e) = write(&path, daedalus, false, false)
         {
             failed.push(format!("{}: {e:#}", path.display()));
         }
@@ -254,25 +261,25 @@ pub fn sync(home: &Path, athena: &Path, enable: bool, projects: &[PathBuf]) -> R
 }
 
 /// The `daedalus` command hooks should run: the Homebrew link if installed, else this executable.
-pub fn athena_command() -> PathBuf {
-    let brew = Path::new("/opt/homebrew/bin/athena");
+pub fn daedalus_command() -> PathBuf {
+    let brew = Path::new("/opt/homebrew/bin/daedalus");
     if brew.exists() {
         return brew.to_path_buf();
     }
     std::env::current_exe()
         .and_then(|p| p.canonicalize())
-        .unwrap_or_else(|_| PathBuf::from("athena"))
+        .unwrap_or_else(|_| PathBuf::from("daedalus"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ATHENA: &str = "/opt/homebrew/bin/athena";
+    const DAEDALUS: &str = "/opt/homebrew/bin/daedalus";
 
     fn command(event: &str) -> String {
         format!(
-            "[ -n \"$ATHENA_PANE_ID\" ] && [ -x \"{ATHENA}\" ] && \"{ATHENA}\" notify --event {event} || true"
+            "[ -n \"$DAEDALUS_PANE_ID$ATHENA_PANE_ID\" ] && [ -x \"{DAEDALUS}\" ] && \"{DAEDALUS}\" notify --event {event} || true"
         )
     }
 
@@ -282,7 +289,7 @@ mod tests {
             "permissions": { "allow": ["Bash(ls)"] },
             "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "say done" }] }] }
         });
-        let out = merge(existing, Path::new(ATHENA), true).unwrap();
+        let out = merge(existing, Path::new(DAEDALUS), true).unwrap();
         assert_eq!(out["permissions"]["allow"][0], "Bash(ls)");
         let stop = out["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "the user's own Stop hook is kept");
@@ -302,12 +309,12 @@ mod tests {
     #[test]
     fn an_install_from_before_the_prompt_hook_gets_it_beside_the_running_one() {
         let dir = temp("prompt");
-        let mut old = merge(json!({}), Path::new(ATHENA), true).unwrap();
+        let mut old = merge(json!({}), Path::new(DAEDALUS), true).unwrap();
         let submit = old["hooks"]["UserPromptSubmit"].as_array_mut().unwrap();
         submit.retain(|e| e["hooks"][0]["command"] == command("claude-running"));
         fs::write(settings_path(&dir), old.to_string()).unwrap();
         assert!(!enabled(&settings_path(&dir)));
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         assert!(enabled(&settings_path(&dir)));
         let written: Value =
             serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
@@ -321,11 +328,11 @@ mod tests {
     #[test]
     fn an_install_from_before_session_start_is_upgraded_once() {
         let dir = temp("upgrade");
-        let mut old = merge(json!({}), Path::new(ATHENA), true).unwrap();
+        let mut old = merge(json!({}), Path::new(DAEDALUS), true).unwrap();
         old["hooks"].as_object_mut().unwrap().remove("SessionStart");
         fs::write(settings_path(&dir), old.to_string()).unwrap();
         assert!(installed(&settings_path(&dir)) && !enabled(&settings_path(&dir)));
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         assert!(enabled(&settings_path(&dir)));
         let written: Value =
             serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
@@ -334,7 +341,7 @@ mod tests {
         assert_eq!(start[0]["hooks"][0]["command"], command("claude-session"));
         assert_eq!(written["hooks"]["Stop"], old["hooks"]["Stop"]);
         assert_eq!(
-            merge(written.clone(), Path::new(ATHENA), true).unwrap(),
+            merge(written.clone(), Path::new(DAEDALUS), true).unwrap(),
             written
         );
         fs::remove_dir_all(dir).unwrap();
@@ -342,26 +349,26 @@ mod tests {
 
     #[test]
     fn is_idempotent_and_removable() {
-        let once = merge(json!({}), Path::new(ATHENA), true).unwrap();
-        let twice = merge(once.clone(), Path::new(ATHENA), true).unwrap();
+        let once = merge(json!({}), Path::new(DAEDALUS), true).unwrap();
+        let twice = merge(once.clone(), Path::new(DAEDALUS), true).unwrap();
         assert_eq!(once, twice);
-        let removed = merge(twice, Path::new(ATHENA), false).unwrap();
+        let removed = merge(twice, Path::new(DAEDALUS), false).unwrap();
         assert_eq!(removed, json!({}));
     }
 
     #[test]
     fn writes_and_reads_back() {
-        let dir = std::env::temp_dir().join(format!("athena-hooks-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-hooks-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         assert!(!enabled(&settings_path(&dir)));
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         assert!(enabled(&settings_path(&dir)));
-        write(&settings_path(&dir), Path::new(ATHENA), false, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), false, false).unwrap();
         assert!(!enabled(&settings_path(&dir)) && !installed(&settings_path(&dir)));
         fs::write(settings_path(&dir), "{ not json").unwrap();
         assert!(
-            write(&settings_path(&dir), Path::new(ATHENA), true, false).is_err(),
+            write(&settings_path(&dir), Path::new(DAEDALUS), true, false).is_err(),
             "never overwrite a file we can't parse"
         );
         fs::remove_dir_all(dir).unwrap();
@@ -385,7 +392,7 @@ mod tests {
 
     #[test]
     fn edit_hooks_are_appended_after_the_users_own_and_removed_cleanly() {
-        let out = merge(user_settings(), Path::new(ATHENA), true).unwrap();
+        let out = merge(user_settings(), Path::new(DAEDALUS), true).unwrap();
         let pre = out["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre.len(), 3);
         assert_eq!(pre[0]["hooks"][0]["command"], "guard.sh");
@@ -406,17 +413,17 @@ mod tests {
         assert_eq!(start[1]["hooks"][0]["command"], command("claude-session"));
         assert_eq!(out["model"], "opus");
 
-        let again = merge(out.clone(), Path::new(ATHENA), true).unwrap();
+        let again = merge(out.clone(), Path::new(DAEDALUS), true).unwrap();
         assert_eq!(again, out, "enabling twice changes nothing");
         assert_eq!(
-            merge(again, Path::new(ATHENA), false).unwrap(),
+            merge(again, Path::new(DAEDALUS), false).unwrap(),
             user_settings()
         );
     }
 
     #[test]
     fn the_plan_hook_sits_beside_the_edit_hook_and_both_survive_enabling_twice() {
-        let out = merge(user_settings(), Path::new(ATHENA), true).unwrap();
+        let out = merge(user_settings(), Path::new(DAEDALUS), true).unwrap();
         let post = out["hooks"]["PostToolUse"].as_array().unwrap();
         let matchers: Vec<&str> = post
             .iter()
@@ -432,9 +439,9 @@ mod tests {
             ]
         );
         assert_eq!(post[3]["hooks"][0]["command"], command("claude-plan"));
-        assert_eq!(merge(out.clone(), Path::new(ATHENA), true).unwrap(), out);
+        assert_eq!(merge(out.clone(), Path::new(DAEDALUS), true).unwrap(), out);
         assert_eq!(
-            merge(out, Path::new(ATHENA), false).unwrap(),
+            merge(out, Path::new(DAEDALUS), false).unwrap(),
             user_settings()
         );
     }
@@ -442,14 +449,14 @@ mod tests {
     #[test]
     fn an_install_without_the_plan_hook_is_upgraded_without_duplicating_the_edit_hook() {
         let dir = temp("plan-upgrade");
-        let mut old = merge(user_settings(), Path::new(ATHENA), true).unwrap();
+        let mut old = merge(user_settings(), Path::new(DAEDALUS), true).unwrap();
         old["hooks"]["PostToolUse"]
             .as_array_mut()
             .unwrap()
             .retain(|e| e["matcher"] != PLAN_TOOLS);
         fs::write(settings_path(&dir), old.to_string()).unwrap();
         assert!(!enabled(&settings_path(&dir)) && installed(&settings_path(&dir)));
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         assert!(enabled(&settings_path(&dir)));
         let written: Value =
             serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
@@ -461,10 +468,10 @@ mod tests {
 
     #[test]
     fn an_install_from_an_older_athena_reads_as_not_enabled_until_upgraded() {
-        let dir = std::env::temp_dir().join(format!("athena-hooks-old-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-hooks-old-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".claude")).unwrap();
-        let mut old = merge(user_settings(), Path::new(ATHENA), true).unwrap();
+        let mut old = merge(user_settings(), Path::new(DAEDALUS), true).unwrap();
         let hooks = old["hooks"].as_object_mut().unwrap();
         for event in ["PreToolUse", "PostToolUse"] {
             let kept: Vec<Value> = hooks[event]
@@ -482,7 +489,7 @@ mod tests {
             installed(&settings_path(&dir)),
             "an older install can still be removed"
         );
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         assert!(enabled(&settings_path(&dir)));
         let written: Value =
             serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
@@ -495,7 +502,8 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-hooks-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-hooks-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".claude")).unwrap();
         dir
@@ -510,20 +518,20 @@ mod tests {
                 { "type": "command", "command": "lint.sh" }
             ] }] }
         });
-        let removed = merge(shared, Path::new(ATHENA), false).unwrap();
+        let removed = merge(shared, Path::new(DAEDALUS), false).unwrap();
         assert_eq!(
             removed,
             json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "lint.sh" }] }] } })
         );
-        let again = merge(removed, Path::new(ATHENA), true).unwrap();
+        let again = merge(removed, Path::new(DAEDALUS), true).unwrap();
         let stop = again["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2);
         assert_eq!(stop[0]["hooks"][0]["command"], "lint.sh");
         assert_eq!(stop[1]["hooks"][0]["command"], ours);
 
         let odd = json!({ "hooks": { "Stop": ["x", { "hooks": "y" }] } });
-        let round_trip = merge(odd.clone(), Path::new(ATHENA), true).unwrap();
-        assert_eq!(merge(round_trip, Path::new(ATHENA), false).unwrap(), odd);
+        let round_trip = merge(odd.clone(), Path::new(DAEDALUS), true).unwrap();
+        assert_eq!(merge(round_trip, Path::new(DAEDALUS), false).unwrap(), odd);
     }
 
     #[test]
@@ -537,11 +545,11 @@ mod tests {
         ] {
             fs::write(settings_path(&dir), text).unwrap();
             assert!(
-                write(&settings_path(&dir), Path::new(ATHENA), true, false).is_err(),
+                write(&settings_path(&dir), Path::new(DAEDALUS), true, false).is_err(),
                 "{text}"
             );
             assert!(
-                write(&settings_path(&dir), Path::new(ATHENA), false, false).is_err(),
+                write(&settings_path(&dir), Path::new(DAEDALUS), false, false).is_err(),
                 "{text}"
             );
             assert_eq!(fs::read_to_string(settings_path(&dir)).unwrap(), text);
@@ -562,14 +570,14 @@ mod tests {
         });
         let text = serde_json::to_string_pretty(&settings).unwrap() + "\n";
         fs::write(settings_path(&dir), &text).unwrap();
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         let on = fs::read_to_string(settings_path(&dir)).unwrap();
         let order = |t: &str| {
             ["zeta", "hooks", "SessionEnd", "Stop", "alpha"]
                 .map(|k| t.find(&format!("\"{k}\"")).unwrap())
         };
         assert!(order(&on).is_sorted(), "{on}");
-        write(&settings_path(&dir), Path::new(ATHENA), false, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), false, false).unwrap();
         assert_eq!(fs::read_to_string(settings_path(&dir)).unwrap(), text);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -582,7 +590,7 @@ mod tests {
         fs::write(&real, "{\"model\": \"opus\"}").unwrap();
         fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
         std::os::unix::fs::symlink(&real, settings_path(&dir)).unwrap();
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         assert!(settings_path(&dir).is_symlink(), "the link is kept");
         assert!(enabled(&settings_path(&dir)));
         let written: Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
@@ -591,7 +599,7 @@ mod tests {
             fs::metadata(&real).unwrap().permissions().mode() & 0o7777,
             0o600
         );
-        write(&settings_path(&dir), Path::new(ATHENA), false, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), false, false).unwrap();
         assert!(settings_path(&dir).is_symlink());
         assert_eq!(
             fs::metadata(&real).unwrap().permissions().mode() & 0o7777,
@@ -601,7 +609,7 @@ mod tests {
             !e.unwrap()
                 .file_name()
                 .to_string_lossy()
-                .ends_with("athena-tmp")
+                .ends_with("daedalus-tmp")
         }));
         fs::remove_dir_all(dir).unwrap();
     }
@@ -609,18 +617,48 @@ mod tests {
     #[test]
     fn hooks_from_before_the_guard_are_replaced() {
         let dir = temp("unguarded");
-        let old = merge(json!({}), Path::new(ATHENA), true)
+        let old = merge(json!({}), Path::new(DAEDALUS), true)
             .unwrap()
             .to_string()
             .replace(
-                "[ -n \\\"$ATHENA_PANE_ID\\\" ] && [ -x \\\"/opt/homebrew/bin/athena\\\" ] && ",
+                "[ -n \\\"$DAEDALUS_PANE_ID$ATHENA_PANE_ID\\\" ] && [ -x \\\"/opt/homebrew/bin/daedalus\\\" ] && ",
                 "",
             );
-        assert!(!old.contains("ATHENA_PANE_ID"), "{old}");
+        assert!(!old.contains("DAEDALUS_PANE_ID"), "{old}");
         fs::write(settings_path(&dir), &old).unwrap();
         assert!(!enabled(&settings_path(&dir)));
-        write(&settings_path(&dir), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
         assert!(enabled(&settings_path(&dir)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn athena_hooks_are_replaced_by_daedalus_hooks_and_removed_with_them() {
+        let dir = temp("legacy");
+        let old = merge(user_settings(), Path::new(DAEDALUS), true)
+            .unwrap()
+            .to_string()
+            .replace("$DAEDALUS_PANE_ID$ATHENA_PANE_ID", "$ATHENA_PANE_ID")
+            .replace("/opt/homebrew/bin/daedalus", "/opt/homebrew/bin/athena");
+        assert!(!old.contains("daedalus"), "{old}");
+        fs::write(settings_path(&dir), &old).unwrap();
+        assert!(installed(&settings_path(&dir)) && !enabled(&settings_path(&dir)));
+
+        write(&settings_path(&dir), Path::new(DAEDALUS), true, false).unwrap();
+        let upgraded: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
+        assert!(enabled(&settings_path(&dir)));
+        assert!(!upgraded.to_string().contains("athena\\\" notify"));
+        assert_eq!(
+            upgraded,
+            merge(user_settings(), Path::new(DAEDALUS), true).unwrap()
+        );
+
+        fs::write(settings_path(&dir), &old).unwrap();
+        write(&settings_path(&dir), Path::new(DAEDALUS), false, false).unwrap();
+        let off: Value =
+            serde_json::from_str(&fs::read_to_string(settings_path(&dir)).unwrap()).unwrap();
+        assert_eq!(off, user_settings());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -635,11 +673,11 @@ mod tests {
         fs::write(&user, user_settings().to_string()).unwrap();
         fs::set_permissions(&user, fs::Permissions::from_mode(0o600)).unwrap();
         let project = temp("project");
-        write(&settings_path(&project), Path::new(ATHENA), true, false).unwrap();
+        write(&settings_path(&project), Path::new(DAEDALUS), true, false).unwrap();
 
         sync(
             &home,
-            Path::new(ATHENA),
+            Path::new(DAEDALUS),
             true,
             std::slice::from_ref(&project),
         )
@@ -654,12 +692,12 @@ mod tests {
             fs::metadata(&user).unwrap().permissions().mode() & 0o7777,
             0o600
         );
-        let backup = home.join(".claude/settings.json.athena-backup");
+        let backup = home.join(".claude/settings.json.daedalus-backup");
         let saved: Value = serde_json::from_str(&fs::read_to_string(&backup).unwrap()).unwrap();
         assert_eq!(saved, user_settings());
         assert!(!installed(&settings_path(&project)));
 
-        sync(&home, Path::new(ATHENA), false, &[]).unwrap();
+        sync(&home, Path::new(DAEDALUS), false, &[]).unwrap();
         let off: Value = serde_json::from_str(&fs::read_to_string(&user).unwrap()).unwrap();
         assert_eq!(off, user_settings());
         assert!(!installed(&work));

@@ -24,6 +24,14 @@ pub const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 
 pub type PaneId = u64;
 
+/// The pane this process runs in. `ATHENA_PANE_ID` is what daemons from before the rename set.
+pub fn pane_id_from_env() -> Option<PaneId> {
+    std::env::var("DAEDALUS_PANE_ID")
+        .or_else(|_| std::env::var("ATHENA_PANE_ID"))
+        .ok()
+        .and_then(|p| p.parse().ok())
+}
+
 /// Requests to the running Daedalus window over `app.sock`, from the command line and the MCP
 /// bridge. Each gets one `AppReply`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -50,7 +58,7 @@ pub enum AppMsg {
         text: String,
         newline: bool,
     },
-    /// Sent first by clients running in a Daedalus terminal (`ATHENA_PANE_ID`). The window only
+    /// Sent first by clients running in a Daedalus terminal (`DAEDALUS_PANE_ID`). The window only
     /// believes it if that pane's foreground program is an ancestor of the client.
     Identify {
         session: PaneId,

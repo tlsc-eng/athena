@@ -84,7 +84,7 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         notices_path,
         path,
         // For automation: run the windows' logic without showing them or taking focus.
-        hidden: std::env::var_os("ATHENA_HIDDEN").is_some(),
+        hidden: std::env::var_os("DAEDALUS_HIDDEN").is_some(),
         open: Vec::new(),
         focused: None,
         parked,

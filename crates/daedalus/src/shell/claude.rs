@@ -83,7 +83,7 @@ impl Shell {
             .map(|p| p.root.clone())
             .collect();
         let task = cx.background_executor().spawn(async move {
-            claude_hooks::sync(&home, &claude_hooks::athena_command(), on, &projects)
+            claude_hooks::sync(&home, &claude_hooks::daedalus_command(), on, &projects)
         });
         cx.spawn(async move |this, cx| {
             if let Err(e) = task.await {
@@ -130,7 +130,8 @@ impl Shell {
             if answer.await != Ok(0) {
                 return;
             }
-            let result = claude_hooks::write(&file, &claude_hooks::athena_command(), false, false);
+            let result =
+                claude_hooks::write(&file, &claude_hooks::daedalus_command(), false, false);
             let _ = this.update(cx, |this, cx| {
                 let (title, body) = match result {
                     Ok(()) => (

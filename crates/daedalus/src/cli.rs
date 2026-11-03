@@ -277,9 +277,7 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
         },
         _ => anyhow::bail!("{USAGE}"),
     };
-    let pane = std::env::var("ATHENA_PANE_ID")
-        .ok()
-        .and_then(|p| p.parse().ok());
+    let pane = daedalus_proto::pane_id_from_env();
     if let Ok((conn, _)) = daedalus_proto::connect(&daedalus_proto::socket_path()?) {
         conn.send(&ClientMsg::Notify { pane, kind })?;
     }
@@ -314,10 +312,7 @@ fn tell_window(msg: AppMsg) -> anyhow::Result<()> {
     let mut stream = UnixStream::connect(daedalus_proto::app_socket_path()?)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
-    if let Some(session) = std::env::var("ATHENA_PANE_ID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-    {
+    if let Some(session) = daedalus_proto::pane_id_from_env() {
         daedalus_proto::write_frame(&mut stream, &AppMsg::Identify { session })?;
         daedalus_proto::read_frame::<_, daedalus_proto::AppReply>(&mut stream)?;
     }

@@ -79,15 +79,15 @@ impl Pane {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "athena");
+        cmd.env("TERM_PROGRAM", "daedalus");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        cmd.env("ATHENA_PANE_ID", id.to_string());
+        cmd.env("DAEDALUS_PANE_ID", id.to_string());
         let zsh = cmd
             .get_env("SHELL")
             .is_some_and(|s| Path::new(s).ends_with("zsh"));
         if let Some(dir) = zdotdir.filter(|_| zsh) {
             if let Some(original) = std::env::var_os("ZDOTDIR") {
-                cmd.env("ATHENA_ORIG_ZDOTDIR", original);
+                cmd.env("DAEDALUS_ORIG_ZDOTDIR", original);
             }
             cmd.env("ZDOTDIR", dir);
         }

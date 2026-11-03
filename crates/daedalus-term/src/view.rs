@@ -1192,7 +1192,7 @@ impl TerminalView {
             Ok(text) => return cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Err(NoOutput::NoCommand) => {
                 "No command has finished here with shell integration marks (OSC 133). zsh sends \
-                 them unless ATHENA_SHELL_INTEGRATION=0; the README has a snippet for bash."
+                 them unless DAEDALUS_SHELL_INTEGRATION=0; the README has a snippet for bash."
             }
             Err(NoOutput::Unmarked) => {
                 "The shell did not mark where the output started (OSC 133;C)."
