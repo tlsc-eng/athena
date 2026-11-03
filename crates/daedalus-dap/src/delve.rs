@@ -103,7 +103,7 @@ func main() {
             eprintln!("skipped: dlv is not on the login PATH");
             return;
         };
-        if !debugging_needs_no_password() && std::env::var_os("ATHENA_DAP_TEST").is_none() {
+        if !debugging_needs_no_password() && std::env::var_os("DAEDALUS_DAP_TEST").is_none() {
             eprintln!(
                 "skipped: Developer Mode is off (DevToolsSecurity -enable), so macOS would ask"
             );

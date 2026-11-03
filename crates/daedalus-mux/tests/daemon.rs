@@ -23,8 +23,8 @@ impl Daemon {
         std::fs::create_dir_all(&home).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_daedalus-mux"))
             .env("HOME", &home)
-            .env("ATHENA_TEST_SECRET", "leaked")
-            .env("ATHENA_NOTIFY_AFTER_SECS", "0")
+            .env("DAEDALUS_TEST_SECRET", "leaked")
+            .env("DAEDALUS_NOTIFY_AFTER_SECS", "0")
             .env("SHELL", "/bin/zsh")
             .envs(env.iter().copied())
             .spawn()
@@ -210,7 +210,7 @@ fn shells_do_not_inherit_the_daemon_environment() {
     };
     conn.send(&ClientMsg::Attach { pane }).unwrap();
     let probe =
-        b"echo \"secret=[${ATHENA_TEST_SECRET}] home=[${HOME}] pane=[${ATHENA_PANE_ID}]\"\r";
+        b"echo \"secret=[${DAEDALUS_TEST_SECRET}] home=[${HOME}] pane=[${DAEDALUS_PANE_ID}]\"\r";
     conn.send(&ClientMsg::Input {
         pane,
         data: probe.to_vec(),
@@ -235,7 +235,7 @@ fn new_shells_get_the_ide_port_from_ide_env() {
         let pane = spawn_pane(&conn, reader);
         conn.send(&ClientMsg::Attach { pane }).unwrap();
         let line = "echo \"port=[${CLAUDE_CODE_SSE_PORT}] on=[${ENABLE_IDE_INTEGRATION}] \
-                    x=[${EXTRA}] end=[${ATHENA_PANE_ID}]\"\r";
+                    x=[${EXTRA}] end=[${DAEDALUS_PANE_ID}]\"\r";
         conn.send(&ClientMsg::Input {
             pane,
             data: line.as_bytes().to_vec(),
@@ -587,7 +587,7 @@ fn list_panes(conn: &Connection, reader: &mut UnixStream) -> Vec<u64> {
 
 #[test]
 fn a_pane_no_client_ever_attached_to_is_ended_but_a_detached_one_is_kept() {
-    let daemon = Daemon::start_with("orphan", &[("ATHENA_UNATTACHED_SECS", "1")]);
+    let daemon = Daemon::start_with("orphan", &[("DAEDALUS_UNATTACHED_SECS", "1")]);
     let (conn, mut reader) = daemon.connect();
     let orphan = spawn_pane(&conn, &mut reader);
     let kept = spawn_pane(&conn, &mut reader);

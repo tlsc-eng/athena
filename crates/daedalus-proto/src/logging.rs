@@ -50,7 +50,7 @@ mod tests {
         let path = dir.join("app.log");
         fs::write(&path, vec![b'x'; MAX_LOG as usize + 1]).unwrap();
 
-        init(&path, "ATHENA_TEST_LOG").unwrap();
+        init(&path, "DAEDALUS_TEST_LOG").unwrap();
         tracing::info!("hello from the test");
 
         assert_eq!(

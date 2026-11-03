@@ -118,10 +118,7 @@ async fn ask(msg: AppMsg) -> Result<AppReply, ErrorData> {
         let path = daedalus_proto::app_socket_path().map_err(|e| e.to_string())?;
         let mut stream =
             UnixStream::connect(path).map_err(|_| "Daedalus is not running".to_string())?;
-        if let Some(session) = std::env::var("ATHENA_PANE_ID")
-            .ok()
-            .and_then(|s| s.parse().ok())
-        {
+        if let Some(session) = daedalus_proto::pane_id_from_env() {
             let identify = AppMsg::Identify { session };
             daedalus_proto::write_frame(&mut stream, &identify).map_err(|e| e.to_string())?;
             daedalus_proto::read_frame::<_, AppReply>(&mut stream).map_err(|e| e.to_string())?;

@@ -39,7 +39,7 @@ fn run() -> Result<()> {
         let empty: libc::sigset_t = std::mem::zeroed();
         libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
     }
-    daedalus_proto::logging::init(&daedalus_proto::log_path()?, "ATHENA_LOG")?;
+    daedalus_proto::logging::init(&daedalus_proto::log_path()?, "DAEDALUS_LOG")?;
 
     let lock = OpenOptions::new()
         .create(true)
@@ -68,7 +68,7 @@ fn run() -> Result<()> {
         socket,
         install_zsh_integration(),
         notify_after(),
-        seconds_from_env("ATHENA_UNATTACHED_SECS", 60),
+        seconds_from_env("DAEDALUS_UNATTACHED_SECS", 60),
     ));
     server.clone().start_idle_reaper();
     server.clone().start_foreground_poller();
@@ -85,7 +85,7 @@ fn run() -> Result<()> {
 
 /// Writes the zsh startup shim; `None` disables integration (opted out or not writable).
 fn install_zsh_integration() -> Option<std::path::PathBuf> {
-    if std::env::var_os("ATHENA_SHELL_INTEGRATION").is_some_and(|v| v == "0") {
+    if std::env::var_os("DAEDALUS_SHELL_INTEGRATION").is_some_and(|v| v == "0") {
         return None;
     }
     let dir = daedalus_proto::data_dir().ok()?.join("shell/zsh");
@@ -96,7 +96,7 @@ fn install_zsh_integration() -> Option<std::path::PathBuf> {
 
 /// Commands shorter than this finish silently.
 fn notify_after() -> std::time::Duration {
-    seconds_from_env("ATHENA_NOTIFY_AFTER_SECS", 10)
+    seconds_from_env("DAEDALUS_NOTIFY_AFTER_SECS", 10)
 }
 
 fn seconds_from_env(name: &str, default: u64) -> std::time::Duration {

@@ -28,7 +28,7 @@ fn main() {
     }
     match daedalus_proto::app_log_path() {
         Ok(log) => {
-            if let Err(err) = daedalus_proto::logging::init(&log, "ATHENA_LOG") {
+            if let Err(err) = daedalus_proto::logging::init(&log, "DAEDALUS_LOG") {
                 eprintln!("daedalus: logging to {}: {err}", log.display());
             }
         }

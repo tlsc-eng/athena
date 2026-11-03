@@ -1,4 +1,4 @@
-//! Runs against a project that installs the linters, named by ATHENA_LINTER_FIXTURE:
+//! Runs against a project that installs the linters, named by DAEDALUS_LINTER_FIXTURE:
 //! `npm i -D eslint @eslint/js vscode-langservers-extracted @biomejs/biome` with an
 //! eslint.config.js turning on `no-var` and `prefer-const`. Skipped when it is not set.
 
@@ -11,7 +11,7 @@ use daedalus_lsp::{Client, Diagnostic, Event, Position, Range, ServerKind};
 const SOURCE: &str = "var count = 1;\nlet total = 2;\nexport const twice = count * total;\n";
 
 fn fixture() -> Option<PathBuf> {
-    let root = PathBuf::from(std::env::var_os("ATHENA_LINTER_FIXTURE")?);
+    let root = PathBuf::from(std::env::var_os("DAEDALUS_LINTER_FIXTURE")?);
     Some(root.canonicalize().expect("fixture exists"))
 }
 
@@ -53,7 +53,7 @@ fn diagnostics(
 #[test]
 fn the_projects_eslint_and_biome_report_and_fix_problems() {
     let Some(root) = fixture() else {
-        eprintln!("ATHENA_LINTER_FIXTURE not set; skipping");
+        eprintln!("DAEDALUS_LINTER_FIXTURE not set; skipping");
         return;
     };
     let file = root.join("athena-linter-probe.js");
