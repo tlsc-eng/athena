@@ -31,11 +31,11 @@ const WATCHDOG_TICK: Duration = Duration::from_millis(100);
 /// macOS refuses Unix socket paths longer than this.
 const MAX_SOCKET_PATH: usize = 100;
 
-/// How Athena talks to an adapter.
+/// How Daedalus talks to an adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
     Stdio,
-    /// The adapter dials a Unix socket Athena listens on, as `dlv dap --client-addr` does; `{socket}`
+    /// The adapter dials a Unix socket Daedalus listens on, as `dlv dap --client-addr` does; `{socket}`
     /// in its arguments is replaced by that socket's path.
     DialIn,
 }
@@ -225,7 +225,7 @@ impl Client {
     pub async fn initialize(&self, adapter_id: &str) -> Reply {
         let arguments = json!({
             "clientID": "athena",
-            "clientName": "Athena",
+            "clientName": "Daedalus",
             "adapterID": adapter_id,
             "locale": "en",
             "pathFormat": "path",
@@ -630,7 +630,7 @@ fn handle(message: &Value, shared: &Shared) {
                 "request_seq": message.get("seq").cloned().unwrap_or(Value::Null),
                 "command": command,
                 "success": false,
-                "message": format!("Athena does not support {command}"),
+                "message": format!("Daedalus does not support {command}"),
             }));
         }
         _ => {}

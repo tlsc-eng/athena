@@ -383,7 +383,7 @@ fn nonce() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The whole page: Athena's palette, inline fonts, and Mermaid only when the document uses it.
+/// The whole page: Daedalus's palette, inline fonts, and Mermaid only when the document uses it.
 fn page(doc: &Rendered, t: &Theme) -> String {
     let c = &t.color;
     let nonce = nonce();

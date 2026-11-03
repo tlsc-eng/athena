@@ -66,7 +66,7 @@ pub(super) struct Bound {
     pub key: String,
     pub symbols: String,
     pub when: Option<String>,
-    /// The keymap.json entry it comes from; `None` for Athena's own.
+    /// The keymap.json entry it comes from; `None` for Daedalus's own.
     pub entry: Option<usize>,
 }
 
@@ -101,7 +101,7 @@ impl Bound {
     }
 }
 
-/// `editor::MoveLinesUp` as `Editor: Move lines up`; Athena's own commands go unprefixed.
+/// `editor::MoveLinesUp` as `Editor: Move lines up`; Daedalus's own commands go unprefixed.
 fn humanize(name: &str) -> String {
     let (namespace, action) = name.split_once("::").unwrap_or(("", name));
     let mut words = String::new();
@@ -216,7 +216,7 @@ pub(super) fn remove(row: &Row) -> Option<KeymapEdit> {
     }
 }
 
-/// Deletes every keymap.json entry about `command`, so Athena's own bindings of it come back.
+/// Deletes every keymap.json entry about `command`, so Daedalus's own bindings of it come back.
 pub(super) fn reset(command: &str, entries: &[Option<String>]) -> Option<KeymapEdit> {
     (!entries_about(command, entries).is_empty()).then(|| KeymapEdit::Reset(command.to_string()))
 }
@@ -283,7 +283,7 @@ struct Recording {
     _blur: Subscription,
 }
 
-/// An entry of keymap.json Athena could not use.
+/// An entry of keymap.json Daedalus could not use.
 struct Invalid {
     text: String,
     why: String,
@@ -649,8 +649,8 @@ impl ShortcutsView {
         }
         let t = cx.theme().clone();
         let title = match self.invalid.len() {
-            1 => "keymap.json has an entry Athena cannot use".to_string(),
-            n => format!("keymap.json has {n} entries Athena cannot use"),
+            1 => "keymap.json has an entry Daedalus cannot use".to_string(),
+            n => format!("keymap.json has {n} entries Daedalus cannot use"),
         };
         Some(
             div()
@@ -1004,7 +1004,7 @@ impl ShortcutsView {
     }
 }
 
-/// An entry's text on one line, for the list of entries Athena could not use.
+/// An entry's text on one line, for the list of entries Daedalus could not use.
 fn entry_text(text: &str, range: Range<usize>) -> String {
     let one: Vec<&str> = text[range].split_whitespace().collect();
     let line = one.join(" ");

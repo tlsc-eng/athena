@@ -312,17 +312,17 @@ fn recent_menu(recent: &[PathBuf]) -> Menu {
 fn menus(recent: &[PathBuf]) -> Vec<Menu> {
     vec![
         Menu {
-            name: "Athena".into(),
+            name: "Daedalus".into(),
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Hide Athena", Hide),
+                MenuItem::action("Hide Daedalus", Hide),
                 MenuItem::action("Hide Others", HideOthers),
                 MenuItem::action("Show All", ShowAll),
                 MenuItem::separator(),
-                MenuItem::action("Quit Athena", Quit),
+                MenuItem::action("Quit Daedalus", Quit),
             ],
         },
         Menu {
@@ -548,7 +548,7 @@ mod tests {
         let names: Vec<&str> = menus.iter().map(|m| m.name.as_ref()).collect();
         assert_eq!(
             names,
-            ["Athena", "File", "Selection", "View", "Run", "Window"]
+            ["Daedalus", "File", "Selection", "View", "Run", "Window"]
         );
         let selection: Vec<&str> = menus[2]
             .items

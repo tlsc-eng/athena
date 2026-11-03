@@ -112,7 +112,7 @@ impl Session {
             Verdict::Rejected => rejected(&key),
             Verdict::Unavailable => {
                 return Err(ErrorData::internal_error(
-                    "The file is not in a project open in Athena",
+                    "The file is not in a project open in Daedalus",
                     None,
                 ));
             }
@@ -144,7 +144,7 @@ impl Session {
 
     #[tool(
         name = "getDiagnostics",
-        description = "Errors and warnings from Athena's language servers, for one file or all open ones."
+        description = "Errors and warnings from Daedalus's language servers, for one file or all open ones."
     )]
     async fn get_diagnostics(
         &self,

@@ -70,7 +70,7 @@ struct Server {
 #[derive(Default)]
 pub(super) struct LspState {
     servers: HashMap<ServerKey, Server>,
-    /// Servers that failed to start, not retried until Athena restarts.
+    /// Servers that failed to start, not retried until Daedalus restarts.
     failed: HashMap<ServerKey, String>,
     /// Each file's diagnostics, by the server that published them.
     pub(super) diagnostics: HashMap<PathBuf, Vec<(ServerKey, Vec<Diagnostic>)>>,
@@ -676,7 +676,7 @@ impl Shell {
                 "TypeScript waits for this project to be allowed",
                 format!(
                     "{name} has its own TypeScript, which runs only once {name} is allowed. \
-                     Install one for Athena to use meanwhile: npm install -g typescript"
+                     Install one for Daedalus to use meanwhile: npm install -g typescript"
                 ),
                 cx,
             );
@@ -816,7 +816,7 @@ impl Shell {
                 LinterTrust::Denied,
                 "Project code disallowed",
                 format!(
-                    "Athena no longer runs ESLint, Biome or TypeScript from {name}'s \
+                    "Daedalus no longer runs ESLint, Biome or TypeScript from {name}'s \
                      node_modules, nor its settings for language servers."
                 ),
             ),

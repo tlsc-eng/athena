@@ -58,7 +58,7 @@ pub enum Kind {
 pub struct Setting {
     /// Where it sits in settings.json, as the writer takes it.
     pub keys: &'static [&'static str],
-    /// VS Code's spellings, dotted from the top of the file, which Athena reads too.
+    /// VS Code's spellings, dotted from the top of the file, which Daedalus reads too.
     pub aliases: &'static [&'static str],
     pub title: &'static str,
     pub description: &'static str,
@@ -66,7 +66,7 @@ pub struct Setting {
     pub kind: Kind,
     /// Applies from the user's settings.json only; a project's file may not set it.
     pub user_only: bool,
-    /// Other values Athena accepts, as a JSON Schema, such as VS Code's spellings.
+    /// Other values Daedalus accepts, as a JSON Schema, such as VS Code's spellings.
     pub also: Option<&'static str>,
 }
 
@@ -492,7 +492,7 @@ pub static SETTINGS: &[Setting] = &[
         keys: &["ide_integration"],
         aliases: &[],
         title: "Claude Code IDE Integration",
-        description: "Claude Code connects to Athena as its IDE: it sees the open file and \
+        description: "Claude Code connects to Daedalus as its IDE: it sees the open file and \
                       selection, and shows its edits as diffs here.",
         group: Group::Claude,
         kind: TOGGLE_OFF,
@@ -503,7 +503,7 @@ pub static SETTINGS: &[Setting] = &[
         keys: &["claude", "hooks"],
         aliases: &[],
         title: "Claude Code Hooks",
-        description: "Keeps Athena's hooks in each Claude Code config folder, so tabs show \
+        description: "Keeps Daedalus's hooks in each Claude Code config folder, so tabs show \
                       whether Claude is running, needs input or is done, and notify you.",
         group: Group::Claude,
         kind: TOGGLE_ON,
@@ -596,7 +596,7 @@ pub fn json_schema() -> Value {
     top.extend(blocks);
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "Athena settings",
+        "title": "Daedalus settings",
         "type": "object",
         "allowComments": true,
         "allowTrailingCommas": true,
@@ -755,7 +755,7 @@ mod tests {
         assert!(!project_may_set(&["nope"]));
     }
 
-    /// What Athena does with `s`, through the same fallbacks the shell applies.
+    /// What Daedalus does with `s`, through the same fallbacks the shell applies.
     fn behaviour(s: &Settings) -> Vec<String> {
         let prefs = s.over(Workspace::default().preferences());
         let e = s.editor_for(Some(Lang::Rust));

@@ -42,7 +42,7 @@ pub struct Workspace {
     /// Long lines wrap in editor tabs that have not chosen; Markdown wraps either way.
     #[serde(default)]
     pub word_wrap: bool,
-    /// Claude Code may connect to Athena as its IDE, to show proposed edits and read diagnostics.
+    /// Claude Code may connect to Daedalus as its IDE, to show proposed edits and read diagnostics.
     #[serde(default)]
     pub ide_integration: bool,
     #[serde(default = "legacy_ui")]
@@ -56,7 +56,7 @@ pub struct Workspace {
     /// repeat the first window's, so a build without windows sees all the projects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<WindowEntry>,
-    /// Projects of windows closed while Athena kept running, newest first; their shells still run.
+    /// Projects of windows closed while Daedalus kept running, newest first; their shells still run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked: Vec<Project>,
     /// Sidebar folders this window shows closed, by path.

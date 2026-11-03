@@ -51,7 +51,7 @@ pub(super) struct RowState {
 }
 
 /// `setting` as `scope` sees it: the project's value over the user's over workspace.json's
-/// choice (`fallback`) over the default, as Athena applies them.
+/// choice (`fallback`) over the default, as Daedalus applies them.
 pub(super) fn row_state(
     setting: &Setting,
     scope: Scope,
@@ -792,7 +792,7 @@ impl Render for SettingsView {
                 .text_color(t.color.content_muted)
                 .child(
                     "These apply to this project's files, over your own, and are saved in \
-                     .athena/settings.json. Settings that apply to all of Athena are under User.",
+                     .athena/settings.json. Settings that apply to all of Daedalus are under User.",
                 )
         });
         div()

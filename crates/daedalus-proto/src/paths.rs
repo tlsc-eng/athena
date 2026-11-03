@@ -34,17 +34,17 @@ pub fn app_log_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("app.log"))
 }
 
-/// Where the Athena window listens for `athena <folder>`.
+/// Where the Daedalus window listens for `daedalus <folder>`.
 pub fn app_socket_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("app.sock"))
 }
 
-/// Where copies of unsaved files go when Athena quits or crashes without saving them.
+/// Where copies of unsaved files go when Daedalus quits or crashes without saving them.
 pub fn recovery_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("recovery"))
 }
 
-/// Where the window tells athena-mux which port its Claude Code IDE server listens on.
+/// Where the window tells daedalus-mux which port its Claude Code IDE server listens on.
 pub fn ide_env_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("ide.env"))
 }

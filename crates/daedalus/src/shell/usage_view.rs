@@ -184,7 +184,7 @@ impl Shell {
             PromptLevel::Info,
             "Show Claude plan usage?",
             Some(
-                "Athena reads the sign-in Claude Code keeps in your Keychain (macOS may ask you to allow \
+                "Daedalus reads the sign-in Claude Code keeps in your Keychain (macOS may ask you to allow \
                  this) and asks api.anthropic.com for your 5-hour and weekly usage every 5 minutes. \
                  Nothing is stored. This uses the same undocumented endpoint as Claude Code's /usage, \
                  so it may stop working after a Claude Code update.",

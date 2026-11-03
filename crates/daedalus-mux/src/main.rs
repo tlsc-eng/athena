@@ -1,4 +1,4 @@
-//! `daedalus-mux`: owns the shells so they outlive the Athena window.
+//! `daedalus-mux`: owns the shells so they outlive the Daedalus window.
 
 mod notices;
 mod pane;

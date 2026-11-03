@@ -148,7 +148,7 @@ fn open_window(
         WindowOptions {
             window_bounds: Some(bounds),
             titlebar: Some(TitlebarOptions {
-                title: Some("Athena".into()),
+                title: Some("Daedalus".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -786,7 +786,7 @@ pub(super) fn open_notification_elsewhere(id: u64, from: AnyWindowHandle, cx: &m
     cx.defer(move |cx| show_notification(id, Some(from), cx));
 }
 
-/// Which window answers a request from `athena` or the MCP bridge.
+/// Which window answers a request from `daedalus` or the MCP bridge.
 #[derive(Debug, PartialEq)]
 enum Target {
     Window(usize),
@@ -866,7 +866,7 @@ fn merge(replies: Vec<(bool, AppReply)>) -> AppReply {
             (Some(kept), _) => kept,
         });
     }
-    merged.unwrap_or_else(|| AppReply::Error("no Athena window is open".into()))
+    merged.unwrap_or_else(|| AppReply::Error("no Daedalus window is open".into()))
 }
 
 fn serve_app_socket(cx: &mut App) -> Task<()> {
@@ -885,7 +885,7 @@ fn serve(request: Request, cx: &mut App) {
     let Some(in_use) = focused(cx).and_then(|f| windows.iter().position(|h| *h == f)) else {
         let _ = request
             .reply
-            .send(AppReply::Error("no Athena window is open".into()));
+            .send(AppReply::Error("no Daedalus window is open".into()));
         return;
     };
     let holder = |session| {
@@ -1493,7 +1493,7 @@ mod tests {
         );
         assert_eq!(
             merge(vec![]),
-            AppReply::Error("no Athena window is open".into())
+            AppReply::Error("no Daedalus window is open".into())
         );
     }
 }

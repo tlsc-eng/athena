@@ -186,7 +186,7 @@ impl Shell {
         let file = daedalus_playwright::mcp_json_path(&root);
         let detail = if enable {
             format!(
-                "Athena will add a \"playwright\" server ({}) to {} so Claude Code can drive a fresh, \
+                "Daedalus will add a \"playwright\" server ({}) to {} so Claude Code can drive a fresh, \
                  isolated browser. Claude asks you to approve the server the first time. The file is \
                  listed in .git/info/exclude so it stays out of commits.",
                 daedalus_playwright::MCP_PACKAGE,
@@ -194,7 +194,7 @@ impl Shell {
             )
         } else {
             format!(
-                "Athena will remove the \"playwright\" server from {}.",
+                "Daedalus will remove the \"playwright\" server from {}.",
                 file.display()
             )
         };

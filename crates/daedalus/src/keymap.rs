@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 /// What a new keymap.json holds: an empty list, with an example of each kind of entry.
 const TEMPLATE: &str = include_str!("keymap-template.jsonc");
 
-/// The bindings Athena registers itself, kept so the user's file can be re-applied over them.
+/// The bindings Daedalus registers itself, kept so the user's file can be re-applied over them.
 struct Defaults(Vec<KeyBinding>);
 
 impl Global for Defaults {}
@@ -61,7 +61,7 @@ pub fn ensure_file() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Re-applies Athena's bindings plus the user's keymap.json; returns what was wrong with the file.
+/// Re-applies Daedalus's bindings plus the user's keymap.json; returns what was wrong with the file.
 pub fn reload(cx: &mut App) -> Vec<String> {
     if !cx.has_global::<Defaults>() {
         let defaults = cx.key_bindings().borrow().bindings().cloned().collect();
@@ -169,7 +169,7 @@ pub fn entry_commands(text: &str) -> Vec<Option<String>> {
         .collect()
 }
 
-/// One binding as keymap.json spells it, `key` in Athena's spelling (`cmd-k cmd-t`).
+/// One binding as keymap.json spells it, `key` in Daedalus's spelling (`cmd-k cmd-t`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewEntry {
     pub key: String,
@@ -358,7 +358,7 @@ fn readable_layout(text: &str) -> Result<Option<crate::settings::ArrayLayout>, S
         .map_err(|_| "keymap.json could not be read; fix it, then try again".to_string())
 }
 
-/// A binding's keys in Athena's spelling, as keymap.json takes them: `cmd-k cmd-t`.
+/// A binding's keys in Daedalus's spelling, as keymap.json takes them: `cmd-k cmd-t`.
 pub fn key_text(binding: &KeyBinding) -> String {
     let strokes: Vec<String> = binding
         .keystrokes()
@@ -450,7 +450,7 @@ impl Recorder {
     }
 }
 
-/// The bindings `key` (Athena's spelling) would also trigger, in any context.
+/// The bindings `key` (Daedalus's spelling) would also trigger, in any context.
 pub fn conflicts<'a>(bindings: &'a [KeyBinding], key: &str) -> Vec<&'a KeyBinding> {
     let Ok(wanted) = key
         .split_whitespace()
@@ -477,7 +477,7 @@ pub fn json_schema(commands: &[&str]) -> Value {
     names.extend(commands.iter().map(|c| format!("-{c}")));
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "Athena keyboard shortcuts",
+        "title": "Daedalus keyboard shortcuts",
         "type": "array",
         "allowComments": true,
         "allowTrailingCommas": true,
@@ -491,7 +491,7 @@ pub fn json_schema(commands: &[&str]) -> Value {
                     "description": "Keys such as \"cmd-k cmd-t\" or VS Code's \"cmd+k cmd+t\"."
                 },
                 "command": {
-                    "description": "The command to run; \"-command\" removes Athena's binding of it.",
+                    "description": "The command to run; \"-command\" removes Daedalus's binding of it.",
                     "anyOf": [{"enum": names}, {"type": "string"}]
                 },
                 "when": {
@@ -530,14 +530,14 @@ fn rule(
         return Err(anyhow!("\"{}\" has no \"key\"", entry.command));
     };
     let action = build(&qualified(&entry.command), entry.args)
-        .map_err(|e| anyhow!("\"{}\" is not an Athena command ({e})", entry.command))?;
+        .map_err(|e| anyhow!("\"{}\" is not a Daedalus command ({e})", entry.command))?;
     Ok(Rule::Bind(binding(key, action, when)?))
 }
 
 /// Commands that were renamed, so a keymap.json written before still binds and unbinds them.
 const RENAMED: &[(&str, &str)] = &[("athena::ToggleNotifications", "athena::ToggleDrawer")];
 
-/// Athena's own commands may be named without their `athena::` prefix.
+/// Daedalus's own commands may be named without their `athena::` prefix.
 fn qualified(name: &str) -> String {
     let full = if name.contains("::") {
         name.to_string()
@@ -569,7 +569,7 @@ const NAMED_KEYS: &[&str] = &[
     "insert",
 ];
 
-/// A VS Code keystroke (`cmd+shift+p`) in Athena's spelling (`cmd-shift-p`).
+/// A VS Code keystroke (`cmd+shift+p`) in Daedalus's spelling (`cmd-shift-p`).
 fn athena_keystroke(vscode: &str) -> String {
     if !vscode.contains('+') || vscode == "+" {
         return vscode.to_string();
@@ -617,7 +617,7 @@ fn binding(
     .map_err(|e| anyhow!("\"{key}\": {e}"))
 }
 
-/// Athena's bindings minus the ones the user removed or rebound everywhere, then the user's,
+/// Daedalus's bindings minus the ones the user removed or rebound everywhere, then the user's,
 /// which win at equal depth because they come later.
 pub fn merge(defaults: &[KeyBinding], rules: Vec<Rule>) -> Vec<KeyBinding> {
     let mut out: Vec<KeyBinding> = defaults.to_vec();

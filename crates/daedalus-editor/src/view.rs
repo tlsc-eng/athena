@@ -172,7 +172,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-shift-down", CopyLinesDown, ctx),
         KeyBinding::new("cmd-shift-k", DeleteLines, ctx),
         KeyBinding::new("cmd-enter", InsertLineBelow, ctx),
-        // VS Code's cmd-shift-enter (Insert Line Above) stays Athena's Zoom Pane.
+        // VS Code's cmd-shift-enter (Insert Line Above) stays Daedalus's Zoom Pane.
         KeyBinding::new("cmd-alt-f", FindReplace, ctx),
         // These shadow the shell's Split Right and Focus Pane Up/Down while an editor has focus,
         // as VS Code binds them; pane focus still moves left and right from an editor.

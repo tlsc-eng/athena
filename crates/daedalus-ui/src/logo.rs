@@ -52,7 +52,7 @@ impl RenderOnce for Lockup {
                     .font_family(theme.typography.ui.clone())
                     .text_size(self.size * 0.69)
                     .line_height(self.size * 0.69)
-                    .child("athena"),
+                    .child("daedalus"),
             )
     }
 }

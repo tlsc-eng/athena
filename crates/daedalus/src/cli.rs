@@ -15,7 +15,7 @@ const MAX_HOOK_INPUT: u64 = 256 * 1024 * 1024;
 const MAX_TODOS: usize = 200;
 const MAX_PLAN: usize = 64 * 1024;
 
-/// The fields Athena reads from a Claude Code hook's input; the rest, such as a Write's whole
+/// The fields Daedalus reads from a Claude Code hook's input; the rest, such as a Write's whole
 /// file content, is skipped while parsing rather than held in memory.
 #[derive(Debug, Default, serde::Deserialize)]
 struct HookInput {
@@ -202,8 +202,8 @@ fn mux_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Raises a notice in Athena. Never fails loudly: it runs inside Claude Code hooks, which must not
-/// break because Athena is closed.
+/// Raises a notice in Daedalus. Never fails loudly: it runs inside Claude Code hooks, which must not
+/// break because Daedalus is closed.
 fn notify(args: &[&str]) -> anyhow::Result<()> {
     let flag = |name: &str| {
         args.iter()
@@ -326,7 +326,7 @@ fn tell_window(msg: AppMsg) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `athena <folder>`: hands the folder to a running Athena, else starts the installed app with it.
+/// `daedalus <folder>`: hands the folder to a running Daedalus, else starts the installed app with it.
 /// Returns `None` to start the window in this process (a development build with no app installed).
 fn open_folder(path: &Path) -> Option<i32> {
     let Ok(path) = path
@@ -350,7 +350,7 @@ fn open_folder(path: &Path) -> Option<i32> {
     if launched { Some(0) } else { None }
 }
 
-/// Bare `athena` from a shell: brings the running window forward, or starts the app this
+/// Bare `daedalus` from a shell: brings the running window forward, or starts the app this
 /// executable belongs to. Returns `None` to start the window in this process (a development build).
 fn open_app() -> Option<i32> {
     // Homebrew links only the executable, so follow the link to find the bundle.

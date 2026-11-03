@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::client::{Adapter, Transport};
 
-/// What to tell the user when Delve is not installed; Athena never installs it.
+/// What to tell the user when Delve is not installed; Daedalus never installs it.
 pub const DELVE_INSTALL_HINT: &str = "go install github.com/go-delve/delve/cmd/dlv@latest";
 
 /// Delve on the login shell's PATH, as gopls is found.
@@ -10,7 +10,7 @@ pub fn find_delve() -> Option<PathBuf> {
     daedalus_lsp::find_program("dlv")
 }
 
-/// `dlv dap`, which has no stdio mode, so it dials back to a socket Athena listens on.
+/// `dlv dap`, which has no stdio mode, so it dials back to a socket Daedalus listens on.
 pub fn delve_adapter(program: PathBuf, cwd: PathBuf) -> Adapter {
     Adapter {
         program,

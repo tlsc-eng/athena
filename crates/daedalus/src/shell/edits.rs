@@ -235,7 +235,7 @@ fn check_edit(
                     }
                     if open(path).is_some() {
                         return Err(format!(
-                            "{} is open; Athena does not replace an open file.",
+                            "{} is open; Daedalus does not replace an open file.",
                             name(path)
                         ));
                     }
@@ -281,7 +281,7 @@ fn check_edit(
                     continue;
                 }
                 return Err(format!(
-                    "The language server asked to delete {}; Athena does not delete files for it, so nothing was changed.",
+                    "The language server asked to delete {}; Daedalus does not delete files for it, so nothing was changed.",
                     name(path)
                 ));
             }

@@ -23,7 +23,7 @@ pub(crate) enum WebEvent {
     Committed(String),
     Finished,
     Failed(String),
-    /// A document link to a file, which Athena opens itself.
+    /// A document link to a file, which Daedalus opens itself.
     OpenLocal(PathBuf),
     /// A document link to the web, which goes to the default browser.
     OpenExternal(String),
@@ -44,7 +44,7 @@ pub(crate) struct Ivars {
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "AthenaPreviewDelegate"]
+    #[name = "DaedalusPreviewDelegate"]
     #[ivars = Ivars]
     pub(crate) struct Delegate;
 

@@ -154,7 +154,7 @@ pub(super) fn text(bytes: Option<Vec<u8>>) -> Result<String> {
         bail!("The file is larger than 20 MB.");
     }
     if bytes[..bytes.len().min(8000)].contains(&0) {
-        bail!("This is a binary file; Athena shows differences in text files only.");
+        bail!("This is a binary file; Daedalus shows differences in text files only.");
     }
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("This file is not UTF-8 text."))
 }
@@ -189,7 +189,7 @@ pub(super) fn decoded(
     }
     daedalus_editor::decode_text(bytes, forced)
         .map(Some)
-        .context("This is a binary file; Athena shows differences in text files only.")
+        .context("This is a binary file; Daedalus shows differences in text files only.")
 }
 
 /// Both sides of a diff as text. A side detection could only guess (Windows 1252, as for

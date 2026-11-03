@@ -31,7 +31,7 @@ use crate::{ServerKind, env};
 
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
-/// The protocol's standard semantic token types and modifiers, all of which Athena colours or
+/// The protocol's standard semantic token types and modifiers, all of which Daedalus colours or
 /// safely ignores.
 const SEMANTIC_TYPES: &[&str] = &[
     "namespace",
@@ -132,7 +132,7 @@ impl EditReply {
 impl Drop for EditReply {
     fn drop(&mut self) {
         if !self.answered {
-            self.answer(Err("Athena closed before applying the edit".into()));
+            self.answer(Err("Daedalus closed before applying the edit".into()));
         }
     }
 }
@@ -1113,7 +1113,7 @@ impl Reader {
                             .events
                             .send_blocking(Event::ApplyEdit { label, edit, reply });
                     }
-                    None => reply.answer(Err("Athena could not read this edit".into())),
+                    None => reply.answer(Err("Daedalus could not read this edit".into())),
                 }
             }
             // Servers wait for these answers; gopls stalls without them.

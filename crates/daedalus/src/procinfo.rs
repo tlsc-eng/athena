@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn walks_up_to_launchd() {
-        // mcp(40) -> claude(30) -> zsh(20) -> athena-mux(10) -> launchd(1)
+        // mcp(40) -> claude(30) -> zsh(20) -> daedalus-mux(10) -> launchd(1)
         let tree: HashMap<i32, i32> = [(40, 30), (30, 20), (20, 10), (10, 1)].into();
         assert_eq!(lineage(40, |p| tree.get(&p).copied()), vec![40, 30, 20, 10]);
     }

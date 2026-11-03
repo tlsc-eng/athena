@@ -3,7 +3,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use daedalus_ui::TerminalColors;
 use gpui::{Hsla, Rgba};
 
-/// Resolves a cell colour: program overrides (OSC 4/10/11) win, then the Athena palette.
+/// Resolves a cell colour: program overrides (OSC 4/10/11) win, then the Daedalus palette.
 pub fn resolve(color: Color, overrides: &Colors, palette: &TerminalColors) -> Hsla {
     match color {
         Color::Spec(rgb) => rgb_to_hsla(rgb),

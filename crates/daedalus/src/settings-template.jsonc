@@ -1,7 +1,7 @@
-// Athena settings. Comments and trailing commas are allowed, as in VS Code. A setting left out
+// Daedalus settings. Comments and trailing commas are allowed, as in VS Code. A setting left out
 // keeps its default, or the choice last made from the command palette or the File menu.
-// Uncomment and edit any of these; Athena applies them as soon as the file is saved.
-// A project's own .athena/settings.json (and the keys Athena knows in .vscode/settings.json)
+// Uncomment and edit any of these; Daedalus applies them as soon as the file is saved.
+// A project's own .athena/settings.json (and the keys Daedalus knows in .vscode/settings.json)
 // is laid over this file for its files; its "lsp" entries apply once the project is allowed.
 {
   // "editor": {
@@ -25,14 +25,14 @@
   // // These beat the "editor" block above, and a language block like this one beats them.
   // "[markdown]": { "trim_trailing_whitespace": true },
   // "theme": "system",                 // "system", "light" or "dark"
-  // "ide_integration": false,          // Claude Code connects to Athena as its IDE
+  // "ide_integration": false,          // Claude Code connects to Daedalus as its IDE
   // "git": { "autofetch": true },      // fetch the active project every three minutes
   // "git.worktree_dir": "~/worktrees", // new worktrees go here, not beside their repository
   // "explorer": { "confirmDragAndDrop": false }, // move tree entries without asking
   // "explorer.excludeGitIgnore": true, // hide git-ignored entries rather than dim them
   // "window": { "zoom_level": 1 },     // interface size in 10% steps, from -3 to 5
   // "eslint": { "fixOnSave": true },   // ⌘S applies ESLint's fixes; needs the project's server
-  // // "hooks": false keeps Athena's hooks out of Claude Code's settings.json, and its tabs
+  // // "hooks": false keeps Daedalus's hooks out of Claude Code's settings.json, and its tabs
   // // without exact running / needs input / done states.
   // "claude": { "hooks": false },
   // // The title bar's plan usage shows this profile for projects under each folder ("tlsc" is

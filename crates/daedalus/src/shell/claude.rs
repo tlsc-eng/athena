@@ -60,8 +60,8 @@ impl Shell {
         Some((root, item.id))
     }
 
-    /// Puts Athena's hooks into every Claude Code config folder, or takes them out, once per
-    /// change of `claude.hooks`; the projects open now lose the per-project hooks of old Athenas.
+    /// Puts Daedalus's hooks into every Claude Code config folder, or takes them out, once per
+    /// change of `claude.hooks`; the projects open now lose the per-project hooks of old versions.
     pub(super) fn sync_claude_hooks(&mut self, cx: &mut Context<Self>) {
         static SYNCED: Mutex<Option<bool>> = Mutex::new(None);
         let on = self.settings.file.claude_hooks();
@@ -103,7 +103,7 @@ impl Shell {
         .detach();
     }
 
-    /// Takes the hooks an older Athena wrote into this project out, after the user confirms.
+    /// Takes the hooks an older Daedalus wrote into this project out, after the user confirms.
     pub(super) fn remove_project_claude_hooks(
         &mut self,
         window: &mut Window,
@@ -114,14 +114,14 @@ impl Shell {
         };
         let file = claude_hooks::settings_path(&root);
         let detail = format!(
-            "Athena will remove its entries from {}. Your other settings are kept. Athena's hooks \
+            "Daedalus will remove its entries from {}. Your other settings are kept. Daedalus's hooks \
              now live in each Claude Code config folder instead; turn them off with \
              \"claude.hooks\" in Settings.",
             file.display()
         );
         let answer = window.prompt(
             PromptLevel::Info,
-            "Remove Athena's Claude Code hooks from this project?",
+            "Remove Daedalus's Claude Code hooks from this project?",
             Some(&detail),
             &["Remove hooks", "Cancel"],
             cx,

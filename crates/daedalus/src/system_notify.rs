@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Notification ids from banners the user clicked, read by the shell.
 static CLICKS: OnceLock<async_channel::Sender<u64>> = OnceLock::new();
 
-/// Whether macOS last said Athena may show banners; until it answers, assume so.
+/// Whether macOS last said Daedalus may show banners; until it answers, assume so.
 static ALLOWED: AtomicBool = AtomicBool::new(true);
 
 #[cfg(target_os = "macos")]
@@ -29,7 +29,7 @@ mod mac {
 
     define_class!(
         #[unsafe(super(NSObject))]
-        #[name = "AthenaNotificationDelegate"]
+        #[name = "DaedalusNotificationDelegate"]
         struct Delegate;
 
         unsafe impl NSObjectProtocol for Delegate {}
@@ -42,7 +42,7 @@ mod mac {
                 _notification: &UNNotification,
                 handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
             ) {
-                // Athena only posts when you are not looking, so show it even if it is frontmost.
+                // Daedalus only posts when you are not looking, so show it even if it is frontmost.
                 handler.call((UNNotificationPresentationOptions::Banner
                     | UNNotificationPresentationOptions::List
                     | UNNotificationPresentationOptions::Sound,));

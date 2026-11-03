@@ -452,7 +452,7 @@ impl Shell {
     /// "<active tab> — <project>" for the Window menu, Mission Control and Cmd+`.
     fn sync_window_title(&mut self, window: &mut Window, cx: &Context<Self>) {
         let title = match self.workspace.active_project() {
-            None => "Athena".to_string(),
+            None => "Daedalus".to_string(),
             Some(project) => {
                 let tab = project
                     .layout

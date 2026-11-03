@@ -40,7 +40,7 @@ pub use semantic::{
 pub use signature::SignatureHelp;
 pub use symbol::{Symbol, symbol_kind_label};
 
-/// The language servers Athena knows how to start.
+/// The language servers Daedalus knows how to start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ServerKind {
     Go,

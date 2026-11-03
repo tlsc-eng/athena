@@ -470,7 +470,7 @@ impl Shell {
                          not to allow. To allow it, run \"Allow project code\" from the command \
                          palette."
                     ),
-                    None => "It has the language server build or run code, which Athena does \
+                    None => "It has the language server build or run code, which Daedalus does \
                              only for files of a project you open and allow."
                         .into(),
                 };

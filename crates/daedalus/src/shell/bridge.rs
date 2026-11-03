@@ -28,7 +28,7 @@ fn runs_hook_of(lineage: &[(i32, i32, i32)]) -> bool {
 }
 
 impl Shell {
-    /// Answers a request from `athena` or the MCP bridge.
+    /// Answers a request from `daedalus` or the MCP bridge.
     pub(super) fn handle_app(
         &mut self,
         msg: AppMsg,
@@ -180,7 +180,7 @@ impl Shell {
         });
         let Some(target) = target else {
             let _ = reply.send(AppReply::Error(format!(
-                "terminal {session} is not open in Athena"
+                "terminal {session} is not open in Daedalus"
             )));
             return;
         };
@@ -197,7 +197,7 @@ impl Shell {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default()
             ),
-            None => "A program outside Athena".to_string(),
+            None => "A program outside Daedalus".to_string(),
         };
         let place = target.read(cx).label();
         let detail = format!(
@@ -353,7 +353,7 @@ impl Shell {
         match view {
             Some(view) => AppReply::Lines(view.read(cx).text_lines(lines as usize)),
             None => AppReply::Error(format!(
-                "terminal {session} is not open in Athena; open its tab first"
+                "terminal {session} is not open in Daedalus; open its tab first"
             )),
         }
     }

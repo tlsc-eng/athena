@@ -283,7 +283,7 @@ impl Shell {
         self.write_setting(&["ide_integration"], true.into(), cx);
         self.transient_notice(
             "Claude Code integration is on",
-            "Claude sessions started in new terminals connect to Athena: proposed edits open as \
+            "Claude sessions started in new terminals connect to Daedalus: proposed edits open as \
              diffs to accept or reject, and your selection goes with each prompt. In a session \
              already running, type /ide.",
             cx,
@@ -606,7 +606,7 @@ impl Shell {
                 };
                 self.action_toast(
                     "Claude Code integration is off",
-                    "Turn it on to send files and selections to Claude Code sessions in Athena.",
+                    "Turn it on to send files and selections to Claude Code sessions in Daedalus.",
                     action,
                     cx,
                 );

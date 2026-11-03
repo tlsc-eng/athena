@@ -1,4 +1,4 @@
-//! Playwright for Athena: finding a project's config, reading the JSON reporter's output, and the
+//! Playwright for Daedalus: finding a project's config, reading the JSON reporter's output, and the
 //! optional `.mcp.json` entry that lets Claude Code drive a browser.
 
 use std::fs;

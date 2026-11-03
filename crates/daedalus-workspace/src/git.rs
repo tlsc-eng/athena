@@ -373,7 +373,7 @@ fn filter_drivers(out: &[u8]) -> Vec<String> {
 }
 
 /// Empties each driver's commands through `GIT_CONFIG_KEY_n`, which takes a name with `=` or
-/// spaces as it is, after any such settings Athena itself was started with.
+/// spaces as it is, after any such settings Daedalus itself was started with.
 fn without_filters(cmd: &mut Command, drivers: &[String]) {
     let mut n: usize = std::env::var("GIT_CONFIG_COUNT")
         .ok()
@@ -1082,7 +1082,7 @@ pub fn worktree_encoding(root: &Path, rel: &Path) -> Result<Option<String>> {
 }
 
 /// Refuses a file that goes through a filter driver or that git re-encodes for the worktree: its
-/// hunks were read without the driver or in Athena's guess at the encoding, so only git itself,
+/// hunks were read without the driver or in Daedalus's guess at the encoding, so only git itself,
 /// staging or restoring the whole file, can store or write it correctly.
 pub fn refuse_filtered(root: &Path, rel: &Path) -> Result<()> {
     let attrs = valued_attrs(root, rel, &["filter", "working-tree-encoding"])?;
@@ -1094,7 +1094,7 @@ pub fn refuse_filtered(root: &Path, rel: &Path) -> Result<()> {
         _ => format!("is kept in git as UTF-8 and written out as {value}"),
     };
     bail!(
-        "{} {why}, so Athena stages and reverts it only as a whole file.",
+        "{} {why}, so Daedalus stages and reverts it only as a whole file.",
         rel.display()
     )
 }
