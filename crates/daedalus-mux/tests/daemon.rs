@@ -18,7 +18,7 @@ impl Daemon {
     }
 
     fn start_with(tag: &str, env: &[(&str, &str)]) -> Self {
-        let home = PathBuf::from(format!("/tmp/athena-t{}-{tag}", std::process::id()));
+        let home = PathBuf::from(format!("/tmp/daedalus-t{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_daedalus-mux"))
@@ -125,10 +125,10 @@ fn session_survives_client_disconnect_and_replays() {
     ));
     conn.send(&ClientMsg::Input {
         pane,
-        data: b"echo athena-$((40+2))\r".to_vec(),
+        data: b"echo daedalus-$((40+2))\r".to_vec(),
     })
     .unwrap();
-    read_until(&mut reader, "athena-42");
+    read_until(&mut reader, "daedalus-42");
     drop((conn, reader));
 
     let (conn, mut reader) = daemon.connect();
@@ -142,7 +142,7 @@ fn session_survives_client_disconnect_and_replays() {
             other => panic!("unexpected {other:?}"),
         }
     }
-    assert!(replay.contains("athena-42"), "history was not replayed");
+    assert!(replay.contains("daedalus-42"), "history was not replayed");
 
     conn.send(&ClientMsg::Kill { pane }).unwrap();
     conn.send(&ClientMsg::ListPanes).unwrap();
@@ -292,7 +292,7 @@ fn reports_the_foreground_program() {
 #[test]
 fn sigterm_stops_the_daemon_even_if_the_parent_ignored_it() {
     use std::os::unix::process::CommandExt;
-    let home = PathBuf::from(format!("/tmp/athena-t{}-term", std::process::id()));
+    let home = PathBuf::from(format!("/tmp/daedalus-t{}-term", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_daedalus-mux"));
@@ -441,7 +441,7 @@ fn a_client_that_stops_reading_does_not_stall_other_clients() {
         })
         .unwrap();
     };
-    input(&healthy, flood, "yes athena-flood\r");
+    input(&healthy, flood, "yes daedalus-flood\r");
     input(
         &healthy,
         shared,
@@ -635,7 +635,7 @@ fn a_client_dropped_for_lagging_reattaches_to_a_short_replay() {
     stalled
         .send(&ClientMsg::Input {
             pane: flood,
-            data: b"yes athena-flood\r".to_vec(),
+            data: b"yes daedalus-flood\r".to_vec(),
         })
         .unwrap();
     stalled_reader

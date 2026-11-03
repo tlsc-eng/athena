@@ -108,18 +108,18 @@ mod tests {
     #[test]
     fn programs_are_found_only_in_absolute_path_folders() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("athena-find-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-find-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let tool = dir.join("athena-tool");
+        let tool = dir.join("daedalus-tool");
         std::fs::write(&tool, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cwd = std::env::current_dir().unwrap();
         let mut relative: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
         relative.push(dir.strip_prefix("/").unwrap());
-        assert!(relative.is_relative() && relative.join("athena-tool").exists());
+        assert!(relative.is_relative() && relative.join("daedalus-tool").exists());
         let both = format!("{}:{}", relative.display(), dir.display());
-        let found = find_in(&relative.display().to_string(), "athena-tool");
-        let absolute = find_in(&both, "athena-tool");
+        let found = find_in(&relative.display().to_string(), "daedalus-tool");
+        let absolute = find_in(&both, "daedalus-tool");
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(
             found, None,

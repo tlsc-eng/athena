@@ -577,7 +577,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-mcp-git-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-mcp-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -623,7 +623,7 @@ mod tests {
             .collect();
         assert_eq!(paths.len(), 2, "{paths:?}");
         assert!(paths.contains(&"a.txt") && paths.contains(&"new.txt"));
-        assert!(git_status(&std::env::temp_dir().join("athena-no-repo-here")).is_err());
+        assert!(git_status(&std::env::temp_dir().join("daedalus-no-repo-here")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

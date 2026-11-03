@@ -210,7 +210,7 @@ mod tests {
 
     fn temp(name: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("athena-comments-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("daedalus-comments-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

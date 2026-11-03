@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn the_message_is_built_from_the_store_as_it_is_when_it_goes_out() {
-        let dir = std::env::temp_dir().join(format!("athena-delivery-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-delivery-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = Path::new("/p/a.rs");
         let add = |line: u32, body: &str| {

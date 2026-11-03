@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn folder_dropdowns_list_folders_first_and_skip_hidden_entries() {
-        let dir = std::env::temp_dir().join(format!("athena-crumbs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-crumbs-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join("a.go"), "").unwrap();

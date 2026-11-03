@@ -29,7 +29,7 @@ pub(super) mod live;
 mod session_view;
 
 actions!(
-    athena,
+    daedalus,
     [
         ShowClaudeSessions,
         ClaudeReviewNextFile,
@@ -1100,7 +1100,7 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-cs-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-cs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()

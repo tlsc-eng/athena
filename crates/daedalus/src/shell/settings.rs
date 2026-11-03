@@ -33,7 +33,7 @@ pub(super) struct SettingsState {
     /// Code integration, git autofetch) wait for the watcher's next read.
     unapplied: bool,
     toast: Option<u64>,
-    /// Each project's `.vscode/settings.json` with its `.athena/settings.json` laid over it.
+    /// Each project's `.vscode/settings.json` with its `.daedalus/settings.json` laid over it.
     pub(super) projects: HashMap<PathBuf, ProjectSettings>,
     project_toast: Option<u64>,
     /// What is wrong in settings.json, keymap.json or a project's settings file as edited, by
@@ -104,7 +104,7 @@ fn diagnostic(
             Severity::Warning
         },
         message: why,
-        source: Some("athena".into()),
+        source: Some("daedalus".into()),
         raw: Value::Null,
     }
 }
@@ -119,13 +119,13 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Reads a project's settings files; problems in its `.athena/settings.json` are returned to
+/// Reads a project's settings files; problems in its `.daedalus/settings.json` are returned to
 /// report, while `.vscode/settings.json` is read leniently as VS Code's extensions share it.
 fn read_project(root: &Path) -> (Settings, Vec<String>) {
     let vscode = std::fs::read_to_string(root.join(settings::VSCODE_FILE))
         .map(|text| settings::parse_vscode(&text, root))
         .unwrap_or_default();
-    let (own, problems) = match std::fs::read_to_string(root.join(settings::PROJECT_FILE)) {
+    let (own, problems) = match std::fs::read_to_string(settings::project_file(root)) {
         Ok(text) => match settings::parse_project(&text) {
             Ok(parsed) => parsed,
             Err(why) => (Settings::default(), vec![why]),
@@ -358,7 +358,7 @@ impl Shell {
     fn refresh_project_settings(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
         let stamps = [
             modified(&root.join(settings::VSCODE_FILE)),
-            modified(&root.join(settings::PROJECT_FILE)),
+            modified(&settings::project_file(root)),
         ];
         if self
             .settings
@@ -374,15 +374,16 @@ impl Shell {
         }
         if !problems.is_empty() {
             for problem in &problems {
-                tracing::warn!("{}: {problem}", root.join(settings::PROJECT_FILE).display());
+                tracing::warn!("{}: {problem}", settings::project_file(root).display());
             }
+            let name = settings::project_file_name(root);
             let title = match problems.len() {
-                1 => ".athena/settings.json has a problem; the other settings apply".to_string(),
-                n => format!(".athena/settings.json has {n} problems; the other settings apply"),
+                1 => format!("{name} has a problem; the other settings apply"),
+                n => format!("{name} has {n} problems; the other settings apply"),
             };
-            let path = root.join(settings::PROJECT_FILE);
+            let path = settings::project_file(root);
             let action = ToastAction {
-                label: "Open .athena/settings.json",
+                label: "Open settings file",
                 run: Rc::new(move |this: &mut Shell, window, cx| {
                     this.open_file(path.clone(), window, cx)
                 }),
@@ -421,7 +422,7 @@ impl Shell {
 
     /// A saved file that is one of a project's settings files puts it in force.
     pub(super) fn project_settings_saved(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let ours = path.ends_with(settings::PROJECT_FILE) || path.ends_with(settings::VSCODE_FILE);
+        let ours = settings::is_project_file(path) || path.ends_with(settings::VSCODE_FILE);
         let Some(root) = self.project_root_of(path).filter(|_| ours) else {
             return;
         };
@@ -544,7 +545,7 @@ impl Shell {
         self.refresh_settings_views(cx);
     }
 
-    /// Sets, or with `None` removes, a setting in the project's `.athena/settings.json`.
+    /// Sets, or with `None` removes, a setting in the project's `.daedalus/settings.json`.
     fn write_project_setting(
         &mut self,
         root: &Path,
@@ -557,7 +558,8 @@ impl Shell {
                 "\"{}\" is not a project setting; set it in settings.json",
                 keys.join(".")
             );
-            self.transient_notice(".athena/settings.json was not updated", why, cx);
+            let title = format!("{} was not updated", settings::project_file_name(root));
+            self.transient_notice(title, why, cx);
             return;
         }
         let written = settings::ensure_project_file(root).and_then(|path| {
@@ -569,11 +571,10 @@ impl Shell {
         });
         match written {
             Ok(path) => self.project_settings_saved(&path, cx),
-            Err(e) => self.transient_notice(
-                ".athena/settings.json was not updated",
-                format!("{e:#}"),
-                cx,
-            ),
+            Err(e) => {
+                let title = format!("{} was not updated", settings::project_file_name(root));
+                self.transient_notice(title, format!("{e:#}"), cx)
+            }
         }
         self.refresh_settings_views(cx);
     }
@@ -684,7 +685,7 @@ impl Shell {
             Some(ConfigFile::Settings)
         } else if same(crate::keymap::path()) {
             Some(ConfigFile::Keymap)
-        } else if path.ends_with(settings::PROJECT_FILE) && self.project_root_of(path).is_some() {
+        } else if settings::is_project_file(path) && self.project_root_of(path).is_some() {
             Some(ConfigFile::ProjectSettings)
         } else {
             None
@@ -768,7 +769,7 @@ impl Shell {
         let folder = settings::path()
             .ok()
             .and_then(|p| Some(p.parent()?.file_name()?.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "athena".into());
+            .unwrap_or_else(|| "daedalus".into());
         let mut commands: Vec<&str> = gpui::generate_list_of_all_registered_actions()
             .map(|a| a.name)
             .filter(|n| {
@@ -783,7 +784,11 @@ impl Shell {
             "validate": {"enable": true},
             "schemas": [
                 {
-                    "fileMatch": [format!("{folder}/settings.json"), settings::PROJECT_FILE],
+                    "fileMatch": [
+                        format!("{folder}/settings.json"),
+                        settings::PROJECT_FILE,
+                        settings::LEGACY_PROJECT_FILE,
+                    ],
                     "schema": settings::schema::json_schema(),
                 },
                 {

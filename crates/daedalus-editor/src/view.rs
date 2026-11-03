@@ -2385,7 +2385,7 @@ impl EditorView {
     /// Closes this tab through the shell's Close Tab, which asks about unsaved edits first.
     fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
-        if let Ok(action) = cx.build_action("athena::CloseTab", None) {
+        if let Ok(action) = cx.build_action("daedalus::CloseTab", None) {
             window.dispatch_action(action, cx);
         }
     }
@@ -2926,7 +2926,7 @@ mod tests {
 
     #[test]
     fn a_file_that_failed_to_open_opens_once_it_is_readable() {
-        let dir = std::env::temp_dir().join(format!("athena-retry-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-retry-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("late.txt");
         let mut error = None;

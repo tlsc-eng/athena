@@ -16,7 +16,7 @@ use crate::actions::display_path;
 use crate::worktree_forks;
 
 actions!(
-    athena,
+    daedalus,
     [
         GitOpenWorktree,
         GitCreateWorktree,
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[test]
     fn a_worktree_with_a_project_or_terminal_inside_it_is_in_use() {
-        let dir = std::env::temp_dir().join(format!("athena-wt-use-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-wt-use-{}", std::process::id()));
         let (wt, sub, other) = (
             dir.join("repo-feat"),
             dir.join("repo-feat/src"),
@@ -1397,7 +1397,7 @@ mod tests {
 
     #[test]
     fn finishing_says_what_is_lost_and_what_is_kept() {
-        let root = Path::new("/w/athena-feat");
+        let root = Path::new("/w/daedalus-feat");
         let summary = |branch: Option<&str>, dirty| git::Summary {
             branch: branch.map(String::from),
             tracking: None,
@@ -1421,19 +1421,19 @@ mod tests {
 
     #[test]
     fn new_worktrees_go_beside_the_main_one_named_after_the_branch() {
-        let main = Path::new("/code/athena");
+        let main = Path::new("/code/daedalus");
         assert_eq!(
             worktree_path(main, None, "feat/x y", |_| false),
-            PathBuf::from("/code/athena-feat-x-y")
+            PathBuf::from("/code/daedalus-feat-x-y")
         );
         assert_eq!(
             worktree_path(main, Some(Path::new("/w")), "dev", |_| false),
-            PathBuf::from("/w/athena-dev")
+            PathBuf::from("/w/daedalus-dev")
         );
-        let taken = |p: &Path| p == Path::new("/code/athena-dev");
+        let taken = |p: &Path| p == Path::new("/code/daedalus-dev");
         assert_eq!(
             worktree_path(main, None, "dev", taken),
-            PathBuf::from("/code/athena-dev-2")
+            PathBuf::from("/code/daedalus-dev-2")
         );
     }
 

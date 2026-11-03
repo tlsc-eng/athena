@@ -127,7 +127,8 @@ mod tests {
     }
 
     fn repo(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-forks-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-forks-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();

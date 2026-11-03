@@ -1266,9 +1266,12 @@ mod tests {
 
     #[test]
     fn json_keys_are_properties() {
-        let src = "{\"name\": \"athena\", \"n\": 1, \"ok\": true}\n";
+        let src = "{\"name\": \"daedalus\", \"n\": 1, \"ok\": true}\n";
         assert_eq!(painted(Lang::Json, src, "\"name\""), Some(Token::Property));
-        assert_eq!(painted(Lang::Json, src, "\"athena\""), Some(Token::String));
+        assert_eq!(
+            painted(Lang::Json, src, "\"daedalus\""),
+            Some(Token::String)
+        );
         assert_eq!(painted(Lang::Json, src, "1"), Some(Token::Number));
         assert_eq!(painted(Lang::Json, src, "true"), Some(Token::Constant));
         assert_eq!(painted(Lang::Json, src, "{"), Some(Token::Punctuation));
@@ -1285,11 +1288,14 @@ mod tests {
 
     #[test]
     fn toml_keys_are_properties_and_tables_types() {
-        let src = "[package]\nname = \"athena\"\nedition.workspace = true\n";
+        let src = "[package]\nname = \"daedalus\"\nedition.workspace = true\n";
         assert_eq!(painted(Lang::Toml, src, "package"), Some(Token::Type));
         assert_eq!(painted(Lang::Toml, src, "name"), Some(Token::Property));
         assert_eq!(painted(Lang::Toml, src, "workspace"), Some(Token::Property));
-        assert_eq!(painted(Lang::Toml, src, "\"athena\""), Some(Token::String));
+        assert_eq!(
+            painted(Lang::Toml, src, "\"daedalus\""),
+            Some(Token::String)
+        );
     }
 
     #[test]

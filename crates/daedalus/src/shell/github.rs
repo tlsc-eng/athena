@@ -8,7 +8,7 @@ use gpui::{Context, InteractiveElement, Task, Window, actions};
 
 use super::Shell;
 
-actions!(athena, [CreatePullRequest, ViewPullRequestChecks]);
+actions!(daedalus, [CreatePullRequest, ViewPullRequestChecks]);
 
 /// The CI dot is re-read this often while the window is in front.
 const CI_EVERY: Duration = Duration::from_secs(120);

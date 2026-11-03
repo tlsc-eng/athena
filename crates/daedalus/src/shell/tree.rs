@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn read_dir_marks_git_ignored_entries_or_leaves_them_out() {
-        let dir = std::env::temp_dir().join(format!("athena-tree-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-tree-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::create_dir_all(dir.join("target")).unwrap();
         std::fs::write(dir.join(".gitignore"), ".env\ntarget/\n").unwrap();

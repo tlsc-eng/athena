@@ -151,7 +151,7 @@ pub fn problems_at(
         .collect()
 }
 
-/// Each entry's command, `athena::`-qualified and with its `-` kept; `None` for an entry with none.
+/// Each entry's command, `daedalus::`-qualified and with its `-` kept; `None` for an entry with none.
 pub fn entry_commands(text: &str) -> Vec<Option<String>> {
     let json = strip_jsonc(text);
     let Ok(entries) = serde_json::from_str::<Vec<Value>>(&json) else {
@@ -535,14 +535,17 @@ fn rule(
 }
 
 /// Commands that were renamed, so a keymap.json written before still binds and unbinds them.
-const RENAMED: &[(&str, &str)] = &[("athena::ToggleNotifications", "athena::ToggleDrawer")];
+const RENAMED: &[(&str, &str)] = &[("daedalus::ToggleNotifications", "daedalus::ToggleDrawer")];
 
-/// Daedalus's own commands may be named without their `athena::` prefix.
+/// Daedalus's own commands may be named without their `daedalus::` prefix.
 fn qualified(name: &str) -> String {
-    let full = if name.contains("::") {
+    let full = if let Some(rest) = name.strip_prefix("athena::") {
+        // Keymaps written for Athena name its commands `athena::`.
+        format!("daedalus::{rest}")
+    } else if name.contains("::") {
         name.to_string()
     } else {
-        format!("athena::{name}")
+        format!("daedalus::{name}")
     };
     match RENAMED.iter().find(|(old, _)| *old == full) {
         Some((_, new)) => new.to_string(),
@@ -570,7 +573,7 @@ const NAMED_KEYS: &[&str] = &[
 ];
 
 /// A VS Code keystroke (`cmd+shift+p`) in Daedalus's spelling (`cmd-shift-p`).
-fn athena_keystroke(vscode: &str) -> String {
+fn daedalus_keystroke(vscode: &str) -> String {
     if !vscode.contains('+') || vscode == "+" {
         return vscode.to_string();
     }
@@ -588,7 +591,7 @@ fn binding(
     action: Box<dyn Action>,
     when: Option<KeyBindingContextPredicate>,
 ) -> Result<KeyBinding> {
-    let strokes: Vec<String> = key.split_whitespace().map(athena_keystroke).collect();
+    let strokes: Vec<String> = key.split_whitespace().map(daedalus_keystroke).collect();
     if strokes.is_empty() {
         return Err(anyhow!("\"key\" is empty"));
     }
@@ -733,9 +736,9 @@ mod tests {
 
     fn build(name: &str, _: Option<serde_json::Value>) -> Result<Box<dyn Action>> {
         match name {
-            "athena::NewTerminal" => Ok(Box::new(NewTerminal)),
-            "athena::QuickOpen" => Ok(Box::new(QuickOpen)),
-            "athena::SplitRight" => Ok(Box::new(SplitRight)),
+            "daedalus::NewTerminal" => Ok(Box::new(NewTerminal)),
+            "daedalus::QuickOpen" => Ok(Box::new(QuickOpen)),
+            "daedalus::SplitRight" => Ok(Box::new(SplitRight)),
             _ => Err(anyhow!("unknown")),
         }
     }
@@ -764,7 +767,7 @@ mod tests {
     fn comments_and_trailing_commas_are_allowed_and_strings_kept() {
         let text = r#"// header
         [ /* one */ {"key": "cmd-k cmd-t", "command": "NewTerminal",},
-          {"key": "cmd-p", "command": "athena::QuickOpen", "when": "Editor"}, // tail
+          {"key": "cmd-p", "command": "daedalus::QuickOpen", "when": "Editor"}, // tail
         ]"#;
         let (rules, problems) = parse(text, build);
         assert!(problems.is_empty(), "{problems:?}");
@@ -780,18 +783,18 @@ mod tests {
     #[test]
     fn invalid_entries_are_reported_and_the_rest_kept() {
         let text = r#"[
-            {"key": "cmd-k cmd-t", "command": "athena::NewTerminal"},
-            {"key": "cmd-k", "command": "athena::Nope"},
-            {"key": "cmd-shiftt-p", "command": "athena::QuickOpen"},
-            {"key": "cmd-p", "command": "athena::QuickOpen", "when": "Editor &&"},
-            {"command": "athena::QuickOpen"},
-            {"key": "cmd-p", "command": "athena::QuickOpen", "typo": 1},
+            {"key": "cmd-k cmd-t", "command": "daedalus::NewTerminal"},
+            {"key": "cmd-k", "command": "daedalus::Nope"},
+            {"key": "cmd-shiftt-p", "command": "daedalus::QuickOpen"},
+            {"key": "cmd-p", "command": "daedalus::QuickOpen", "when": "Editor &&"},
+            {"command": "daedalus::QuickOpen"},
+            {"key": "cmd-p", "command": "daedalus::QuickOpen", "typo": 1},
             "cmd-p"
         ]"#;
         let (rules, problems) = parse(text, build);
         assert_eq!(rules.len(), 1);
         assert_eq!(problems.len(), 6, "{problems:#?}");
-        assert!(problems[0].starts_with("entry 2:") && problems[0].contains("athena::Nope"));
+        assert!(problems[0].starts_with("entry 2:") && problems[0].contains("daedalus::Nope"));
         assert!(problems[1].starts_with("entry 3:") && problems[1].contains("keystroke"));
         assert!(problems[2].contains("when"));
         assert!(problems[3].contains("no \"key\""));
@@ -804,13 +807,13 @@ mod tests {
     fn the_old_toggle_notifications_name_binds_and_unbinds_toggle_drawer() {
         let build = |name: &str, _: Option<serde_json::Value>| -> Result<Box<dyn Action>> {
             match name {
-                "athena::ToggleDrawer" => Ok(Box::new(ToggleDrawer)),
+                "daedalus::ToggleDrawer" => Ok(Box::new(ToggleDrawer)),
                 _ => Err(anyhow!("unknown")),
             }
         };
         let (rules, problems) = parse(
             r#"[{"key": "cmd-k cmd-j", "command": "ToggleNotifications"},
-                {"key": "cmd-l", "command": "athena::ToggleNotifications"},
+                {"key": "cmd-l", "command": "daedalus::ToggleNotifications"},
                 {"key": "cmd-j", "command": "-ToggleNotifications"}]"#,
             build,
         );
@@ -819,22 +822,46 @@ mod tests {
         assert_eq!(
             summary(&merged),
             [
-                ("cmd-k cmd-j".to_string(), "athena::ToggleDrawer"),
-                ("cmd-l".to_string(), "athena::ToggleDrawer"),
+                ("cmd-k cmd-j".to_string(), "daedalus::ToggleDrawer"),
+                ("cmd-l".to_string(), "daedalus::ToggleDrawer"),
             ]
         );
         assert_eq!(
             entry_commands(r#"[{"key": "cmd-l", "command": "ToggleNotifications"}]"#),
-            [Some("athena::ToggleDrawer".to_string())]
+            [Some("daedalus::ToggleDrawer".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_keymap_written_for_athena_binds_and_unbinds_like_the_daedalus_spelling() {
+        let merged = |text: &str| {
+            let (rules, problems) = parse(text, build);
+            assert!(problems.is_empty(), "{problems:?}");
+            summary(&merge(&defaults(), rules))
+        };
+        let athena = merged(
+            r#"[{"key": "cmd-k cmd-t", "command": "athena::NewTerminal"},
+                {"key": "cmd-d", "command": "-athena::SplitRight"}]"#,
+        );
+        let daedalus = merged(
+            r#"[{"key": "cmd-k cmd-t", "command": "daedalus::NewTerminal"},
+                {"key": "cmd-d", "command": "-daedalus::SplitRight"}]"#,
+        );
+        assert_eq!(athena, daedalus);
+        assert!(athena.contains(&("cmd-k cmd-t".to_string(), "daedalus::NewTerminal")));
+        assert!(!athena.iter().any(|(keys, _)| keys == "cmd-d"));
+        assert_eq!(
+            entry_commands(r#"[{"key": "cmd-d", "command": "-athena::SplitRight"}]"#),
+            [Some("-daedalus::SplitRight".to_string())]
         );
     }
 
     #[test]
     fn vs_code_key_spelling_is_accepted_and_unknown_keys_are_not() {
-        assert_eq!(athena_keystroke("cmd+shift+p"), "cmd-shift-p");
-        assert_eq!(athena_keystroke("ctrl+-"), "ctrl--");
-        assert_eq!(athena_keystroke("cmd++"), "cmd-+");
-        assert_eq!(athena_keystroke("cmd-k"), "cmd-k");
+        assert_eq!(daedalus_keystroke("cmd+shift+p"), "cmd-shift-p");
+        assert_eq!(daedalus_keystroke("ctrl+-"), "ctrl--");
+        assert_eq!(daedalus_keystroke("cmd++"), "cmd-+");
+        assert_eq!(daedalus_keystroke("cmd-k"), "cmd-k");
         let (rules, problems) = parse(
             r#"[{"key": "cmd+k cmd+t", "command": "NewTerminal"},
                 {"key": "shift+f12", "command": "NewTerminal"},
@@ -854,9 +881,9 @@ mod tests {
     fn user_bindings_come_after_defaults_and_minus_removes_a_default() {
         let text = r#"[
             {"key": "cmd-k cmd-t", "command": "NewTerminal"},
-            {"key": "cmd-d", "command": "-athena::SplitRight"},
-            {"command": "-athena::NewTerminal", "when": "Editor"},
-            {"key": "cmd-d", "command": "athena::QuickOpen"}
+            {"key": "cmd-d", "command": "-daedalus::SplitRight"},
+            {"command": "-daedalus::NewTerminal", "when": "Editor"},
+            {"key": "cmd-d", "command": "daedalus::QuickOpen"}
         ]"#;
         let (rules, problems) = parse(text, build);
         assert!(problems.is_empty(), "{problems:?}");
@@ -864,10 +891,10 @@ mod tests {
         assert_eq!(
             summary(&merged),
             [
-                ("cmd-shift-d".to_string(), "athena::SplitDown"),
-                ("cmd-t".into(), "athena::NewTerminal"),
-                ("cmd-k cmd-t".into(), "athena::NewTerminal"),
-                ("cmd-d".into(), "athena::QuickOpen"),
+                ("cmd-shift-d".to_string(), "daedalus::SplitDown"),
+                ("cmd-t".into(), "daedalus::NewTerminal"),
+                ("cmd-k cmd-t".into(), "daedalus::NewTerminal"),
+                ("cmd-d".into(), "daedalus::QuickOpen"),
             ]
         );
         assert!(merged[1].predicate().is_none(), "only the Editor one went");
@@ -876,21 +903,21 @@ mod tests {
     #[test]
     fn a_user_binding_on_a_default_key_wins() {
         let (rules, _) = parse(
-            r#"[{"key": "cmd-t", "command": "athena::QuickOpen"}]"#,
+            r#"[{"key": "cmd-t", "command": "daedalus::QuickOpen"}]"#,
             build,
         );
         let keymap = gpui::Keymap::new(merge(&defaults()[..3], rules));
         let typed = [Keystroke::parse("cmd-t").unwrap()];
         let shell = [KeyContext::parse("Shell").unwrap()];
         let (found, _) = keymap.bindings_for_input(&typed, &shell);
-        assert_eq!(found[0].action().name(), "athena::QuickOpen");
+        assert_eq!(found[0].action().name(), "daedalus::QuickOpen");
     }
 
     #[test]
     fn a_user_binding_without_when_beats_a_default_in_a_deeper_context() {
         let (rules, _) = parse(
-            r#"[{"key": "cmd-t", "command": "athena::QuickOpen"},
-                {"key": "cmd-d", "command": "athena::NewTerminal", "when": "Editor"}]"#,
+            r#"[{"key": "cmd-t", "command": "daedalus::QuickOpen"},
+                {"key": "cmd-d", "command": "daedalus::NewTerminal", "when": "Editor"}]"#,
             build,
         );
         let keymap = gpui::Keymap::new(merge(&defaults(), rules));
@@ -903,16 +930,16 @@ mod tests {
             let (found, _) = keymap.bindings_for_input(&typed, &editor);
             found.iter().map(|b| b.action().name()).collect()
         };
-        assert_eq!(actions("cmd-t"), ["athena::QuickOpen"]);
+        assert_eq!(actions("cmd-t"), ["daedalus::QuickOpen"]);
         assert_eq!(
             actions("cmd-d")[0],
-            "athena::NewTerminal",
+            "daedalus::NewTerminal",
             "one with when wins in its context"
         );
         let shell = [KeyContext::parse("Shell").unwrap()];
         let typed = [Keystroke::parse("cmd-d").unwrap()];
         let (found, _) = keymap.bindings_for_input(&typed, &shell);
-        assert_eq!(found[0].action().name(), "athena::SplitRight");
+        assert_eq!(found[0].action().name(), "daedalus::SplitRight");
     }
 
     fn entry(key: &str, command: &str, when: Option<&str>) -> NewEntry {
@@ -925,7 +952,7 @@ mod tests {
 
     #[test]
     fn user_bindings_carry_their_entry_index_and_problems_point_at_their_entry() {
-        let text = "[\n  {\"key\": \"cmd-k\", \"command\": \"athena::Nope\"},\n  // two\n  {\"key\": \"cmd-k cmd-t\", \"command\": \"NewTerminal\"}\n]";
+        let text = "[\n  {\"key\": \"cmd-k\", \"command\": \"daedalus::Nope\"},\n  // two\n  {\"key\": \"cmd-k cmd-t\", \"command\": \"NewTerminal\"}\n]";
         let (rules, _) = parse(text, build);
         let Rule::Bind(b) = &rules[0] else {
             panic!("expected a binding");
@@ -935,7 +962,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(
             &text[found[0].0.clone()],
-            "{\"key\": \"cmd-k\", \"command\": \"athena::Nope\"}"
+            "{\"key\": \"cmd-k\", \"command\": \"daedalus::Nope\"}"
         );
         assert!(!found[0].2);
         let broken = "[\n  {\"key\": \"cmd-k\"\n   \"command\": \"x\"}\n]";
@@ -948,21 +975,21 @@ mod tests {
     fn new_entries_go_at_the_end_keeping_the_header_and_comments() {
         let out = append_entries(
             TEMPLATE,
-            &[entry("cmd-k cmd-t", "athena::NewTerminal", None)],
+            &[entry("cmd-k cmd-t", "daedalus::NewTerminal", None)],
         )
         .unwrap();
         assert!(out.starts_with(&TEMPLATE[..TEMPLATE.rfind('[').unwrap()]));
         assert!(
             out.ends_with(
-                "[\n  {\"key\": \"cmd-k cmd-t\", \"command\": \"athena::NewTerminal\"}\n]\n"
+                "[\n  {\"key\": \"cmd-k cmd-t\", \"command\": \"daedalus::NewTerminal\"}\n]\n"
             ),
             "{out}"
         );
         let out = append_entries(
             &out,
             &[
-                entry("cmd-e", "athena::QuickOpen", Some("Editor")),
-                entry("cmd-d", "-athena::SplitRight", None),
+                entry("cmd-e", "daedalus::QuickOpen", Some("Editor")),
+                entry("cmd-d", "-daedalus::SplitRight", None),
             ],
         )
         .unwrap();
@@ -970,7 +997,7 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}\n{out}");
         assert_eq!(rules.len(), 3);
         assert!(out.contains(
-            "NewTerminal\"},\n  {\"key\": \"cmd-e\", \"command\": \"athena::QuickOpen\", \"when\": \"Editor\"},\n  {"
+            "NewTerminal\"},\n  {\"key\": \"cmd-e\", \"command\": \"daedalus::QuickOpen\", \"when\": \"Editor\"},\n  {"
         ), "{out}");
         for (text, want) in [
             ("", "[\n  {\"key\": \"f1\", \"command\": \"x\"}\n]\n"),
@@ -1034,7 +1061,7 @@ mod tests {
             let out = remove_entries(&text, &removed).unwrap();
             let kept: Vec<Option<String>> = (0..count)
                 .filter(|i| !removed.contains(i))
-                .map(|i| Some(format!("athena::Command{i}")))
+                .map(|i| Some(format!("daedalus::Command{i}")))
                 .collect();
             assert_eq!(
                 entry_commands(&out),
@@ -1094,11 +1121,11 @@ mod tests {
         };
         assert_eq!(
             names(conflicts(&bindings, "cmd-t")),
-            ["athena::NewTerminal", "athena::NewTerminal"]
+            ["daedalus::NewTerminal", "daedalus::NewTerminal"]
         );
         assert_eq!(
             names(conflicts(&bindings, "cmd-shift-d")),
-            ["athena::SplitDown"]
+            ["daedalus::SplitDown"]
         );
         assert!(conflicts(&bindings, "cmd-k cmd-t").is_empty());
         assert!(conflicts(&bindings, "cmd-alt-t").is_empty());
@@ -1106,7 +1133,7 @@ mod tests {
         let merged = merge(&bindings, rules);
         assert_eq!(
             names(conflicts(&merged, "cmd-k cmd-t")),
-            ["athena::QuickOpen"]
+            ["daedalus::QuickOpen"]
         );
         assert_eq!(
             key_text(conflicts(&merged, "cmd-k cmd-t")[0]),
@@ -1116,18 +1143,18 @@ mod tests {
 
     #[test]
     fn the_keymap_schema_lists_commands_and_their_removals() {
-        let schema = json_schema(&["athena::NewTerminal"]);
+        let schema = json_schema(&["daedalus::NewTerminal"]);
         let names = &schema["items"]["properties"]["command"]["anyOf"][0]["enum"];
         assert_eq!(
             names,
-            &json!(["athena::NewTerminal", "-athena::NewTerminal"])
+            &json!(["daedalus::NewTerminal", "-daedalus::NewTerminal"])
         );
         assert_eq!(schema["allowComments"], true);
     }
 
     #[test]
     fn a_symlinked_keymap_names_its_target_folder_to_watch() {
-        let dir = std::env::temp_dir().join(format!("athena-keymap-link-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-keymap-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
@@ -1147,7 +1174,7 @@ mod tests {
 
     #[test]
     fn only_edits_to_keymap_json_count_as_changes() {
-        let dir = std::env::temp_dir().join(format!("athena-keymap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-keymap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("keymap.json");
         std::fs::write(&file, "[]").unwrap();

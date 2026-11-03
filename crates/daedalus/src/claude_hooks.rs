@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn an_existing_athena_backup_stops_a_daedalus_backup_from_being_made() {
-        let dir = temp("athena-backup");
+        let dir = temp("daedalus-backup");
         let user = settings_path(&dir);
         fs::write(&user, user_settings().to_string()).unwrap();
         let athena_backup = dir.join(".claude/settings.json.athena-backup");

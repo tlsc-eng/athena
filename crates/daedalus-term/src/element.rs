@@ -24,7 +24,7 @@ use crate::view::TerminalView;
 
 const LINE_HEIGHT_RATIO: f32 = 1.4;
 
-/// Logs each prepaint, its duration and the rows it rebuilt under `athena::render` when dropped.
+/// Logs each prepaint, its duration and the rows it rebuilt under `daedalus::render` when dropped.
 struct PrepaintTimer {
     started: Instant,
     rebuilt: usize,
@@ -34,7 +34,7 @@ impl Drop for PrepaintTimer {
     fn drop(&mut self) {
         let us = self.started.elapsed().as_micros() as u64;
         let rebuilt = self.rebuilt;
-        tracing::trace!(target: "athena::render", us, rebuilt, "terminal prepaint");
+        tracing::trace!(target: "daedalus::render", us, rebuilt, "terminal prepaint");
     }
 }
 
@@ -336,7 +336,7 @@ impl RowBuilder<'_> {
                 .into_iter()
                 .flatten()
                 .copied()
-                .filter(|&c| !marks::is_athenas(c))
+                .filter(|&c| !marks::is_daedalus_own(c))
                 .peekable();
             let simple = !flags.contains(Flags::WIDE_CHAR) && extra.peek().is_none();
             if simple

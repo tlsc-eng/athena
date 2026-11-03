@@ -25,7 +25,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("athena-ide-t-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-ide-t-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (server, events) = Server::start(Config {
@@ -91,7 +91,7 @@ impl Fixture {
             init["result"]["capabilities"]["tools"].is_object(),
             "{init}"
         );
-        assert_eq!(init["result"]["serverInfo"]["name"], "athena");
+        assert_eq!(init["result"]["serverInfo"]["name"], "daedalus");
         client.send(INITIALIZED).await;
         let Event::Client {
             client: id,
@@ -524,7 +524,7 @@ fn file_uris_with_spaces_and_unicode_decode_whether_encoded_or_not() {
     assert_eq!(session::uri_path(&file_url(path)), path);
     assert_eq!(session::uri_path("file:///p/my dir/日本#1.rs"), path);
 
-    let dir = std::env::temp_dir().join(format!("athena-ide-uri-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("daedalus-ide-uri-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let literal = dir.join("100%20done.txt");
     std::fs::write(&literal, "").unwrap();

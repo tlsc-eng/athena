@@ -562,7 +562,7 @@ mod tests {
     fn the_picker_lists_running_sessions_newest_first_then_the_two_new_ones() {
         let mut unbound = session("", Some(3), None, 20);
         unbound.label = "Claude".into();
-        unbound.cwd = PathBuf::from("/code/athena");
+        unbound.cwd = PathBuf::from("/code/daedalus");
         let rows = picker_rows(vec![
             session("old", Some(1), None, 50),
             session("closed", None, None, 0),
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(rows[1].to, SendTo::Terminal(3));
         assert_eq!(
             rows[1].detail.as_deref(),
-            Some("athena"),
+            Some("daedalus"),
             "an unbound Claude is told apart by its project"
         );
         assert_eq!(rows[0].to, SendTo::Terminal(2));
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn a_moved_file_differs_when_missing_or_unlike_by_contents_up_to_a_size() {
-        let dir = std::env::temp_dir().join(format!("athena-send-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-send-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = |name: &str, bytes: &[u8]| {
             let path = dir.join(name);

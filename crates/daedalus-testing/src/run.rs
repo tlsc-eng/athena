@@ -59,7 +59,7 @@ impl Stop {
 /// the whole process group is killed when it is stopped, `limit` passes, or the runner exits.
 pub fn run(job: &Job, limit: Duration, stop: &Stop) -> Result<Finished> {
     let mut cmd = Command::new("/bin/zsh");
-    cmd.args(["-lc", "cd \"$1\" && shift && exec \"$@\"", "athena"])
+    cmd.args(["-lc", "cd \"$1\" && shift && exec \"$@\"", "daedalus"])
         .arg(&job.dir)
         .arg(&job.program)
         .args(&job.args)
@@ -220,7 +220,7 @@ mod tests {
     fn the_time_limit_kills_the_whole_group() {
         let never = Stop::default();
         let started = Instant::now();
-        let marker = std::env::temp_dir().join(format!("athena-kill-{}", std::process::id()));
+        let marker = std::env::temp_dir().join(format!("daedalus-kill-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let script = format!("(sleep 2; touch '{}') & sleep 30", marker.display());
         let done = run_command(sh(&script), Duration::from_millis(300), &never).unwrap();
@@ -240,7 +240,7 @@ mod tests {
     }
 
     fn marker(name: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("athena-{name}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("daedalus-{name}-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }

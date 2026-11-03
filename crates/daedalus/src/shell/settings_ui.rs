@@ -473,7 +473,7 @@ impl SettingsView {
         let scope = self.scope;
         let file = match scope {
             Scope::User => "settings.json",
-            Scope::Project => ".athena/settings.json",
+            Scope::Project => settings::project_file_name(&self.root),
         };
         div()
             .mx(t.ui(24.))
@@ -677,7 +677,7 @@ impl SettingsView {
                 let scope = self.scope;
                 let file = match scope {
                     Scope::User => "settings.json",
-                    Scope::Project => ".athena/settings.json",
+                    Scope::Project => settings::project_file_name(&self.root),
                 };
                 div()
                     .flex()
@@ -790,10 +790,11 @@ impl Render for SettingsView {
                 .pt(t.ui(12.))
                 .text_size(t.typography.caption)
                 .text_color(t.color.content_muted)
-                .child(
+                .child(format!(
                     "These apply to this project's files, over your own, and are saved in \
-                     .athena/settings.json. Settings that apply to all of Daedalus are under User.",
-                )
+                     {}. Settings that apply to all of Daedalus are under User.",
+                    settings::project_file_name(&self.root)
+                ))
         });
         div()
             .key_context("Settings")
@@ -820,9 +821,9 @@ impl Render for SettingsView {
     }
 }
 
-/// A project's `.athena/settings.json`; a missing file sets nothing.
+/// A project's `.daedalus/settings.json`; a missing file sets nothing.
 fn read_project(root: &Path) -> Read {
-    match std::fs::read_to_string(root.join(settings::PROJECT_FILE)) {
+    match std::fs::read_to_string(settings::project_file(root)) {
         Ok(text) => settings::parse_project(&text).map(|(s, _)| s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(e) => Err(format!("{e}")),

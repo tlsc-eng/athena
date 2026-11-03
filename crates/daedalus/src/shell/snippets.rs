@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::Shell;
 use crate::settings::language_id;
 
-actions!(athena, [ConfigureSnippets, ConfigureGlobalSnippets]);
+actions!(daedalus, [ConfigureSnippets, ConfigureGlobalSnippets]);
 
 /// The protocol's CompletionItemKind for a snippet.
 const SNIPPET_KIND: u32 = 15;
@@ -891,7 +891,7 @@ mod tests {
 
     #[test]
     fn language_files_and_scoped_global_files_both_apply() {
-        let dir = std::env::temp_dir().join(format!("athena-snippets-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-snippets-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let go = dir.join("go.json");

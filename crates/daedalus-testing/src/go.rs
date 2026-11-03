@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn modules_map_packages_to_folders_and_back() {
-        let dir = std::env::temp_dir().join(format!("athena-gomod-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-gomod-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("svc/api")).unwrap();
         std::fs::write(

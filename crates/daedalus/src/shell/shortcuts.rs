@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn one_watcher_serves_settings_and_keymap_and_tells_their_changes_apart() {
-        let dir = std::env::temp_dir().join(format!("athena-config-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-config-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();

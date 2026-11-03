@@ -10,7 +10,7 @@ use super::lsp::{CONFIRMED, confirm_buttons};
 use super::palette::Mode;
 
 actions!(
-    athena,
+    daedalus,
     [
         GitMergeBranch,
         GitRebaseOnto,

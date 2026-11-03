@@ -560,7 +560,7 @@ pub fn find(keys: &[&str]) -> Option<&'static Setting> {
         .find(|s| super::setting_name(None, &s.id()) == name)
 }
 
-/// Whether a project's `.athena/settings.json` may set `keys`: a known setting, not app-wide.
+/// Whether a project's `.daedalus/settings.json` may set `keys`: a known setting, not app-wide.
 pub fn project_may_set(keys: &[&str]) -> bool {
     find(keys).is_some_and(|s| !s.user_only)
 }
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn each_default_is_what_athena_does_without_the_setting() {
+    fn each_default_is_what_daedalus_does_without_the_setting() {
         let unset = behaviour(&Settings::default());
         for s in SETTINGS {
             if matches!(s.kind, Kind::Json { .. }) {

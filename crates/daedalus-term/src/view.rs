@@ -2081,7 +2081,7 @@ mod tests {
 
     #[test]
     fn file_hyperlinks_open_only_regular_files() {
-        let file = std::env::temp_dir().join(format!("athena-link-{}.txt", std::process::id()));
+        let file = std::env::temp_dir().join(format!("daedalus-link-{}.txt", std::process::id()));
         std::fs::write(&file, "x").unwrap();
         let uri = format!("file://{}", file.display());
         assert_eq!(file_link_target(&uri), Some(file.clone()));
