@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use crate::components::DotState;
 use crate::motion::{EASE_ENTER, EASE_EXIT, EASE_STANDARD, SPIN_STEPS, SPIN_TICK_MS};
-use crate::{Colors, Size, Space, Theme};
+use crate::{Colors, Size, Space, TerminalColors, Theme};
 
 fn hex(color: Hsla) -> String {
     let rgba = Rgba::from(color);
@@ -31,8 +31,9 @@ fn num(v: f32) -> Value {
 fn colors(c: &Colors) -> Value {
     macro_rules! fields {
         ($($name:ident),*) => {{
+            let Colors { $($name),* } = c;
             let mut map = Map::new();
-            $(map.insert(stringify!($name).into(), json!(hex(c.$name)));)*
+            $(map.insert(stringify!($name).into(), json!(hex(*$name)));)*
             Value::Object(map)
         }};
     }
@@ -65,18 +66,27 @@ fn colors(c: &Colors) -> Value {
 }
 
 fn appearance(theme: &Theme) -> Value {
-    let t = &theme.terminal;
+    let TerminalColors {
+        foreground,
+        bright_foreground,
+        dim_foreground,
+        background,
+        cursor,
+        cursor_text,
+        selection,
+        ansi,
+    } = &theme.terminal;
     json!({
         "color": colors(&theme.color),
         "terminal": {
-            "foreground": hex(t.foreground),
-            "bright_foreground": hex(t.bright_foreground),
-            "dim_foreground": hex(t.dim_foreground),
-            "background": hex(t.background),
-            "cursor": hex(t.cursor),
-            "cursor_text": hex(t.cursor_text),
-            "selection": hex(t.selection),
-            "ansi": t.ansi.iter().map(|c| hex(*c)).collect::<Vec<_>>(),
+            "foreground": hex(*foreground),
+            "bright_foreground": hex(*bright_foreground),
+            "dim_foreground": hex(*dim_foreground),
+            "background": hex(*background),
+            "cursor": hex(*cursor),
+            "cursor_text": hex(*cursor_text),
+            "selection": hex(*selection),
+            "ansi": ansi.iter().map(|c| hex(*c)).collect::<Vec<_>>(),
         },
     })
 }
@@ -117,28 +127,44 @@ fn session_glyphs(theme: &Theme) -> Value {
     Value::Object(map)
 }
 
+fn space_name(space: Space) -> &'static str {
+    match space {
+        Space::Xxs => "xxs",
+        Space::Xs => "xs",
+        Space::Sm => "sm",
+        Space::Md => "md",
+        Space::Lg => "lg",
+        Space::Xl => "xl",
+        Space::Xxl => "xxl",
+    }
+}
+
+fn size_name(size: Size) -> &'static str {
+    match size {
+        Size::Row => "row",
+        Size::Control => "control",
+        Size::TabBar => "tab_bar",
+        Size::TitleBar => "title_bar",
+    }
+}
+
 fn tokens() -> Value {
     let dark = Theme::dark(false);
     let light = Theme::light(false);
     let ty = &dark.typography;
     let px = |p: gpui::Pixels| num(f32::from(p));
     let space = [
-        ("xxs", Space::Xxs),
-        ("xs", Space::Xs),
-        ("sm", Space::Sm),
-        ("md", Space::Md),
-        ("lg", Space::Lg),
-        ("xl", Space::Xl),
-        ("xxl", Space::Xxl),
+        Space::Xxs,
+        Space::Xs,
+        Space::Sm,
+        Space::Md,
+        Space::Lg,
+        Space::Xl,
+        Space::Xxl,
     ]
-    .map(|(name, s)| (name, num(s.value())));
-    let size = [
-        ("row", Size::Row),
-        ("control", Size::Control),
-        ("tab_bar", Size::TabBar),
-        ("title_bar", Size::TitleBar),
-    ]
-    .map(|(name, s)| (name, num(s.value())));
+    .map(|s| (space_name(s), num(s.value())));
+    let size = [Size::Row, Size::Control, Size::TabBar, Size::TitleBar]
+        .map(|s| (size_name(s), num(s.value())));
     let curve = |c: [f32; 4]| Value::Array(c.map(num).to_vec());
     let m = &dark.motion;
     json!({
