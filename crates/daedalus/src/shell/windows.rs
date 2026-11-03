@@ -96,8 +96,14 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         _tasks: Vec::new(),
     });
     let mut near = None;
-    for workspace in windows {
-        near = open_window(workspace, near, cx).map(Into::into).or(near);
+    let hidden = cx.global::<Windows>().hidden;
+    let last = windows.len() - 1;
+    for (i, workspace) in windows.into_iter().enumerate() {
+        // The last window opened ends up in front, so it is the one that plays the splash.
+        let splash = !hidden && i == last;
+        near = open_window(workspace, near, splash, cx)
+            .map(Into::into)
+            .or(near);
     }
     // The first window started the IDE server before the others' projects were known.
     refresh_ide_folders(cx);
@@ -134,6 +140,7 @@ pub(super) fn workspace_path(cx: &App) -> PathBuf {
 fn open_window(
     mut workspace: Workspace,
     near: Option<AnyWindowHandle>,
+    splash: bool,
     cx: &mut App,
 ) -> Option<WindowHandle<Shell>> {
     let hidden = cx.global::<Windows>().hidden;
@@ -157,7 +164,7 @@ fn open_window(
             focus: !hidden,
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| Shell::new(workspace, window, cx)),
+        |window, cx| cx.new(|cx| Shell::new(workspace, splash, window, cx)),
     );
     let handle = match opened {
         Ok(handle) => handle,
@@ -388,7 +395,7 @@ pub(super) fn new_window(
     }
     let near = near.or_else(|| focused(cx).map(Into::into));
     let projects = workspace.projects.clone();
-    match open_window(workspace, near, cx) {
+    match open_window(workspace, near, false, cx) {
         Some(handle) => {
             let _ = handle.update(cx, |shell, window, cx| {
                 shell.review.sessions.absorb(std::mem::take(bindings));

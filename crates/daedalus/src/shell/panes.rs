@@ -715,7 +715,8 @@ impl Shell {
             || self.palette_closing.is_some()
             || self.context_menu.is_some()
             || !self.item_menus.is_empty()
-            || self.usage_open();
+            || self.usage_open()
+            || self.splash.is_some();
         let toasts = self.toast_area.get().filter(|_| !self.toasts.is_empty());
         if let Some(project) = self.workspace.active_project().filter(|_| !covered)
             && let Some(layout) = &project.layout
