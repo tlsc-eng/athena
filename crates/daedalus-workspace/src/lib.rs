@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn colliding_monograms_split_where_names_differ() {
-        let w = ws(&["/n/hephaestus", "/n/hestia", "/n/daedalus"]);
+        let w = ws(&["/n/hephaestus", "/n/hestia", "/n/athena"]);
         assert_eq!(w.monograms(), ["HP", "HS", "AT"]);
     }
 
