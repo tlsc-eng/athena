@@ -376,13 +376,14 @@ impl Shell {
             for problem in &problems {
                 tracing::warn!("{}: {problem}", settings::project_file(root).display());
             }
+            let name = settings::project_file_name(root);
             let title = match problems.len() {
-                1 => ".daedalus/settings.json has a problem; the other settings apply".to_string(),
-                n => format!(".daedalus/settings.json has {n} problems; the other settings apply"),
+                1 => format!("{name} has a problem; the other settings apply"),
+                n => format!("{name} has {n} problems; the other settings apply"),
             };
             let path = settings::project_file(root);
             let action = ToastAction {
-                label: "Open .daedalus/settings.json",
+                label: "Open settings file",
                 run: Rc::new(move |this: &mut Shell, window, cx| {
                     this.open_file(path.clone(), window, cx)
                 }),
@@ -557,7 +558,8 @@ impl Shell {
                 "\"{}\" is not a project setting; set it in settings.json",
                 keys.join(".")
             );
-            self.transient_notice(".daedalus/settings.json was not updated", why, cx);
+            let title = format!("{} was not updated", settings::project_file_name(root));
+            self.transient_notice(title, why, cx);
             return;
         }
         let written = settings::ensure_project_file(root).and_then(|path| {
@@ -569,11 +571,10 @@ impl Shell {
         });
         match written {
             Ok(path) => self.project_settings_saved(&path, cx),
-            Err(e) => self.transient_notice(
-                ".daedalus/settings.json was not updated",
-                format!("{e:#}"),
-                cx,
-            ),
+            Err(e) => {
+                let title = format!("{} was not updated", settings::project_file_name(root));
+                self.transient_notice(title, format!("{e:#}"), cx)
+            }
         }
         self.refresh_settings_views(cx);
     }

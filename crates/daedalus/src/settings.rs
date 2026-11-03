@@ -466,15 +466,18 @@ pub const PROJECT_FILE: &str = ".daedalus/settings.json";
 pub const LEGACY_PROJECT_FILE: &str = ".athena/settings.json";
 pub const VSCODE_FILE: &str = ".vscode/settings.json";
 
-/// The settings file a project reads: the legacy one only while no `.daedalus` one exists.
-pub fn project_file(root: &Path) -> PathBuf {
-    let legacy = root.join(LEGACY_PROJECT_FILE);
-    let current = root.join(PROJECT_FILE);
-    if legacy.exists() && !current.exists() {
-        legacy
+/// A project's settings file relative to its root: the legacy one only while no `.daedalus` one
+/// exists.
+pub fn project_file_name(root: &Path) -> &'static str {
+    if root.join(LEGACY_PROJECT_FILE).exists() && !root.join(PROJECT_FILE).exists() {
+        LEGACY_PROJECT_FILE
     } else {
-        current
+        PROJECT_FILE
     }
+}
+
+pub fn project_file(root: &Path) -> PathBuf {
+    root.join(project_file_name(root))
 }
 
 pub fn is_project_file(path: &Path) -> bool {
@@ -1768,9 +1771,11 @@ pub(crate) mod tests {
 
         let legacy = place("legacy", &[LEGACY_PROJECT_FILE]);
         assert_eq!(project_file(&legacy), legacy.join(LEGACY_PROJECT_FILE));
+        assert_eq!(project_file_name(&legacy), LEGACY_PROJECT_FILE);
 
         let both = place("both", &[LEGACY_PROJECT_FILE, PROJECT_FILE]);
         assert_eq!(project_file(&both), both.join(PROJECT_FILE));
+        assert_eq!(project_file_name(&both), PROJECT_FILE);
 
         let neither = place("neither", &[]);
         assert_eq!(project_file(&neither), neither.join(PROJECT_FILE));
