@@ -295,11 +295,11 @@ mod tests {
 
     #[test]
     fn cargo_rustc_and_python_output() {
-        let arrow = "  --> crates/athena/src/main.rs:41:9";
+        let arrow = "  --> crates/daedalus/src/main.rs:41:9";
         assert_eq!(place(arrow, 2), None, "the arrow is not a path");
         assert_eq!(
             place(arrow, at_word(arrow, "crates")),
-            Some(("crates/athena/src/main.rs".into(), Some(41), Some(9)))
+            Some(("crates/daedalus/src/main.rs".into(), Some(41), Some(9)))
         );
         let panicked = "thread 'main' panicked at src/lib.rs:7:5:";
         assert_eq!(
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn references_resolve_against_each_directory_in_turn() {
-        let dir = std::env::temp_dir().join(format!("athena-links-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-links-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("pkg")).unwrap();
         std::fs::write(dir.join("pkg/a.go"), "package pkg\n").unwrap();
         let file = |p: &str| FileRef {

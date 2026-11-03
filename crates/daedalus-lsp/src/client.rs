@@ -953,7 +953,7 @@ impl Session {
         let options = self.config.read().map_or(Value::Null, |c| c.clone());
         let mut params = json!({
             "processId": std::process::id(),
-            "clientInfo": {"name": "athena", "version": env!("CARGO_PKG_VERSION")},
+            "clientInfo": {"name": "daedalus", "version": env!("CARGO_PKG_VERSION")},
             "rootUri": uri,
             "workspaceFolders": [{"uri": uri, "name": name}],
             "capabilities": {

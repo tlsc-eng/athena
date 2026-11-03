@@ -4,7 +4,7 @@ use daedalus_editor as editor;
 use gpui::{Action, App, Global, KeyBinding, Menu, MenuItem, SystemMenuType, actions};
 
 actions!(
-    athena,
+    daedalus,
     [
         Quit,
         Hide,
@@ -94,15 +94,15 @@ actions!(
     ]
 );
 
-actions!(athena, [GitOpenTimeline, GitToggleFileBlame]);
+actions!(daedalus, [GitOpenTimeline, GitToggleFileBlame]);
 
 actions!(
-    athena,
+    daedalus,
     [ShowSessions, ShowFiles, ShowOutline, ShowExplorer, ShowGit]
 );
 
 actions!(
-    athena,
+    daedalus,
     [
         GitFetch,
         GitPull,
@@ -121,7 +121,7 @@ actions!(
 );
 
 actions!(
-    athena,
+    daedalus,
     [
         StartDebugging,
         StopDebugging,
@@ -138,7 +138,7 @@ actions!(
 );
 
 actions!(
-    athena,
+    daedalus,
     [
         NewWindow,
         OpenProjectInNewWindow,
@@ -149,21 +149,21 @@ actions!(
 );
 
 #[derive(Clone, PartialEq, Debug, Action)]
-#[action(namespace = athena, no_json)]
+#[action(namespace = daedalus, no_json)]
 pub struct SelectProject(pub usize);
 
 #[derive(Clone, PartialEq, Debug, Action)]
-#[action(namespace = athena, no_json)]
+#[action(namespace = daedalus, no_json)]
 pub struct SelectTab(pub usize);
 
 /// A recently closed project folder, from the File menu.
 #[derive(Clone, PartialEq, Debug, Action)]
-#[action(namespace = athena, no_json)]
+#[action(namespace = daedalus, no_json)]
 pub struct OpenRecentProject(pub PathBuf);
 
 /// The entry of the open code action menu to run.
 #[derive(Clone, PartialEq, Debug, Action)]
-#[action(namespace = athena, no_json)]
+#[action(namespace = daedalus, no_json)]
 pub struct ApplyCodeAction(pub usize);
 
 pub fn init(cx: &mut App) {

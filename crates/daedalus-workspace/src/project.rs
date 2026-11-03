@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn branch_from_head() {
-        let dir = std::env::temp_dir().join(format!("athena-git-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-{}", std::process::id()));
         fs::create_dir_all(dir.join(".git")).unwrap();
         fs::write(dir.join(".git/HEAD"), "ref: refs/heads/feat/x\n").unwrap();
         assert_eq!(git_branch(&dir).as_deref(), Some("feat/x"));

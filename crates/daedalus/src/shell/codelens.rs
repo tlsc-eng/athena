@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn only_lenses_athena_can_run_are_clickable_and_unresolved_ones_are_not_shown() {
+    fn only_lenses_daedalus_can_run_are_clickable_and_unresolved_ones_are_not_shown() {
         let (client, _) = Client::start_local(
             daedalus_lsp::ServerKind::Go,
             "/nonexistent/gopls".into(),

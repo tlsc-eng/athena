@@ -2029,7 +2029,7 @@ mod tests {
 
     /// What `git diff -U0` reports for two texts, through the parser the gutter uses.
     fn parse_hunks_of(old: &str, new: &str) -> Vec<Hunk> {
-        let dir = std::env::temp_dir().join(format!("athena-hunks-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-hunks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a"), old).unwrap();
         std::fs::write(dir.join("b"), new).unwrap();
@@ -2052,7 +2052,8 @@ mod tests {
             out.extend(t.encode_utf16().flat_map(u16::to_le_bytes));
             out
         };
-        let dir = std::env::temp_dir().join(format!("athena-utf16-gutter-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-utf16-gutter-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();

@@ -752,7 +752,9 @@ impl Terminal {
 
 /// `text` without the zero-width tags marking prompt lines.
 fn strip_tags(text: &str) -> String {
-    text.chars().filter(|&c| !marks::is_athenas(c)).collect()
+    text.chars()
+        .filter(|&c| !marks::is_daedalus_own(c))
+        .collect()
 }
 
 /// Whether a prompt-submit hook left the prompt box empty: the user pressed Enter and has typed
@@ -1284,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn athenas_own_zsh_marks_without_b_are_enough() {
+    fn daedalus_own_zsh_marks_without_b_are_enough() {
         let (mut t, _) = terminal();
         // precmd sends A before zle draws the prompt, in a later write; preexec sends C with the
         // command line in base64.

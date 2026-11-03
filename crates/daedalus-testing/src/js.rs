@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_workspace_package_without_a_runner_uses_the_one_above_it() {
-        let dir = std::env::temp_dir().join(format!("athena-jspkg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-jspkg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("packages/ui/src")).unwrap();
         std::fs::write(

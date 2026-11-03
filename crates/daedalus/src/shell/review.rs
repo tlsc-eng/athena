@@ -677,7 +677,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-review-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-review-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -726,7 +726,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-review-hunk-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-review-hunk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -786,7 +786,8 @@ mod tests {
         name: &str,
         files: &[(&str, Vec<u8>)],
     ) -> (PathBuf, impl Fn(&[&str]) -> Vec<u8> + use<>) {
-        let dir = std::env::temp_dir().join(format!("athena-review-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-review-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -899,7 +900,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-review-skip-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-review-skip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("repo")).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -989,7 +990,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-review-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-review-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let dir = dir.canonicalize().unwrap();

@@ -1761,13 +1761,13 @@ mod tests {
     fn the_panel_terminal_and_window_zoom_commands_are_listed() {
         let names: Vec<&str> = commands().iter().map(|(_, a)| a.name()).collect();
         for action in [
-            "athena::ToggleTerminalPanel",
-            "athena::NewPanelTerminal",
-            "athena::MoveTerminalToPanel",
-            "athena::MoveTerminalToEditor",
-            "athena::WindowZoomIn",
-            "athena::WindowZoomOut",
-            "athena::WindowZoomReset",
+            "daedalus::ToggleTerminalPanel",
+            "daedalus::NewPanelTerminal",
+            "daedalus::MoveTerminalToPanel",
+            "daedalus::MoveTerminalToEditor",
+            "daedalus::WindowZoomIn",
+            "daedalus::WindowZoomOut",
+            "daedalus::WindowZoomReset",
         ] {
             assert!(names.contains(&action), "{action}");
         }
@@ -1777,13 +1777,13 @@ mod tests {
     fn the_commands_for_the_views_that_left_the_drawer_are_still_listed() {
         let names: Vec<&str> = commands().iter().map(|(_, a)| a.name()).collect();
         for action in [
-            "athena::ShowContainers",
-            "athena::ShowPlaywright",
-            "athena::ShowNotifications",
-            "athena::ToggleDrawer",
-            "athena::ShowChanges",
-            "athena::GitOpenTimeline",
-            "athena::ShowSessions",
+            "daedalus::ShowContainers",
+            "daedalus::ShowPlaywright",
+            "daedalus::ShowNotifications",
+            "daedalus::ToggleDrawer",
+            "daedalus::ShowChanges",
+            "daedalus::GitOpenTimeline",
+            "daedalus::ShowSessions",
         ] {
             assert!(names.contains(&action), "{action}");
         }
@@ -1800,7 +1800,7 @@ mod tests {
 
     #[test]
     fn workspace_symbols_open_through_the_project_spelling_of_their_path() {
-        let dir = std::env::temp_dir().join(format!("athena-palette-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-palette-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("pkg")).unwrap();
         let canonical = dir.canonicalize().unwrap();
         let at = Position {

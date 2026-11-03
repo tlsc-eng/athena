@@ -114,7 +114,7 @@ func main() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("go.mod"),
-            "module example.com/athenadap\n\ngo 1.21\n",
+            "module example.com/daedalusdap\n\ngo 1.21\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.go"), MAIN).unwrap();

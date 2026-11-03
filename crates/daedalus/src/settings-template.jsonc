@@ -1,7 +1,7 @@
 // Daedalus settings. Comments and trailing commas are allowed, as in VS Code. A setting left out
 // keeps its default, or the choice last made from the command palette or the File menu.
 // Uncomment and edit any of these; Daedalus applies them as soon as the file is saved.
-// A project's own .athena/settings.json (and the keys Daedalus knows in .vscode/settings.json)
+// A project's own .daedalus/settings.json (and the keys Daedalus knows in .vscode/settings.json)
 // is laid over this file for its files; its "lsp" entries apply once the project is allowed.
 {
   // "editor": {

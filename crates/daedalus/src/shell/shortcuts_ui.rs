@@ -16,7 +16,7 @@ use crate::keymap::{self, EntryRef, NewEntry, Recorder, Step};
 
 /// The namespaces whose commands the table lists; the rest belong to text fields and menus.
 const NAMESPACES: &[&str] = &[
-    "athena",
+    "daedalus",
     "editor",
     "terminal",
     "diff",
@@ -114,7 +114,7 @@ fn humanize(name: &str) -> String {
         }
     }
     match namespace {
-        "athena" | "" => words,
+        "daedalus" | "" => words,
         ns => {
             let ns = ns.replace('_', " ");
             let mut chars = ns.chars();
@@ -1049,10 +1049,10 @@ mod tests {
 
     fn build(name: &str, _: Option<serde_json::Value>) -> Result<Box<dyn Action>> {
         match name {
-            "athena::NewTerminal" => Ok(Box::new(NewTerminal)),
-            "athena::QuickOpen" => Ok(Box::new(QuickOpen)),
-            "athena::SplitRight" => Ok(Box::new(SplitRight)),
-            "athena::SplitDown" => Ok(Box::new(SplitDown)),
+            "daedalus::NewTerminal" => Ok(Box::new(NewTerminal)),
+            "daedalus::QuickOpen" => Ok(Box::new(QuickOpen)),
+            "daedalus::SplitRight" => Ok(Box::new(SplitRight)),
+            "daedalus::SplitDown" => Ok(Box::new(SplitDown)),
             _ => Err(anyhow!("unknown")),
         }
     }
@@ -1070,10 +1070,10 @@ mod tests {
         let (rules, problems) = keymap::parse(text, build);
         assert!(problems.is_empty(), "{problems:?}\n{text}");
         let bindings = keymap::merge(&defaults(), rules);
-        let labels = HashMap::from([("athena::SplitRight", "Split right".to_string())]);
+        let labels = HashMap::from([("daedalus::SplitRight", "Split right".to_string())]);
         let commands = [
-            "athena::QuickOpen",
-            "athena::SplitRight",
+            "daedalus::QuickOpen",
+            "daedalus::SplitRight",
             "context_menu::Up",
         ];
         build_rows(&bindings, &commands, &labels, |n| build(n, None).is_ok())
@@ -1120,12 +1120,12 @@ mod tests {
         let rows = table("[]");
         let terminal = rows
             .iter()
-            .find(|r| r.command == "athena::NewTerminal")
+            .find(|r| r.command == "daedalus::NewTerminal")
             .unwrap();
         let text = edited("[]", change(terminal, "cmd-k cmd-t"));
         let rows = table(&text);
         assert_eq!(
-            keys(&rows, "athena::NewTerminal"),
+            keys(&rows, "daedalus::NewTerminal"),
             [("cmd-k cmd-t".into(), Some("!Terminal".into()), true)]
         );
         assert!(
@@ -1134,11 +1134,11 @@ mod tests {
         );
         let user = rows
             .iter()
-            .find(|r| r.command == "athena::NewTerminal")
+            .find(|r| r.command == "daedalus::NewTerminal")
             .unwrap();
         let text = edited(&text, change(user, "f7"));
         assert_eq!(
-            keys(&table(&text), "athena::NewTerminal"),
+            keys(&table(&text), "daedalus::NewTerminal"),
             [("f7".into(), Some("!Terminal".into()), true)],
             "a user binding changes where it is"
         );
@@ -1147,10 +1147,10 @@ mod tests {
         assert_eq!(change(same, "f7"), None, "the same keys change nothing");
         let reset_text = edited(
             &text,
-            reset("athena::NewTerminal", &keymap::entry_commands(&text)),
+            reset("daedalus::NewTerminal", &keymap::entry_commands(&text)),
         );
         assert_eq!(
-            keys(&table(&reset_text), "athena::NewTerminal"),
+            keys(&table(&reset_text), "daedalus::NewTerminal"),
             [("cmd-t".into(), Some("!Terminal".into()), false)],
             "reset brings the default back"
         );
@@ -1161,35 +1161,35 @@ mod tests {
         let rows = table("[]");
         let split = rows
             .iter()
-            .find(|r| r.command == "athena::SplitRight")
+            .find(|r| r.command == "daedalus::SplitRight")
             .unwrap();
         let text = edited("[]", remove(split));
-        assert!(keys(&table(&text), "athena::SplitRight").is_empty());
+        assert!(keys(&table(&text), "daedalus::SplitRight").is_empty());
         let open = table(&text)
             .into_iter()
-            .find(|r| r.command == "athena::QuickOpen")
+            .find(|r| r.command == "daedalus::QuickOpen")
             .unwrap();
         assert!(open.binding.is_none() && open.bindable);
         let text = edited(&text, change(&open, "cmd-d"));
         let rows = table(&text);
         assert_eq!(
-            keys(&rows, "athena::QuickOpen"),
+            keys(&rows, "daedalus::QuickOpen"),
             [("cmd-d".into(), None, true)]
         );
         let user = rows
             .iter()
-            .find(|r| r.command == "athena::QuickOpen")
+            .find(|r| r.command == "daedalus::QuickOpen")
             .unwrap();
         let text = edited(&text, add(user, "cmd-shift-o"));
-        assert_eq!(keys(&table(&text), "athena::QuickOpen").len(), 2);
+        assert_eq!(keys(&table(&text), "daedalus::QuickOpen").len(), 2);
         let user = table(&text)
             .into_iter()
-            .find(|r| r.command == "athena::QuickOpen")
+            .find(|r| r.command == "daedalus::QuickOpen")
             .unwrap();
         let text = edited(&text, remove(&user));
-        assert_eq!(keys(&table(&text), "athena::QuickOpen").len(), 1);
+        assert_eq!(keys(&table(&text), "daedalus::QuickOpen").len(), 1);
         assert_eq!(
-            reset("athena::NewTerminal", &keymap::entry_commands(&text)),
+            reset("daedalus::NewTerminal", &keymap::entry_commands(&text)),
             None
         );
     }
@@ -1201,7 +1201,7 @@ mod tests {
         );
         let row = before
             .iter()
-            .position(|r| r.command == "athena::SplitRight")
+            .position(|r| r.command == "daedalus::SplitRight")
             .unwrap();
         let after = table("[]");
         assert_eq!(
@@ -1216,14 +1216,14 @@ mod tests {
             change(
                 after
                     .iter()
-                    .find(|r| r.command == "athena::SplitRight")
+                    .find(|r| r.command == "daedalus::SplitRight")
                     .unwrap(),
                 "f9"
             )
         );
         let user = before
             .iter()
-            .find(|r| r.command == "athena::QuickOpen")
+            .find(|r| r.command == "daedalus::QuickOpen")
             .unwrap();
         assert_eq!(
             follow(user, &after),
@@ -1246,29 +1246,32 @@ mod tests {
                 .find(|r| r.command == command)
                 .unwrap()
         };
-        let removal = remove(row("athena::QuickOpen")).unwrap();
-        let rebind = change(row("athena::NewTerminal"), "f9").unwrap();
-        let reset_all = reset("athena::NewTerminal", &keymap::entry_commands(text)).unwrap();
+        let removal = remove(row("daedalus::QuickOpen")).unwrap();
+        let rebind = change(row("daedalus::NewTerminal"), "f9").unwrap();
+        let reset_all = reset("daedalus::NewTerminal", &keymap::entry_commands(text)).unwrap();
         let moved = text.replacen(
             '[',
             "[\n  {\"key\": \"f8\", \"command\": \"SplitDown\"},",
             1,
         );
         assert_eq!(
-            keys(&table(&removal.apply(&moved).unwrap()), "athena::QuickOpen"),
+            keys(
+                &table(&removal.apply(&moved).unwrap()),
+                "daedalus::QuickOpen"
+            ),
             [],
             "the entry that moved down is the one removed"
         );
         let rebound = table(&rebind.apply(&moved).unwrap());
         assert_eq!(
-            keys(&rebound, "athena::NewTerminal"),
+            keys(&rebound, "daedalus::NewTerminal"),
             [
                 ("cmd-t".into(), Some("!Terminal".into()), false),
                 ("f9".into(), Some("(Editor && !Terminal)".into()), true)
             ]
         );
         assert_eq!(
-            keys(&rebound, "athena::SplitDown"),
+            keys(&rebound, "daedalus::SplitDown"),
             [
                 ("cmd-shift-d".into(), None, false),
                 ("f8".into(), None, true)
@@ -1276,11 +1279,11 @@ mod tests {
         );
         let reset = table(&reset_all.apply(&moved).unwrap());
         assert_eq!(
-            keys(&reset, "athena::NewTerminal"),
+            keys(&reset, "daedalus::NewTerminal"),
             [("cmd-t".into(), Some("!Terminal".into()), false)]
         );
         assert_eq!(
-            keys(&reset, "athena::SplitDown"),
+            keys(&reset, "daedalus::SplitDown"),
             [
                 ("cmd-shift-d".into(), None, false),
                 ("f8".into(), None, true)
@@ -1303,10 +1306,10 @@ mod tests {
                 .map(|r| r.command)
                 .collect()
         };
-        assert_eq!(hits("split right"), ["athena::SplitRight"]);
-        assert_eq!(hits("cmd-shift-d"), ["athena::SplitDown"]);
-        assert_eq!(hits("⇧⌘D"), ["athena::SplitDown"]);
-        assert_eq!(hits("user"), ["athena::QuickOpen"]);
-        assert_eq!(hits("terminal"), ["athena::NewTerminal"]);
+        assert_eq!(hits("split right"), ["daedalus::SplitRight"]);
+        assert_eq!(hits("cmd-shift-d"), ["daedalus::SplitDown"]);
+        assert_eq!(hits("⇧⌘D"), ["daedalus::SplitDown"]);
+        assert_eq!(hits("user"), ["daedalus::QuickOpen"]);
+        assert_eq!(hits("terminal"), ["daedalus::NewTerminal"]);
     }
 }

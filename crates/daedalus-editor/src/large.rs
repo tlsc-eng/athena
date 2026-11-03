@@ -877,7 +877,8 @@ mod tests {
 
     /// A sparse 100 MB file: 1,000 numbered lines, a hole of zeros as one long line, then a tail.
     fn sparse(name: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("athena-large-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-large-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("big.log");
@@ -988,7 +989,7 @@ mod tests {
 
     #[test]
     fn a_lone_cr_ends_a_line_and_crlf_ends_one_even_across_reads() {
-        let dir = std::env::temp_dir().join(format!("athena-large-cr-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-large-cr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mac.txt");
@@ -1029,7 +1030,8 @@ mod tests {
 
     #[test]
     fn files_over_2_gb_and_binary_files_are_refused() {
-        let dir = std::env::temp_dir().join(format!("athena-large-refuse-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-large-refuse-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let huge = dir.join("huge.txt");
         let f = File::create(&huge).unwrap();

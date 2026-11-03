@@ -194,7 +194,7 @@ mod tests {
 
     fn scratch(test: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("athena-fileops-{test}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("daedalus-fileops-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -361,7 +361,7 @@ mod tests {
     #[ignore = "moves a file into the real user Trash"]
     fn trash_moves_the_file_out_of_place() {
         let dir = scratch("trash");
-        let file = dir.join("athena-trash-test.txt");
+        let file = dir.join("daedalus-trash-test.txt");
         fs::write(&file, "x").unwrap();
         trash(&file).unwrap();
         assert!(!file.exists());

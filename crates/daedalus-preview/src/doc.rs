@@ -194,7 +194,7 @@ impl DocView {
             // that now needs Mermaid, is loaded afresh.
             Some(shown) if self.loaded && (shown.mermaid || !next.mermaid) => {
                 if *shown != next {
-                    web.run_script(&format!("athenaUpdate({})", js_string(&next.body)));
+                    web.run_script(&format!("daedalusUpdate({})", js_string(&next.body)));
                 }
             }
             _ => {
@@ -425,7 +425,7 @@ document.addEventListener('DOMContentLoaded',function(){{mermaid.run();}});</scr
         r#"<!doctype html>
 <html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data: https: http:; font-src data:; frame-src 'none'; base-uri 'none'; form-action 'none'">
-<script nonce="{nonce}">window.athenaUpdate=function(html){{document.getElementById('content').innerHTML=html;if(window.mermaid)mermaid.run();}};</script>
+<script nonce="{nonce}">window.daedalusUpdate=function(html){{document.getElementById('content').innerHTML=html;if(window.mermaid)mermaid.run();}};</script>
 {mermaid}
 <style>
 {fonts}

@@ -56,7 +56,7 @@ fn the_projects_eslint_and_biome_report_and_fix_problems() {
         eprintln!("DAEDALUS_LINTER_FIXTURE not set; skipping");
         return;
     };
-    let file = root.join("athena-linter-probe.js");
+    let file = root.join("daedalus-linter-probe.js");
     std::fs::write(&file, SOURCE).unwrap();
     let start_of_file = Range {
         start: Position {

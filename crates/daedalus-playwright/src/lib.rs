@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn finds_configs_and_excludes_from_git() {
-        let dir = std::env::temp_dir().join(format!("athena-pw-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-pw-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("e2e")).unwrap();
         fs::create_dir_all(dir.join(".git/info")).unwrap();

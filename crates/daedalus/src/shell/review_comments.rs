@@ -16,7 +16,7 @@ use crate::snapshots;
 pub(super) mod delivery;
 
 actions!(
-    athena,
+    daedalus,
     [
         ClaudeReviewComments,
         ClaudeSendReviewComments,
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn a_failed_save_stores_nothing_and_tells_the_box_to_keep_its_text() {
-        let dir = std::env::temp_dir().join(format!("athena-rc-apply-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-rc-apply-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = Path::new("/p/a.rs");
         let add = |lines| ReviewEvent::Add {

@@ -23,7 +23,7 @@ use super::Shell;
 use super::drawer::DrawerTab;
 use crate::actions;
 
-actions!(athena, [RunTestsWithCoverage, ToggleCoverage]);
+actions!(daedalus, [RunTestsWithCoverage, ToggleCoverage]);
 
 /// `go test` stops a package after ten minutes; a whole run gets a little longer than that.
 const RUN_LIMIT: Duration = Duration::from_secs(15 * 60);
@@ -1375,7 +1375,7 @@ mod tests {
 
     #[test]
     fn claude_runs_vitest_or_jest_only_in_a_trusted_project() {
-        let dir = std::env::temp_dir().join(format!("athena-plan-trust-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-plan-trust-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("go.mod"), "module example.com/m\n").unwrap();
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn go_runs_name_the_package_and_test_from_the_module_root() {
-        let dir = std::env::temp_dir().join(format!("athena-plan-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-plan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("svc")).unwrap();
         std::fs::write(dir.join("go.mod"), "module example.com/m\n").unwrap();

@@ -163,7 +163,7 @@ impl Shell {
             .args([
                 "-lc",
                 "cd \"$1\" && exec npx playwright show-trace \"$2\"",
-                "athena",
+                "daedalus",
             ])
             .arg(dir)
             .arg(trace)

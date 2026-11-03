@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn locations_are_1_based_capped_and_quote_only_shared_files() {
-        let dir = std::env::temp_dir().join(format!("athena-mcp-loc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-mcp-loc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();

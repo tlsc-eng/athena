@@ -38,7 +38,7 @@ const SNIPPET_CHARS: usize = 160;
 
 pub(super) const NO_SERVER: &str = "No language server runs for this file.";
 
-actions!(athena, [AllowProjectLinters, DisallowProjectLinters]);
+actions!(daedalus, [AllowProjectLinters, DisallowProjectLinters]);
 
 const PROJECT_LINTERS: [ServerKind; 2] = [ServerKind::Eslint, ServerKind::Biome];
 

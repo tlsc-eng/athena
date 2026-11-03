@@ -519,8 +519,8 @@ mod tests {
     #[test]
     fn folders_are_named_as_claude_code_names_them() {
         assert_eq!(
-            project_folder(Path::new("/Users/me/code/hobby/athena")),
-            "-Users-me-code-hobby-athena"
+            project_folder(Path::new("/Users/me/code/hobby/daedalus")),
+            "-Users-me-code-hobby-daedalus"
         );
         assert_eq!(
             project_folder(Path::new("/Users/me/code/tlsc/.github")),
@@ -530,7 +530,7 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-tx-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-tx-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

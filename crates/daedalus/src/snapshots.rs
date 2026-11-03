@@ -203,7 +203,7 @@ fn write_through(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(dir)?;
     let name = target.file_name().context("the file has no name")?;
     let tmp = dir.join(format!(
-        ".{}.{}.{}.athena-revert",
+        ".{}.{}.{}.daedalus-revert",
         name.to_string_lossy(),
         std::process::id(),
         TEMPS.fetch_add(1, Ordering::Relaxed)
@@ -296,7 +296,7 @@ mod tests {
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-snap-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-snap-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -489,7 +489,7 @@ mod tests {
             assert!(
                 names
                     .iter()
-                    .all(|n| !n.to_string_lossy().contains("athena-revert")),
+                    .all(|n| !n.to_string_lossy().contains("daedalus-revert")),
                 "{names:?}"
             );
         }

@@ -261,7 +261,7 @@ build: again
 
     #[test]
     fn the_lockfile_picks_the_runner_and_odd_names_are_quoted() {
-        let dir = std::env::temp_dir().join(format!("athena-tasks-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-tasks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(package_runner(&dir), "npm");

@@ -2384,7 +2384,7 @@ fn read_text(path: &Path, forced: Option<FileEncoding>) -> Result<(Decoded, Stam
 /// Swaps `target` for a fully written temp file, so a failed save never leaves it half written.
 fn replace_file(target: &Path, bytes: &[u8], meta: Option<&fs::Metadata>) -> Result<()> {
     let tmp = target.with_file_name(format!(
-        ".{}.athena-tmp",
+        ".{}.daedalus-tmp",
         target
             .file_name()
             .map(|n| n.to_string_lossy())
@@ -2689,7 +2689,7 @@ mod tests {
 
     #[test]
     fn save_is_atomic_and_clears_dirty() {
-        let dir = std::env::temp_dir().join(format!("athena-buf-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-buf-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("main.go");
         fs::write(&path, "package main\n").unwrap();
@@ -2731,7 +2731,7 @@ mod tests {
     }
 
     fn temp_file(name: &str, text: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-buf-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-buf-{name}-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("main.go");
         fs::write(&path, text).unwrap();
@@ -3944,7 +3944,7 @@ mod tests {
     }
 
     fn encoding_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-enc-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-enc-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

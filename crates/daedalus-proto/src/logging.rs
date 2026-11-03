@@ -45,7 +45,7 @@ mod tests {
     fn oversized_log_is_rotated_and_reopened_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("athena-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-log-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("app.log");
         fs::write(&path, vec![b'x'; MAX_LOG as usize + 1]).unwrap();

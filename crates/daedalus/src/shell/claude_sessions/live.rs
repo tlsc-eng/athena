@@ -716,7 +716,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let main = std::env::temp_dir().join(format!("athena-live-{}", std::process::id()));
+        let main = std::env::temp_dir().join(format!("daedalus-live-{}", std::process::id()));
         let tree = main.with_extension("wt");
         let _ = std::fs::remove_dir_all(&main);
         let _ = std::fs::remove_dir_all(&tree);

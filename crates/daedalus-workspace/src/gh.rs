@@ -249,7 +249,7 @@ mod tests {
     /// A folder holding a fake `gh` whose body is `body`, to put on a PATH.
     fn fake_gh(name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("athena-gh-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-gh-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gh = dir.join("gh");

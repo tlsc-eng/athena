@@ -1224,7 +1224,7 @@ pub fn revert_file_bytes(
     }
     keep_copy(root, rel, backup)?;
     let tmp = path.with_file_name(format!(
-        ".{}.athena-revert",
+        ".{}.daedalus-revert",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
     std::fs::write(&tmp, contents)?;
@@ -2187,7 +2187,7 @@ mod tests {
         let dir = committed_repo(name, "x\n");
         repo_git(
             &dir,
-            &["remote", "add", "origin", "athena-test.invalid:x.git"],
+            &["remote", "add", "origin", "daedalus-test.invalid:x.git"],
         );
         if let Some(ssh) = ssh_command {
             repo_git(&dir, &["config", "core.sshCommand", ssh]);
@@ -2206,7 +2206,7 @@ mod tests {
         if !available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-git-tty-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-tty-{}", std::process::id()));
         let fake = dir.with_extension("ssh");
         let ran = dir.with_extension("ran");
         let _ = std::fs::remove_file(&ran);
@@ -2238,7 +2238,7 @@ mod tests {
         if !available() {
             return;
         }
-        let bin = std::env::temp_dir().join(format!("athena-git-bin-{}", std::process::id()));
+        let bin = std::env::temp_dir().join(format!("daedalus-git-bin-{}", std::process::id()));
         std::fs::create_dir_all(&bin).unwrap();
         let said = bin.join("args");
         script(
@@ -2263,7 +2263,7 @@ mod tests {
         if !available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-git-hang-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-hang-{}", std::process::id()));
         let fake = dir.with_extension("ssh");
         let marker = dir.with_extension("left");
         let _ = std::fs::remove_file(&marker);
@@ -2292,7 +2292,7 @@ mod tests {
             eprintln!("git is not installed; skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-git-lit-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-lit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("app/[slug]")).unwrap();
         std::fs::create_dir_all(dir.join("app/s")).unwrap();
@@ -2332,7 +2332,7 @@ mod tests {
             eprintln!("git is not installed; skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-git-repo-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-repo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -2427,7 +2427,7 @@ mod tests {
             eprintln!("git is not installed; skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-git-unborn-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-unborn-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -2742,7 +2742,7 @@ mod tests {
     }
 
     fn committed_repo(name: &str, contents: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-git-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -3380,8 +3380,8 @@ mod tests {
         let a = committed_repo("remote-a", "one\n");
         let parent = a.parent().unwrap().to_path_buf();
         let tag = format!("{}", std::process::id());
-        let bare = parent.join(format!("athena-git-remote-{tag}.git"));
-        let b = parent.join(format!("athena-git-remote-b-{tag}"));
+        let bare = parent.join(format!("daedalus-git-remote-{tag}.git"));
+        let b = parent.join(format!("daedalus-git-remote-b-{tag}"));
         let _ = std::fs::remove_dir_all(&bare);
         let _ = std::fs::remove_dir_all(&b);
         repo_git(&parent, &["init", "--bare", "-q", bare.to_str().unwrap()]);
@@ -3560,7 +3560,7 @@ mod tests {
             eprintln!("git is not installed; skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-git-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-git-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let dir = dir.canonicalize().unwrap();

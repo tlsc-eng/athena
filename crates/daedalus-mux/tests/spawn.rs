@@ -5,7 +5,7 @@ use std::thread;
 #[test]
 fn concurrent_callers_share_one_spawned_daemon() {
     // Short path: unix socket paths are capped at 104 bytes.
-    let home = PathBuf::from(format!("/tmp/athena-s{}", std::process::id()));
+    let home = PathBuf::from(format!("/tmp/daedalus-s{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).unwrap();
     // SAFETY: the only test in this binary, before it starts any thread; the daemon inherits HOME.

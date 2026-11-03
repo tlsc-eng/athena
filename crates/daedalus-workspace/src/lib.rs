@@ -454,7 +454,7 @@ mod tests {
 
     /// A real folder and a symlink to it, like /private/tmp and /tmp.
     fn linked_dirs(test: &str) -> (PathBuf, PathBuf) {
-        let base = std::env::temp_dir().join(format!("athena-ws-{test}-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("daedalus-ws-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let real = base.join("real");
         std::fs::create_dir_all(&real).unwrap();
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn colliding_monograms_split_where_names_differ() {
-        let w = ws(&["/n/hephaestus", "/n/hestia", "/n/athena"]);
+        let w = ws(&["/n/hephaestus", "/n/hestia", "/n/daedalus"]);
         assert_eq!(w.monograms(), ["HP", "HS", "AT"]);
     }
 

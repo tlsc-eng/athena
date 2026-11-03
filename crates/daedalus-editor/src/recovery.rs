@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn dirty_buffers_are_written_once_and_offered_once() {
-        let root = std::env::temp_dir().join(format!("athena-recovery-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("daedalus-recovery-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let id = next_id();
         let other = next_id();
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn only_announced_sessions_past_the_limit_are_pruned() {
-        let root = std::env::temp_dir().join(format!("athena-prune-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("daedalus-prune-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for i in 0..KEEP_SESSIONS + 3 {
             let session = root.join(format!("{:013}", 1_000 + i));

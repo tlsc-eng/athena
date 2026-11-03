@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn ide_env_keeps_only_a_valid_port_and_the_enable_flag() {
-        let dir = std::env::temp_dir().join(format!("athena-ide-env-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-ide-env-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ide.env");
         fs::write(

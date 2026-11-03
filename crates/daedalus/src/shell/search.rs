@@ -229,12 +229,12 @@ fn temp_path(path: &Path) -> PathBuf {
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    path.with_file_name(format!(".{name}.athena-tmp"))
+    path.with_file_name(format!(".{name}.daedalus-tmp"))
 }
 
 fn is_temp(path: &Path) -> bool {
     path.file_name()
-        .is_some_and(|n| n.to_string_lossy().ends_with(".athena-tmp"))
+        .is_some_and(|n| n.to_string_lossy().ends_with(".daedalus-tmp"))
 }
 
 /// Replaces `path`'s contents through a rename, so a failed write never leaves it half written.
@@ -1308,7 +1308,8 @@ mod tests {
     use super::*;
 
     fn project(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-search-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-search-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // The ignore crate only reads .gitignore inside a repository.
         std::fs::create_dir_all(dir.join(".git")).unwrap();

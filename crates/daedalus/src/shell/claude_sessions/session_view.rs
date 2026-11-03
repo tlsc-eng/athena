@@ -657,7 +657,7 @@ mod tests {
         if !git::available() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("athena-fork-diff-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-fork-diff-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let top = dir.canonicalize().unwrap();
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn a_path_a_snapshot_spells_another_way_is_still_one_file() {
-        let dir = std::env::temp_dir().join(format!("athena-fork-spell-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-fork-spell-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("sub/a"), "").unwrap();

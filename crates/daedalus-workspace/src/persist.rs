@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let dir = std::env::temp_dir().join(format!("athena-persist-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-persist-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         assert_eq!(load(&path).unwrap(), Workspace::default());
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn only_unparsable_files_count_as_corrupt_and_old_copies_are_pruned() {
-        let dir = std::env::temp_dir().join(format!("athena-corrupt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-corrupt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn layouts_with_empty_panes_or_stale_ids_are_repaired_on_load() {
-        let dir = std::env::temp_dir().join(format!("athena-repair-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-repair-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         let leaf = |id: u64, items: &str, active: usize| {
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn editor_view_state_survives_a_round_trip_and_old_files_load_without_it() {
-        let dir = std::env::temp_dir().join(format!("athena-view-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-view-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         let old = r#"{"projects":[{"root":"/a","layout":{"tree":{"Leaf":{"id":1,
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn tabs_of_kinds_a_later_release_added_are_dropped_and_the_rest_of_the_file_loads() {
-        let dir = std::env::temp_dir().join(format!("athena-unknown-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-unknown-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         let json = r#"{"projects":[{"root":"/a","layout":{"tree":{"Split":{
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn files_written_by_every_earlier_release_open_as_one_window_and_lose_nothing() {
-        let dir = std::env::temp_dir().join(format!("athena-fixtures-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-fixtures-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         for (version, text) in FIXTURES {
             let path = dir.join(format!("{version}.json"));
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn a_fixture_split_into_two_windows_and_back_keeps_every_project() {
-        let dir = std::env::temp_dir().join(format!("athena-split-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-split-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         for (version, text) in FIXTURES {
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn an_unrecognised_side_mode_of_any_shape_falls_back_to_files_without_losing_the_workspace() {
-        let dir = std::env::temp_dir().join(format!("athena-sidemode-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-sidemode-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         for value in [r#""Tasks""#, "null", "7", r#"{"Tasks":1}"#] {
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn a_removed_or_malformed_drawer_tab_reads_as_none_without_losing_the_workspace() {
-        let dir = std::env::temp_dir().join(format!("athena-drawertab-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-drawertab-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         for value in [r#""Claude""#, r#""Changes""#, "null", "7", r#"{"Tests":1}"#] {

@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn a_path_is_within_a_project_opened_through_a_symlink() {
-        let dir = std::env::temp_dir().join(format!("athena-within-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-within-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("real/src")).unwrap();
         std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();

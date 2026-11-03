@@ -224,7 +224,7 @@ impl Client {
 
     pub async fn initialize(&self, adapter_id: &str) -> Reply {
         let arguments = json!({
-            "clientID": "athena",
+            "clientID": "daedalus",
             "clientName": "Daedalus",
             "adapterID": adapter_id,
             "locale": "en",

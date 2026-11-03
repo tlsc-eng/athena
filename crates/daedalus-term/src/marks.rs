@@ -98,7 +98,7 @@ const MAX_COMMANDS: usize = 4096;
 pub const PROBE: char = '\u{10FFFE}';
 
 /// Whether a zero-width character is Daedalus's own rather than the program's.
-pub fn is_athenas(c: char) -> bool {
+pub fn is_daedalus_own(c: char) -> bool {
     c == PROBE || tag_id(c).is_some()
 }
 
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(tag_id('\u{301}'), None);
         assert_eq!(tag_id('a'), None);
         assert_eq!(tag_id('\u{F0493}'), None, "a Nerd Font icon");
-        assert!(is_athenas(PROBE) && is_athenas(tag(7)) && !is_athenas('\u{F0493}'));
+        assert!(is_daedalus_own(PROBE) && is_daedalus_own(tag(7)) && !is_daedalus_own('\u{F0493}'));
     }
 
     #[test]

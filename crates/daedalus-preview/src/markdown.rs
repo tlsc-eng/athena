@@ -6,7 +6,7 @@ use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd,
 
 /// Relative images larger than this are left as links rather than inlined.
 const MAX_INLINE_IMAGE: u64 = 5 * 1024 * 1024;
-pub(crate) const LOCAL_SCHEME: &str = "athena-doc";
+pub(crate) const LOCAL_SCHEME: &str = "daedalus-doc";
 
 /// A document turned into the HTML that goes inside the page's content element.
 #[derive(Debug, PartialEq)]
@@ -171,7 +171,7 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Local links open in Daedalus: they become `athena-doc:` URLs the page hands back to the app.
+/// Local links open in Daedalus: they become `daedalus-doc:` URLs the page hands back to the app.
 fn link_target(url: &str, base: &Path) -> Option<String> {
     if url.is_empty() || url.starts_with('#') || url.starts_with("//") || has_scheme(url) {
         return None;
@@ -191,7 +191,7 @@ fn link_target(url: &str, base: &Path) -> Option<String> {
     Some(out)
 }
 
-/// The path an `athena-doc:` URL points at.
+/// The path an `daedalus-doc:` URL points at.
 pub(crate) fn local_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix(LOCAL_SCHEME)?.strip_prefix("://")?;
     let path = rest.split(['#', '?']).next().unwrap_or(rest);
@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn local_links_point_back_into_athena() {
+    fn local_links_point_back_into_daedalus() {
         let out = render(
             "[a](docs/My%20File.md#usage) [b](https://tlsc.io) [c](#top) [d](mailto:x@y)",
             Path::new("/repo"),
@@ -365,7 +365,7 @@ mod tests {
         );
         assert!(
             out.body
-                .contains("href=\"athena-doc:///repo/docs/My%20File.md#usage\""),
+                .contains("href=\"daedalus-doc:///repo/docs/My%20File.md#usage\""),
             "{}",
             out.body
         );
@@ -373,7 +373,7 @@ mod tests {
         assert!(out.body.contains("href=\"#top\""));
         assert!(out.body.contains("href=\"mailto:x@y\""));
         assert_eq!(
-            local_path("athena-doc:///repo/docs/My%20File.md#usage"),
+            local_path("daedalus-doc:///repo/docs/My%20File.md#usage"),
             Some(PathBuf::from("/repo/docs/My File.md"))
         );
         assert_eq!(local_path("https://x"), None);
@@ -387,10 +387,10 @@ mod tests {
             &mut ImageCache::default(),
         );
         for href in [
-            "athena-doc:///repo/other/x.md#s",
-            "athena-doc:///repo/docs/y.md",
-            "athena-doc:///repo/b.md",
-            "athena-doc:///up.md",
+            "daedalus-doc:///repo/other/x.md#s",
+            "daedalus-doc:///repo/docs/y.md",
+            "daedalus-doc:///repo/b.md",
+            "daedalus-doc:///up.md",
         ] {
             assert!(
                 out.body.contains(&format!("href=\"{href}\"")),
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn relative_images_are_inlined() {
-        let dir = std::env::temp_dir().join(format!("athena-md-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-md-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("dot.png"), [1u8, 2, 3, 4]).unwrap();
         let out = render(
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn images_are_encoded_again_only_when_the_file_changes() {
-        let dir = std::env::temp_dir().join(format!("athena-md-cache-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-md-cache-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("dot.png");
         let at = SystemTime::now() - std::time::Duration::from_secs(60);

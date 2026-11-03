@@ -47,7 +47,7 @@ impl FolderWatcher {
             })?;
         inner.watch(root, RecursiveMode::Recursive)?;
         std::thread::Builder::new()
-            .name("athena-watch".into())
+            .name("daedalus-watch".into())
             .spawn(move || debounce(&rx, QUIET, MAX_WAIT, on_change))?;
         Ok(Self { _inner: inner })
     }
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn writing_a_file_in_a_watched_folder_is_reported() {
-        let dir = std::env::temp_dir().join(format!("athena-watch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-watch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();

@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn conflicted_files_are_read_for_their_blocks() {
-        let dir = std::env::temp_dir().join(format!("athena-conflicts-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-conflicts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let block = "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n";

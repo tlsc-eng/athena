@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn a_symlinked_file_is_matched_by_the_path_its_target_changes_under() {
-        let dir = std::env::temp_dir().join(format!("athena-watch-link-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-watch-link-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("AGENTS.md");
         std::fs::write(&target, "x").unwrap();

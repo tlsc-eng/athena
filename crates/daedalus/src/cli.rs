@@ -425,14 +425,14 @@ mod tests {
     fn edit_hook_input_names_an_absolute_file_and_the_session() {
         let input = hook_input(serde_json::json!({
             "session_id": "abc-123",
-            "cwd": "/nonexistent-athena-test/app",
+            "cwd": "/nonexistent-daedalus-test/app",
             "tool_name": "Edit",
             "tool_input": { "file_path": "src/main.go", "old_string": "a", "new_string": "b" }
         }));
         let (path, session) = edited_file(&input, None).unwrap();
         assert_eq!(
             path,
-            PathBuf::from("/nonexistent-athena-test/app/src/main.go")
+            PathBuf::from("/nonexistent-daedalus-test/app/src/main.go")
         );
         let tmp =
             hook_input(serde_json::json!({ "tool_input": { "file_path": "/tmp/new-file.go" } }));
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn a_write_hook_with_a_large_file_still_records_the_baseline() {
-        let dir = std::env::temp_dir().join(format!("athena-cli-large-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-cli-large-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();

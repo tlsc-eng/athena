@@ -461,10 +461,27 @@ fn worktree_dir(value: &Value) -> Result<String, String> {
     }
 }
 
-pub const PROJECT_FILE: &str = ".athena/settings.json";
+pub const PROJECT_FILE: &str = ".daedalus/settings.json";
+/// Where projects kept their settings before Athena became Daedalus.
+pub const LEGACY_PROJECT_FILE: &str = ".athena/settings.json";
 pub const VSCODE_FILE: &str = ".vscode/settings.json";
 
-/// A project's `.athena/settings.json`, read like the global file; settings that are app-wide
+/// The settings file a project reads: the legacy one only while no `.daedalus` one exists.
+pub fn project_file(root: &Path) -> PathBuf {
+    let legacy = root.join(LEGACY_PROJECT_FILE);
+    let current = root.join(PROJECT_FILE);
+    if legacy.exists() && !current.exists() {
+        legacy
+    } else {
+        current
+    }
+}
+
+pub fn is_project_file(path: &Path) -> bool {
+    path.ends_with(PROJECT_FILE) || path.ends_with(LEGACY_PROJECT_FILE)
+}
+
+/// A project's `.daedalus/settings.json`, read like the global file; settings that are app-wide
 /// (theme, zoom, autofetch and the like) are reported and left out.
 pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
     let (mut s, mut problems) = parse(text)?;
@@ -860,9 +877,9 @@ pub fn unset_at(path: &Path, keys: &[&str]) -> Result<String> {
     edit_at(path, |text| unset_value(text, keys))
 }
 
-/// Creates a project's `.athena/settings.json` as an empty object unless it exists.
+/// Creates a project's `.daedalus/settings.json` as an empty object unless it exists.
 pub fn ensure_project_file(root: &Path) -> Result<PathBuf> {
-    let path = root.join(PROJECT_FILE);
+    let path = project_file(root);
     if !path.exists() {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -1578,7 +1595,7 @@ pub(crate) mod tests {
         .unwrap();
         assert!(problems.is_empty(), "{problems:?}");
         let at = |p: &str| s.claude_profile_for(Path::new(p));
-        assert_eq!(at("/code/hobby/athena"), Some("claude-tlsc"));
+        assert_eq!(at("/code/hobby/daedalus"), Some("claude-tlsc"));
         assert_eq!(at("/code/ai/x"), Some("claude-ai"));
         assert_eq!(at("/code/ai"), Some("claude-ai"));
         assert_eq!(at("/work/x"), Some("claude-work"));
@@ -1643,7 +1660,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn bracket_pair_colorization_reads_vs_codes_key_and_athenas_and_by_language() {
+    fn bracket_pair_colorization_reads_vs_codes_key_and_daedalus_and_by_language() {
         let (s, problems) = parse(
             r#"{"editor.bracketPairColorization.enabled": false,
                 "[markdown]": {"bracket_pair_colorization": true}}"#,
@@ -1716,7 +1733,7 @@ pub(crate) mod tests {
     #[test]
     fn a_symlinked_file_is_written_through_and_keeps_its_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("athena-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-settings-{}", std::process::id()));
         let dots = dir.join("dotfiles");
         std::fs::create_dir_all(&dots).unwrap();
         let real = dots.join("settings.json");
@@ -1731,6 +1748,41 @@ pub(crate) mod tests {
         assert_eq!(text, "{\n  // mine\n  \"theme\": \"dark\"\n}\n");
         let mode = std::fs::metadata(&real).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_reads_its_legacy_settings_file_only_while_it_has_no_daedalus_one() {
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-project-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = |name: &str, files: &[&str]| {
+            let root = dir.join(name);
+            for file in files {
+                let path = root.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "{}").unwrap();
+            }
+            root
+        };
+
+        let legacy = place("legacy", &[LEGACY_PROJECT_FILE]);
+        assert_eq!(project_file(&legacy), legacy.join(LEGACY_PROJECT_FILE));
+
+        let both = place("both", &[LEGACY_PROJECT_FILE, PROJECT_FILE]);
+        assert_eq!(project_file(&both), both.join(PROJECT_FILE));
+
+        let neither = place("neither", &[]);
+        assert_eq!(project_file(&neither), neither.join(PROJECT_FILE));
+        let created = ensure_project_file(&neither).unwrap();
+        assert_eq!(created, neither.join(PROJECT_FILE));
+        assert!(created.exists() && !neither.join(LEGACY_PROJECT_FILE).exists());
+
+        assert_eq!(
+            ensure_project_file(&legacy).unwrap(),
+            legacy.join(LEGACY_PROJECT_FILE)
+        );
+        assert!(!legacy.join(PROJECT_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1750,7 +1802,8 @@ pub(crate) mod tests {
                 "{broken}"
             );
         }
-        let dir = std::env::temp_dir().join(format!("athena-settings-bad-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-settings-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("settings.json");
         std::fs::write(&file, "{\"theme\": \"light\" \"x\": 1}").unwrap();
@@ -2398,7 +2451,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_vscode_settings_file_gives_athena_the_keys_it_knows_and_nothing_else() {
+    fn a_vscode_settings_file_gives_daedalus_the_keys_it_knows_and_nothing_else() {
         let root = Path::new("/p/app");
         let s = parse_vscode(
             r#"{

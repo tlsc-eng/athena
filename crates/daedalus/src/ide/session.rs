@@ -206,7 +206,7 @@ pub(super) fn diagnostics_json(
 impl ServerHandler for Session {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("athena", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new("daedalus", env!("CARGO_PKG_VERSION")))
     }
 
     async fn on_custom_notification(

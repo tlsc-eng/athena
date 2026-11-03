@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn a_session_tab_is_left_out_of_the_file_and_the_file_still_loads() {
         use daedalus_workspace::{Axis, Layout};
-        let dir = std::env::temp_dir().join(format!("athena-session-tab-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-session-tab-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("workspace.json");
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn the_file_on_disk_is_read_only_when_it_is_small_regular_text() {
-        let dir = std::env::temp_dir().join(format!("athena-ide-read-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-ide-read-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = |name: &str| dir.join(name);
         assert_eq!(read_text(&file("missing.rs")), Ok(String::new()));
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn the_file_on_disk_is_read_in_the_encoding_the_editor_would_use() {
-        let dir = std::env::temp_dir().join(format!("athena-ide-enc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-ide-enc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let utf16: Vec<u8> = [0xFF, 0xFE]
             .into_iter()
@@ -874,7 +874,7 @@ mod tests {
 
     #[test]
     fn a_proposal_lands_in_the_project_its_resolved_path_is_in() {
-        let dir = std::env::temp_dir().join(format!("athena-ide-target-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-ide-target-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (proj, other) = (dir.join("proj"), dir.join("other"));
         std::fs::create_dir_all(proj.join("src")).unwrap();

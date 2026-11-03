@@ -1788,7 +1788,7 @@ mod tests {
 
     #[test]
     fn breakpoints_round_trip_through_the_saved_file_relative_to_their_project() {
-        let dir = std::env::temp_dir().join(format!("athena-debug-save-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("daedalus-debug-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("proj")).unwrap();
         let root = document_key(&dir.join("proj"));
@@ -1818,7 +1818,8 @@ mod tests {
 
     #[test]
     fn two_windows_saving_breakpoints_keep_each_others_projects() {
-        let dir = std::env::temp_dir().join(format!("athena-debug-windows-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-debug-windows-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("a")).unwrap();
         std::fs::create_dir_all(dir.join("b")).unwrap();
@@ -1919,7 +1920,8 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("athena-debug-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("daedalus-debug-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
