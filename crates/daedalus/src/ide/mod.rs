@@ -1,7 +1,7 @@
 //! The Claude Code IDE server: MCP over a loopback WebSocket that Claude Code finds through a
 //! lock file. It runs on its own thread; the window gets [`Event`]s and answers through [`Server`].
 
-mod lock;
+pub(crate) mod lock;
 mod session;
 mod transport;
 
