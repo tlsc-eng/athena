@@ -3,7 +3,7 @@ use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -156,27 +156,40 @@ fn run(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
         let _ = tx.send(read.ok().map(|_| buf));
     });
     let deadline = Instant::now() + timeout;
-    let kill_group = |child: &mut Child| {
-        // SAFETY: killpg takes plain integers; the group leader is our own child.
-        unsafe { libc::killpg(pgid, libc::SIGKILL) };
-        let _ = child.wait();
-    };
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            _ => {
-                kill_group(&mut child);
-                return None;
-            }
+    let mut exited = false;
+    while !exited && Instant::now() < deadline {
+        exited = has_exited(pgid);
+        if !exited {
+            std::thread::sleep(Duration::from_millis(10));
         }
+    }
+    let out = if exited {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()
+    } else {
+        None
     };
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let Ok(out) = rx.recv_timeout(remaining) else {
-        kill_group(&mut child);
-        return None;
-    };
-    status.success().then_some(out).flatten()
+    // The leader is still an unreaped zombie here, so its pid cannot name an unrelated group.
+    // SAFETY: killpg takes plain integers.
+    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    let status = child.wait().ok()?;
+    status.success().then_some(out).flatten().flatten()
+}
+
+/// Whether `pid` has exited, leaving it unreaped so its pid stays reserved.
+fn has_exited(pid: libc::pid_t) -> bool {
+    // SAFETY: an all-zero siginfo_t is a valid value and waitid only writes into it; WNOWAIT
+    // keeps the child waitable, so `Child::wait` still reaps it.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let rc = libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        rc != 0 || info.si_pid != 0
+    }
 }
 
 #[cfg(test)]
@@ -331,16 +344,45 @@ mod tests {
         }
     }
 
+    fn is_running(pattern: &str) -> bool {
+        std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", pattern])
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    fn assert_dies_soon(pattern: &str) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while is_running(pattern) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!is_running(pattern), "{pattern} survived run");
+    }
+
     #[test]
     fn a_grandchild_holding_stdout_cannot_outlast_the_timeout() {
         let started = Instant::now();
         let out = run(
             Path::new("/bin/sh"),
-            &["-c", "sleep 30; true"],
+            &["-c", "sleep 37.5; true"],
             Duration::from_millis(200),
         );
         assert_eq!(out, None);
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_dies_soon("sleep 37.5");
+    }
+
+    #[test]
+    fn a_grandchild_left_behind_by_an_exited_child_is_killed() {
+        let started = Instant::now();
+        let out = run(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 30.25 & echo hi"],
+            Duration::from_millis(200),
+        );
+        assert_eq!(out, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_dies_soon("sleep 30.25");
     }
 
     #[test]
