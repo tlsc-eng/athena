@@ -193,7 +193,12 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(mut workspace: Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        mut workspace: Workspace,
+        splash: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
         let settings = settings::SettingsState::load(&mut workspace);
@@ -326,6 +331,9 @@ impl Shell {
         shell.start_settings(window, cx);
         shell.sync_claude_hooks(cx);
         crate::system_notify::set_badge(shell.unread());
+        if splash {
+            shell.begin_splash(cx);
+        }
         shell
     }
 
