@@ -2,6 +2,7 @@ mod actions;
 mod app_socket;
 mod claude_hooks;
 mod cli;
+mod companion;
 mod ide;
 mod keymap;
 mod mcp;
