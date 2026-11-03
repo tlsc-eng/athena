@@ -85,7 +85,8 @@ pub enum ServerMsg {
     },
     Exited {
         pane: u64,
-        code: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<i32>,
     },
     Dropped {
         pane: u64,
@@ -180,13 +181,13 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     pub state: SessionState,
-    pub unread: u32,
+    pub unread: bool,
     pub todos: Vec<Todo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs: Option<String>,
-    pub files: Vec<String>,
+    pub files: u32,
     pub modified_ms: u64,
 }
 
@@ -248,7 +249,7 @@ mod tests {
             main_root: "/Users/jason/code/daedalus".into(),
             branch: Some("feat/bridge".into()),
             state: SessionState::NeedsInput,
-            unread: 2,
+            unread: true,
             todos: vec![
                 Todo {
                     content: "Write the protocol".into(),
@@ -263,7 +264,7 @@ mod tests {
             ],
             plan: Some("1. Types\n2. Server".into()),
             needs: Some("Run cargo test?".into()),
-            files: vec!["crates/daedalus/src/companion/protocol.rs".into()],
+            files: 3,
             modified_ms: 1_767_225_600_000,
         }
     }
@@ -350,7 +351,13 @@ mod tests {
             },
         );
         golden("replay_done", &ServerMsg::ReplayDone { pane: 123 });
-        golden("exited", &ServerMsg::Exited { pane: 123, code: 0 });
+        golden(
+            "exited",
+            &ServerMsg::Exited {
+                pane: 123,
+                code: Some(0),
+            },
+        );
         golden(
             "dropped",
             &ServerMsg::Dropped {
@@ -400,6 +407,17 @@ mod tests {
                 name: "Jason's Mac".into(),
             },
         );
+    }
+
+    #[test]
+    fn an_exit_with_an_unknown_status_omits_the_code() {
+        let msg = ServerMsg::Exited {
+            pane: 5,
+            code: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"exited","pane":5}"#);
+        assert_eq!(serde_json::from_str::<ServerMsg>(&json).unwrap(), msg);
     }
 
     #[test]

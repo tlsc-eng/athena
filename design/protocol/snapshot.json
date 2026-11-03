@@ -18,7 +18,7 @@
       "main_root": "/Users/jason/code/daedalus",
       "branch": "feat/bridge",
       "state": "needs_input",
-      "unread": 2,
+      "unread": true,
       "todos": [
         {
           "content": "Write the protocol",
@@ -32,9 +32,7 @@
       ],
       "plan": "1. Types\n2. Server",
       "needs": "Run cargo test?",
-      "files": [
-        "crates/daedalus/src/companion/protocol.rs"
-      ],
+      "files": 3,
       "modified_ms": 1767225600000
     }
   ],
