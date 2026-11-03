@@ -36,8 +36,9 @@ a copy downloaded by hand from the releases page is refused by Gatekeeper until 
 (`xattr -dr com.apple.quarantine /Applications/Daedalus.app`).
 
 `brew uninstall --zap --cask daedalus` also stops the session daemon (its shells are hung up) and
-deletes `~/Library/Application Support/daedalus`. A plain uninstall or upgrade leaves the daemon and
-its shells running.
+deletes both `~/Library/Application Support/daedalus` and `~/Library/Application Support/athena`,
+which includes the data Daedalus took over from Athena. A plain uninstall or upgrade leaves the
+daemon and its shells running.
 
 ## Upgrading from Athena
 
@@ -45,16 +46,20 @@ Daedalus is Athena under a new name, version 3.0.0. It takes over your data and 
 sessions alive:
 
 1. Run `brew update && brew upgrade`. If brew does not move the cask over, run
-   `brew uninstall --cask athena` (without `--zap`, which would delete your data) and then
-   `brew tap tlsc-eng/daedalus && brew install --cask daedalus`.
+   `brew uninstall --cask athena` (without `--zap`, which would hang up your shells and delete
+   your data), `brew untap tlsc-eng/athena`, then
+   `brew tap tlsc-eng/daedalus && brew install --cask tlsc-eng/daedalus/daedalus`.
 2. Start Daedalus. It adopts `~/Library/Application Support/athena` by moving it to `daedalus` and
    leaving a symlink `athena -> daedalus`, so a daemon that is still running keeps its sockets and
    shells. Check with `ls -l ~/Library/Application\ Support`.
-3. There is no `athena` command any more. Register the MCP server again:
-   `claude mcp add -s user daedalus -- daedalus mcp-stdio`.
-4. Shells started by the old daemon keep `ATHENA_PANE_ID` and `TERM_PROGRAM=athena`; Daedalus
-   still honours the pane id. Run `daedalus mux stop` (it hangs up the shells) when you want them
-   to pick up the `DAEDALUS_*` names. Scripts that read `ATHENA_*` variables need the new names.
+3. There is no `athena` command any more. For each Claude Code profile, run
+   `claude mcp remove -s user athena` and then
+   `claude mcp add -s user daedalus -- daedalus mcp-stdio`, and rename `mcp__athena__*`
+   permission rules to `mcp__daedalus__*`.
+4. Daedalus reuses the running old daemon, so every terminal, new ones included, keeps
+   `ATHENA_PANE_ID`, `TERM_PROGRAM=athena` and the old zshenv until you run `daedalus mux stop`
+   (it hangs up the shells). Daedalus still honours the pane id. Scripts that read `ATHENA_*`
+   variables need the new names.
 5. Keymap entries written as `athena::Command` and projects' `.athena/settings.json` files are
    still read; rename them whenever you like.
 6. macOS asks again for notification permission, because the app is a new one.
@@ -672,7 +677,7 @@ information rather than triggering the install dialog).
   state (needs input, running, done) and how many sessions a folder or collapsed repository
   stands for.
 - An MCP server, `daedalus mcp-stdio`, answers from the running app (see below).
-- Each file Claude edits in an Daedalus terminal refreshes its open diffs; the **Sessions** list
+- Each file Claude edits in a Daedalus terminal refreshes its open diffs; the **Sessions** list
   opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
 - The side panel's **Sessions** view (palette: **Claude: Show sessions**) lists the project's recent
@@ -850,7 +855,7 @@ tree which pane (and window) the calling Claude session runs in; lists such as `
 and `get_open_editors` cover every window.
 
 The language server tools (`lsp_definition`, `lsp_references`, `document_symbols`) and
-`read_buffer` work only on files open in an Daedalus editor tab; for any other file they answer
+`read_buffer` work only on files open in a Daedalus editor tab; for any other file they answer
 that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB message.
 
 | Tool | What it does |
