@@ -33,7 +33,12 @@ fn adopt_legacy(legacy: &Path, dir: &Path) {
     }
     if std::os::unix::fs::symlink("daedalus", legacy).is_err() {
         let _ = fs::remove_dir(legacy);
-        let _ = std::os::unix::fs::symlink("daedalus", legacy);
+        if let Err(e) = std::os::unix::fs::symlink("daedalus", legacy) {
+            tracing::warn!(
+                "could not leave {} pointing at daedalus: {e}",
+                legacy.display()
+            );
+        }
     }
 }
 
