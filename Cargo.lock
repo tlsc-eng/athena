@@ -1569,6 +1569,7 @@ dependencies = [
  "anyhow",
  "gpui",
  "objc2-app-kit",
+ "serde_json",
 ]
 
 [[package]]
