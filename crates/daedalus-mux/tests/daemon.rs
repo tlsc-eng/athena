@@ -41,7 +41,7 @@ impl Daemon {
 
     fn socket(&self) -> PathBuf {
         self.home
-            .join("Library/Application Support/athena/mux.sock")
+            .join("Library/Application Support/daedalus/mux.sock")
     }
 
     fn ready(&self) -> bool {
@@ -227,7 +227,7 @@ fn new_shells_get_the_ide_port_from_ide_env() {
     let daemon = Daemon::start("ide");
     let env = daemon
         .home
-        .join("Library/Application Support/athena/ide.env");
+        .join("Library/Application Support/daedalus/ide.env");
     // A connection per shell, so the first one's output does not get in the way of the second.
     let probe = || {
         let (conn, mut reader) = daemon.connect();
