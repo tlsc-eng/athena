@@ -73,13 +73,12 @@ impl Devices {
     pub fn load(dir: &Path) -> Self {
         let path = dir.join(FILE);
         let devices = match fs::read(&path) {
-            Ok(bytes) => {
-                tighten(&path);
-                serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-                    tracing::warn!("ignoring corrupt {}: {err}", path.display());
-                    Vec::new()
-                })
-            }
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            Ok(_) if !trusted(dir, &path, unsafe { libc::geteuid() }) => Vec::new(),
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|err| {
+                tracing::warn!("ignoring corrupt {}: {err}", path.display());
+                Vec::new()
+            }),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(err) => {
                 tracing::warn!("cannot read {}: {err}", path.display());
@@ -129,16 +128,14 @@ impl Devices {
         found
     }
 
-    /// Returns whether a device with `id` existed.
+    /// Returns whether a device with `id` existed. The device stays revoked in memory even if
+    /// saving fails, so a revoked phone loses access at once.
     pub fn revoke(&mut self, id: &str) -> io::Result<bool> {
         let Some(at) = self.devices.iter().position(|d| d.id == id) else {
             return Ok(false);
         };
-        let removed = self.devices.remove(at);
-        if let Err(err) = self.save() {
-            self.devices.insert(at, removed);
-            return Err(err);
-        }
+        self.devices.remove(at);
+        self.save()?;
         Ok(true)
     }
 
@@ -166,15 +163,23 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-fn tighten(path: &Path) {
-    let Ok(meta) = fs::metadata(path) else {
-        return;
+/// A store someone else owns, or one we cannot lock down, cannot be trusted to hold only our tokens.
+fn trusted(dir: &Path, path: &Path, euid: u32) -> bool {
+    let (Ok(dir_meta), Ok(meta)) = (fs::metadata(dir), fs::metadata(path)) else {
+        tracing::warn!("cannot inspect {}", path.display());
+        return false;
     };
+    if dir_meta.uid() != euid || meta.uid() != euid {
+        tracing::warn!("ignoring {}: not owned by this user", path.display());
+        return false;
+    }
     if meta.mode() & 0o077 != 0
         && let Err(err) = fs::set_permissions(path, fs::Permissions::from_mode(0o600))
     {
-        tracing::warn!("cannot restrict {}: {err}", path.display());
+        tracing::warn!("ignoring {}: cannot restrict it: {err}", path.display());
+        return false;
     }
+    true
 }
 
 #[cfg(test)]
@@ -295,6 +300,30 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, [FILE]);
+    }
+
+    #[test]
+    fn a_failed_save_still_leaves_the_device_revoked() {
+        let tmp = TempDir::new();
+        let mut devices = Devices::load(&tmp.0);
+        let (device, secret) = devices.issue("Phone", "me@example.com", "mac").unwrap();
+        fs::remove_dir_all(&tmp.0).unwrap();
+        fs::write(&tmp.0, b"").unwrap();
+
+        assert!(devices.revoke(&device.id).is_err());
+        assert!(devices.verify(&secret).is_none());
+    }
+
+    #[test]
+    fn a_store_owned_by_someone_else_loads_as_empty() {
+        let tmp = TempDir::new();
+        let mut devices = Devices::load(&tmp.0);
+        devices.issue("Phone", "me@example.com", "mac").unwrap();
+        let path = tmp.0.join(FILE);
+        let euid = fs::metadata(&path).unwrap().uid();
+
+        assert!(trusted(&tmp.0, &path, euid));
+        assert!(!trusted(&tmp.0, &path, euid + 1));
     }
 
     #[test]

@@ -69,19 +69,26 @@ impl Lock {
 pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     // Not ending in `.lock`, so Claude Code never parses (and deletes) a half-written copy.
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(bytes)?;
-    drop(file);
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", token()?));
+    create_private(&tmp, bytes)?;
     fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
+}
+
+/// Creates `path` owner-only and refuses to reuse or follow anything already there.
+fn create_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(bytes))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(path);
+        })
 }
 
 /// A fresh 128-bit token as lowercase hex.
@@ -176,6 +183,21 @@ mod tests {
         assert!(!tokens_match(&a.as_bytes()[..31], a.as_bytes()));
         assert!(!tokens_match(format!("{a}0").as_bytes(), a.as_bytes()));
         assert!(!tokens_match(b"", a.as_bytes()));
+    }
+
+    #[test]
+    fn a_symlink_planted_at_the_temp_name_is_not_followed() {
+        let dir = temp("symlink");
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        let planted = dir.join("planted.tmp");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        assert!(create_private(&planted, b"secret").is_err());
+        assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        assert!(planted.symlink_metadata().unwrap().is_symlink());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
