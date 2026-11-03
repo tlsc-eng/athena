@@ -4,16 +4,16 @@ set -euo pipefail
 cd "${0:a:h}/.."
 
 version=${1:?usage: scripts/release.sh <version>}
-tap=${ATHENA_TAP:-../homebrew-athena}
+tap=${DAEDALUS_TAP:-../homebrew-daedalus}
 
 [[ -z $(git status --porcelain) ]] || { echo "release: commit or stash changes first" >&2; exit 1; }
 [[ $(git branch --show-current) == main ]] || { echo "release: run from main" >&2; exit 1; }
-[[ -d $tap/.git ]] || { echo "release: no tap checkout at $tap (set ATHENA_TAP)" >&2; exit 1; }
+[[ -d $tap/.git ]] || { echo "release: no tap checkout at $tap (set DAEDALUS_TAP)" >&2; exit 1; }
 cargo_version=$(cargo metadata --no-deps --format-version 1 \
-  | python3 -I -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="athena"))')
+  | python3 -I -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="daedalus"))')
 [[ $cargo_version == "$version" ]] || { echo "release: Cargo.toml is at $cargo_version" >&2; exit 1; }
 
-git tag -a "v$version" -m "Athena $version"
+git tag -a "v$version" -m "Daedalus $version"
 git push origin main "v$version"
 
 # The run appears a few seconds after the tag lands.
@@ -32,8 +32,8 @@ sha=$(gh release download "v$version" --pattern "*.sha256" --output - | awk '{pr
 [[ $sha =~ ^[0-9a-f]{64}$ ]] || { echo "release: bad checksum '$sha'" >&2; exit 1; }
 
 mkdir -p "$tap/Casks"
-sed -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" packaging/athena.rb.in > "$tap/Casks/athena.rb"
-git -C "$tap" add Casks/athena.rb
-git -C "$tap" commit -m "athena $version"
+sed -e "s/@VERSION@/$version/" -e "s/@SHA256@/$sha/" packaging/daedalus.rb.in > "$tap/Casks/daedalus.rb"
+git -C "$tap" add Casks/daedalus.rb
+git -C "$tap" commit -m "daedalus $version"
 git -C "$tap" push
-echo "released $version: brew update && brew upgrade --cask athena"
+echo "released $version: brew update && brew upgrade --cask daedalus"

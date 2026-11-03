@@ -1,0 +1,194 @@
+use std::fs;
+use std::io::{self, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use daedalus_proto::{AppMsg, AppReply, PaneId};
+
+use crate::procinfo;
+
+/// How long a client waits for the window; long enough for a person to answer a confirm.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// One request from `athena` or the MCP bridge, answered on the window's thread.
+pub struct Request {
+    pub msg: AppMsg,
+    /// The pane the client says it runs in, still to be checked against `lineage`.
+    pub claimed: Option<PaneId>,
+    /// The client process and its ancestors.
+    pub lineage: Vec<i32>,
+    pub reply: mpsc::SyncSender<AppReply>,
+}
+
+/// Listens on `app.sock`; same-user connections only.
+pub fn listen() -> async_channel::Receiver<Request> {
+    let (tx, rx) = async_channel::unbounded();
+    let Ok(path) = daedalus_proto::app_socket_path() else {
+        return rx;
+    };
+    // A live window answers a connect; only then is the socket someone else's.
+    if UnixStream::connect(&path).is_ok() {
+        return rx;
+    }
+    let _ = fs::remove_file(&path);
+    let Ok(listener) = UnixListener::bind(&path) else {
+        return rx;
+    };
+    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    let _ = thread::Builder::new()
+        .name("app-socket".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                if !same_user(&stream) {
+                    continue;
+                }
+                let tx = tx.clone();
+                let _ = thread::Builder::new()
+                    .name("app-client".into())
+                    .spawn(move || serve(stream, tx));
+            }
+        });
+    rx
+}
+
+fn serve(mut stream: UnixStream, tx: async_channel::Sender<Request>) {
+    let lineage = procinfo::peer_lineage(&stream);
+    let mut claimed = None;
+    while let Ok(Some(msg)) = daedalus_proto::read_frame::<_, AppMsg>(&mut stream) {
+        if let AppMsg::Identify { session } = msg {
+            claimed = Some(session);
+            if send_reply(&mut stream, AppReply::Ok).is_err() {
+                return;
+            }
+            continue;
+        }
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let request = Request {
+            msg,
+            claimed,
+            lineage: lineage.clone(),
+            reply: reply_tx,
+        };
+        if tx.send_blocking(request).is_err() {
+            return;
+        }
+        let reply = reply_rx
+            .recv_timeout(REPLY_TIMEOUT)
+            .unwrap_or_else(|_| AppReply::Error("Athena did not answer in time".into()));
+        if send_reply(&mut stream, reply).is_err() {
+            return;
+        }
+    }
+}
+
+/// Sends `reply`, trimming a list too long for one frame; terminal lines keep the newest.
+fn send_reply(out: &mut impl Write, mut reply: AppReply) -> io::Result<()> {
+    loop {
+        match daedalus_proto::write_frame(out, &reply) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => reply = shrink(reply),
+            done => return done,
+        }
+    }
+}
+
+fn shrink(reply: AppReply) -> AppReply {
+    match reply {
+        AppReply::Lines(mut lines) if lines.len() > 1 => {
+            lines.drain(..lines.len().div_ceil(4));
+            AppReply::Lines(lines)
+        }
+        AppReply::Diagnostics(mut list) if list.len() > 1 => {
+            list.truncate(list.len() * 3 / 4);
+            AppReply::Diagnostics(list)
+        }
+        AppReply::Symbols(mut list) if list.len() > 1 => {
+            list.truncate(list.len() * 3 / 4);
+            AppReply::Symbols(list)
+        }
+        AppReply::Locations(mut list) if list.len() > 1 => {
+            list.truncate(list.len() * 3 / 4);
+            AppReply::Locations(list)
+        }
+        _ => AppReply::Error("the answer is too large to send".into()),
+    }
+}
+
+fn same_user(stream: &UnixStream) -> bool {
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: getpeereid writes two integers for a connected unix socket we own.
+    let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
+    // SAFETY: geteuid has no preconditions.
+    ok && uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use daedalus_proto::{LocationInfo, SymbolInfo};
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_reply_over_the_frame_limit_is_trimmed_to_its_newest_lines() {
+        let lines: Vec<String> = (0..2000)
+            .map(|i| format!("{i:04}{}", "x".repeat(996)))
+            .collect();
+        let mut out = Vec::new();
+        send_reply(&mut out, AppReply::Lines(lines)).unwrap();
+        let Some(AppReply::Lines(sent)) = daedalus_proto::read_frame(&mut out.as_slice()).unwrap()
+        else {
+            panic!("expected lines")
+        };
+        assert!((800..2000).contains(&sent.len()), "{} lines", sent.len());
+        assert!(sent.last().unwrap().starts_with("1999"));
+    }
+
+    #[test]
+    fn symbols_and_locations_over_the_frame_limit_keep_their_first_entries() {
+        let symbols: Vec<SymbolInfo> = (0..2000)
+            .map(|i| SymbolInfo {
+                name: format!("{i:04}{}", "s".repeat(996)),
+                kind: "function".into(),
+                container: None,
+                line: i,
+                end_line: i,
+            })
+            .collect();
+        let mut out = Vec::new();
+        send_reply(&mut out, AppReply::Symbols(symbols)).unwrap();
+        let Some(AppReply::Symbols(sent)) =
+            daedalus_proto::read_frame(&mut out.as_slice()).unwrap()
+        else {
+            panic!("expected symbols")
+        };
+        assert!((500..2000).contains(&sent.len()), "{} symbols", sent.len());
+        assert_eq!(sent[0].line, 0);
+
+        let locations: Vec<LocationInfo> = (0..2000)
+            .map(|i| LocationInfo {
+                path: PathBuf::from(format!("/{i:04}{}", "p".repeat(996))),
+                line: i,
+                column: 1,
+                end_line: i,
+                end_column: 1,
+                text: None,
+            })
+            .collect();
+        let mut out = Vec::new();
+        send_reply(&mut out, AppReply::Locations(locations)).unwrap();
+        let Some(AppReply::Locations(sent)) =
+            daedalus_proto::read_frame(&mut out.as_slice()).unwrap()
+        else {
+            panic!("expected locations")
+        };
+        assert!(
+            (500..2000).contains(&sent.len()),
+            "{} locations",
+            sent.len()
+        );
+        assert_eq!(sent[0].line, 0);
+    }
+}

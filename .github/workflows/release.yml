@@ -24,13 +24,13 @@ jobs:
       # Tag runs can restore main's cache, which also holds cargo-deny and cargo-audit in ~/.cargo/bin.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: athena-macos
+          shared-key: daedalus-macos
           save-if: false
 
       - name: Tag matches the crate version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
-            | python3 -I -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="athena"))')
+            | python3 -I -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="daedalus"))')
           test "v$version" = "$GITHUB_REF_NAME"
 
       - name: Supply chain
@@ -46,5 +46,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/Athena-*-arm64.zip dist/Athena-*-arm64.zip.sha256 \
-            --title "Athena ${GITHUB_REF_NAME#v}" --notes "Install: brew install --cask tlsc-eng/athena/athena"
+          gh release create "$GITHUB_REF_NAME" dist/Daedalus-*-arm64.zip dist/Daedalus-*-arm64.zip.sha256 \
+            --title "Daedalus ${GITHUB_REF_NAME#v}" --notes "Install: brew install --cask tlsc-eng/daedalus/daedalus"

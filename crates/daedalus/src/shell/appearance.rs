@@ -1,0 +1,34 @@
+use daedalus_ui::Appearance;
+use daedalus_workspace::ThemeChoice;
+use gpui::{Context, Window};
+
+use super::Shell;
+
+/// The appearance `choice` means for this window right now.
+pub(super) fn resolve(choice: ThemeChoice, window: &Window) -> Appearance {
+    match choice {
+        ThemeChoice::Light => Appearance::Light,
+        ThemeChoice::Dark => Appearance::Dark,
+        ThemeChoice::System => daedalus_ui::appearance_for(window.appearance()),
+    }
+}
+
+impl Shell {
+    pub(super) fn set_theme_choice(
+        &mut self,
+        choice: ThemeChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace.theme = choice;
+        daedalus_ui::set_appearance(resolve(choice, window), cx);
+        self.schedule_save(cx);
+        let name = match choice {
+            ThemeChoice::System => "system",
+            ThemeChoice::Light => "light",
+            ThemeChoice::Dark => "dark",
+        };
+        self.write_setting(&["theme"], name.into(), cx);
+        cx.notify();
+    }
+}
