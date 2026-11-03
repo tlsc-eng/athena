@@ -1382,7 +1382,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "daedalus"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-containers"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "async-channel 2.5.0",
  "bollard",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-dap"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-editor"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "daedalus-ui",
@@ -1479,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-lsp"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-mux"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "daedalus-proto",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-playwright"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-preview"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "async-channel 2.5.0",
  "block2",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-proto"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-term"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-testing"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-ui"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "gpui",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "daedalus-workspace"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "libc",

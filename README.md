@@ -1,7 +1,7 @@
-# Athena
+# Daedalus
 
-Athena is a macOS IDE built around terminals that outlive the window and around Claude Code.
-Shells run in a separate session daemon (`athena-mux`), so quitting or updating the app does not
+Daedalus is a macOS IDE built around terminals that outlive the window and around Claude Code.
+Shells run in a separate session daemon (`daedalus-mux`), so quitting or updating the app does not
 kill them; the window reattaches on the next launch. Projects get split panes of terminals and a
 terminal panel under them, an editor with language-server support that opens files in their own
 encoding (and files over 50 MB read-only), a Go debugger on Delve, a git diff viewer with hunk
@@ -12,32 +12,57 @@ and todo progress on the tab, the Sessions list lists each session's changed fil
 plan with Resume, each file Claude edits can be reviewed as one diff against the version from
 before the session, and an MCP server lets Claude read the editor, language servers, tests, the
 debugger and terminals.
-Optionally Athena also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
+Optionally Daedalus also acts as Claude Code's IDE: Claude's proposed edits open as diffs to accept
 or reject, and the editor selection goes with each prompt. Projects can be spread over several
 windows, and settings and keyboard shortcuts each have an editor tab of their own beside their
 JSON files.
 
 It is written in Rust on [GPUI](https://crates.io/crates/gpui) and runs only on Apple silicon.
 
-![Athena with a project open](docs/screenshots/overview.png)
+![Daedalus with a project open](docs/screenshots/overview.png)
 
 ## Install
 
 Requires Apple silicon and macOS 26 (Tahoe).
 
 ```sh
-brew tap tlsc-eng/athena
-brew install --cask athena
+brew tap tlsc-eng/daedalus
+brew install --cask daedalus
 ```
 
-The cask installs `Athena.app` and links the `athena` command onto your `PATH`. The app is
+The cask installs `Daedalus.app` and links the `daedalus` command onto your `PATH`. The app is
 ad-hoc signed without a Developer ID, so the cask removes the quarantine attribute after install;
 a copy downloaded by hand from the releases page is refused by Gatekeeper until you do the same
-(`xattr -dr com.apple.quarantine /Applications/Athena.app`).
+(`xattr -dr com.apple.quarantine /Applications/Daedalus.app`).
 
-`brew uninstall --zap --cask athena` also stops the session daemon (its shells are hung up) and
-deletes `~/Library/Application Support/athena`. A plain uninstall or upgrade leaves the daemon and
-its shells running.
+`brew uninstall --zap --cask daedalus` also stops the session daemon (its shells are hung up) and
+deletes both `~/Library/Application Support/daedalus` and `~/Library/Application Support/athena`,
+which includes the data Daedalus took over from Athena. A plain uninstall or upgrade leaves the
+daemon and its shells running.
+
+## Upgrading from Athena
+
+Daedalus is Athena under a new name, version 3.0.0. It takes over your data and keeps your
+sessions alive:
+
+1. Run `brew update && brew upgrade`. If brew does not move the cask over, run
+   `brew uninstall --cask athena` (without `--zap`, which would hang up your shells and delete
+   your data), `brew untap tlsc-eng/athena`, then
+   `brew tap tlsc-eng/daedalus && brew install --cask tlsc-eng/daedalus/daedalus`.
+2. Start Daedalus. It adopts `~/Library/Application Support/athena` by moving it to `daedalus` and
+   leaving a symlink `athena -> daedalus`, so a daemon that is still running keeps its sockets and
+   shells. Check with `ls -l ~/Library/Application\ Support`.
+3. There is no `athena` command any more. For each Claude Code profile, run
+   `claude mcp remove -s user athena` and then
+   `claude mcp add -s user daedalus -- daedalus mcp-stdio`, and rename `mcp__athena__*`
+   permission rules to `mcp__daedalus__*`.
+4. Daedalus reuses the running old daemon, so every terminal, new ones included, keeps
+   `ATHENA_PANE_ID`, `TERM_PROGRAM=athena` and the old zshenv until you run `daedalus mux stop`
+   (it hangs up the shells). Daedalus still honours the pane id. Scripts that read `ATHENA_*`
+   variables need the new names.
+5. Keymap entries written as `athena::Command` and projects' `.athena/settings.json` files are
+   still read; rename them whenever you like.
+6. macOS asks again for notification permission, because the app is a new one.
 
 ## Features
 
@@ -45,7 +70,7 @@ its shells running.
 
 ![Terminals in split panes](docs/screenshots/terminal.png)
 
-- Shell sessions are owned by `athena-mux`, which keeps running when the window closes. Restored
+- Shell sessions are owned by `daedalus-mux`, which keeps running when the window closes. Restored
   tabs reattach to the same shells with their scrollback.
 - Split panes right and down, zoom a pane, move focus between panes with the keyboard.
 - A terminal panel under the panes, as in VS Code: ``ctrl-` `` shows the drawer's **Terminal** tab
@@ -57,14 +82,14 @@ its shells running.
   Move Terminal into Panel), the View menu, the palette's **Terminal:** commands, or by dragging
   a sub-tab onto a pane or a terminal tab onto the panel.
   Panel terminals belong to the daemon like any other and come back on the next launch, the
-  drawer open on them if it was open when Athena quit. With the
+  drawer open on them if it was open when Daedalus quit. With the
   keyboard in a panel terminal, `cmd-w` closes that terminal rather than the editor area's tab.
   Claude Code and the MCP tools see panel terminals too, and a notification still leads to its
   terminal after it moves.
 - zsh shell integration (OSC 133) marks commands; one that runs longer than 10 seconds posts a
-  notification when it finishes. `ATHENA_NOTIFY_AFTER_SECS` changes the threshold and
-  `ATHENA_SHELL_INTEGRATION=0` turns the integration off; set them in the environment the daemon
-  starts from, e.g. `open -a Athena --env ATHENA_NOTIFY_AFTER_SECS=30`.
+  notification when it finishes. `DAEDALUS_NOTIFY_AFTER_SECS` changes the threshold and
+  `DAEDALUS_SHELL_INTEGRATION=0` turns the integration off; set them in the environment the daemon
+  starts from, e.g. `open -a Daedalus --env DAEDALUS_NOTIFY_AFTER_SECS=30`.
 - With those marks each prompt gets a dot in the left margin (the success colour, red after a
   non-zero exit, an outline while the command runs); `cmd-up` and `cmd-down` scroll the previous
   or next prompt to the top, and **Copy Last Command Output** (right-click menu or command
@@ -72,19 +97,19 @@ its shells running.
   add this to `~/.bashrc` (VS Code's OSC 633 spelling works too):
 
   ```bash
-  if [[ "$TERM_PROGRAM" == "athena" ]]; then
-    __athena_preexec() {
-      [[ $__athena_quiet == 1 || $BASH_COMMAND == __athena_* ]] && return
-      __athena_quiet=1 __athena_ran=1
+  if [[ "$TERM_PROGRAM" == "daedalus" ]]; then
+    __daedalus_preexec() {
+      [[ $__daedalus_quiet == 1 || $BASH_COMMAND == __daedalus_* ]] && return
+      __daedalus_quiet=1 __daedalus_ran=1
       printf '\e]133;C\a'
     }
-    __athena_precmd() {
-      [[ $__athena_ran == 1 ]] && printf '\e]133;D;%d\a' "$__athena_status"
-      __athena_quiet=0 __athena_ran=0
+    __daedalus_precmd() {
+      [[ $__daedalus_ran == 1 ]] && printf '\e]133;D;%d\a' "$__daedalus_status"
+      __daedalus_quiet=0 __daedalus_ran=0
       printf '\e]133;A\a'
     }
-    PROMPT_COMMAND="__athena_status=\$?;__athena_quiet=1;${PROMPT_COMMAND:+$PROMPT_COMMAND;}__athena_precmd"
-    trap '__athena_preexec' DEBUG
+    PROMPT_COMMAND="__daedalus_status=\$?;__daedalus_quiet=1;${PROMPT_COMMAND:+$PROMPT_COMMAND;}__daedalus_precmd"
+    trap '__daedalus_preexec' DEBUG
   fi
   ```
 - If a new version cannot attach to the shells of an older session daemon, their tabs are marked
@@ -286,7 +311,7 @@ its shells running.
 - Auto save one second after you stop typing (palette: "Toggle auto save"), unsaved markers on
   tabs, tree rows and the window title, Save As, and a Reload / Overwrite bar when a file changes
   on disk while you have unsaved edits (unchanged files just reload). Project folders are
-  watched, so changes made outside Athena show up without switching windows.
+  watched, so changes made outside Daedalus show up without switching windows.
 - Markdown and Mermaid preview (`cmd-shift-v`) for `.md`, `.markdown`, `.mdx`, `.mmd` and
   `.mermaid`: tables, task lists, local images and links, ```` ```mermaid ```` blocks. It follows
   unsaved edits as you type and re-renders on save.
@@ -327,7 +352,7 @@ its shells running.
 
 **Git**
 
-Needs the Xcode command line tools (Athena runs `/usr/bin/git`; without the tools it shows no git
+Needs the Xcode command line tools (Daedalus runs `/usr/bin/git`; without the tools it shows no git
 information rather than triggering the install dialog).
 
 - Tree rows and tab labels take the file's status colour (modified, added, untracked, deleted,
@@ -335,7 +360,7 @@ information rather than triggering the install dialog).
   status inside them.
 - The editor gutter marks added, modified and removed lines of the saved file against the index,
   as VS Code's quick diff does, so staging a change clears its bar. UTF-16 files, which git diffs
-  as binary, get their marks from Athena's own line diff of the two decoded texts.
+  as binary, get their marks from Daedalus's own line diff of the two decoded texts.
 - Quick diff peek: clicking a change bar, or `alt-f3` / `shift-alt-f3` from the cursor, opens a
   peek under the change with the index's lines for it in red and **Stage**, **Revert**, previous,
   next and close buttons; Escape closes it. It diffs the buffer, unsaved edits included, and
@@ -392,7 +417,7 @@ information rather than triggering the install dialog).
   With nothing staged it offers to stage everything and commit. **Discard** asks
   first: tracked files go back to their staged or committed version, untracked ones move to the
   Trash. Discard and Revert keep a copy of the replaced file in
-  `~/Library/Application Support/athena/discarded` for 30 days.
+  `~/Library/Application Support/daedalus/discarded` for 30 days.
 - Merge conflicts: a conflicted file's `<<<<<<<` blocks are tinted as in VS Code (current green,
   incoming blue, a diff3 base grey), and a row after each `<<<<<<<` line offers **Accept Current
   Change**, **Accept Incoming Change**, **Accept Both Changes** (one undo step each, keeping CRLF
@@ -432,7 +457,7 @@ information rather than triggering the install dialog).
   of their own without a terminal, so a password or passphrase prompt fails at once. Use an ssh
   agent or a credential helper. A remote command is stopped after 5 minutes, ssh included.
 - Reading a repository never runs a command its config names. For status, the gutter, the peek,
-  blame, the timeline and stored versions, Athena switches off every configured filter driver
+  blame, the timeline and stored versions, Daedalus switches off every configured filter driver
   (clean, smudge and process), passes `--no-textconv` and turns `log.showSignature` off, so
   opening a cloned repository cannot run its drivers; built-in line-ending conversion still
   applies. Drivers configured inside a submodule are not covered yet: git status, which looks
@@ -483,7 +508,7 @@ information rather than triggering the install dialog).
   Create pull request). It is looked up on the login shell's `PATH`, then in Homebrew's folders,
   and git commands it runs get `core.fsmonitor=false`. Without gh, or signed out of github.com,
   the dot stays hidden and the two palette entries say in one line what is missing ("Needs gh:
-  brew install gh", "Needs gh auth login"); Athena checks again every two minutes, so a fresh
+  brew install gh", "Needs gh auth login"); Daedalus checks again every two minutes, so a fresh
   `gh auth login` is picked up.
 - Status is re-read every 5 seconds while the window is in front and shortly after a save, a file
   operation or a change on disk. The title bar and the status bar show the branch.
@@ -564,7 +589,7 @@ information rather than triggering the install dialog).
   Debug for a Go test). A failed run opens the tab at the first failure. The palette has
   **Tests**, **Tests: run test at cursor**, **Tests: run tests in current file**, **Tests: run all
   tests**, **Tests: re-run failed tests**, **Tests: stop** and the two coverage commands.
-- Runs have a 15-minute limit; Stop, the limit and quitting Athena kill the whole process group,
+- Runs have a 15-minute limit; Stop, the limit and quitting Daedalus kill the whole process group,
   test binaries and workers included.
 - **Run task…** (palette) lists the project's `package.json` scripts ("npm: build", run through
   pnpm, yarn or bun when their lockfile is there) and its Makefile targets ("make: test"), and
@@ -575,7 +600,7 @@ information rather than triggering the install dialog).
 
 - Requirements: Delve (`dlv`) on your login shell's `PATH`, found as gopls is and never installed
   for you (`go install github.com/go-delve/delve/cmd/dlv@latest`; without it F5 shows that
-  command). Athena runs it as `dlv dap` through the login shell, so goenv-style shims work. On
+  command). Daedalus runs it as `dlv dap` through the login shell, so goenv-style shims work. On
   macOS, unless Developer Mode is on, the system asks for an administrator password whenever
   Delve takes control of a program after a while; `sudo DevToolsSecurity -enable` turns Developer
   Mode on and stops it asking. A launch held up by that prompt says so in the Debug Console.
@@ -594,7 +619,7 @@ information rather than triggering the install dialog).
   neither), before launch.json is even read; a disallowed project gets a notice naming **Allow
   project code**. Restart checks again, and disallowing a project stops its session. Unsaved
   files of the project are saved first, and Delve's binary goes to a private temporary folder
-  rather than the project; quitting Athena or closing the project ends the session, kills Delve
+  rather than the project; quitting Daedalus or closing the project ends the session, kills Delve
   and removes that folder.
 - Click left of a line number, or press **F9**, to add or remove a breakpoint; the pointer shows a
   faint dot where a click would add one. Right-click the gutter for **Add Conditional
@@ -638,21 +663,21 @@ information rather than triggering the install dialog).
 - Tabs show **running** while Claude works, **needs input** while it waits on a permission, a
   question or a plan, and **done** when it finishes, until you look at the tab. A session whose
   background agents are still working stays **running** until they report back and it finishes.
-  Athena also posts a macOS banner when a session needs you or finishes, unless you are looking at
+  Daedalus also posts a macOS banner when a session needs you or finishes, unless you are looking at
   that tab (with banners turned off in System Settings, or from outside the app bundle, it shows a
   toast in the window instead). **Next Claude Session Needing You** (`cmd-alt-j`, View menu,
   palette) goes to the next session waiting for an answer, or the next that has finished. Opening the tab resolves
   its notifications: they are marked read, the Dock badge drops, and their banners leave
-  Notification Center. This comes from Athena's Claude Code hooks (see [Hooks](#hooks)); without
+  Notification Center. This comes from Daedalus's Claude Code hooks (see [Hooks](#hooks)); without
   them a tab shows only **running** while Claude draws, and nothing once it stops.
 - The project rail shows the same state as a filled square, and a hollow square for a project
   with a Claude session open and nothing to report. A small cup marks a project whose Claude is keeping
-  the Mac awake: Claude Code runs `caffeinate` while it works, so Athena checks the Mac's power
+  the Mac awake: Claude Code runs `caffeinate` while it works, so Daedalus checks the Mac's power
   assertions every 5 seconds while any Claude is open. The project's tooltip spells out the
   state (needs input, running, done) and how many sessions a folder or collapsed repository
   stands for.
-- An MCP server, `athena mcp-stdio`, answers from the running app (see below).
-- Each file Claude edits in an Athena terminal refreshes its open diffs; the **Sessions** list
+- An MCP server, `daedalus mcp-stdio`, answers from the running app (see below).
+- Each file Claude edits in a Daedalus terminal refreshes its open diffs; the **Sessions** list
   opens the file's changes since before the session's first edit to it (see
   [Reviewing Claude's edits](#reviewing-claudes-edits)).
 - The side panel's **Sessions** view (palette: **Claude: Show sessions**) lists the project's recent
@@ -673,7 +698,7 @@ information rather than triggering the install dialog).
 - Playwright: run a project's tests, list failures from the JSON report, open traces, and
   optionally add the Playwright MCP server for Claude.
 - Containers: a read-only view of the local Docker engine (Docker Desktop or Rancher Desktop):
-  list, stats and logs. Athena never starts, stops or removes containers.
+  list, stats and logs. Daedalus never starts, stops or removes containers.
 - The drawer under the panes has the tabs Terminal, Problems, Tests, Debug, Search and References,
   and a **Tools** menu at the end of the bar holding Containers and Playwright (the bar then reads
   "Containers ▾" or "Playwright ▾"). Notifications live in the bell in the title bar (View >
@@ -716,7 +741,7 @@ information rather than triggering the install dialog).
   to New Window (Window menu, or right-click a project in the rail), Merge All Windows and Close
   Window, all in the palette too. Each window has its own projects, layout and drawer, and saves
   its bounds. A project is open in one window at a time: opening it again (Open, Open Recent,
-  `athena <folder>`, a Finder drop) brings that window forward, and a new folder opens in the
+  `daedalus <folder>`, a Finder drop) brings that window forward, and a new folder opens in the
   focused window. The MCP tools, notifications and Claude Code's IDE connection reach every
   window's projects. A project keeps its terminals and unsaved text when it moves. Moving a project ends its debug session, rejects
   Claude's pending proposals for it and restarts its language servers in the window it lands in;
@@ -733,7 +758,7 @@ information rather than triggering the install dialog).
 - Settings (`cmd-,`) and Keyboard Shortcuts (`cmd-k cmd-s`) open as tabs for editing
   settings.json and keymap.json without writing JSON; see [Settings](#settings) and [Your own
   shortcuts](#your-own-shortcuts).
-- Light and dark themes. By default Athena follows the macOS appearance and switches with it;
+- Light and dark themes. By default Daedalus follows the macOS appearance and switches with it;
   View > Theme or the palette's **Theme:** commands pin light or dark. Both themes cover the
   interface, code, the terminal's 16 colours (tuned so Claude Code stays readable) and Markdown
   previews.
@@ -773,7 +798,7 @@ one.
 
 Linters run beside them when the project installs them: `vscode-eslint-language-server` (from
 `vscode-langservers-extracted`) or `biome` (from `@biomejs/biome`). They are the project's own
-code, so Athena never installs them and never looks for them on `PATH`: it starts one only from
+code, so Daedalus never installs them and never looks for them on `PATH`: it starts one only from
 `node_modules/.bin` directly under the project folder you opened, and only when that entry
 resolves, symlinks followed, to a file inside that same `node_modules` (a `.bin` entry or a
 `node_modules` linked in from elsewhere, or one in a parent folder, is ignored). Their diagnostics
@@ -781,7 +806,7 @@ join the Problems tab labelled with their source and rule, as `eslint(no-unused-
 fixes join the `cmd-.` menu. `"eslint": { "fixOnSave": true }` makes `cmd-s` apply ESLint's
 fix-all first (off by default).
 
-Since running them runs the project's code, Athena asks once per project folder before the first
+Since running them runs the project's code, Daedalus asks once per project folder before the first
 start whether to allow the project's code: "Run ESLint, Biome and TypeScript from proj?" (naming
 only what it installs), or "Use proj's language server settings?" for a project that brings only
 such settings. One answer covers everything the project brings: its linters, its own TypeScript,
@@ -806,7 +831,7 @@ group is stopped with it (Biome's background daemon exits once its proxy is gone
 
 typescript-language-server would otherwise load the project's `node_modules/typescript` (or one
 in a folder above it, or one linked in from elsewhere as pnpm does) and the tsconfig plugins
-beside it, so until the project is allowed Athena points it at the TypeScript installed beside the
+beside it, so until the project is allowed Daedalus points it at the TypeScript installed beside the
 server or with `tsc` (`npm install -g typescript`); once allowed it uses the project's own, as VS
 Code's "Use Workspace Version" does. A project that can reach a TypeScript of its own and has no
 global one to stand in waits, with a notice, until it is allowed.
@@ -819,23 +844,23 @@ another Go, unless its settings name one: `"lsp": { "gopls": { "env": { "GOTOOLC
 
 ### MCP server
 
-Register Athena's MCP server once per Claude Code profile:
+Register Daedalus's MCP server once per Claude Code profile:
 
 ```sh
-claude mcp add -s user athena -- athena mcp-stdio
+claude mcp add -s user daedalus -- daedalus mcp-stdio
 ```
 
-The server holds no state; each tool asks the running Athena, which works out from the process
+The server holds no state; each tool asks the running Daedalus, which works out from the process
 tree which pane (and window) the calling Claude session runs in; lists such as `list_projects`
 and `get_open_editors` cover every window.
 
 The language server tools (`lsp_definition`, `lsp_references`, `document_symbols`) and
-`read_buffer` work only on files open in an Athena editor tab; for any other file they answer
+`read_buffer` work only on files open in a Daedalus editor tab; for any other file they answer
 that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB message.
 
 | Tool | What it does |
 |---|---|
-| `list_projects` | Projects open in Athena; `current` marks the one this session runs in. |
+| `list_projects` | Projects open in Daedalus; `current` marks the one this session runs in. |
 | `get_active_file` | Focused editor's path, cursor, selection and unsaved state. |
 | `open_file` | Opens a project file in the editor, optionally at a line. |
 | `list_terminals` | Terminals (tabs and the bottom panel) with session id, title, cwd, running program and Claude state (`running`, `waiting_input` or `finished`). |
@@ -854,7 +879,7 @@ that Claude should `open_file` it first. Every answer is capped to fit one 1 MiB
 
 ### Hooks
 
-On launch Athena adds these hooks to the `settings.json` of every Claude Code config folder:
+On launch Daedalus adds these hooks to the `settings.json` of every Claude Code config folder:
 `~/.claude` and each `~/.claude-*` folder Claude Code has run from (the ones `CLAUDE_CONFIG_DIR`
 points at). They go after any of your own on the same events:
 
@@ -869,25 +894,25 @@ points at). They go after any of your own on the same events:
 - `PostToolUse` on `TodoWrite|ExitPlanMode`, which shows the session's todo progress ("3/7") on
   its terminal tab and its todos and plan in the Sessions list.
 
-Each runs `athena notify --event …` only inside a terminal Athena started (one with
-`ATHENA_PANE_ID` set) and only while Athena is installed, so Claude sessions elsewhere are not
-affected; their edits are not offered for review either. Before Athena first changes a settings
-file it keeps a copy beside it as `settings.json.athena-backup`. Your own hooks are kept, even
+Each runs `daedalus notify --event …` only inside a terminal Daedalus started (one with
+`DAEDALUS_PANE_ID` set; a shell the old daemon started has `ATHENA_PANE_ID`, which counts too) and only while Daedalus is installed, so Claude sessions elsewhere are not
+affected; their edits are not offered for review either. Before Daedalus first changes a settings
+file it keeps a copy beside it as `settings.json.daedalus-backup` (an existing `settings.json.athena-backup` counts as that copy). Your own hooks are kept, even
 when they share an entry with ours. A settings file whose shape is not what Claude Code expects is
-left untouched and Athena reports an error; a symlinked settings file stays a symlink and keeps
+left untouched and Daedalus reports an error; a symlinked settings file stays a symlink and keeps
 its permissions. Claude Code reads hooks when a session starts, so restart sessions that were
 already running.
 
-Set `"claude": { "hooks": false }` in Settings to remove Athena's hooks from every config folder.
+Set `"claude": { "hooks": false }` in Settings to remove Daedalus's hooks from every config folder.
 
 Athena 0.10 and earlier wrote hooks into each project's `.claude/settings.local.json` instead.
-Athena removes them from the projects open at launch, and **Remove Athena's old Claude Code hooks
+Daedalus removes them from the projects open at launch, and **Remove Daedalus's old Claude Code hooks
 from this project** in the command palette removes them from any other.
 
 ### Reviewing Claude's edits
 
 Before Claude's first edit to a file in a session, the `PreToolUse` hook copies the file into
-`~/Library/Application Support/athena/snapshots/<session>/` (or notes that the session is creating
+`~/Library/Application Support/daedalus/snapshots/<session>/` (or notes that the session is creating
 it). The hook always exits 0, so it never blocks an edit. After each edit, the `PostToolUse` hook
 tells the window, which reloads open diffs of that file. When no copy was kept for that session,
 the file's diff shows its unstaged changes instead.
@@ -900,34 +925,34 @@ labels that side "Index" and says why. A review tab whose copy no longer exists 
 after pruning) says no copy was kept.
 
 Snapshots older than 7 days are deleted, then the oldest sessions until the folder is under
-200 MB. `athena notify --edited <file>` reports an edit by hand.
+200 MB. `daedalus notify --edited <file>` reports an edit by hand.
 
 ### Claude Code as an IDE (off by default)
 
 **Toggle Claude Code integration** (command palette, or File > Toggle Claude Code Integration)
-lets Claude Code connect to Athena the way it connects to VS Code. It is off by default while the
+lets Claude Code connect to Daedalus the way it connects to VS Code. It is off by default while the
 protocol is undocumented and may change between Claude Code releases. When it is on:
 
-- Athena listens on a random loopback port and writes `~/.claude/ide/<port>.lock` (owner-only,
-  with a fresh token each launch). Claude Code finds Athena there; the lock lists the open
-  projects of every window and is removed when Athena quits or the setting is turned off.
+- Daedalus listens on a random loopback port and writes `~/.claude/ide/<port>.lock` (owner-only,
+  with a fresh token each launch). Claude Code finds Daedalus there; the lock lists the open
+  projects of every window and is removed when Daedalus quits or the setting is turned off.
 - New terminals get `CLAUDE_CODE_SSE_PORT`, so `claude` started in them connects by itself. In a
-  session that was already running, type `/ide`. Athena listens on the same port after a restart
+  session that was already running, type `/ide`. Daedalus listens on the same port after a restart
   when it is free, so older terminals keep finding it. A session daemon still running from
   Athena 0.4 does not pass the port on, so its new terminals get it only once that daemon is
-  restarted: quit Athena, run `athena mux stop` (which hangs up its shells) and start Athena
+  restarted: quit Daedalus, run `daedalus mux stop` (which hangs up its shells) and start Daedalus
   again. Until then `/ide` connects too.
 - When Claude asks to edit a file, the proposed change opens as "main.rs (Claude's Proposal)":
   the file on disk against Claude's version. **Accept** (`cmd-enter`) lets Claude Code write it;
   **Reject** (`cmd-backspace`) or closing the tab declines it. You can still answer in the
-  terminal instead; the tab then closes. Athena never writes the file itself. As far as
+  terminal instead; the tab then closes. Daedalus never writes the file itself. As far as
   Claude Code's own code shows, it asks this way only when it would otherwise ask for
   permission, so auto-accept modes skip it.
 - The editor selection goes with each prompt (Claude Code shows "N lines selected"), and
   `cmd-alt-k` (**Send selection to Claude**) asks which of the project's running Claude
   sessions (worktrees included), or a new one, should get `@file#L3-7` in its prompt, and focuses
   it. A session without a connected IDE gets it pasted instead, unless it is asking a question.
-- Claude Code reads diagnostics from Athena's language servers before and after each edit.
+- Claude Code reads diagnostics from Daedalus's language servers before and after each edit.
 
 Quitting with a proposal open answers it as rejected.
 
@@ -938,14 +963,14 @@ project's `.mcp.json` and lists that file in `.git/info/exclude`.
 
 ### Plan usage
 
-Clicking **Usage** in the title bar asks before turning the indicator on. Athena then reads the
+Clicking **Usage** in the title bar asks before turning the indicator on. Daedalus then reads the
 sign-in Claude Code keeps in the Keychain and asks api.anthropic.com for usage every 5 minutes;
 nothing is stored. It uses the same undocumented endpoint as Claude Code's `/usage`, so it may stop
 working after a Claude Code update.
 
 With more than one signed-in profile (`~/.claude-*` config folders), the title bar shows the
 active project's profile, named before the figures, and the popover marks it **this project**.
-Athena picks it from `claude.profiles` in settings.json, where the deepest matching folder wins
+Daedalus picks it from `claude.profiles` in settings.json, where the deepest matching folder wins
 and `"tlsc"` names `~/.claude-tlsc`:
 
 ```json
@@ -960,7 +985,7 @@ the listed folders also goes by its newest session. With neither, it shows the b
 
 Keys use GPUI's binding syntax as written in the source. `1…9` means each digit from 1 to 9.
 
-### App (`crates/athena/src/actions.rs`)
+### App (`crates/daedalus/src/actions.rs`)
 
 | Keys | Action |
 |---|---|
@@ -1014,7 +1039,7 @@ Keys use GPUI's binding syntax as written in the source. `1…9` means each digi
 | `cmd-alt-j` | Next Claude session needing you |
 | `ctrl-cmd-f` | Toggle full screen |
 | `cmd-m` | Minimize |
-| `cmd-h` | Hide Athena |
+| `cmd-h` | Hide Daedalus |
 | `ctrl-r` | Open recent folder (not in a terminal, where it is the shell's history search) |
 | `f5` | Start debugging, or continue when paused (not in a terminal, nor the other debug keys) |
 | `shift-f5` | Stop debugging |
@@ -1043,8 +1068,8 @@ selection, Format selection, the five multi-cursor commands and Toggle word wrap
 a terminal focused, Copy last command output and Scroll to previous / next command. In Go to
 file, `@` lists the file's symbols, `#` searches workspace symbols and `>` lists commands.
 
-The menu bar has Athena, File, Selection, View, Run and Window menus. Run holds the debugging
-commands and their keys. Athena holds Settings…
+The menu bar has Daedalus, File, Selection, View, Run and Window menus. Run holds the debugging
+commands and their keys. Daedalus holds Settings…
 (`cmd-,`). File has New Window, Open Project in New Window… and Close Window; Window has Move
 Project to New Window and Merge All Windows. Selection holds Select All, the line copy and move commands and the multi-cursor
 commands. View includes Word Wrap, Theme, the terminal panel commands (Terminal, New Terminal in
@@ -1056,10 +1081,10 @@ On a Mac keyboard the `f`-keys need Fn unless "Use F1, F2, etc. keys as standard
 on in System Settings. macOS also takes F11 (Show Desktop) and, on some setups, F10 for itself
 unless those shortcuts are turned off under Keyboard Shortcuts > Mission Control; the Run menu
 and the title bar's buttons step without them. A system or app shortcut set on the same keys (`cmd-.` is a common one) can
-take them before Athena sees them; Quick Fix… in the editor's right-click menu does the same as
+take them before Daedalus sees them; Quick Fix… in the editor's right-click menu does the same as
 `cmd-.`.
 
-### Editor (`crates/athena-editor/src/view.rs`, `lsp_ui.rs`, `smart_select.rs`)
+### Editor (`crates/daedalus-editor/src/view.rs`, `lsp_ui.rs`, `smart_select.rs`)
 
 | Keys | Action |
 |---|---|
@@ -1124,16 +1149,16 @@ chevron in the gutter folds or unfolds that block. Escape leaves a snippet's tab
 find bar's replace field, `enter` replaces the current match and `cmd-enter` replaces all. In the rename field, `enter` renames and
 `escape` or a click elsewhere cancels.
 
-Image viewer (`crates/athena-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd--` zoom in / out,
+Image viewer (`crates/daedalus-editor/src/image.rs`): `cmd-=` (or `cmd-+`) / `cmd--` zoom in / out,
 `cmd-0` fit to the pane, `cmd`-scroll zooms at the pointer. These take over from the text zoom
 keys while the image viewer has focus.
 
-Large-file view (`crates/athena-editor/src/large.rs`, files over 50 MB): `up` / `down` scroll a
+Large-file view (`crates/daedalus-editor/src/large.rs`, files over 50 MB): `up` / `down` scroll a
 line, `pageup` / `pagedown` a page, `cmd-up` / `cmd-down` go to the start / end and `cmd-f` finds;
 in its find field `enter` or `down` goes to the next match, `up` to the previous one and
 `escape` closes it.
 
-### Diff view (`crates/athena-editor/src/diff_view.rs`)
+### Diff view (`crates/daedalus-editor/src/diff_view.rs`)
 
 | Keys | Action |
 |---|---|
@@ -1146,7 +1171,7 @@ in its find field `enter` or `down` goes to the next match, `up` to the previous
 | `cmd-a` | Select everything |
 | `shift`-click | Extend the selection |
 
-### File tree, palette and Search tab (text field keys: `crates/athena-ui/src/input.rs`)
+### File tree, palette and Search tab (text field keys: `crates/daedalus-ui/src/input.rs`)
 
 | Keys | Action |
 |---|---|
@@ -1161,7 +1186,7 @@ in its find field `enter` or `down` goes to the next match, `up` to the previous
 | `enter`, `up` / `down` in the Git view's message field | New line, move between lines |
 | `cmd-a` in any text field | Select all |
 
-### Terminal (`crates/athena-term/src/view.rs`)
+### Terminal (`crates/daedalus-term/src/view.rs`)
 
 | Keys | Action |
 |---|---|
@@ -1182,11 +1207,11 @@ closes it.
 
 ### Your own shortcuts
 
-![The Keyboard Shortcuts tab with an entry Athena cannot use](docs/screenshots/v0.10/02-shortcuts.png)
+![The Keyboard Shortcuts tab with an entry Daedalus cannot use](docs/screenshots/v0.10/02-shortcuts.png)
 
 The **Keyboard Shortcuts** tab (`cmd-k cmd-s` outside a terminal, File > Keyboard Shortcuts, or
 **Open keyboard shortcuts** in the palette) lists every command with its keys, its `when` context
-and whether the binding is Athena's (Default) or yours (User). The search field matches command
+and whether the binding is Daedalus's (Default) or yours (User). The search field matches command
 names and ids, keys (as `cmd-k` or `⌘K`), contexts and the words default and user; Up and Down
 move through the rows. Double-click a row, or press Return on it, to record new keys: press up to
 two keystrokes (a third starts over), Return saves and Escape cancels; keys such as `cmd-w` are
@@ -1196,33 +1221,34 @@ Keybinding, Reset Keybinding (removes your entries for the command) and Copy Com
 are written to keymap.json as VS Code writes them, keeping its comments: a changed default gets a
 new entry plus a `-` entry removing the old keys. An edit finds its entry in the file as it is
 when written, so a hand edit in between is not overwritten; when the entry is gone the edit is
-refused with a message. Entries of keymap.json that Athena cannot use are listed above the table
+refused with a message. Entries of keymap.json that Daedalus cannot use are listed above the table
 with the reason and an Open keymap.json button.
 
 **Open keyboard shortcuts (JSON)** (palette, or the tab's button) opens
-`~/Library/Application Support/athena/keymap.json`, creating it with examples. It takes the same
-shape as VS Code's `keybindings.json`, and Athena applies it as soon as you save:
+`~/Library/Application Support/daedalus/keymap.json`, creating it with examples. It takes the same
+shape as VS Code's `keybindings.json`, and Daedalus applies it as soon as you save:
 
 ```jsonc
 [
-  // A new chord for an existing command (athena:: may be left out of Athena's own commands).
-  {"key": "cmd-k cmd-t", "command": "athena::NewTerminal"},
+  // A new chord for an existing command (daedalus:: may be left out of Daedalus's own commands).
+  {"key": "cmd-k cmd-t", "command": "daedalus::NewTerminal"},
   // VS Code's key spelling works too.
-  {"key": "cmd+shift+e", "command": "athena::RevealInTree"},
+  {"key": "cmd+shift+e", "command": "daedalus::RevealInTree"},
   // Only while an editor has focus.
-  {"key": "f5", "command": "athena::ShowProblems", "when": "Editor"},
+  {"key": "f5", "command": "daedalus::ShowProblems", "when": "Editor"},
   // A leading - removes one default binding (here cmd-d as Split right; the editor keeps
   // cmd-d for Add next occurrence).
-  {"key": "cmd-d", "command": "-athena::SplitRight"}
+  {"key": "cmd-d", "command": "-daedalus::SplitRight"}
 ]
 ```
 
-Command names are the action names in the source: `athena::…` (`crates/athena/src/actions.rs`),
+Command names are the action names in the source: `daedalus::…` (`crates/daedalus/src/actions.rs`;
+the old `athena::…` spelling still works in keymap.json),
 `editor::…`, `terminal::…` and so on. `when` takes the key contexts `Shell`, `Editor`,
 `Terminal`, `DiffView`, `ImageView`, `DocView`, `LargeFile` and `TextInput`, combined with `&&`, `||` and `!`.
-Your entries come after Athena's, so on the same key in the same context yours win, and an entry
-without `when` takes its key in every context: Athena's bindings of that key, including the
-editor's and terminal's, no longer apply. Comments and trailing commas are allowed. Entries Athena cannot use (an unknown command, a key it cannot
+Your entries come after Daedalus's, so on the same key in the same context yours win, and an entry
+without `when` takes its key in every context: Daedalus's bindings of that key, including the
+editor's and terminal's, no longer apply. Comments and trailing commas are allowed. Entries Daedalus cannot use (an unknown command, a key it cannot
 parse, a broken `when`) are listed in a toast, in `app.log`, as warnings on the entry in its
 editor and above the Keyboard Shortcuts table; the rest still apply.
 
@@ -1230,8 +1256,8 @@ editor and above the Keyboard Shortcuts table; the rest still apply.
 
 ![The Settings tab](docs/screenshots/v0.10/01-settings.png)
 
-The **Settings** tab (`cmd-,`, Athena > Settings…, or **Open settings** in the palette) lists
-every setting Athena reads, grouped as Editor, Workbench, Explorer, Git, Claude and Language
+The **Settings** tab (`cmd-,`, Daedalus > Settings…, or **Open settings** in the palette) lists
+every setting Daedalus reads, grouped as Editor, Workbench, Explorer, Git, Claude and Language
 Servers, each with its title, description, key and a control: a checkbox, a number field (written
 once you pause typing or press Return; a value it cannot take is explained under the field and
 not written), a
@@ -1239,7 +1265,7 @@ dropdown, or, for settings that hold structured values (`lsp`,
 `claude.profiles`, `editor.codeActionsOnSave`), a link to the JSON file. Search matches titles, descriptions, keys
 and VS Code's spellings.
 **User** edits your settings.json; **Project · name** edits the active project's
-`.athena/settings.json`, creating it on the first change, and leaves out app-wide settings (see
+`.daedalus/settings.json`, creating it on the first change, and leaves out app-wide settings (see
 [Project settings](#project-settings)), which a project file cannot hold. A setting the scope's
 file sets is marked **Modified** with a **Reset** that removes it from that file; "Also set for
 this project" or "Also set in User" says the other file sets it too. Changes go through the same
@@ -1248,9 +1274,9 @@ says why, changes nothing and offers to open it. Like any tab it needs an open p
 `cmd-,` shows a notice with the path of settings.json instead.
 
 **Open settings (JSON)** (palette, or the tab's **Open Settings (JSON)** button, which opens the
-scope's file) opens `~/Library/Application Support/athena/settings.json`, creating it with every
+scope's file) opens `~/Library/Application Support/daedalus/settings.json`, creating it with every
 setting commented out. Like VS Code's `settings.json` it allows comments and trailing commas, and
-Athena applies it as soon as you save:
+Daedalus applies it as soon as you save:
 
 ```jsonc
 {
@@ -1291,7 +1317,7 @@ trailing whitespace and inserting a final newline are off by default, as in VS C
 or an `.editorconfig` (which wins) turn them on. The palette and menu toggles (auto save, format on
 save, word wrap, inlay hints, minimap, theme, Claude Code integration) write only their own key into this
 file, changing that key's value where the parser reads it (the last one, if it is spelled twice)
-or adding it at the end of its object, so comments and layout stay. A file Athena cannot read
+or adding it at the end of its object, so comments and layout stay. A file Daedalus cannot read
 (a missing comma, a bare `tru`) is never rewritten: the toggle still takes effect, kept in
 `workspace.json`, and a toast says settings.json was not updated. A key left
 out falls back to the choice `workspace.json` already held, so nothing set before settings.json
@@ -1302,13 +1328,13 @@ object), and is sent again with `workspace/didChangeConfiguration` when the file
 Problems (an unknown key, a wrong type) are listed in a toast and in `app.log` while the rest
 applies; a file that is not valid JSON leaves the settings in force as they were.
 
-While settings.json, a project's `.athena/settings.json` or keymap.json is open in an editor,
-Athena checks it as you type and shows each problem beside the language servers' diagnostics: a
+While settings.json, a project's `.daedalus/settings.json` or keymap.json is open in an editor,
+Daedalus checks it as you type and shows each problem beside the language servers' diagnostics: a
 warning on the key or entry it is about, an error on the line where the JSON stops parsing. If
 VS Code's JSON server, `vscode-json-language-server`, is on your login shell's `PATH` (`npm
-install -g vscode-langservers-extracted`) when Athena or a new window starts, every JSON file
-opens in it, and it checks those three files against JSON schemas Athena generates from its
-settings and its commands. It is optional: Athena never installs it, does not mention it when it
+install -g vscode-langservers-extracted`) when Daedalus or a new window starts, every JSON file
+opens in it, and it checks those three files against JSON schemas Daedalus generates from its
+settings and its commands. It is optional: Daedalus never installs it, does not mention it when it
 is missing, and looks for it only in absolute `PATH` folders, so a project's own binary is never
 picked up.
 
@@ -1326,18 +1352,19 @@ and the rest, as the VS Code extension sends them).
 
 #### Project settings
 
-A project can keep its own settings in `.athena/settings.json` at its root, written like the global
+A project can keep its own settings in `.daedalus/settings.json` at its root, written like the global
 file; for that project's files they are laid over the global ones, key by key, and a `"[lang]"`
-block beats an `"editor"` setting from either file, as in VS Code. Athena also reads the keys it
+block beats an `"editor"` setting from either file, as in VS Code. Daedalus also reads the keys it
 knows from the project's `.vscode/settings.json`, so a repository set up for VS Code works as is:
 `editor.*` and `files.*` settings (`"editor.wordWrap": "on"` included), `"[lang]"` blocks,
 `editor.codeActionsOnSave`, `gopls`, `go.toolsEnvVars` (gopls's `env`), `typescript.tsdk` and the
 `typescript.*` / `javascript.*` preferences; anything else there, an extension's keys or a value
-Athena cannot use, is ignored silently. `.athena/settings.json` beats `.vscode/settings.json`.
+Daedalus cannot use, is ignored silently. `.daedalus/settings.json` beats `.vscode/settings.json`. A project that still has the old
+`.athena/settings.json` and no `.daedalus/settings.json` keeps using it.
 App-wide settings (`theme`, `window`, `git`, `explorer`, `ide_integration`, `claude`,
 `editor.font_size`)
 apply only in the global file; set in a project file they are reported and ignored. Both files
-apply as soon as they are saved in Athena, or when the next file of the project opens.
+apply as soon as they are saved in Daedalus, or when the next file of the project opens.
 
 Server settings can name programs, plugins, build flags and toolchains, so a project's `lsp`
 entries (and `gopls`, `go.toolsEnvVars`, `typescript.*` from `.vscode`) apply only once the
@@ -1370,14 +1397,14 @@ On wrapped lines each hint sits on its own row, and hints that do not fit their 
 
 #### Snippets
 
-Your own snippets live in `~/Library/Application Support/athena/snippets/`, in VS Code's format:
+Your own snippets live in `~/Library/Application Support/daedalus/snippets/`, in VS Code's format:
 `<language id>.json` (`go.json`, `typescript.json`, the ids of the `"[lang]"` blocks above) for one
 language, and any `*.code-snippets` file for every language, or for those its snippets name in
 `"scope": "go,typescript"`. Each snippet has a `prefix` and a `body` (a string or a list of lines)
 and may have a `description`; comments and trailing commas are allowed. **Snippets: configure
 snippets for this language** and **Snippets: configure global snippets** (palette) open the file,
 creating it with a commented example (the global one is `global.code-snippets`). Files are read
-again when they change; saving one in Athena reports a parse error, or applies it to open editors.
+again when they change; saving one in Daedalus reports a parse error, or applies it to open editors.
 
 Snippets join the suggestions after the language server's, one per prefix, with the body as their
 documentation, and expand with the usual tab stops. Languages without a server offer them as you
@@ -1394,20 +1421,20 @@ an unknown one keeps its default (`${NAME:default}`). Transforms follow VS Code'
 ## Command line
 
 ```text
-athena [<folder>]             open a folder in Athena (the window that has it, else the focused one), or start Athena with it
-athena --version
-athena mux status             list the daemon's sessions
-athena mux stop               stop the daemon; its shells are hung up
-athena notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan>
-athena notify --edited <file> [--session <id>]
-athena notify --title <t> [--body <b>]
-athena mcp-stdio              MCP server for Claude Code
+daedalus [<folder>]             open a folder in Daedalus (the window that has it, else the focused one), or start Daedalus with it
+daedalus --version
+daedalus mux status             list the daemon's sessions
+daedalus mux stop               stop the daemon; its shells are hung up
+daedalus notify --event <claude-stop|claude-needs-input|claude-running|claude-tool|claude-will-edit|claude-edited|claude-plan>
+daedalus notify --edited <file> [--session <id>]
+daedalus notify --title <t> [--body <b>]
+daedalus mcp-stdio              MCP server for Claude Code
 ```
 
 ## Files and logs
 
-Everything lives in `~/Library/Application Support/athena`: `workspace.json` (each window's
-projects, bounds and layout, the projects of windows closed while Athena ran with their tabs and
+Everything lives in `~/Library/Application Support/daedalus`: `workspace.json` (each window's
+projects, bounds and layout, the projects of windows closed while Daedalus ran with their tabs and
 shell sessions, each editor tab's cursor, scroll line, folds and wrap choice, recently closed folders, panel
 sizes, the text and interface zoom, the theme (`System`, `Light` or `Dark`), each project's
 panel terminals and its answer about running the project's code, and the
@@ -1418,19 +1445,19 @@ edits), `discarded/` (copies kept by Discard and Revert), `app.log` (the app's l
 `mux.log` (the session daemon's log). Both logs are created owner-only (mode 600); a log larger
 than 5 MB is renamed to `app.log.1` or `mux.log.1` at the next start, replacing the previous one.
 
-`ATHENA_LOG` sets the log level in `tracing` filter syntax (default `info`). The `athena` command
-hands off to Launch Services, which does not pass your shell's environment, so quit Athena and
+`DAEDALUS_LOG` sets the log level in `tracing` filter syntax (default `info`). The `daedalus` command
+hands off to Launch Services, which does not pass your shell's environment, so quit Daedalus and
 start it with the variable set:
 
 ```sh
-open -a Athena --env ATHENA_LOG=debug
-open -a Athena --env ATHENA_LOG=info,athena_lsp=debug     # debug for language server traffic only
+open -a Daedalus --env DAEDALUS_LOG=debug
+open -a Daedalus --env DAEDALUS_LOG=info,daedalus_lsp=debug     # debug for language server traffic only
 ```
 
-A session daemon that Athena starts inherits the level; one already running keeps its own. At
+A session daemon that Daedalus starts inherits the level; one already running keeps its own. At
 `debug`, language server requests and replies are logged.
 
-Check `athena mux status` first when a terminal does not attach, then `mux.log` and `app.log`.
+Check `daedalus mux status` first when a terminal does not attach, then `mux.log` and `app.log`.
 
 ## Build from source
 
@@ -1444,9 +1471,9 @@ Requirements:
 - Rust 1.98 or later (`rustup toolchain install 1.98`)
 
 ```sh
-cargo build --release --locked -p athena -p athena-mux
-./target/release/athena      # finds athena-mux next to itself
-./scripts/bundle.sh          # dist/Athena.app and dist/Athena-<version>-arm64.zip, ad-hoc signed
+cargo build --release --locked -p daedalus -p daedalus-mux
+./target/release/daedalus      # finds daedalus-mux next to itself
+./scripts/bundle.sh          # dist/Daedalus.app and dist/Daedalus-<version>-arm64.zip, ad-hoc signed
 ```
 
 macOS banners and the Dock badge only work from the bundled app; a `cargo run` build shows
@@ -1466,6 +1493,6 @@ cargo deny check
 Apache License 2.0. See [LICENSE](LICENSE).
 
 Bundled third-party assets keep their own licences: the Geist fonts (SIL OFL,
-`crates/athena-ui/assets/fonts/OFL.txt`), seti-ui icons (MIT,
-`crates/athena-ui/assets/icons/LICENSE-seti.md`) and Mermaid (MIT,
-`crates/athena-preview/assets/LICENSE-mermaid`).
+`crates/daedalus-ui/assets/fonts/OFL.txt`), seti-ui icons (MIT,
+`crates/daedalus-ui/assets/icons/LICENSE-seti.md`) and Mermaid (MIT,
+`crates/daedalus-preview/assets/LICENSE-mermaid`).
