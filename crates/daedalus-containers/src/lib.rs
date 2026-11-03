@@ -2,7 +2,7 @@
 //!
 //! bollard needs tokio, which the window does not run, so the client lives on its own thread with
 //! a small runtime and talks to the UI over channels. Only ping, list, events, stats and logs are
-//! ever called: Athena never starts, stops or removes anything.
+//! ever called: Daedalus never starts, stops or removes anything.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

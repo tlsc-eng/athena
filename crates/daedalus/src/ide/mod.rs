@@ -51,7 +51,7 @@ pub enum Verdict {
     /// The user accepted; Claude Code writes these contents itself.
     Accepted(String),
     Rejected,
-    /// Athena cannot show it; Claude Code then asks in the terminal.
+    /// Daedalus cannot show it; Claude Code then asks in the terminal.
     Unavailable,
 }
 
@@ -113,7 +113,7 @@ pub struct Position {
 pub struct Config {
     /// Where the lock file goes; Claude Code scans `~/.claude/ide`.
     pub lock_dir: PathBuf,
-    /// Where athena-mux reads the port for new shells; it also names the port to listen on again.
+    /// Where daedalus-mux reads the port for new shells; it also names the port to listen on again.
     pub env_file: Option<PathBuf>,
     pub folders: Vec<PathBuf>,
 }
@@ -465,7 +465,7 @@ pub fn file_url(path: &Path) -> String {
         .map_or_else(|()| format!("file://{}", path.display()), String::from)
 }
 
-/// The env file athena-mux reads, or `None` when the data directory cannot be made.
+/// The env file daedalus-mux reads, or `None` when the data directory cannot be made.
 pub fn env_file() -> Option<PathBuf> {
     daedalus_proto::ide_env_path().ok()
 }

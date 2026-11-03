@@ -172,7 +172,7 @@ impl Transport for MuxTransport {
     }
 }
 
-/// One shell session, owned by the `athena-mux` daemon and rendered as a pane.
+/// One shell session, owned by the `daedalus-mux` daemon and rendered as a pane.
 pub struct TerminalView {
     terminal: Option<Terminal>,
     error: Option<String>,
@@ -690,7 +690,7 @@ impl TerminalView {
     fn render_stale(&self, stale: Stale, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, body) = match stale {
             Stale::Offered => (
-                "This session ran on an older Athena",
+                "This session ran on an older Daedalus",
                 "Its shell still runs in the previous session daemon, which this version cannot \
                  attach to. Restarting ends those shells and starts new ones here.",
             ),

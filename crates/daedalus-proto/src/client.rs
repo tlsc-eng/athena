@@ -24,7 +24,7 @@ pub enum ConnectError {
     #[error("session daemon is not running")]
     NotRunning,
     #[error(
-        "session daemon speaks protocol {daemon} but this Athena needs {PROTO_VERSION}; \
+        "session daemon speaks protocol {daemon} but this Daedalus needs {PROTO_VERSION}; \
          run `daedalus mux stop` to restart it, which ends the shells it runs ({panes})"
     )]
     VersionMismatch { daemon: u32, panes: u32, pid: u32 },

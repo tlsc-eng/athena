@@ -403,7 +403,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             Box::new(actions::ChangeClaudeCommand),
         ),
         (
-            "Remove Athena's old Claude Code hooks from this project",
+            "Remove Daedalus's old Claude Code hooks from this project",
             Box::new(actions::DisableClaudeHooks),
         ),
         (
@@ -799,7 +799,7 @@ impl Shell {
         commands
             .into_iter()
             .filter(|(label, _)| {
-                !(label.starts_with("Remove Athena's old Claude Code hooks") && !hooks_any
+                !(label.starts_with("Remove Daedalus's old Claude Code hooks") && !hooks_any
                     || label.starts_with("Enable Playwright MCP") && (mcp_on || !playwright)
                     || label.starts_with("Disable Playwright MCP") && !mcp_on
                     || *label == "Run Playwright tests" && !playwright

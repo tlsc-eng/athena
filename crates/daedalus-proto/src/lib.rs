@@ -1,4 +1,4 @@
-//! Wire protocol between the Athena GUI and the `athena-mux` session daemon.
+//! Wire protocol between the Daedalus GUI and the `daedalus-mux` session daemon.
 
 mod client;
 mod codec;
@@ -24,7 +24,7 @@ pub const MAX_OUTPUT_CHUNK: usize = 64 * 1024;
 
 pub type PaneId = u64;
 
-/// Requests to the running Athena window over `app.sock`, from the command line and the MCP
+/// Requests to the running Daedalus window over `app.sock`, from the command line and the MCP
 /// bridge. Each gets one `AppReply`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum AppMsg {
@@ -50,7 +50,7 @@ pub enum AppMsg {
         text: String,
         newline: bool,
     },
-    /// Sent first by clients running in an Athena terminal (`ATHENA_PANE_ID`). The window only
+    /// Sent first by clients running in a Daedalus terminal (`ATHENA_PANE_ID`). The window only
     /// believes it if that pane's foreground program is an ancestor of the client.
     Identify {
         session: PaneId,
@@ -318,7 +318,7 @@ pub enum ClientMsg {
     Shutdown,
     /// Receive every `Notice`, including ones buffered while no window was connected.
     Subscribe,
-    /// Raise a notice, as `athena notify` does from Claude Code hooks.
+    /// Raise a notice, as `daedalus notify` does from Claude Code hooks.
     Notify {
         pane: Option<PaneId>,
         kind: NoticeKind,

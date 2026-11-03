@@ -1,7 +1,7 @@
-//! Claude Code hooks that tell Athena when a session starts working, stops, needs input, or
+//! Claude Code hooks that tell Daedalus when a session starts working, stops, needs input, or
 //! edits a file.
 //! Kept in each Claude Code config folder's `settings.json` unless `claude.hooks` is off; they do
-//! nothing in a terminal Athena did not start.
+//! nothing in a terminal Daedalus did not start.
 
 use std::fs;
 use std::io::Write;
@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
-/// Every Athena hook command contains this, which is how they are found again.
+/// Every Daedalus hook command contains this, which is how they are found again.
 const MARKER: &str = "athena\" notify --event";
 
-/// Where Athena 0.10 and earlier put its hooks, one project at a time.
+/// Where Daedalus 0.10 and earlier put its hooks, one project at a time.
 pub fn settings_path(root: &Path) -> PathBuf {
     root.join(".claude/settings.local.json")
 }
@@ -40,7 +40,7 @@ const ASKS: &str = "permission_prompt|elicitation_dialog|elicitation_url_dialog|
 
 fn hooks(athena: &Path) -> [(&'static str, Option<&'static str>, String); 12] {
     let athena = athena.display();
-    // Settings are shared with Claude sessions outside Athena, where the hook must stay silent.
+    // Settings are shared with Claude sessions outside Daedalus, where the hook must stay silent.
     let cmd = |event: &str| {
         format!(
             "[ -n \"$ATHENA_PANE_ID\" ] && [ -x \"{athena}\" ] && \"{athena}\" notify --event {event} || true"
@@ -77,7 +77,7 @@ fn is_ours(entry: &Value) -> bool {
         .is_some_and(|hs| hs.iter().any(is_ours_command))
 }
 
-/// Settings with Athena's hooks added (`enable`) or removed, leaving everything else as it was.
+/// Settings with Daedalus's hooks added (`enable`) or removed, leaving everything else as it was.
 /// Fails on settings whose shape it does not understand rather than guess.
 pub fn merge(mut settings: Value, athena: &Path, enable: bool) -> Result<Value> {
     let Value::Object(top) = &mut settings else {
@@ -130,7 +130,7 @@ pub fn merge(mut settings: Value, athena: &Path, enable: bool) -> Result<Value> 
     Ok(settings)
 }
 
-/// Whether the settings at `path` hold any Athena hook, so there is something to remove.
+/// Whether the settings at `path` hold any Daedalus hook, so there is something to remove.
 pub fn installed(path: &Path) -> bool {
     let Some(settings) = fs::read_to_string(path)
         .ok()
@@ -147,7 +147,7 @@ pub fn installed(path: &Path) -> bool {
     })
 }
 
-/// Whether the settings at `path` hold every current Athena hook; an install from an older Athena
+/// Whether the settings at `path` hold every current Daedalus hook; an install from an older Daedalus
 /// does not, so enabling again brings it up to date.
 pub fn enabled(path: &Path) -> bool {
     let Some(settings) = fs::read_to_string(path)
@@ -181,8 +181,8 @@ pub fn enabled(path: &Path) -> bool {
         })
 }
 
-/// Adds or removes Athena's hooks in the Claude settings at `path`, keeping a copy of the
-/// file as it was before Athena first changed it when `backup` is set.
+/// Adds or removes Daedalus's hooks in the Claude settings at `path`, keeping a copy of the
+/// file as it was before Daedalus first changed it when `backup` is set.
 pub fn write(path: &Path, athena: &Path, enable: bool, backup: bool) -> Result<()> {
     let path = path.to_path_buf();
     // Write through a symlinked settings file to its target instead of replacing the link.
@@ -231,8 +231,8 @@ pub fn write(path: &Path, athena: &Path, enable: bool, backup: bool) -> Result<(
     Ok(())
 }
 
-/// Brings Athena's hooks in every Claude Code config folder under `home` in line with `enable`,
-/// and takes the per-project hooks of older Athenas out of `projects`.
+/// Brings Daedalus's hooks in every Claude Code config folder under `home` in line with `enable`,
+/// and takes the per-project hooks of older versions out of `projects`.
 pub fn sync(home: &Path, athena: &Path, enable: bool, projects: &[PathBuf]) -> Result<()> {
     let mut failed = Vec::new();
     for path in global_settings(home) {
@@ -253,7 +253,7 @@ pub fn sync(home: &Path, athena: &Path, enable: bool, projects: &[PathBuf]) -> R
     Ok(())
 }
 
-/// The `athena` command hooks should run: the Homebrew link if installed, else this executable.
+/// The `daedalus` command hooks should run: the Homebrew link if installed, else this executable.
 pub fn athena_command() -> PathBuf {
     let brew = Path::new("/opt/homebrew/bin/athena");
     if brew.exists() {
@@ -367,7 +367,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A settings file as a user might have it: their own hooks on the same events Athena uses.
+    /// A settings file as a user might have it: their own hooks on the same events Daedalus uses.
     fn user_settings() -> Value {
         json!({
             "model": "opus",

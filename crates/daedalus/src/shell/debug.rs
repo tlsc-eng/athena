@@ -1456,7 +1456,7 @@ impl Shell {
         self.refresh_debug_marks(cx);
     }
 
-    /// Kills a running session's adapter and program as Athena quits.
+    /// Kills a running session's adapter and program as Daedalus quits.
     pub(super) fn debug_quit(&mut self) {
         if let Some(session) = self.debug.take_session() {
             session.client.kill_now();
@@ -1735,7 +1735,9 @@ fn test_launch(
     cx: &Context<Shell>,
 ) -> Result<Launch, String> {
     if path.extension().is_none_or(|e| e != "go") {
-        return Err("Athena debugs Go tests; Vitest and Jest tests run without a debugger.".into());
+        return Err(
+            "Daedalus debugs Go tests; Vitest and Jest tests run without a debugger.".into(),
+        );
     }
     let text = shell
         .editors_showing(&document_key(path), cx)
@@ -1766,7 +1768,7 @@ fn read_launch_json(root: &Path) -> Result<Vec<daedalus_dap::LaunchConfig>, Stri
 }
 
 const LAUNCH_TEMPLATE: &str = r#"{
-  // Athena debugs the first "go" configuration with F5.
+  // Daedalus debugs the first "go" configuration with F5.
   "version": "0.2.0",
   "configurations": [
     {

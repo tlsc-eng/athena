@@ -269,7 +269,7 @@ impl Shell {
     }
 
     /// This window's terminals that need you, whether or not a session is bound to them, so it is
-    /// cheap per frame; bindings are lost with Athena, and the shells outlive it.
+    /// cheap per frame; bindings are lost with Daedalus, and the shells outlive it.
     fn needing_you(&self, cx: &App) -> Vec<(PathBuf, ItemId, u8)> {
         let terminals = self
             .items

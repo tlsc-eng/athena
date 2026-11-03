@@ -97,7 +97,7 @@ const MAX_COMMANDS: usize = 4096;
 /// Put on the newest scrollback line while output is parsed, to count the lines that scroll past.
 pub const PROBE: char = '\u{10FFFE}';
 
-/// Whether a zero-width character is Athena's own rather than the program's.
+/// Whether a zero-width character is Daedalus's own rather than the program's.
 pub fn is_athenas(c: char) -> bool {
     c == PROBE || tag_id(c).is_some()
 }
@@ -107,7 +107,7 @@ pub fn tag(id: u32) -> char {
     char::from_u32(TAG_BASE + id % TAGS).unwrap_or('\u{100000}')
 }
 
-/// The command id a zero-width character tags, if it is one of Athena's tags.
+/// The command id a zero-width character tags, if it is one of Daedalus's tags.
 pub fn tag_id(c: char) -> Option<u32> {
     let c = c as u32;
     (TAG_BASE..TAG_BASE + TAGS)

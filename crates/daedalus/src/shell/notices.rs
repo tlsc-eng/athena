@@ -168,7 +168,7 @@ pub(super) fn covers(toasts: Bounds<Pixels>, pane: Rect) -> bool {
 
 /// Title and body for a notice, as shown in toasts, the bell popover and macOS banners.
 pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, String) {
-    let place = project.unwrap_or("Athena");
+    let place = project.unwrap_or("Daedalus");
     match kind {
         NoticeKind::CommandFinished {
             exit_code,
@@ -206,7 +206,7 @@ pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, Str
     }
 }
 
-/// Listens for the daemon's notices for as long as Athena runs, handing each to its window.
+/// Listens for the daemon's notices for as long as Daedalus runs, handing each to its window.
 pub(super) fn subscribe(cx: &mut App) -> Task<()> {
     cx.spawn(async move |cx| {
         loop {
@@ -523,7 +523,7 @@ impl Shell {
             .map(|n| n.to_string_lossy().into_owned())
     }
 
-    /// A notice raised by Athena itself (not a terminal), shown as a toast and kept in the list.
+    /// A notice raised by Daedalus itself (not a terminal), shown as a toast and kept in the list.
     pub(super) fn local_notice(&mut self, kind: NoticeKind, cx: &mut Context<Self>) {
         let id = self.notices.borrow_mut().next_id();
         self.notices.borrow_mut().push(Notification {

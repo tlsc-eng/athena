@@ -39,7 +39,7 @@ pub(super) struct SettingsState {
     /// What is wrong in settings.json, keymap.json or a project's settings file as edited, by
     /// canonical path, shown in its editor beside language servers' diagnostics.
     file_problems: HashMap<PathBuf, Vec<Diagnostic>>,
-    /// VS Code's JSON server was found, so JSON files open in it with Athena's schemas.
+    /// VS Code's JSON server was found, so JSON files open in it with Daedalus's schemas.
     json_server: bool,
     config_changes: Option<ConfigChanges>,
 }
@@ -71,7 +71,7 @@ impl ConfigChanges {
     }
 }
 
-/// Athena's own files, checked as they are edited.
+/// Daedalus's own files, checked as they are edited.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConfigFile {
     Settings,
@@ -691,7 +691,7 @@ impl Shell {
         }
     }
 
-    /// Checks Athena's own settings and keymap files as they are edited, before they are saved.
+    /// Checks Daedalus's own settings and keymap files as they are edited, before they are saved.
     fn watch_config_problems(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
         let Some(kind) = self.config_file(editor.read(cx).path()) else {
             return;
@@ -794,7 +794,7 @@ impl Shell {
         }})
     }
 
-    /// What Athena found wrong in its own file at `doc`, as edited.
+    /// What Daedalus found wrong in its own file at `doc`, as edited.
     pub(super) fn config_problems(&self, doc: &Path) -> impl Iterator<Item = &Diagnostic> {
         self.settings.file_problems.get(doc).into_iter().flatten()
     }

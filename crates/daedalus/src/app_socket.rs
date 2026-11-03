@@ -14,7 +14,7 @@ use crate::procinfo;
 /// How long a client waits for the window; long enough for a person to answer a confirm.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(75);
 
-/// One request from `athena` or the MCP bridge, answered on the window's thread.
+/// One request from `daedalus` or the MCP bridge, answered on the window's thread.
 pub struct Request {
     pub msg: AppMsg,
     /// The pane the client says it runs in, still to be checked against `lineage`.
@@ -78,7 +78,7 @@ fn serve(mut stream: UnixStream, tx: async_channel::Sender<Request>) {
         }
         let reply = reply_rx
             .recv_timeout(REPLY_TIMEOUT)
-            .unwrap_or_else(|_| AppReply::Error("Athena did not answer in time".into()));
+            .unwrap_or_else(|_| AppReply::Error("Daedalus did not answer in time".into()));
         if send_reply(&mut stream, reply).is_err() {
             return;
         }

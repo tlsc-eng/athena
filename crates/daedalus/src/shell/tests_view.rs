@@ -516,7 +516,7 @@ impl Shell {
             Some((planned, root)) => self.start_tests(root, vec![planned], cx),
             None => self.transient_notice(
                 "No tests in this file",
-                "Athena runs Go tests and Vitest or Jest test files.",
+                "Daedalus runs Go tests and Vitest or Jest test files.",
                 cx,
             ),
         }
@@ -530,7 +530,7 @@ impl Shell {
         if planned.is_empty() {
             return self.transient_notice(
                 "No tests found",
-                "Athena runs go test where go.mod is, and Vitest or Jest from package.json, at \
+                "Daedalus runs go test where go.mod is, and Vitest or Jest from package.json, at \
                  the project root.",
                 cx,
             );
@@ -1248,7 +1248,7 @@ impl Shell {
         };
         if planned.is_empty() {
             return Err(
-                "No tests found there. Athena runs go test where go.mod is, and Vitest \
+                "No tests found there. Daedalus runs go test where go.mod is, and Vitest \
                         or Jest from package.json."
                     .into(),
             );

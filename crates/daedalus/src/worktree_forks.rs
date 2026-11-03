@@ -1,4 +1,4 @@
-//! The commit each Claude worktree branched from, kept beside Athena's other per-app state so a
+//! The commit each Claude worktree branched from, kept beside Daedalus's other per-app state so a
 //! later "bring changes back" can squash exactly what the worktree added.
 
 use std::fs;
@@ -61,7 +61,7 @@ pub fn create(
     git::add_worktree(main, path, &NewWorktree::Create(branch.to_string()))?;
     let saved = match store {
         Some(store) => record(store, main, path, branch),
-        None => Err(anyhow::anyhow!("Athena's data folder is not available")),
+        None => Err(anyhow::anyhow!("Daedalus's data folder is not available")),
     };
     Ok(saved.err())
 }
@@ -94,7 +94,7 @@ pub fn remove(store: Option<&Path>, repo: &Path, worktree: &Path, force: bool) -
     Ok(())
 }
 
-/// Where the worktree at `worktree` branched from; `None` for one Athena did not start from the
+/// Where the worktree at `worktree` branched from; `None` for one Daedalus did not start from the
 /// main checkout.
 pub fn worktree_fork(worktree: &Path) -> Option<Fork> {
     fork_in(&store().ok()?, worktree)

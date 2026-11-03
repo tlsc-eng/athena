@@ -2171,7 +2171,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// Picks up edits made outside Athena, e.g. after the window regains focus.
+    /// Picks up edits made outside Daedalus, e.g. after the window regains focus.
     pub(super) fn reload_changed_files(&mut self, cx: &mut Context<Self>) {
         for view in self.items.values() {
             match view {

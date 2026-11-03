@@ -522,7 +522,7 @@ fn same_user(stream: &UnixStream) -> bool {
     ok && uid == unsafe { libc::geteuid() }
 }
 
-/// Notices from `athena notify` come from scripts; keep their text printable and short too.
+/// Notices from `daedalus notify` come from scripts; keep their text printable and short too.
 fn sanitize(kind: NoticeKind) -> NoticeKind {
     match kind {
         NoticeKind::ClaudeNeedsInput { message } => NoticeKind::ClaudeNeedsInput {

@@ -30,7 +30,7 @@ pub enum Direction {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ItemKind {
-    /// `session` is the athena-mux pane id once the shell exists.
+    /// `session` is the daedalus-mux pane id once the shell exists.
     Terminal {
         session: Option<u64>,
     },

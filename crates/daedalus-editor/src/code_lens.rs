@@ -18,7 +18,7 @@ pub struct Lens {
     /// The zero-based line it belongs to.
     pub line: u32,
     pub title: String,
-    /// What a click sends back in [`LspRequest::RunCodeLens`]; `None` for a lens Athena cannot
+    /// What a click sends back in [`LspRequest::RunCodeLens`]; `None` for a lens Daedalus cannot
     /// run, which is shown but not clickable.
     pub id: Option<usize>,
 }

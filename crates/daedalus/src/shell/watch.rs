@@ -14,7 +14,7 @@ const INVALIDATE_ABOVE: usize = 256;
 /// One file watcher per open project, feeding debounced batches back to the shell.
 pub(super) struct WatchState {
     watchers: HashMap<PathBuf, FolderWatcher>,
-    /// Roots whose watch could not start, not retried until Athena restarts.
+    /// Roots whose watch could not start, not retried until Daedalus restarts.
     failed: Vec<PathBuf>,
     changes: async_channel::Sender<(PathBuf, Vec<PathBuf>)>,
     /// One per repository, by its common git folder, for branch and worktree changes.
@@ -170,7 +170,7 @@ impl Shell {
         common.is_some_and(|c| self.watch.git_watchers.contains_key(c))
     }
 
-    /// Something outside Athena (or a save) changed files under `root`.
+    /// Something outside Daedalus (or a save) changed files under `root`.
     fn files_changed(&mut self, root: &Path, paths: &[PathBuf], cx: &mut Context<Self>) {
         let everything = paths.iter().any(|p| p == root);
         if everything || paths.len() > INVALIDATE_ABOVE {

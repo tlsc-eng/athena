@@ -444,7 +444,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(pane) = caller {
-            // A relative path would resolve against Athena's own folder when located.
+            // A relative path would resolve against Daedalus's own folder when located.
             let cwd = cwd.is_absolute().then_some(cwd);
             if let Some(cwd) = cwd {
                 self.review.sessions.cwds.insert(session.clone(), cwd);
@@ -671,7 +671,7 @@ impl Shell {
                 file_label(&path)
             ),
             Some(
-                "Athena keeps a copy of the current file in Application Support/athena/discarded \
+                "Daedalus keeps a copy of the current file in Application Support/athena/discarded \
                  for 30 days.",
             ),
             &confirm_buttons("Cancel", "Revert"),

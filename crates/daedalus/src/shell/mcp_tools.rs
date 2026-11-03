@@ -155,7 +155,7 @@ impl Shell {
             .next()
             .ok_or_else(|| {
                 format!(
-                    "{} is not open in Athena; open it with open_file first so its language server \
+                    "{} is not open in Daedalus; open it with open_file first so its language server \
                      loads it",
                     path.display()
                 )
@@ -309,7 +309,7 @@ impl Shell {
                 Some(root) => AppReply::Debug(Box::new(self.debug_state_for_claude(&root))),
                 None => AppReply::Error("no project is open".into()),
             },
-            _ => AppReply::Error("Athena could not answer that request".into()),
+            _ => AppReply::Error("Daedalus could not answer that request".into()),
         }
     }
 
@@ -343,7 +343,7 @@ impl Shell {
 
 fn no_server(doc: &Path) -> String {
     format!(
-        "no language server has {} open; Athena runs gopls and typescript-language-server",
+        "no language server has {} open; Daedalus runs gopls and typescript-language-server",
         doc.display()
     )
 }

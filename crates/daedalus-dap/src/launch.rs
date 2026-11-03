@@ -160,7 +160,7 @@ impl LaunchConfig {
     pub fn resolve(&self, ctx: &Context) -> Result<Launch, String> {
         if self.request != "launch" {
             return Err(format!(
-                "{}: Athena launches programs and tests; attaching (\"request\": \"{}\") is not \
+                "{}: Daedalus launches programs and tests; attaching (\"request\": \"{}\") is not \
                  supported yet",
                 self.name, self.request
             ));
@@ -267,7 +267,7 @@ fn is_go_test_file(path: &Path) -> bool {
         .is_some_and(|n| n.to_string_lossy().ends_with("_test.go"))
 }
 
-/// Replaces VS Code's `${…}` variables; one Athena does not know is an error, not left in place.
+/// Replaces VS Code's `${…}` variables; one Daedalus does not know is an error, not left in place.
 pub fn substitute(text: &str, ctx: &Context) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -311,7 +311,7 @@ fn variable(name: &str, ctx: &Context) -> Result<String, String> {
         "relativeFile" => relative(file()?),
         "relativeFileDirname" => relative(file()?.parent().unwrap_or(ctx.workspace)),
         "pathSeparator" => "/".into(),
-        other => return Err(format!("${{{other}}} is not a variable Athena knows")),
+        other => return Err(format!("${{{other}}} is not a variable Daedalus knows")),
     })
 }
 

@@ -171,7 +171,7 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Local links open in Athena: they become `athena-doc:` URLs the page hands back to the app.
+/// Local links open in Daedalus: they become `athena-doc:` URLs the page hands back to the app.
 fn link_target(url: &str, base: &Path) -> Option<String> {
     if url.is_empty() || url.starts_with('#') || url.starts_with("//") || has_scheme(url) {
         return None;

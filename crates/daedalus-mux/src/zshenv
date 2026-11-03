@@ -1,4 +1,4 @@
-# Athena shell integration. Marks prompts and commands with OSC 133 so Athena can tell when a long
+# Daedalus shell integration. Marks prompts and commands with OSC 133 so Daedalus can tell when a long
 # command finishes. Set ATHENA_SHELL_INTEGRATION=0 in the environment to turn it off.
 if [[ -n "${ATHENA_ORIG_ZDOTDIR+x}" ]]; then
   ZDOTDIR="$ATHENA_ORIG_ZDOTDIR"

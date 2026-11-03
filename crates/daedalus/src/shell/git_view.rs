@@ -696,7 +696,7 @@ impl Shell {
                 };
                 let message = format!("The branch “{branch}” has no upstream branch.");
                 let detail = format!(
-                    "Publish it to {remote}? Athena runs git push -u {remote} {branch}, so later \
+                    "Publish it to {remote}? Daedalus runs git push -u {remote} {branch}, so later \
                      pushes and pulls go there."
                 );
                 let answer = window.prompt(
@@ -1435,7 +1435,7 @@ impl Shell {
             (
                 format!("Discard changes in {what}?"),
                 "The file goes back to its staged or committed version. Git cannot undo this; \
-                 Athena keeps a copy of your version in Application Support/athena/discarded \
+                 Daedalus keeps a copy of your version in Application Support/athena/discarded \
                  for 30 days."
                     .to_string(),
                 "Discard Changes",

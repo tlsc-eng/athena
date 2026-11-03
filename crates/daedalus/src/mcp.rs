@@ -1,4 +1,4 @@
-//! `athena mcp-stdio`: an MCP server for Claude Code that answers from the running Athena window.
+//! `daedalus mcp-stdio`: an MCP server for Claude Code that answers from the running Daedalus window.
 //! It holds no state of its own; every tool asks the window over `app.sock`, which works out
 //! from the process tree which pane Claude is running in.
 
@@ -65,7 +65,7 @@ struct ProjectFilesArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PositionArgs {
-    /// Absolute path of a file open in Athena's editor.
+    /// Absolute path of a file open in Daedalus's editor.
     path: String,
     /// 1-based line.
     line: u32,
@@ -88,13 +88,13 @@ impl PositionArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PathArgs {
-    /// Absolute path of a file open in Athena's editor.
+    /// Absolute path of a file open in Daedalus's editor.
     path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ReadBufferArgs {
-    /// Absolute path of a file open in Athena's editor.
+    /// Absolute path of a file open in Daedalus's editor.
     path: String,
     /// Return at most this many bytes of the text (default 262144, at most 524288).
     max_bytes: Option<u32>,
@@ -117,7 +117,7 @@ async fn ask(msg: AppMsg) -> Result<AppReply, ErrorData> {
     let reply = tokio::task::spawn_blocking(move || -> Result<AppReply, String> {
         let path = daedalus_proto::app_socket_path().map_err(|e| e.to_string())?;
         let mut stream =
-            UnixStream::connect(path).map_err(|_| "Athena is not running".to_string())?;
+            UnixStream::connect(path).map_err(|_| "Daedalus is not running".to_string())?;
         if let Some(session) = std::env::var("ATHENA_PANE_ID")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -129,7 +129,7 @@ async fn ask(msg: AppMsg) -> Result<AppReply, ErrorData> {
         daedalus_proto::write_frame(&mut stream, &msg).map_err(|e| e.to_string())?;
         daedalus_proto::read_frame::<_, AppReply>(&mut stream)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Athena closed the connection".to_string())
+            .ok_or_else(|| "Daedalus closed the connection".to_string())
     })
     .await
     .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
@@ -151,7 +151,7 @@ fn text(s: impl Into<String>) -> Result<CallToolResult, ErrorData> {
 }
 
 fn unexpected() -> ErrorData {
-    ErrorData::internal_error("unexpected reply from Athena", None)
+    ErrorData::internal_error("unexpected reply from Daedalus", None)
 }
 
 /// The open project `asked` names (root path or name), else the caller's, else the active one.
@@ -216,7 +216,7 @@ fn git_status(root: &Path) -> Result<serde_json::Value, String> {
 #[tool_router]
 impl Bridge {
     #[tool(
-        description = "List the projects open in Athena. `current` marks the project this Claude session runs in."
+        description = "List the projects open in Daedalus. `current` marks the project this Claude session runs in."
     )]
     async fn list_projects(&self) -> Result<CallToolResult, ErrorData> {
         let AppReply::Projects(projects) = ask(AppMsg::ListProjects).await? else {
@@ -241,18 +241,18 @@ impl Bridge {
     }
 
     #[tool(
-        description = "The file open in Athena's focused editor: path, 1-based cursor line and column, selected text and whether it has unsaved changes."
+        description = "The file open in Daedalus's focused editor: path, 1-based cursor line and column, selected text and whether it has unsaved changes."
     )]
     async fn get_active_file(&self) -> Result<CallToolResult, ErrorData> {
         match ask(AppMsg::ActiveFile).await? {
             AppReply::ActiveFile(Some(file)) => json(&file),
-            AppReply::ActiveFile(None) => text("No file is focused in Athena."),
+            AppReply::ActiveFile(None) => text("No file is focused in Daedalus."),
             _ => Err(unexpected()),
         }
     }
 
     #[tool(
-        description = "Open a file from one of the open projects in Athena's editor, optionally at a 1-based line."
+        description = "Open a file from one of the open projects in Daedalus's editor, optionally at a 1-based line."
     )]
     async fn open_file(
         &self,
@@ -267,7 +267,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Show the user a file's uncommitted changes in Athena's diff viewer (unstaged by default), where they can stage or revert each change."
+        description = "Show the user a file's uncommitted changes in Daedalus's diff viewer (unstaged by default), where they can stage or revert each change."
     )]
     async fn open_diff(
         &self,
@@ -292,7 +292,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Read the most recent output of a terminal open in Athena, as plain text."
+        description = "Read the most recent output of a terminal open in Daedalus, as plain text."
     )]
     async fn read_terminal(
         &self,
@@ -311,7 +311,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Type a command into one of the user's terminals. Athena shows the user the exact text and runs it only if they approve within 60 seconds."
+        description = "Type a command into one of the user's terminals. Daedalus shows the user the exact text and runs it only if they approve within 60 seconds."
     )]
     async fn run_in_terminal(
         &self,
@@ -341,7 +341,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Errors and warnings from Athena's language servers (gopls, typescript-language-server). Covers files open in Athena's editor and, for Go, the rest of their packages. Lines are 1-based; columns count UTF-16 units."
+        description = "Errors and warnings from Daedalus's language servers (gopls, typescript-language-server). Covers files open in Daedalus's editor and, for Go, the rest of their packages. Lines are 1-based; columns count UTF-16 units."
     )]
     async fn get_diagnostics(
         &self,
@@ -358,7 +358,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Where the symbol at a position is defined, from the language server that has the file open in Athena (unsaved edits included). Name the position by 1-based line plus the symbol's text on that line, or a 1-based UTF-16 column. Returns up to 200 locations with 1-based lines and columns and the source line."
+        description = "Where the symbol at a position is defined, from the language server that has the file open in Daedalus (unsaved edits included). Name the position by 1-based line plus the symbol's text on that line, or a 1-based UTF-16 column. Returns up to 200 locations with 1-based lines and columns and the source line."
     )]
     async fn lsp_definition(
         &self,
@@ -375,7 +375,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Every reference to the symbol at a position, from the language server that has the file open in Athena (unsaved edits included). Same position arguments as lsp_definition; returns up to 200 locations."
+        description = "Every reference to the symbol at a position, from the language server that has the file open in Daedalus (unsaved edits included). Same position arguments as lsp_definition; returns up to 200 locations."
     )]
     async fn lsp_references(
         &self,
@@ -392,7 +392,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "The symbols (functions, types, methods, fields…) of a file open in Athena, as its language server sees the unsaved text: name, kind, container and the 1-based lines each spans. At most 2000."
+        description = "The symbols (functions, types, methods, fields…) of a file open in Daedalus, as its language server sees the unsaved text: name, kind, container and the 1-based lines each spans. At most 2000."
     )]
     async fn document_symbols(
         &self,
@@ -408,7 +408,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Files open in Athena's editor tabs across all projects: path, project, whether it has unsaved changes (`dirty`) and whether it is the focused tab."
+        description = "Files open in Daedalus's editor tabs across all projects: path, project, whether it has unsaved changes (`dirty`) and whether it is the focused tab."
     )]
     async fn get_open_editors(&self) -> Result<CallToolResult, ErrorData> {
         let AppReply::Editors(list) = ask(AppMsg::OpenEditors).await? else {
@@ -418,7 +418,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "The text of a file open in Athena's editor, including changes not saved to disk yet. Cut off after max_bytes; `total_bytes` gives the full size."
+        description = "The text of a file open in Daedalus's editor, including changes not saved to disk yet. Cut off after max_bytes; `total_bytes` gives the full size."
     )]
     async fn read_buffer(
         &self,
@@ -435,7 +435,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Start tests in Athena's Tests panel for this session's project: go test where go.mod is, Vitest or Jest from package.json (only once the user has allowed the project's code). `path` must lie in this session's project. Returns at once; poll get_test_results until `running` is false."
+        description = "Start tests in Daedalus's Tests panel for this session's project: go test where go.mod is, Vitest or Jest from package.json (only once the user has allowed the project's code). `path` must lie in this session's project. Returns at once; poll get_test_results until `running` is false."
     )]
     async fn run_tests(
         &self,
@@ -452,7 +452,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Results of the tests run in Athena for this session's project, later runs folded into earlier ones: whether a run is still going, counts, and each failed test with its output (shortened)."
+        description = "Results of the tests run in Daedalus for this session's project, later runs folded into earlier ones: whether a run is still going, counts, and each failed test with its output (shortened)."
     )]
     async fn get_test_results(&self) -> Result<CallToolResult, ErrorData> {
         let AppReply::Tests(results) = ask(AppMsg::TestResults).await? else {
@@ -462,7 +462,7 @@ impl Bridge {
     }
 
     #[tool(
-        description = "Read-only state of the debugger in Athena for this session's project: whether a Go program is being debugged (status not_debugging, starting, running or paused) and, while paused, why it stopped, where (file and 1-based line of the selected frame), the call stack (up to 20 frames) and that frame's local variables (up to 50, values shortened to 200 characters). Use it to help the user while their program is paused at a breakpoint."
+        description = "Read-only state of the debugger in Daedalus for this session's project: whether a Go program is being debugged (status not_debugging, starting, running or paused) and, while paused, why it stopped, where (file and 1-based line of the selected frame), the call stack (up to 20 frames) and that frame's local variables (up to 50, values shortened to 200 characters). Use it to help the user while their program is paused at a breakpoint."
     )]
     async fn debug_state(&self) -> Result<CallToolResult, ErrorData> {
         let AppReply::Debug(state) = ask(AppMsg::DebugState).await? else {
@@ -491,7 +491,7 @@ impl Bridge {
 impl ServerHandler for Bridge {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Athena is the user's editor and terminal multiplexer. Use these tools to see which file \
+            "Daedalus is the user's editor and terminal multiplexer. Use these tools to see which file \
              they have open, open files for them, and read the output of their other terminals.",
         )
     }

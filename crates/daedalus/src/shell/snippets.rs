@@ -172,7 +172,7 @@ struct Variables {
 }
 
 impl Variables {
-    /// The value of the variable `name`; `None` for one Athena does not know, which the snippet
+    /// The value of the variable `name`; `None` for one Daedalus does not know, which the snippet
     /// then shows as its default text, as VS Code does for an unset one.
     fn get(&self, name: &str) -> Option<String> {
         let file_name = || {

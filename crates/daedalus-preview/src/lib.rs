@@ -94,7 +94,7 @@ impl PreviewView {
                     Some(url) => this.navigate(url, cx),
                     None => {
                         this.error = Some(format!(
-                            "Athena previews http and https pages only, not {text}."
+                            "Daedalus previews http and https pages only, not {text}."
                         ));
                         cx.notify();
                     }

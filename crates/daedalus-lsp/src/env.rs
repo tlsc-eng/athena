@@ -74,7 +74,7 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
 }
 
 fn find_in(path: &str, name: &str) -> Option<PathBuf> {
-    // A relative entry resolves against wherever Athena happens to run, often a project.
+    // A relative entry resolves against wherever Daedalus happens to run, often a project.
     std::env::split_paths(path)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(name))
@@ -123,7 +123,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(
             found, None,
-            "a folder relative to wherever Athena started is skipped"
+            "a folder relative to wherever Daedalus started is skipped"
         );
         assert_eq!(absolute, Some(tool));
     }

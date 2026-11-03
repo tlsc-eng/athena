@@ -21,7 +21,7 @@ struct Contents<'a> {
     auth_token: &'a str,
 }
 
-/// `<port>.lock`, which tells Claude Code where Athena listens and which folders it has open.
+/// `<port>.lock`, which tells Claude Code where Daedalus listens and which folders it has open.
 pub struct Lock {
     path: PathBuf,
     token: String,
@@ -47,7 +47,7 @@ impl Lock {
         let contents = Contents {
             pid: std::process::id(),
             workspace_folders: folders,
-            ide_name: "Athena",
+            ide_name: "Daedalus",
             transport: "ws",
             running_in_windows: false,
             auth_token: &self.token,
@@ -100,7 +100,7 @@ pub fn tokens_match(given: &[u8], expected: &[u8]) -> bool {
     diff == 0
 }
 
-/// Publishes the port for athena-mux to give new shells.
+/// Publishes the port for daedalus-mux to give new shells.
 pub fn write_env(path: &Path, port: u16) -> io::Result<()> {
     let text = format!("CLAUDE_CODE_SSE_PORT={port}\nENABLE_IDE_INTEGRATION=true\n");
     write_private(path, text.as_bytes())
@@ -139,7 +139,7 @@ mod tests {
         };
         let json = read();
         assert_eq!(json["pid"], std::process::id());
-        assert_eq!(json["ideName"], "Athena");
+        assert_eq!(json["ideName"], "Daedalus");
         assert_eq!(json["transport"], "ws");
         assert_eq!(json["runningInWindows"], false);
         assert_eq!(json["authToken"], "abc");

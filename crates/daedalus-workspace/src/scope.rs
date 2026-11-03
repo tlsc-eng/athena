@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-/// Names Claude may not read or open through Athena, even inside a project.
+/// Names Claude may not read or open through Daedalus, even inside a project.
 fn denied_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(

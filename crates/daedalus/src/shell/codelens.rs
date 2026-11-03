@@ -22,7 +22,7 @@ fn keep(kept: &mut Vec<LensAnswer>, request: u64, client: &Rc<Client>, lenses: V
     }
 }
 
-/// Whether Athena can run a lens: the server runs its command, or it lists references.
+/// Whether Daedalus can run a lens: the server runs its command, or it lists references.
 fn runnable(client: &Client, lens: &CodeLens) -> bool {
     !lens.locations().is_empty()
         || lens

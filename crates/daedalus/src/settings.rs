@@ -44,7 +44,7 @@ pub struct Settings {
     pub zoom_level: Option<i32>,
     /// VS Code ESLint's `eslint.fixOnSave`-style switch: Cmd+S applies ESLint's fixes first.
     pub eslint_fix_on_save: Option<bool>,
-    /// `claude.hooks`: Athena's hooks in every Claude Code config folder; on unless turned off.
+    /// `claude.hooks`: Daedalus's hooks in every Claude Code config folder; on unless turned off.
     pub claude_hooks: Option<bool>,
     /// `claude.profiles`: folder prefix (`/` or `~/`) to config folder name, such as `claude-tlsc`.
     pub claude_profiles: Vec<(String, String)>,
@@ -136,7 +136,7 @@ impl EditorSettings {
                 self.minimap = Some(flag.ok_or("must be true or false")?);
             }
             "code_lens" => self.code_lens = Some(flag()?),
-            // VS Code's "configuredByTheme" is on: every Athena theme colours semantic tokens.
+            // VS Code's "configuredByTheme" is on: every Daedalus theme colours semantic tokens.
             "semantic_highlighting" => {
                 self.semantic_highlighting = Some(match value.as_str() {
                     Some("configuredByTheme") => true,
@@ -202,7 +202,7 @@ fn editor_key(key: &str) -> &str {
     }
 }
 
-/// The `editor.codeActionsOnSave` kinds Athena runs: organize imports and ESLint's fix-all.
+/// The `editor.codeActionsOnSave` kinds Daedalus runs: organize imports and ESLint's fix-all.
 /// VS Code takes a list of kinds, or an object of kinds to `true`, `"explicit"`, `"always"`
 /// or `false`/`"never"`; Cmd+S is an explicit save, so all but the off values turn a kind on.
 fn code_actions_on_save(value: &Value) -> Result<(bool, bool), String> {
@@ -499,10 +499,10 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
     Ok((s, problems))
 }
 
-/// The settings Athena understands in a project's `.vscode/settings.json`: editor and `[lang]`
+/// The settings Daedalus understands in a project's `.vscode/settings.json`: editor and `[lang]`
 /// keys, `editor.codeActionsOnSave`, `gopls`, `go.toolsEnvVars` (gopls's `env`),
 /// `typescript.tsdk` and the `typescript.*` / `javascript.*` preferences typescript-language-server
-/// reads. Everything else, and any value Athena cannot use, is ignored, as the file is shared
+/// reads. Everything else, and any value Daedalus cannot use, is ignored, as the file is shared
 /// with VS Code and its extensions.
 pub fn parse_vscode(text: &str, root: &Path) -> Settings {
     let mut settings = Settings::default();
@@ -2425,7 +2425,7 @@ pub(crate) mod tests {
         assert_eq!(s.editor.insert_final_newline, Some(true));
         assert_eq!(
             s.editor.tab_size, None,
-            "a value Athena cannot use is skipped"
+            "a value Daedalus cannot use is skipped"
         );
         assert_eq!(s.languages["typescriptreact"].tab_size, Some(2));
         assert_eq!(s.editor.organize_imports_on_save, Some(true));

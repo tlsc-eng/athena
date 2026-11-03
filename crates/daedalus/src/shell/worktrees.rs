@@ -100,7 +100,7 @@ fn claude_branch(task: &str, stamp: &str, exists: impl Fn(&str) -> bool) -> Stri
     name
 }
 
-/// Local time as `yyyymmdd-hhmm`; Athena has no date library, and libc is already a dependency.
+/// Local time as `yyyymmdd-hhmm`; Daedalus has no date library, and libc is already a dependency.
 pub(super) fn local_stamp() -> String {
     // SAFETY: `localtime_r` only writes into the zeroed `tm` it is given.
     let tm = unsafe {

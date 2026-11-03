@@ -1,4 +1,4 @@
-//! Tests for Athena: which runner a folder uses, the command that runs some of its tests, and
+//! Tests for Daedalus: which runner a folder uses, the command that runs some of its tests, and
 //! what `go test -json`, Vitest's and Jest's JSON reporters say happened.
 
 mod go;
