@@ -65,7 +65,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1"}
 ```
 
-`snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. See `design/protocol/snapshot.json` for a full example with every optional field set.
+`snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
 
 ```json
 {"type":"snapshot","seq":7,"projects":[{"root":"/Users/jason/code/daedalus","name":"daedalus","window":1}],"sessions":[],"terminals":[{"pane":124,"project":"/Users/jason/code/daedalus","title":"zsh","rows":24,"cols":80}]}

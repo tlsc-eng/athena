@@ -42,8 +42,8 @@
       "project": "/Users/jason/code/daedalus",
       "title": "claude",
       "program": "claude",
-      "cwd": "/Users/jason/code/daedalus",
-      "claude": "running",
+      "cwd": "/Users/jason/code/daedalus/.claude/worktrees/bridge",
+      "claude": "needs_input",
       "rows": 40,
       "cols": 120
     },
