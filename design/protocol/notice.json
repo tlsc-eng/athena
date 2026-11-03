@@ -1,0 +1,7 @@
+{
+  "type": "notice",
+  "pane": 123,
+  "kind": "needs_input",
+  "message": "Run cargo test?",
+  "at": 1767225600000
+}

@@ -1,0 +1,60 @@
+{
+  "type": "snapshot",
+  "seq": 7,
+  "projects": [
+    {
+      "root": "/Users/jason/code/daedalus",
+      "name": "daedalus",
+      "window": 1
+    }
+  ],
+  "sessions": [
+    {
+      "id": "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10",
+      "label": "Add the phone bridge",
+      "pane": 123,
+      "project": "/Users/jason/code/daedalus",
+      "cwd": "/Users/jason/code/daedalus/.claude/worktrees/bridge",
+      "main_root": "/Users/jason/code/daedalus",
+      "branch": "feat/bridge",
+      "state": "needs_input",
+      "unread": 2,
+      "todos": [
+        {
+          "content": "Write the protocol",
+          "status": "completed"
+        },
+        {
+          "content": "Add the server",
+          "status": "in_progress",
+          "active_form": "Adding the server"
+        }
+      ],
+      "plan": "1. Types\n2. Server",
+      "needs": "Run cargo test?",
+      "files": [
+        "crates/daedalus/src/companion/protocol.rs"
+      ],
+      "modified_ms": 1767225600000
+    }
+  ],
+  "terminals": [
+    {
+      "pane": 123,
+      "project": "/Users/jason/code/daedalus",
+      "title": "claude",
+      "program": "claude",
+      "cwd": "/Users/jason/code/daedalus",
+      "claude": "running",
+      "rows": 40,
+      "cols": 120
+    },
+    {
+      "pane": 124,
+      "project": "/Users/jason/code/daedalus",
+      "title": "zsh",
+      "rows": 24,
+      "cols": 80
+    }
+  ]
+}
