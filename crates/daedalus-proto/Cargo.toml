@@ -1,0 +1,16 @@
+[package]
+name = "daedalus-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

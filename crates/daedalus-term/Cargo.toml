@@ -1,0 +1,17 @@
+[package]
+name = "daedalus-term"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui.workspace = true
+alacritty_terminal.workspace = true
+daedalus-proto.workspace = true
+async-channel.workspace = true
+anyhow.workspace = true
+daedalus-ui.workspace = true
+tracing.workspace = true
+regex.workspace = true

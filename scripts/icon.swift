@@ -1,4 +1,4 @@
-// Renders the Athena app icon (the tlsc logogram, ink on paper) as a 1024 px PNG.
+// Renders the Daedalus app icon (the tlsc logogram, ink on paper) as a 1024 px PNG.
 // Usage: swift scripts/icon.swift <out.png>
 import AppKit
 

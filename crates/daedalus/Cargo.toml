@@ -1,0 +1,45 @@
+[package]
+name = "daedalus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui.workspace = true
+anyhow.workspace = true
+ignore.workspace = true
+globset.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+rmcp.workspace = true
+tokio.workspace = true
+schemars.workspace = true
+sha2.workspace = true
+futures.workspace = true
+tokio-tungstenite.workspace = true
+daedalus-proto.workspace = true
+libc.workspace = true
+daedalus-containers.workspace = true
+daedalus-playwright.workspace = true
+daedalus-testing.workspace = true
+daedalus-preview.workspace = true
+daedalus-lsp.workspace = true
+daedalus-dap.workspace = true
+daedalus-editor.workspace = true
+daedalus-term.workspace = true
+daedalus-ui.workspace = true
+daedalus-workspace.workspace = true
+tracing.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+objc2-user-notifications.workspace = true
+block2.workspace = true
+async-channel.workspace = true

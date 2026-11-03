@@ -1,0 +1,933 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
+
+use daedalus_editor::{DiffEvent, DiffView, EditorView, HunkActions};
+use daedalus_workspace::{DiffBase, ItemId, ItemKind, Project, Workspace};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, Task, Window};
+use serde_json::{Value, json};
+
+use super::Shell;
+use super::item::ItemView;
+use super::notices::ToastAction;
+use super::review::{self, diff_title};
+use super::send_selection::Mention;
+use super::windows;
+use crate::ide::{self, DiffKey, Verdict};
+
+/// How often the focused editor's selection is checked while Claude Code is connected; this
+/// also debounces a drag or a held arrow key into one update.
+const SELECTION_POLL: Duration = Duration::from_millis(150);
+
+const WAITING_NOTE: &str = "Claude Code is waiting for your answer. Accept (⌘↵) lets it write \
+                            this change; Reject (⌘⌫) or closing the tab declines it.";
+
+#[derive(Default)]
+pub(super) struct IdeState {
+    /// Proposals Claude Code waits on, by the id their tab carries.
+    pub(super) proposals: HashMap<String, Proposal>,
+    pub(super) _selection: Option<Task<()>>,
+    /// The selection last sent, so an unchanged one is not sent again.
+    sent: Option<Value>,
+    /// What the selection was last built from, so a poll that finds nothing new copies no text.
+    seen: Option<SelectionKey>,
+    pub(super) send: super::send_selection::SendState,
+}
+
+#[derive(PartialEq)]
+struct SelectionKey {
+    editor: EntityId,
+    version: Option<u64>,
+    head: Option<(u32, u32)>,
+    selected: Option<usize>,
+}
+
+pub(super) struct Proposal {
+    key: DiffKey,
+    contents: String,
+    /// The tab showing it; closing that tab rejects the change.
+    view: Option<EntityId>,
+}
+
+/// Tabs that mean nothing to a later run: Claude's proposals, replace previews and conflict compares.
+fn never_saved(kind: &ItemKind) -> bool {
+    matches!(
+        kind,
+        ItemKind::Diff {
+            base: DiffBase::Proposal { .. } | DiffBase::SearchReplace | DiffBase::Conflict,
+            ..
+        }
+    )
+}
+
+/// Tabs workspace.json leaves out: those above, and the settings, shortcut and session tabs, whose
+/// kinds a v0.9 build cannot read and would set the whole file aside for.
+fn not_on_disk(kind: &ItemKind) -> bool {
+    never_saved(kind)
+        || matches!(
+            kind,
+            ItemKind::Settings | ItemKind::Shortcuts | ItemKind::Session { .. }
+        )
+}
+
+/// The file on disk as diff text, in the encoding the editor would read it in; a FIFO or device
+/// is refused before opening it would block.
+fn read_text(path: &Path) -> Result<String, String> {
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
+        Ok(meta) if !meta.is_file() => return Err("This is not a regular file.".into()),
+        Ok(meta) if meta.len() > review::MAX_DIFF_BYTES as u64 => {
+            return Err("The file is larger than 20 MB.".into());
+        }
+        Ok(_) => {}
+    }
+    review::read_file(path)
+        .and_then(|bytes| review::decoded(bytes.as_deref(), None))
+        .map(|d| d.map(|d| d.text).unwrap_or_default())
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// `path` with symlinks and `..` resolved as the OS would, as far as it exists.
+fn resolve(path: &Path) -> PathBuf {
+    let parts: Vec<Component> = path.components().collect();
+    for n in (1..=parts.len()).rev() {
+        let Ok(mut real) = parts[..n].iter().collect::<PathBuf>().canonicalize() else {
+            continue;
+        };
+        for part in &parts[n..] {
+            match part {
+                Component::ParentDir => {
+                    real.pop();
+                }
+                Component::Normal(name) => real.push(name),
+                _ => {}
+            }
+        }
+        return real;
+    }
+    path.to_path_buf()
+}
+
+/// The project a proposed file really lands in, and the file's path under that project's root.
+fn proposal_target(roots: &[&Path], path: &Path) -> Option<(usize, PathBuf)> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let real = resolve(path);
+    roots.iter().enumerate().find_map(|(i, root)| {
+        let inside = real.strip_prefix(resolve(root)).ok()?;
+        Some((i, root.join(inside)))
+    })
+}
+
+/// The ids of the proposals `project`'s tabs show.
+pub(super) fn proposal_ids(project: &Project) -> Vec<String> {
+    project
+        .items()
+        .filter_map(|i| match &i.kind {
+            ItemKind::Diff {
+                base: DiffBase::Proposal { id },
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A copy of `workspace` without proposal tabs, or `None` when it has none.
+pub(super) fn without_proposals(workspace: &Workspace) -> Option<Workspace> {
+    without(workspace, never_saved)
+}
+
+/// A copy of `workspace` without the tabs `left_out` picks, or `None` when it has none.
+fn without(workspace: &Workspace, left_out: fn(&ItemKind) -> bool) -> Option<Workspace> {
+    let any = workspace
+        .projects
+        .iter()
+        .filter_map(|p| p.layout.as_ref())
+        .any(|l| l.items().any(|i| left_out(&i.kind)));
+    if !any {
+        return None;
+    }
+    let mut saved = workspace.clone();
+    close_tabs(&mut saved.projects, left_out);
+    Some(saved)
+}
+
+/// Takes the tabs workspace.json leaves out from every project in `file`, parked ones included.
+pub(super) fn leave_out_of_file(file: &mut Workspace) {
+    close_tabs(&mut file.projects, not_on_disk);
+    close_tabs(&mut file.parked, not_on_disk);
+}
+
+fn close_tabs(projects: &mut [Project], left_out: fn(&ItemKind) -> bool) {
+    for project in projects {
+        let Some(layout) = project.layout.as_mut() else {
+            continue;
+        };
+        let ids: Vec<ItemId> = layout
+            .items()
+            .filter(|i| left_out(&i.kind))
+            .map(|i| i.id)
+            .collect();
+        for id in ids {
+            if !layout.close_item(id) {
+                project.layout = None;
+                break;
+            }
+        }
+    }
+}
+
+/// `selection_changed` as VS Code sends it; Claude Code reads the 0-based lines and the text.
+fn selection_json(path: &Path, start: (u32, u32), end: (u32, u32), text: String) -> Value {
+    let position = |(line, character): (u32, u32)| json!({"line": line, "character": character});
+    json!({
+        "text": text,
+        "filePath": path,
+        "fileUrl": ide::file_url(path),
+        "selection": {"start": position(start), "end": position(end), "isEmpty": start == end},
+    })
+}
+
+/// The selection to send, if it differs from the one sent last.
+fn changed(sent: &Option<Value>, next: Value) -> Option<Value> {
+    (sent.as_ref() != Some(&next)).then_some(next)
+}
+
+fn severity(s: daedalus_lsp::Severity) -> &'static str {
+    match s {
+        daedalus_lsp::Severity::Error => "Error",
+        daedalus_lsp::Severity::Warning => "Warning",
+        daedalus_lsp::Severity::Information => "Info",
+        daedalus_lsp::Severity::Hint => "Hint",
+    }
+}
+
+fn diagnostic(d: &daedalus_lsp::Diagnostic) -> ide::Diagnostic {
+    let position = |p: daedalus_lsp::Position| ide::Position {
+        line: p.line,
+        character: p.character,
+    };
+    ide::Diagnostic {
+        message: d.message.clone(),
+        severity: severity(d.severity),
+        source: d.source.clone(),
+        code: d.raw.get("code").cloned(),
+        range: ide::Range {
+            start: position(d.range.start),
+            end: position(d.range.end),
+        },
+    }
+}
+
+impl Shell {
+    /// Starts the server if the setting is on; otherwise withdraws a port an earlier run left.
+    pub(super) fn start_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.workspace.ide_integration {
+            if let Some(env) = ide::env_file() {
+                ide::forget_env(&env);
+            }
+            return;
+        }
+        // One server serves every window, as the env file names a single port.
+        if windows::ide(cx).is_some() {
+            if !windows::ide_clients(cx).is_empty() {
+                self.watch_selection(cx);
+            }
+            return;
+        }
+        let Some(lock_dir) = ide::default_lock_dir() else {
+            return;
+        };
+        let mut folders = self.ide_folders();
+        folders.extend(windows::other_roots(window.window_handle(), cx));
+        let config = ide::Config {
+            lock_dir,
+            env_file: ide::env_file(),
+            folders,
+        };
+        match ide::Server::start(config) {
+            Ok((server, events)) => windows::set_ide(server, events, cx),
+            Err(e) => {
+                tracing::error!("could not start the Claude Code IDE server: {e}");
+                self.transient_notice(
+                    "Claude Code integration could not start",
+                    format!("{e}. Turn it off and on again to retry."),
+                    cx,
+                );
+            }
+        }
+    }
+
+    pub(super) fn toggle_ide_integration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.ide_integration = !self.workspace.ide_integration;
+        self.schedule_save(cx);
+        if !self.workspace.ide_integration {
+            self.stop_ide(window, cx);
+            self.write_setting(&["ide_integration"], false.into(), cx);
+            return self.transient_notice(
+                "Claude Code integration is off",
+                "Claude Code asks about edits in the terminal again.",
+                cx,
+            );
+        }
+        self.start_ide(window, cx);
+        if windows::ide(cx).is_none() {
+            self.workspace.ide_integration = false;
+            return;
+        }
+        self.write_setting(&["ide_integration"], true.into(), cx);
+        self.transient_notice(
+            "Claude Code integration is on",
+            "Claude sessions started in new terminals connect to Athena: proposed edits open as \
+             diffs to accept or reject, and your selection goes with each prompt. In a session \
+             already running, type /ide.",
+            cx,
+        );
+    }
+
+    pub(super) fn stop_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ide._selection = None;
+        self.ide.sent = None;
+        windows::stop_ide(cx);
+        let ids: Vec<String> = self.ide.proposals.drain().map(|(id, _)| id).collect();
+        for id in ids {
+            self.close_proposal_tab(&id, window, cx);
+        }
+    }
+
+    /// Tells Claude Code the proposals `ids` were rejected, as their tabs go without an answer.
+    pub(super) fn reject_proposals(&mut self, ids: &[String], cx: &App) {
+        for id in ids {
+            if let Some(proposal) = self.ide.proposals.remove(id)
+                && let Some(server) = windows::ide(cx)
+            {
+                server.resolve(&proposal.key, Verdict::Rejected);
+            }
+        }
+    }
+
+    pub(super) fn ide_folders(&self) -> Vec<PathBuf> {
+        self.workspace
+            .projects
+            .iter()
+            .map(|p| p.root.clone())
+            .collect()
+    }
+
+    /// The workspace as saved: a proposal cannot outlive the request that opened it.
+    pub(super) fn persisted_workspace(&self) -> Cow<'_, Workspace> {
+        without(&self.workspace, not_on_disk).map_or(Cow::Borrowed(&self.workspace), Cow::Owned)
+    }
+
+    pub(super) fn show_proposal(
+        &mut self,
+        key: DiffKey,
+        path: PathBuf,
+        contents: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let roots: Vec<&Path> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|p| p.root.as_path())
+            .collect();
+        let Some((project, path)) = proposal_target(&roots, &path) else {
+            // Claude Code then asks in the terminal instead.
+            if let Some(server) = windows::ide(cx) {
+                server.resolve(&key, Verdict::Unavailable);
+            }
+            return;
+        };
+        self.switch_to(project, cx);
+        let id = key.id();
+        self.close_proposal_tab(&id, window, cx);
+        self.ide.proposals.insert(
+            id.clone(),
+            Proposal {
+                key,
+                contents,
+                view: None,
+            },
+        );
+        self.open_diff(path, DiffBase::Proposal { id }, window, cx);
+    }
+
+    pub(super) fn new_proposal_view(
+        &mut self,
+        path: &Path,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> ItemView {
+        let base = DiffBase::Proposal { id: id.to_string() };
+        let title = diff_title(path, &base);
+        let view = cx.new(|cx| {
+            DiffView::new(
+                path.to_path_buf(),
+                title,
+                "On Disk",
+                "Claude's Proposal",
+                HunkActions::default(),
+                cx,
+            )
+            .as_proposal()
+        });
+        let entity = view.entity_id();
+        match self.ide.proposals.get_mut(id) {
+            Some(proposal) => {
+                proposal.view = Some(entity);
+                let new = proposal.contents.clone();
+                view.update(cx, |v, cx| {
+                    v.set_old_label("On Disk", Some(WAITING_NOTE), cx)
+                });
+                let (disk, weak) = (path.to_path_buf(), view.downgrade());
+                cx.spawn(async move |_, cx| {
+                    let old = cx
+                        .background_executor()
+                        .spawn(async move { read_text(&disk) })
+                        .await;
+                    if let Some(view) = weak.upgrade() {
+                        let _ = view.update(cx, |v, cx| match old {
+                            Ok(old) => v.set_texts(old, new, cx),
+                            Err(e) => v.set_error(e, cx),
+                        });
+                    }
+                })
+                .detach();
+            }
+            None => view.update(cx, |v, cx| {
+                v.set_error(
+                    "Claude Code is no longer waiting for an answer to this change.",
+                    cx,
+                )
+            }),
+        }
+        let (key, file) = (id.to_string(), path.to_path_buf());
+        cx.subscribe(&view, move |this, _, event: &DiffEvent, cx| match event {
+            DiffEvent::Accept => this.answer_proposal(&key, true, cx),
+            DiffEvent::Reject => this.answer_proposal(&key, false, cx),
+            DiffEvent::OpenFile => {
+                this.pending_open = Some(file.clone());
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
+        let key = id.to_string();
+        cx.observe_release(&view, move |this, _, cx| {
+            if this
+                .ide
+                .proposals
+                .get(&key)
+                .is_some_and(|p| p.view == Some(entity))
+            {
+                this.answer_proposal(&key, false, cx);
+            }
+        })
+        .detach();
+        ItemView::Diff(view)
+    }
+
+    fn answer_proposal(&mut self, id: &str, accept: bool, cx: &mut Context<Self>) {
+        let Some(proposal) = self.ide.proposals.remove(id) else {
+            return;
+        };
+        let verdict = match accept {
+            true => Verdict::Accepted(proposal.contents),
+            false => Verdict::Rejected,
+        };
+        if let Some(server) = windows::ide(cx) {
+            server.resolve(&proposal.key, verdict);
+        }
+        let handle = self.window_handle;
+        // Answered from inside the tab's own event, while the window is busy dispatching it.
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let _ = cx.update_window(handle, |_, window, cx| {
+                this.update(cx, |this, cx| this.close_proposal_tab(&id, window, cx))
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn close_proposal_tab(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tabs: Vec<(PathBuf, ItemId)> = self
+            .workspace
+            .projects
+            .iter()
+            .filter_map(|p| Some((&p.root, p.layout.as_ref()?)))
+            .flat_map(|(root, layout)| {
+                layout
+                    .items()
+                    .filter(|i| matches!(&i.kind, ItemKind::Diff { base: DiffBase::Proposal { id: x }, .. } if x == id))
+                    .map(|i| (root.clone(), i.id))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (root, item) in tabs {
+            self.remove_item_from(&root, item, window, cx);
+        }
+    }
+
+    pub(super) fn ide_diagnostics(&self, path: Option<&Path>) -> Vec<ide::FileDiagnostics> {
+        let wanted = path.map(|p| (p.to_path_buf(), p.canonicalize().ok()));
+        self.lsp
+            .diagnostics
+            .iter()
+            .filter(|(file, _)| match &wanted {
+                Some((asked, real)) => *file == asked || real.as_ref() == Some(*file),
+                None => true,
+            })
+            .map(|(file, published)| ide::FileDiagnostics {
+                path: file.clone(),
+                diagnostics: published
+                    .iter()
+                    .flat_map(|(_, list)| list)
+                    .map(diagnostic)
+                    .collect(),
+            })
+            .collect()
+    }
+
+    pub(super) fn ide_selection_stale(&mut self) {
+        self.ide.sent = None;
+    }
+
+    pub(super) fn watch_selection(&mut self, cx: &mut Context<Self>) {
+        // A session that just connected has not seen the current selection.
+        self.ide.sent = None;
+        if self.ide._selection.is_some() {
+            return;
+        }
+        self.ide._selection = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SELECTION_POLL).await;
+                if this.update(cx, |this, cx| this.push_selection(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// The focused editor with its project.
+    fn focused_editor_in(&self) -> Option<(PathBuf, Entity<EditorView>)> {
+        Some((self.active_root()?, self.focused_editor()?))
+    }
+
+    /// Sends the editor selection when it changed; a focused terminal keeps the last one, as in
+    /// VS Code, so it stays attached while the user types to Claude.
+    fn push_selection(&mut self, cx: &mut Context<Self>) {
+        // Only the window in use speaks for the selection, as Claude Code follows one editor.
+        if !windows::is_focused(self.window_handle, cx) {
+            return;
+        }
+        let Some((root, editor)) = self.focused_editor_in() else {
+            return;
+        };
+        let key = {
+            let e = editor.read(cx);
+            SelectionKey {
+                editor: editor.entity_id(),
+                version: e.version(),
+                head: e.cursor_utf16(),
+                selected: e.status().map(|s| s.selected),
+            }
+        };
+        if self.ide.sent.is_some() && self.ide.seen.as_ref() == Some(&key) {
+            return;
+        }
+        self.ide.seen = Some(key);
+        let editor = editor.read(cx);
+        let Some((start, end, text)) = editor.selection_utf16() else {
+            return;
+        };
+        let next = selection_json(editor.path(), start, end, text);
+        let Some(next) = changed(&self.ide.sent, next) else {
+            return;
+        };
+        let targets = self.ide_targets(&root, cx);
+        if let Some(server) = windows::ide(cx) {
+            server.notify(&targets, "selection_changed", next.clone());
+        }
+        self.ide.sent = Some(next);
+    }
+
+    /// The terminal a Claude Code process runs in, from the process tree.
+    pub(super) fn claude_terminal(&self, pid: i32, cx: &App) -> Option<(PathBuf, ItemId)> {
+        let above = crate::procinfo::ancestry(pid);
+        self.items.iter().find_map(|((root, id), view)| {
+            let ItemView::Terminal(t) = view else {
+                return None;
+            };
+            let fg = t.read(cx).foreground_pid()?;
+            (above.contains(&fg) || crate::procinfo::ancestry(fg).contains(&pid))
+                .then(|| (root.clone(), *id))
+        })
+    }
+
+    /// Sessions running in `root`'s terminals, plus any whose terminal is not known.
+    fn ide_targets(&self, root: &Path, cx: &Context<Self>) -> Vec<u64> {
+        let mut targets: Vec<u64> = windows::ide_clients(cx)
+            .into_iter()
+            .filter(|(_, pid)| {
+                pid.and_then(|pid| {
+                    self.claude_terminal(pid, cx)
+                        .map(|(r, _)| r)
+                        .or_else(|| windows::claude_root_elsewhere(pid, self.window_handle, cx))
+                })
+                .is_none_or(|r| r == root)
+            })
+            .map(|(client, _)| client)
+            .collect();
+        targets.sort_unstable();
+        targets
+    }
+
+    /// Asks which Claude session should get the focused file's selected lines, or its cursor line.
+    pub(super) fn send_to_claude(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((_, editor)) = self.focused_editor_in() else {
+            if windows::ide(cx).is_none() {
+                let action = ToastAction {
+                    label: "Turn On",
+                    run: Rc::new(|this: &mut Shell, window, cx| {
+                        this.toggle_ide_integration(window, cx)
+                    }),
+                };
+                self.action_toast(
+                    "Claude Code integration is off",
+                    "Turn it on to send files and selections to Claude Code sessions in Athena.",
+                    action,
+                    cx,
+                );
+                return;
+            }
+            return self.transient_notice(
+                "Nothing to send to Claude",
+                "Focus a file in the editor, then press ⌘⌥K.",
+                cx,
+            );
+        };
+        let (path, selection) = {
+            let e = editor.read(cx);
+            (e.path().to_path_buf(), e.selection_utf16())
+        };
+        let Some((start, end, _)) = selection else {
+            return;
+        };
+        self.pick_send_target(Mention::from_selection(&path, start, end), window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_selection_is_sent_as_vs_code_does_and_only_when_it_changed() {
+        let path = Path::new("/p/src/main.rs");
+        let sel = selection_json(path, (1, 4), (3, 0), "x".into());
+        assert_eq!(
+            sel,
+            json!({
+                "text": "x",
+                "filePath": "/p/src/main.rs",
+                "fileUrl": "file:///p/src/main.rs",
+                "selection": {
+                    "start": {"line": 1, "character": 4},
+                    "end": {"line": 3, "character": 0},
+                    "isEmpty": false,
+                },
+            })
+        );
+        let cursor = selection_json(path, (2, 0), (2, 0), String::new());
+        assert_eq!(cursor["selection"]["isEmpty"], true);
+
+        let mut sent = None;
+        assert!(changed(&sent, sel.clone()).is_some());
+        sent = Some(sel.clone());
+        assert!(
+            changed(&sent, sel).is_none(),
+            "the same selection is not sent twice"
+        );
+        assert!(changed(&sent, cursor).is_some());
+    }
+
+    #[test]
+    fn proposal_tabs_are_left_out_of_the_saved_workspace_and_focus_stays_valid() {
+        use daedalus_workspace::{Axis, Layout};
+        let proposal = ItemKind::Diff {
+            path: PathBuf::from("/p/a.rs"),
+            base: DiffBase::Proposal { id: "1:t".into() },
+        };
+        let mut workspace = Workspace::default();
+        workspace.add_project(PathBuf::from("/p"));
+        let mut layout = Layout::new(ItemKind::Terminal { session: None });
+        let terminal_pane = layout.focused;
+        let pane = layout
+            .split(terminal_pane, Axis::Horizontal, proposal.clone())
+            .unwrap();
+        assert_eq!(layout.focused, pane);
+        workspace.projects[0].layout = Some(layout);
+        assert!(without_proposals(&Workspace::default()).is_none());
+
+        let saved = without_proposals(&workspace).unwrap();
+        let layout = saved.projects[0].layout.clone().unwrap();
+        assert!(layout.items().all(|i| !never_saved(&i.kind)));
+        assert_eq!(layout.focused, terminal_pane);
+        assert!(layout.validated().is_some());
+
+        let mut alone = Workspace::default();
+        alone.add_project(PathBuf::from("/q"));
+        alone.projects[0].layout = Some(Layout::new(proposal));
+        assert!(
+            without_proposals(&alone).unwrap().projects[0]
+                .layout
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_project_leaving_a_window_names_the_proposals_its_tabs_show() {
+        use daedalus_workspace::Layout;
+        let diff = |base| ItemKind::Diff {
+            path: PathBuf::from("/p/a.rs"),
+            base,
+        };
+        let mut project = Project::new(PathBuf::from("/p"));
+        let mut layout = Layout::new(diff(DiffBase::Proposal { id: "1:t".into() }));
+        let pane = layout.focused;
+        layout.add_item(pane, diff(DiffBase::Index)).unwrap();
+        layout
+            .add_item(pane, diff(DiffBase::Proposal { id: "2:u".into() }))
+            .unwrap();
+        project.layout = Some(layout);
+        assert_eq!(proposal_ids(&project), ["1:t", "2:u"]);
+        assert!(proposal_ids(&Project::new(PathBuf::from("/q"))).is_empty());
+    }
+
+    #[test]
+    fn the_saved_workspace_holds_only_tab_kinds_a_v0_9_build_can_read() {
+        use daedalus_workspace::Layout;
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        enum ItemKindOfV09 {
+            Terminal { session: Option<u64> },
+            Editor { path: PathBuf },
+            Preview { url: String },
+            Image { path: PathBuf },
+            Rendered { path: PathBuf },
+            Diff { path: PathBuf, base: DiffBase },
+        }
+        fn kinds(value: &Value, out: &mut Vec<Value>) {
+            match value {
+                Value::Object(map) => {
+                    out.extend(map.get("kind").cloned());
+                    map.values().for_each(|v| kinds(v, out));
+                }
+                Value::Array(list) => list.iter().for_each(|v| kinds(v, out)),
+                _ => {}
+            }
+        }
+
+        let mut workspace = Workspace::default();
+        workspace.add_project(PathBuf::from("/p"));
+        workspace.add_project(PathBuf::from("/q"));
+        let mut layout = Layout::new(ItemKind::Settings);
+        let pane = layout.focused;
+        for kind in [
+            ItemKind::Shortcuts,
+            ItemKind::Editor {
+                path: "/p/a.rs".into(),
+            },
+        ] {
+            layout.add_item(pane, kind).unwrap();
+        }
+        workspace.projects[0].layout = Some(layout);
+        workspace.projects[1].layout = Some(Layout::new(ItemKind::Shortcuts));
+
+        let saved = without(&workspace, not_on_disk).unwrap();
+        let mut found = Vec::new();
+        kinds(&serde_json::to_value(&saved).unwrap(), &mut found);
+        assert_eq!(found.len(), 1, "{found:?}");
+        for kind in found {
+            assert!(
+                serde_json::from_value::<ItemKindOfV09>(kind.clone()).is_ok(),
+                "{kind}"
+            );
+        }
+        assert_eq!(saved.projects[1].layout, None);
+        let mut file = workspace.clone();
+        file.parked = std::mem::take(&mut file.projects);
+        leave_out_of_file(&mut file);
+        let mut found = Vec::new();
+        kinds(&serde_json::to_value(&file).unwrap(), &mut found);
+        assert_eq!(found.len(), 1, "parked projects too: {found:?}");
+        assert!(
+            without_proposals(&workspace).is_none(),
+            "a project moving to another window keeps them"
+        );
+    }
+
+    #[test]
+    fn a_session_tab_is_left_out_of_the_file_and_the_file_still_loads() {
+        use daedalus_workspace::{Axis, Layout};
+        let dir = std::env::temp_dir().join(format!("athena-session-tab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("workspace.json");
+        let mut workspace = Workspace::default();
+        workspace.add_project(PathBuf::from("/p"));
+        let mut layout = Layout::new(ItemKind::Terminal { session: Some(7) });
+        let terminal = layout.focused;
+        layout
+            .add_item(terminal, ItemKind::Session { id: "s-1".into() })
+            .unwrap();
+        let session_pane = layout
+            .split(
+                terminal,
+                Axis::Horizontal,
+                ItemKind::Session { id: "s-2".into() },
+            )
+            .unwrap();
+        workspace.projects[0].layout = Some(layout);
+
+        let saved = without(&workspace, not_on_disk).unwrap();
+        daedalus_workspace::save(&file, &saved).unwrap();
+        let loaded = daedalus_workspace::load(&file).unwrap();
+        let layout = loaded.projects[0].layout.as_ref().unwrap();
+        let kinds: Vec<&ItemKind> = layout.items().map(|i| &i.kind).collect();
+        assert_eq!(kinds, [&ItemKind::Terminal { session: Some(7) }]);
+        assert!(
+            layout.pane(session_pane).is_none(),
+            "a pane of only sessions closes"
+        );
+        assert!(
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("\"Session\""),
+            "an older build never meets the kind"
+        );
+        assert!(
+            std::fs::read_dir(&dir).unwrap().count() == 1,
+            "nothing was set aside"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_file_on_disk_is_read_only_when_it_is_small_regular_text() {
+        let dir = std::env::temp_dir().join(format!("athena-ide-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str| dir.join(name);
+        assert_eq!(read_text(&file("missing.rs")), Ok(String::new()));
+        std::fs::write(file("a.rs"), "fn a() {}\n").unwrap();
+        assert_eq!(read_text(&file("a.rs")).as_deref(), Ok("fn a() {}\n"));
+        std::fs::write(file("a.png"), [0x89, b'P', 0, 1]).unwrap();
+        assert!(read_text(&file("a.png")).unwrap_err().contains("binary"));
+
+        let fifo =
+            std::ffi::CString::new(file("pipe").into_os_string().into_encoded_bytes()).unwrap();
+        // SAFETY: fifo is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(read_text(&file("pipe")).unwrap_err().contains("regular"));
+        assert!(read_text(&dir).unwrap_err().contains("regular"));
+
+        let big = std::fs::File::create(file("big.log")).unwrap();
+        big.set_len(review::MAX_DIFF_BYTES as u64 + 1).unwrap();
+        assert!(read_text(&file("big.log")).unwrap_err().contains("20 MB"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_file_on_disk_is_read_in_the_encoding_the_editor_would_use() {
+        let dir = std::env::temp_dir().join(format!("athena-ide-enc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("a = \"é\"\n".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        std::fs::write(dir.join("utf16.txt"), utf16).unwrap();
+        assert_eq!(
+            read_text(&dir.join("utf16.txt")).as_deref(),
+            Ok("a = \"é\"\n")
+        );
+        // こんにちは in Shift JIS.
+        let sjis = b"\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd\n";
+        std::fs::write(dir.join("sjis.txt"), sjis).unwrap();
+        assert_eq!(
+            read_text(&dir.join("sjis.txt")).as_deref(),
+            Ok("こんにちは\n")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_proposal_lands_in_the_project_its_resolved_path_is_in() {
+        let dir = std::env::temp_dir().join(format!("athena-ide-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (proj, other) = (dir.join("proj"), dir.join("other"));
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(&proj, dir.join("link")).unwrap();
+        std::os::unix::fs::symlink(&other, proj.join("out")).unwrap();
+        let roots = [other.as_path(), proj.as_path()];
+        let target = |p: PathBuf| proposal_target(&roots, &p);
+
+        assert_eq!(
+            target(proj.join("src/new.rs")),
+            Some((1, proj.join("src/new.rs")))
+        );
+        assert_eq!(
+            target(proj.join("gone/../a.rs")),
+            Some((1, proj.join("a.rs")))
+        );
+        assert_eq!(target(dir.join("link/a.rs")), Some((1, proj.join("a.rs"))));
+        assert_eq!(target(proj.join("out/x.rs")), Some((0, other.join("x.rs"))));
+        assert_eq!(target(proj.join("../../etc/passwd")), None);
+        assert_eq!(target(PathBuf::from("proj/a.rs")), None);
+        let linked = [dir.join("link")];
+        let linked: Vec<&Path> = linked.iter().map(PathBuf::as_path).collect();
+        assert_eq!(
+            proposal_target(&linked, &proj.join("a.rs")),
+            Some((0, dir.join("link/a.rs")))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_use_claude_codes_severity_names_and_keep_the_code() {
+        let d = daedalus_lsp::Diagnostic {
+            range: daedalus_lsp::Range {
+                start: daedalus_lsp::Position {
+                    line: 1,
+                    character: 2,
+                },
+                end: daedalus_lsp::Position {
+                    line: 1,
+                    character: 5,
+                },
+            },
+            severity: daedalus_lsp::Severity::Information,
+            message: "m".into(),
+            source: Some("gopls".into()),
+            raw: json!({"code": "SA1000"}),
+        };
+        let out = diagnostic(&d);
+        assert_eq!(out.severity, "Info");
+        assert_eq!(out.code, Some(json!("SA1000")));
+        assert_eq!((out.range.start.line, out.range.end.character), (1, 5));
+        assert_eq!(severity(daedalus_lsp::Severity::Error), "Error");
+        assert_eq!(severity(daedalus_lsp::Severity::Hint), "Hint");
+    }
+}

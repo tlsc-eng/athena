@@ -68,17 +68,17 @@ url = "2.5"
 percent-encoding = "2.3"
 encoding_rs = "0.8.42"
 
-athena-proto = { path = "crates/athena-proto" }
-athena-term = { path = "crates/athena-term" }
-athena-editor = { path = "crates/athena-editor" }
-athena-workspace = { path = "crates/athena-workspace" }
-athena-ui = { path = "crates/athena-ui" }
-athena-containers = { path = "crates/athena-containers" }
-athena-playwright = { path = "crates/athena-playwright" }
-athena-testing = { path = "crates/athena-testing" }
-athena-preview = { path = "crates/athena-preview" }
-athena-lsp = { path = "crates/athena-lsp" }
-athena-dap = { path = "crates/athena-dap" }
+daedalus-proto = { path = "crates/daedalus-proto" }
+daedalus-term = { path = "crates/daedalus-term" }
+daedalus-editor = { path = "crates/daedalus-editor" }
+daedalus-workspace = { path = "crates/daedalus-workspace" }
+daedalus-ui = { path = "crates/daedalus-ui" }
+daedalus-containers = { path = "crates/daedalus-containers" }
+daedalus-playwright = { path = "crates/daedalus-playwright" }
+daedalus-testing = { path = "crates/daedalus-testing" }
+daedalus-preview = { path = "crates/daedalus-preview" }
+daedalus-lsp = { path = "crates/daedalus-lsp" }
+daedalus-dap = { path = "crates/daedalus-dap" }
 
 [profile.release]
 lto = "thin"
