@@ -7,6 +7,8 @@ mod logo;
 mod menu;
 pub mod motion;
 mod theme;
+#[cfg(test)]
+mod tokens;
 
 pub use assets::Assets;
 pub use components::{

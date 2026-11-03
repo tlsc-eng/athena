@@ -22,16 +22,29 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> impl Fn(f32) -> f32 +
     }
 }
 
+/// Milliseconds between spinner steps.
+pub const SPIN_TICK_MS: u128 = 125;
+
+/// Steps in one full turn of the spinner.
+pub const SPIN_STEPS: u128 = 8;
+
+pub(crate) const EASE_STANDARD: [f32; 4] = [0.2, 0., 0., 1.];
+pub(crate) const EASE_ENTER: [f32; 4] = [0., 0., 0., 1.];
+pub(crate) const EASE_EXIT: [f32; 4] = [0.3, 0., 1., 1.];
+
 pub fn ease_standard() -> impl Fn(f32) -> f32 + Clone {
-    cubic_bezier(0.2, 0., 0., 1.)
+    let [x1, y1, x2, y2] = EASE_STANDARD;
+    cubic_bezier(x1, y1, x2, y2)
 }
 
 pub fn ease_enter() -> impl Fn(f32) -> f32 + Clone {
-    cubic_bezier(0., 0., 0., 1.)
+    let [x1, y1, x2, y2] = EASE_ENTER;
+    cubic_bezier(x1, y1, x2, y2)
 }
 
 pub fn ease_exit() -> impl Fn(f32) -> f32 + Clone {
-    cubic_bezier(0.3, 0., 1., 1.)
+    let [x1, y1, x2, y2] = EASE_EXIT;
+    cubic_bezier(x1, y1, x2, y2)
 }
 
 /// Runs `animator` as an animation, or renders its final frame directly when motion is reduced.

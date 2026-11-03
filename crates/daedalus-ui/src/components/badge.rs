@@ -57,7 +57,7 @@ pub enum DotState {
 }
 
 impl DotState {
-    fn look(self, c: &Colors) -> (&'static str, Hsla) {
+    pub(crate) fn look(self, c: &Colors) -> (&'static str, Hsla) {
         match self {
             DotState::NeedsInput => ("ui/session-ask.svg", c.warning),
             DotState::Unread => ("ui/session-done.svg", c.success),

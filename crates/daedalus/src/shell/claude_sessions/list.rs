@@ -21,8 +21,6 @@ use crate::shell::sidebar::Tween;
 
 /// Above this many child rows an expanding session only fades, so a long list does not sweep.
 const MAX_SWEPT_ROWS: usize = 12;
-const SPIN_TICK_MS: u128 = 125;
-const SPIN_STEPS: u128 = 8;
 
 /// What a row says besides its label, as shown in its detail line.
 #[derive(Debug, PartialEq)]
@@ -171,7 +169,8 @@ fn chevron(turn: f32, t: &Theme) -> Svg {
 
 /// The running glyph's turn after `elapsed`: one eighth of a revolution per tick.
 fn spin_step(elapsed: Duration) -> f32 {
-    ((elapsed.as_millis() / SPIN_TICK_MS) % SPIN_STEPS) as f32 * TAU / SPIN_STEPS as f32
+    ((elapsed.as_millis() / motion::SPIN_TICK_MS) % motion::SPIN_STEPS) as f32 * TAU
+        / motion::SPIN_STEPS as f32
 }
 
 fn should_spin(visible: bool, any_running: bool, reduced: bool) -> bool {
@@ -180,7 +179,7 @@ fn should_spin(visible: bool, any_running: bool, reduced: bool) -> bool {
 
 /// The wait to the next tick boundary after `elapsed`, so ticks stay on the grid `spin_step` reads.
 fn until_next_tick(elapsed: Duration) -> Duration {
-    let tick = SPIN_TICK_MS as u64;
+    let tick = motion::SPIN_TICK_MS as u64;
     Duration::from_millis(tick - elapsed.as_millis() as u64 % tick)
 }
 
