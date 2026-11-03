@@ -1435,7 +1435,7 @@ impl Shell {
             (
                 format!("Discard changes in {what}?"),
                 "The file goes back to its staged or committed version. Git cannot undo this; \
-                 Daedalus keeps a copy of your version in Application Support/athena/discarded \
+                 Daedalus keeps a copy of your version in Application Support/daedalus/discarded \
                  for 30 days."
                     .to_string(),
                 "Discard Changes",

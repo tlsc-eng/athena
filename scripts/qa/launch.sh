@@ -19,7 +19,7 @@ pid=$!
 # With an empty HOME the CLI would hand a folder argument to the installed app, so the project
 # goes to this window over its own socket, and only once that exists.
 if [[ -n $project ]]; then
-  socket="$qa_home/Library/Application Support/athena/app.sock"
+  socket="$qa_home/Library/Application Support/daedalus/app.sock"
   for _ in {1..100}; do
     [[ -S $socket ]] && break
     kill -0 $pid 2>/dev/null || { echo "launch.sh: daedalus exited, see $qa_home/stdout.log" >&2; exit 1; }
