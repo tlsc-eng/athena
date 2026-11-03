@@ -671,7 +671,7 @@ impl Shell {
                 file_label(&path)
             ),
             Some(
-                "Daedalus keeps a copy of the current file in Application Support/athena/discarded \
+                "Daedalus keeps a copy of the current file in Application Support/daedalus/discarded \
                  for 30 days.",
             ),
             &confirm_buttons("Cancel", "Revert"),

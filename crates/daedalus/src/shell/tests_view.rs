@@ -165,8 +165,19 @@ fn report_file() -> Option<PathBuf> {
     run_file("tests", "json")
 }
 
+#[cfg(not(test))]
+fn runs_dir() -> Option<PathBuf> {
+    Some(daedalus_proto::data_dir().ok()?.join("runs"))
+}
+
+// Unit tests plan runs without ever resolving the real data dir under the user's HOME.
+#[cfg(test)]
+fn runs_dir() -> Option<PathBuf> {
+    Some(std::env::temp_dir().join("daedalus-test-runs"))
+}
+
 fn run_file(kind: &str, extension: &str) -> Option<PathBuf> {
-    let runs = daedalus_proto::data_dir().ok()?.join("runs");
+    let runs = runs_dir()?;
     std::fs::create_dir_all(&runs).ok()?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
