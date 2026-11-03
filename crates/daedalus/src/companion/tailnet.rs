@@ -1,8 +1,10 @@
 use std::ffi::CStr;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -54,7 +56,12 @@ pub fn pick(addrs: &[(String, IpAddr)]) -> (Option<Ipv4Addr>, Option<Ipv6Addr>) 
             return (Some(*v4), Some(*v6));
         }
     }
-    (v4s.first().map(|(_, a)| *a), v6s.first().map(|(_, a)| *a))
+    // fd7a:115c:a1e0::/48 is Tailscale's alone, so its interface decides which v4 is ours.
+    if let Some((name, v6)) = v6s.first() {
+        let v4 = v4s.iter().find(|(n, _)| n == name).map(|(_, a)| *a);
+        return (v4, Some(*v6));
+    }
+    (v4s.first().map(|(_, a)| *a), None)
 }
 
 /// Every interface address on this machine as `(interface, address)`.
@@ -115,7 +122,9 @@ pub fn self_dns(cli: &Path) -> Option<String> {
 fn parse_whois(json: &str) -> Option<Peer> {
     let v: Value = serde_json::from_str(json).ok()?;
     let text = |value: Option<&Value>| value?.as_str().map(str::to_owned);
-    let login = text(v.pointer("/UserProfile/LoginName")).filter(|s| !s.is_empty())?;
+    // Every tagged node shares this login, so matching it proves nothing about the owner.
+    let login = text(v.pointer("/UserProfile/LoginName"))
+        .filter(|s| !s.is_empty() && s != "tagged-devices")?;
     let node = text(v.pointer("/Node/ComputedName")).filter(|s| !s.is_empty())?;
     let os = text(v.pointer("/Node/Hostinfo/OS"))?;
     Some(Peer { login, node, os })
@@ -127,36 +136,47 @@ fn parse_self_dns(json: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-/// Runs `program` without a shell and returns its stdout, killing it when `timeout` passes.
+/// Runs `program` without a shell and returns its stdout, killing its whole process group when `timeout` passes.
 fn run(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
+    let pgid = child.id() as libc::pid_t;
     let stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = mpsc::channel();
+    // Never joined: a grandchild holding the pipe must not be able to block us.
+    std::thread::spawn(move || {
         let mut buf = String::new();
-        stdout.take(MAX_CLI_OUTPUT).read_to_string(&mut buf).ok()?;
-        Some(buf)
+        let read = stdout.take(MAX_CLI_OUTPUT).read_to_string(&mut buf);
+        let _ = tx.send(read.ok().map(|_| buf));
     });
     let deadline = Instant::now() + timeout;
+    let kill_group = |child: &mut Child| {
+        // SAFETY: killpg takes plain integers; the group leader is our own child.
+        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        let _ = child.wait();
+    };
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+                kill_group(&mut child);
+                return None;
             }
         }
     };
-    let out = reader.join().ok()?;
-    status.filter(|s| s.success())?;
-    out
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let Ok(out) = rx.recv_timeout(remaining) else {
+        kill_group(&mut child);
+        return None;
+    };
+    status.success().then_some(out).flatten()
 }
 
 #[cfg(test)]
@@ -309,6 +329,36 @@ mod tests {
         for json in replies {
             assert_eq!(parse_self_dns(json), None, "{json}");
         }
+    }
+
+    #[test]
+    fn a_grandchild_holding_stdout_cannot_outlast_the_timeout() {
+        let started = Instant::now();
+        let out = run(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 30; true"],
+            Duration::from_millis(200),
+        );
+        assert_eq!(out, None);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_tagged_node_has_no_usable_login() {
+        let json = r#"{"UserProfile":{"LoginName":"tagged-devices"},"Node":{"ComputedName":"n","Hostinfo":{"OS":"linux"}}}"#;
+        assert_eq!(parse_whois(json), None);
+    }
+
+    #[test]
+    fn a_v4_from_another_interface_is_not_paired_with_the_tailscale_v6() {
+        let addrs = [
+            entry("utun2", v4("100.70.0.1")),
+            entry("utun6", v6("fd7a:115c:a1e0::9")),
+        ];
+        assert_eq!(
+            pick(&addrs),
+            (None, Some("fd7a:115c:a1e0::9".parse().unwrap()))
+        );
     }
 
     #[test]
