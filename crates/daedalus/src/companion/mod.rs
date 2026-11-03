@@ -3,3 +3,4 @@
 
 mod devices;
 pub mod protocol;
+pub mod tailnet;
