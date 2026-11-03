@@ -44,6 +44,7 @@ mod shortcuts_ui;
 mod side_panel;
 mod sidebar;
 mod snippets;
+mod splash;
 mod status_bar;
 mod tasks;
 mod terminal_panel;
@@ -107,6 +108,8 @@ pub struct Shell {
     drop_hint: Option<(PaneId, dnd::DropZone)>,
     palette: Option<palette::Palette>,
     palette_closing: Option<(palette::Palette, motion::Closing)>,
+    /// Set while the launch splash covers the window, which native previews would otherwise draw over.
+    splash: Option<std::time::Instant>,
     /// Each project's files as last walked, listed while Go to File walks them again.
     palette_files: HashMap<PathBuf, Rc<Vec<String>>>,
     context_menu: Option<(gpui::Entity<daedalus_ui::ContextMenu>, Subscription)>,
@@ -250,6 +253,7 @@ impl Shell {
             drop_hint: None,
             palette: None,
             palette_closing: None,
+            splash: None,
             palette_files: HashMap::new(),
             context_menu: None,
             item_menus: HashSet::new(),
@@ -984,6 +988,7 @@ impl Render for Shell {
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
             .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
+            .children(self.render_splash(cx))
     }
 }
 

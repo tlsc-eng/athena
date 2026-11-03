@@ -99,6 +99,10 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
     for workspace in windows {
         near = open_window(workspace, near, cx).map(Into::into).or(near);
     }
+    let first = cx.global::<Windows>().open.first().map(|o| o.handle);
+    if let Some(handle) = first.filter(|_| !cx.global::<Windows>().hidden) {
+        let _ = handle.update(cx, |shell, _, cx| shell.begin_splash(cx));
+    }
     // The first window started the IDE server before the others' projects were known.
     refresh_ide_folders(cx);
     if let Some(folder) = folder
