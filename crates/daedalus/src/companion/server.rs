@@ -1,9 +1,11 @@
 //! The tailnet WebSocket server that phones pair with and connect to.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener as StdListener};
-use std::path::PathBuf;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -26,8 +28,11 @@ use super::protocol::{
     Terminal,
 };
 use super::tailnet;
+use crate::ide::lock::{token, write_private};
 
 const MAX_HANDSHAKES: usize = 16;
+const WHOIS_TTL: Duration = Duration::from_secs(10 * 60);
+const ID_FILE: &str = "server-id";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PER_DEVICE: usize = 4;
 const MAX_INPUT: usize = 64 * 1024;
@@ -45,6 +50,8 @@ const MAX_DEVICE_NAME: usize = 64;
 pub struct Config {
     pub addrs: Vec<SocketAddr>,
     pub devices: Arc<Mutex<Devices>>,
+    /// Holds the server id, which must survive restarts because phones key their pairing by it.
+    pub data_dir: PathBuf,
     pub cli: Option<PathBuf>,
     /// Lets loopback peers in; nothing else is exempt from the tailnet check.
     pub allow_loopback_for_tests: bool,
@@ -106,6 +113,9 @@ struct Shared {
     snapshot: watch::Sender<Arc<Snapshot>>,
     notices: broadcast::Sender<Notice>,
     live: Mutex<HashMap<String, usize>>,
+    revoked: broadcast::Sender<String>,
+    handshakes: Arc<Semaphore>,
+    whois: WhoisCache,
 }
 
 /// A running companion server. Dropping it closes every connection.
@@ -133,7 +143,7 @@ impl Server {
             .collect::<io::Result<Vec<_>>>()?;
         let (commands, rx) = async_channel::unbounded();
         let shared = Arc::new(Shared {
-            id: crate::ide::lock::token()?[..16].to_string(),
+            id: load_or_create_id(&config.data_dir)?,
             name: config.name,
             devices: config.devices,
             pairing: Mutex::new(None),
@@ -143,6 +153,9 @@ impl Server {
             snapshot: watch::channel(Arc::default()).0,
             notices: broadcast::channel(64).0,
             live: Mutex::default(),
+            revoked: broadcast::channel(16).0,
+            handshakes: Arc::new(Semaphore::new(MAX_HANDSHAKES)),
+            whois: WhoisCache::default(),
         });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
@@ -164,6 +177,8 @@ impl Server {
                     }
                     let _ = stopped.await;
                 });
+                // Dropping the runtime would wait for an in-flight whois subprocess.
+                runtime.shutdown_background();
             })?;
         tracing::info!(?addrs, "companion server listening");
         let server = Self {
@@ -201,6 +216,14 @@ impl Server {
         });
     }
 
+    /// Removes a paired device and closes its live connections at once.
+    pub fn revoke(&self, id: &str) -> io::Result<bool> {
+        let removed = lock(&self.shared.devices).revoke(id);
+        // The device is gone from memory even when saving failed, so its sockets close either way.
+        let _ = self.shared.revoked.send(id.to_string());
+        removed
+    }
+
     /// Tells every connected phone about a session that needs attention.
     pub fn push(&self, notice: Notice) {
         let _ = self.shared.notices.send(notice);
@@ -229,7 +252,6 @@ fn peer_allowed(ip: IpAddr, allow_loopback: bool) -> bool {
 }
 
 async fn accept(listener: TcpListener, shared: Arc<Shared>) {
-    let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -244,7 +266,7 @@ async fn accept(listener: TcpListener, shared: Arc<Shared>) {
             tracing::info!(%ip, "companion: refused a peer outside the tailnet");
             continue;
         }
-        let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+        let Ok(permit) = shared.handshakes.clone().try_acquire_owned() else {
             tracing::debug!("companion: too many connections waiting to authenticate");
             continue;
         };
@@ -266,6 +288,62 @@ async fn serve(stream: TcpStream, ip: IpAddr, shared: Arc<Shared>, permit: Owned
     }
 }
 
+async fn lookup_peer(shared: &Shared, cli: &Path, ip: IpAddr) -> Option<tailnet::Peer> {
+    if let Some(peer) = shared.whois.get(ip, std::time::Instant::now()) {
+        return Some(peer);
+    }
+    let cli = cli.to_path_buf();
+    // whois runs a subprocess for up to 3 s, which would stall an async worker.
+    let peer = tokio::task::spawn_blocking(move || tailnet::whois(&cli, ip))
+        .await
+        .ok()
+        .flatten()?;
+    shared
+        .whois
+        .put(ip, peer.clone(), std::time::Instant::now());
+    Some(peer)
+}
+
+/// Successful lookups only, so a failed CLI call does not lock a phone out for the whole TTL.
+#[derive(Default)]
+struct WhoisCache(Mutex<HashMap<IpAddr, (tailnet::Peer, std::time::Instant)>>);
+
+impl WhoisCache {
+    fn get(&self, ip: IpAddr, now: std::time::Instant) -> Option<tailnet::Peer> {
+        let entries = lock(&self.0);
+        let (peer, at) = entries.get(&ip)?;
+        (now.saturating_duration_since(*at) < WHOIS_TTL).then(|| peer.clone())
+    }
+
+    fn put(&self, ip: IpAddr, peer: tailnet::Peer, now: std::time::Instant) {
+        let mut entries = lock(&self.0);
+        entries.retain(|_, (_, at)| now.saturating_duration_since(*at) < WHOIS_TTL);
+        entries.insert(ip, (peer, now));
+    }
+}
+
+/// Phones key their Keychain entry by this id, so a malformed stored one is replaced rather than trusted.
+fn load_or_create_id(dir: &Path) -> io::Result<String> {
+    let path = dir.join(ID_FILE);
+    if let Ok(text) = fs::read_to_string(&path) {
+        let stored = text.trim();
+        if is_server_id(stored) {
+            return Ok(stored.to_string());
+        }
+    }
+    let id = token()?[..16].to_string();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    write_private(&path, id.as_bytes())?;
+    Ok(id)
+}
+
+fn is_server_id(text: &str) -> bool {
+    text.len() == 16 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 enum Opened {
     Connect(Ws, Slot),
     Pair(Ws, String, Option<tailnet::Peer>),
@@ -282,12 +360,7 @@ enum Route {
 async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Opened> {
     let whois = match &shared.cli {
         Some(cli) if !ip.is_loopback() => {
-            let cli = cli.clone();
-            // whois runs a subprocess for up to 3 s, which would stall an async worker.
-            let found = tokio::task::spawn_blocking(move || tailnet::whois(&cli, ip))
-                .await
-                .ok()
-                .flatten();
+            let found = lookup_peer(shared, cli, ip).await;
             if found.is_none() {
                 tracing::info!(%ip, "companion: refused a peer Tailscale cannot attribute to a user");
             }
@@ -414,6 +487,7 @@ fn refuse(status: StatusCode) -> ErrorResponse {
 struct Slot {
     shared: Arc<Shared>,
     device: String,
+    revoked: broadcast::Receiver<String>,
 }
 
 impl Slot {
@@ -427,6 +501,7 @@ impl Slot {
         Some(Self {
             shared: shared.clone(),
             device: device.to_string(),
+            revoked: shared.revoked.subscribe(),
         })
     }
 }
@@ -507,7 +582,7 @@ fn clean_name(raw: &str) -> String {
     }
 }
 
-async fn connect(mut ws: Ws, slot: Slot, shared: &Shared) {
+async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut snapshot = shared.snapshot.subscribe();
     let mut notices = shared.notices.subscribe();
     let mut ping = tokio::time::interval_at(Instant::now() + PING_EVERY, PING_EVERY);
@@ -600,9 +675,19 @@ async fn connect(mut ws: Ws, slot: Slot, shared: &Shared) {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            revoked = slot.revoked.recv() => {
+                let gone = match revoked {
+                    Ok(id) => id == slot.device,
+                    Err(broadcast::error::RecvError::Lagged(_)) => !is_paired(shared, &slot.device),
+                    Err(broadcast::error::RecvError::Closed) => true,
+                };
+                if gone {
+                    close(&mut ws, CloseCode::Policy, "device revoked").await;
+                    break;
+                }
+            }
             _ = ping.tick() => {
-                let paired = lock(&shared.devices).list().iter().any(|d| d.id == slot.device);
-                if !paired {
+                if !is_paired(shared, &slot.device) {
                     close(&mut ws, CloseCode::Policy, "device revoked").await;
                     break;
                 }
@@ -613,6 +698,10 @@ async fn connect(mut ws: Ws, slot: Slot, shared: &Shared) {
             () = tokio::time::sleep_until(last_pong + PONG_TIMEOUT) => break,
         }
     }
+}
+
+fn is_paired(shared: &Shared, device: &str) -> bool {
+    lock(&shared.devices).list().iter().any(|d| d.id == device)
 }
 
 /// Only panes the phone has been shown may be attached, so it cannot probe for others.
@@ -711,6 +800,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::listening_on(1)
+        }
+
+        fn listening_on(listeners: usize) -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!(
@@ -720,8 +813,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             let devices = Arc::new(Mutex::new(Devices::load(&dir)));
             let (server, commands) = Server::start(Config {
-                addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+                addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0)); listeners],
                 devices: devices.clone(),
+                data_dir: dir.clone(),
                 cli: None,
                 allow_loopback_for_tests: true,
                 name: "Test Mac".into(),
@@ -854,6 +948,94 @@ mod tests {
         fx.welcomed(&token).await;
         assert!(lock(&fx.devices).revoke(&id).unwrap());
         assert_eq!(status(fx.connect(&token).await), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn revoking_closes_a_live_socket_at_once() {
+        let fx = Fixture::new();
+        let (id, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        assert!(fx.server.revoke(&id).unwrap());
+        let code = timeout(Duration::from_secs(1), close_code(&mut ws))
+            .await
+            .expect("no close frame within a second of the revoke");
+        assert_eq!(code, Some(CloseCode::Policy));
+    }
+
+    #[tokio::test]
+    async fn handshake_slots_are_shared_between_listeners() {
+        let fx = Fixture::listening_on(2);
+        let addrs = fx.server.local_addrs().to_vec();
+        let mut idle = Vec::new();
+        for _ in 0..MAX_HANDSHAKES {
+            idle.push(TcpStream::connect(addrs[0]).await.unwrap());
+        }
+        let taken = async {
+            while fx.server.shared.handshakes.available_permits() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        timeout(Duration::from_secs(2), taken)
+            .await
+            .expect("idle connections never held the handshake slots");
+        let (_, token) = fx.pair_device();
+        let mut request = format!("ws://{}/v1/connect", addrs[1])
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let stream = TcpStream::connect(addrs[1]).await.unwrap();
+        assert!(client_async(request, stream).await.is_err());
+    }
+
+    #[test]
+    fn the_whois_cache_expires_and_holds_only_what_it_was_given() {
+        let peer = || tailnet::Peer {
+            login: "a@b.c".into(),
+            node: "node".into(),
+            os: "iOS".into(),
+        };
+        let ip = IpAddr::from([100, 64, 0, 1]);
+        let cache = WhoisCache::default();
+        let start = StdInstant::now();
+        assert!(cache.get(ip, start).is_none());
+        cache.put(ip, peer(), start);
+        assert_eq!(cache.get(ip, start + WHOIS_TTL / 2), Some(peer()));
+        assert!(cache.get(ip, start + WHOIS_TTL).is_none());
+        assert!(cache.get(IpAddr::from([100, 64, 0, 2]), start).is_none());
+    }
+
+    #[test]
+    fn the_server_id_persists_and_a_malformed_one_is_replaced() {
+        let fx = Fixture::new();
+        let start_again = |dir: &Path| {
+            let (server, _) = Server::start(Config {
+                addrs: Vec::new(),
+                devices: fx.devices.clone(),
+                data_dir: dir.to_path_buf(),
+                cli: None,
+                allow_loopback_for_tests: true,
+                name: "Test Mac".into(),
+            })
+            .unwrap();
+            server.id().to_string()
+        };
+        let first = fx.server.id().to_string();
+        assert!(is_server_id(&first));
+        assert_eq!(start_again(&fx.dir), first);
+        let path = fx.dir.join(ID_FILE);
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&path).unwrap().permissions()
+            ) & 0o777,
+            0o600
+        );
+        std::fs::write(&path, "NOT-A-SERVER-ID!").unwrap();
+        let replaced = start_again(&fx.dir);
+        assert!(is_server_id(&replaced));
+        assert_eq!(start_again(&fx.dir), replaced);
     }
 
     #[tokio::test]
