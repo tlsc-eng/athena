@@ -15,7 +15,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Framing
 
-- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`, and reads `terminal.dialog` only when it lists `dialog`.
+- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`, and reads `terminal.dialog` only when it lists `dialog`, and sends `answer` only when it lists `answer`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
 
@@ -88,6 +88,20 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"interrupt","id":"r10","pane":123}
 ```
 
+`answer`: answer the dialog open in a Claude pane, one verified key at a time. `key` is the `terminal.dialog.key` the phone showed. The pane must be in the latest snapshot and Claude must be in `needs_input` (`this is not a Claude session` or `Claude is not asking anything` otherwise), and a second answer for the same pane while one runs gets `Already answering`.
+- A `select` dialog takes `answers: [{"pick":["<label>"]}]`; a `review` dialog takes `answers: []` and presses "Submit answers".
+- A `question` dialog takes one entry per question, in tab order, each with the `question` text as the dialog shows it. A single-select entry has one `pick` label or an `other` text, not both. A multi-select entry lists every `pick` it wants checked, plus an optional `other`.
+- `other` is typed into the Other row and must be one line: any control character, `\n` and `\t` included, is refused with `answer text has control characters`, because a newline typed into the terminal would act as Enter. It is at most 2 KiB.
+- At most 8 entries, 12 picks each, and labels and `question` at most 200 characters (`answer is too large`).
+- A label matches a screen row ignoring whitespace runs and the curly or straight apostrophe, and a screen label cut with `…` matches by prefix. A label that matches no row, or more than one, stops the answer.
+- The desktop sends one key, reads the pane again, and sends the next only when the screen shows what that key should have done. It never sends Esc, and it stops at the first surprise with `error` `Couldn't confirm the screen, open the terminal (step N: reason)`. The pane is left as it is, so a half-filled form is visible at the desk and the next `snapshot` shows it again. It gives up after 80 keys or 20 s.
+- The reply `sent` comes once the dialog is gone or has changed after the last Enter. A key pressed at the desk in the middle of an answer makes the check fail, and a press in the few milliseconds before the final Enter can still pick another row.
+- The desktop never logs a label, `other` or prompt text.
+
+```json
+{"type":"answer","id":"r12","pane":123,"key":"3f2a9c10","answers":[{"question":"Which colour?","pick":["Blue"]},{"question":"Which sizes?","pick":["A","B"],"other":"XXL"}]}
+```
+
 `usage_refresh`: fetch the Claude plan limits again. The desktop fetches at most once every 60 s, so a request inside that window changes nothing and the phone keeps the current `usage`. `id` is echoed in `sent` straight away, and the new figures arrive in a later `snapshot`. When the Mac's usage indicator is off, the answer is `error` with `usage indicator is off`.
 
 ```json
@@ -96,10 +110,10 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -110,7 +124,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 `terminal.dialog` is present only while the pane runs Claude in `needs_input` and the desktop recognised the dialog on its screen, and is omitted otherwise. The desktop reads the visible text only, so a dialog it does not recognise is omitted or sent as `unknown`, never guessed. See `design/protocol/snapshot_dialog.json`.
 - `kind` is `select` (a single `❯` list: permission prompt, plan approval, trust dialog), `question` (a list with an Other row, checkboxes or a tab header), `review` (the review screen before a question set is submitted) or `unknown` (it has a known footer and zero, several or unplaceable `❯` rows; show it read-only and offer "Open terminal"). A phone decoding an unrecognised `kind` treats it as `unknown`.
-- `key` is 8 hex characters of FNV-1a. With tabs it hashes the kind and the tab labels, otherwise the kind, title, prompt and option labels. It does not change when the highlight, a checkbox, the input text or the current tab moves.
+- `key` is 8 hex characters of FNV-1a. With tabs it hashes the kind and the tab labels, plus the summary lines for `review`. Without tabs it hashes the kind, title, prompt, body `lines` (the command or file shown), each option label and each input row's text, so the next prompt with the same labels has another key. It does not change when the highlight, a checkbox or the current tab moves. Text typed into an Other row can change it, since the row then reads as a plain option.
 - `title`, `lines` (at most 12 of at most 200 characters) and `prompt` are the text above the rows. For a `question`, `title` is the question under the tab header, and `lines` and `prompt` are empty. For `select` and `review`, `prompt` is the last line ending in `?` above the rows and `lines` holds the rest.
 - `options` lists at most 12 rows, in screen order, with labels of at most 200 characters. `description` is the dim line under a row, and `checked` is present only on multi-select rows (`multi` is then true). `input` marks a row that takes typed text: the Other row (`label` is `Other`, `text` empty) and the `Yes, and don’t ask again for` row, whose `text` (at most 500 characters) is the prefix currently in the field.
 - `tabs` is absent without a tab header, and `answered` is true for `☒`. Which tab is current is shown only by colour, so it is not sent. `submit` is the label of the unnumbered `Next` or `Submit` row that follows a multi-select's options.
@@ -194,7 +208,7 @@ An item has `id`, `pos` (byte offset in the file), `at` (epoch milliseconds) and
 | `questions` | On a `question` item: each has `question`, `header`, `multi` and `options` (`label`, `description`). |
 | `answer` | On a `question` item: the result text, cut to 1 KiB. |
 
-`sent`: answer to `prompt` or `interrupt` once the keys have been written to the pane, and to `usage_refresh` once the desktop has handled it.
+`sent`: answer to `prompt`, `interrupt` or `answer` once the keys have been written to the pane, and to `usage_refresh` once the desktop has handled it.
 
 ```json
 {"type":"sent","id":"r7"}

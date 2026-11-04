@@ -2,7 +2,7 @@
 //! the Claude Code IDE server and workspace.json are shared and handed to the right window here.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,7 @@ use super::bridge::hook_claude_holds_terminal;
 use super::claude_sessions::live::Waiting;
 use super::claude_sessions::{Bindings, SessionsState};
 use super::companion::act;
+use super::companion::answer::{self, Goal, Next, Run};
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
@@ -56,6 +57,8 @@ pub(super) struct Windows {
     companion_clients: usize,
     /// What each pane last asked, until it runs again or stops.
     companion_needs: HashMap<PaneId, String>,
+    /// Panes whose answer is being keyed in, so a second answer cannot interleave with it.
+    companion_answering: HashSet<PaneId>,
     companion_dirty: bool,
     usage_pushed: HashMap<(String, String), f32>,
     _companion_ticker: Option<Task<()>>,
@@ -121,6 +124,7 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         _companion_watch: None,
         companion_clients: 0,
         companion_needs: HashMap::new(),
+        companion_answering: HashSet::new(),
         companion_dirty: false,
         usage_pushed: HashMap::new(),
         _companion_ticker: None,
@@ -964,6 +968,13 @@ fn act_for_phone(
             view.update(cx, |v, cx| v.type_text(b"\x1b".to_vec(), cx));
             let _ = reply.send(Ok(()));
         }
+        Action::Answer { key, answers } => {
+            let goal = Goal {
+                key: key.clone(),
+                answers: answers.clone(),
+            };
+            answer_for_phone(&view, pane, goal, reply, cx);
+        }
         Action::Prompt(text) => {
             view.update(cx, |v, cx| v.paste_text(text, cx));
             cx.spawn(async move |cx| {
@@ -980,6 +991,91 @@ fn act_for_phone(
                 });
             })
             .detach();
+        }
+    }
+}
+
+const ANSWER_KEY_WAIT: Duration = Duration::from_millis(800);
+const ANSWER_SETTLE_WAIT: Duration = Duration::from_secs(2);
+const ANSWER_BUDGET: Duration = Duration::from_secs(20);
+const ANSWER_POLL: Duration = Duration::from_millis(40);
+
+/// Keys a phone's answer into a Claude dialog and replies once it is submitted or the screen stopped matching.
+fn answer_for_phone(
+    view: &Entity<daedalus_term::TerminalView>,
+    pane: PaneId,
+    goal: Goal,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    cx: &mut App,
+) {
+    if !cx.global_mut::<Windows>().companion_answering.insert(pane) {
+        let _ = reply.send(Err("Already answering".into()));
+        return;
+    }
+    let view = view.clone();
+    cx.spawn(async move |cx| {
+        let result = drive_answer(&view, goal, cx).await;
+        // Every way out of the driver passes here, so the pane is never left marked.
+        let _ = cx.update(|cx| {
+            cx.global_mut::<Windows>().companion_answering.remove(&pane);
+        });
+        let _ = reply.send(result);
+    })
+    .detach();
+}
+
+async fn drive_answer(
+    view: &Entity<daedalus_term::TerminalView>,
+    goal: Goal,
+    cx: &mut gpui::AsyncApp,
+) -> Result<(), String> {
+    let gone = || "pane is not open".to_string();
+    let read = |cx: &mut gpui::AsyncApp| cx.update(|cx| answer::read(view.read(cx))).ok().flatten();
+    let started = std::time::Instant::now();
+    let mut run = Run::new(goal);
+    let (mut screen, mut app_cursor) = read(cx).ok_or_else(gone)?;
+    loop {
+        if started.elapsed() > ANSWER_BUDGET {
+            return Err(run.refusal("took too long"));
+        }
+        match run.advance(screen.clone(), app_cursor) {
+            Next::Done => return Ok(()),
+            Next::Abort(why) => return Err(why),
+            Next::Send(bytes) => {
+                let sent = cx
+                    .update(|cx| view.update(cx, |v, cx| v.type_text(bytes, cx)))
+                    .is_ok();
+                if !sent {
+                    return Err("Daedalus is closing".into());
+                }
+                let wait = if run.settling() {
+                    ANSWER_SETTLE_WAIT
+                } else {
+                    ANSWER_KEY_WAIT
+                };
+                let deadline = std::time::Instant::now() + wait;
+                let last = screen;
+                loop {
+                    cx.background_executor().timer(ANSWER_POLL).await;
+                    let (now, cursor) = read(cx).ok_or_else(gone)?;
+                    if run.ready(now.as_ref(), last.as_ref()) {
+                        screen = now;
+                        app_cursor = cursor;
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let why = if run.settling() {
+                            "the dialog did not close"
+                        } else {
+                            "no change after the key"
+                        };
+                        return Err(run.refusal(why));
+                    }
+                }
+                if let Some(outcome) = run.after(screen.as_ref()) {
+                    tracing::info!(outcome, "answer: screen re-read after Enter");
+                }
+            }
         }
     }
 }

@@ -123,7 +123,14 @@ fn read(block: &[Line], anchor: usize, pc: usize) -> Dialog {
     } else {
         titled(&head)
     };
-    let key = key(kind, &tabs, title.as_deref(), prompt.as_deref(), &options);
+    let key = key(
+        kind,
+        &tabs,
+        title.as_deref(),
+        prompt.as_deref(),
+        &lines,
+        &options,
+    );
     Dialog {
         key,
         kind,
@@ -391,6 +398,7 @@ fn unknown(block: &[Line], options: Vec<DialogOption>) -> Dialog {
         &[],
         title.as_deref(),
         prompt.as_deref(),
+        &lines,
         &options,
     );
     Dialog {
@@ -408,12 +416,14 @@ fn unknown(block: &[Line], options: Vec<DialogOption>) -> Dialog {
     }
 }
 
-/// Hashes what identifies the dialog and leaves out the highlight, checkboxes, input text and current tab.
+/// Hashes what identifies the dialog and leaves out the highlight, checkboxes and current tab.
+/// Without tabs the body lines and input text are in it, so the next permission prompt with the same labels is another dialog.
 fn key(
     kind: DialogKind,
     tabs: &[DialogTab],
     title: Option<&str>,
     prompt: Option<&str>,
+    lines: &[String],
     options: &[DialogOption],
 ) -> String {
     let kind = match kind {
@@ -426,9 +436,16 @@ fn key(
     if tabs.is_empty() {
         parts.push(title.unwrap_or_default());
         parts.push(prompt.unwrap_or_default());
-        parts.extend(options.iter().map(|o| o.label.as_str()));
+        parts.extend(lines.iter().map(String::as_str));
+        for option in options {
+            parts.push(option.label.as_str());
+            parts.extend(option.text.as_deref());
+        }
     } else {
         parts.extend(tabs.iter().map(|t| t.label.as_str()));
+        if kind == "review" {
+            parts.extend(lines.iter().map(String::as_str));
+        }
     }
     let mut hash: u32 = 0x811c_9dc5;
     for byte in parts.join("\0").bytes() {
@@ -739,12 +756,20 @@ mod tests {
         assert_eq!(key(BASH), key(&moved));
         let toggled = MULTI.replace("[✔] B", "[ ] B").replace("[ ] A", "[✔] A");
         assert_eq!(key(MULTI), key(&toggled));
-        let typed = BASH.replace("npm test *", "cargo test *");
-        assert_eq!(key(BASH), key(&typed));
+        let edited = BASH.replace("npm test *", "cargo test *");
+        assert_ne!(key(BASH), key(&edited));
+        let other_command = BASH.replace("   npm test\n", "   npm run build\n");
+        assert_ne!(key(BASH), key(&other_command));
         let relabelled = BASH.replace("3. Yes, and switch", "3. Yes, and change");
         assert_ne!(key(BASH), key(&relabelled));
         assert_ne!(key(TRUST), key(BASH));
         assert_eq!(dialog(BASH).key.len(), 8);
+    }
+
+    #[test]
+    fn a_review_key_follows_its_summary() {
+        let other = REVIEW.replace("→ Blue", "→ Red");
+        assert_ne!(dialog(REVIEW).key, dialog(&other).key);
     }
 
     #[test]
