@@ -45,6 +45,9 @@ pub(in crate::shell) struct Progress {
     rewound: bool,
     tabs: Vec<String>,
     typed: Option<Typed>,
+    /// Set by an Enter that ends a question, so a new question counts only right after one.
+    entered: bool,
+    after_enter: bool,
 }
 
 /// The Other row once text is typed into it: it then reads as a plain option, so it is found by position.
@@ -95,11 +98,13 @@ impl Expect {
             }),
             Self::HighlightAt(i) => now.is_some_and(|n| {
                 n.kind == before.kind
+                    && n.title == before.title
                     && n.options.len() == before.options.len()
                     && n.highlight == Some(*i as u32)
             }),
             Self::Checked(i, on) => now.is_some_and(|n| {
-                n.options.len() == before.options.len()
+                n.title == before.title
+                    && n.options.len() == before.options.len()
                     && n.options.get(*i).is_some_and(|o| o.checked == Some(*on))
             }),
             Self::InputStartsWith(i, text) => {
@@ -114,6 +119,7 @@ impl Expect {
 
 /// Plans the next key from the screen that follows the last one. Call it only once the previous `Expect` held.
 pub(in crate::shell) fn step(d: &Dialog, goal: &Goal, p: &mut Progress, app_cursor: bool) -> Step {
+    p.after_enter = std::mem::take(&mut p.entered);
     match plan(d, goal, p, app_cursor) {
         Ok(Step::Key(bytes, expect)) => {
             p.keys += 1;
@@ -195,7 +201,7 @@ fn question(d: &Dialog, goal: &Goal, p: &mut Progress, app: bool) -> Plan {
     match p.question {
         None => {}
         Some(q) if q == at => {}
-        Some(q) if p.rewound && at == q + 1 => p.typed = None,
+        Some(q) if p.rewound && p.after_enter && at == q + 1 => p.typed = None,
         Some(q) if !p.rewound && at + 1 == q => {}
         Some(_) => return Err("the questions came in another order"),
     }
@@ -259,6 +265,10 @@ fn multi(d: &Dialog, pick: &AnswerPick, p: &mut Progress, app: bool, tabbed: boo
     let mut wanted = vec![false; d.options.len()];
     for label in &pick.pick {
         wanted[find(d, label, |i| skip(i, p))?] = true;
+    }
+    let desk_ticked = d.options.iter().any(|o| o.input && o.checked == Some(true));
+    if desk_ticked && typed_text(pick).is_none() {
+        return Err("the Other row is ticked at the desk");
     }
     for (i, option) in d.options.iter().enumerate() {
         let on = wanted[i];
@@ -342,6 +352,7 @@ fn enter(p: &mut Progress, last: bool) -> Step {
         p.submitted = true;
         Step::Key(b"\r".to_vec(), Expect::GoneOrKeyChanged)
     } else {
+        p.entered = true;
         Step::Key(b"\r".to_vec(), Expect::ReviewOrNext)
     }
 }
@@ -788,6 +799,56 @@ mod tests {
         let (keys, end) = play(g, screens, false);
         assert_eq!(keys, [&b"hello"[..], DOWN, ENTER]);
         assert_done(end);
+    }
+
+    #[test]
+    fn an_up_that_lands_on_another_tab_with_the_same_highlight_aborts() {
+        let second = at(parse(TABS), 1);
+        let g = tabbed_goal(&second);
+        let mut other_tab = at(colour_question(), 0);
+        other_tab.options.truncate(3);
+        let first = at(colour_question(), 1);
+        let screens = vec![Some(second), Some(first), Some(other_tab)];
+        let (_, end) = play(g, screens, false);
+        assert_aborted(end, "did not match");
+    }
+
+    #[test]
+    fn a_space_that_lands_on_another_tab_with_the_same_boxes_aborts() {
+        let d = parse(MULTI);
+        let mut tabbed = d.clone();
+        tabbed.tabs = vec![DialogTab {
+            label: "A".into(),
+            answered: false,
+        }];
+        let g = goal(&tabbed, vec![pick(Some("Which sizes?"), &["A", "B"], None)]);
+        let mut next_tab = checked(tabbed.clone(), &[true, true, false]);
+        next_tab.title = Some("Which else?".into());
+        let screens = vec![Some(tabbed), Some(next_tab)];
+        let (keys, end) = play(g, screens, false);
+        assert_eq!(keys, [b" ".to_vec()]);
+        assert_aborted(end, "did not match");
+    }
+
+    #[test]
+    fn a_new_question_without_an_enter_before_it_aborts() {
+        let second = parse(TABS);
+        let first = colour_question();
+        let g = tabbed_goal(&second);
+        let mut p = Progress::default();
+        assert!(matches!(step(&first, &g, &mut p, false), Step::Key(..)));
+        assert!(matches!(step(&second, &g, &mut p, false), Step::Abort(_)));
+    }
+
+    #[test]
+    fn an_other_row_ticked_at_the_desk_aborts_when_the_phone_typed_nothing() {
+        let d = parse(MULTI);
+        let mut ticked = checked(d, &[false, true, true]);
+        ticked.options[2].input = true;
+        let g = goal(&ticked, vec![pick(Some("Which sizes?"), &["B"], None)]);
+        let (keys, end) = play(g, vec![Some(ticked)], false);
+        assert!(keys.is_empty());
+        assert_aborted(end, "ticked at the desk");
     }
 
     #[test]
