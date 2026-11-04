@@ -140,6 +140,8 @@ fn parse_self_dns(json: &str) -> Option<String> {
 fn run(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
+        // Without a TERM (GUI launch) the app binary starts the GUI instead of acting as the CLI.
+        .env("TAILSCALE_BE_CLI", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -383,6 +385,16 @@ mod tests {
         assert_eq!(out, None);
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_dies_soon("sleep 30.25");
+    }
+
+    #[test]
+    fn the_cli_runs_in_cli_mode() {
+        let out = run(
+            Path::new("/bin/sh"),
+            &["-c", "printf %s \"$TAILSCALE_BE_CLI\""],
+            Duration::from_secs(5),
+        );
+        assert_eq!(out.as_deref(), Some("1"));
     }
 
     #[test]
