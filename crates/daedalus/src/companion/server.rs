@@ -761,7 +761,11 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let started = spawn_claude(shared, &current, id, project, busy).await;
                                 queue(&mut pending, started)
                             }
-                            ClientMsg::UsageRefresh { id } => Some(usage_refresh(shared, id).await),
+                            ClientMsg::UsageRefresh { id } => {
+                                let busy = pending.len() >= MAX_IN_FLIGHT;
+                                let started = usage_refresh(shared, id, busy).await;
+                                queue(&mut pending, started)
+                            }
                             ClientMsg::TranscriptOpen { id, session, limit } => {
                                 let current = Arc::clone(&snapshot.borrow());
                                 Some(transcripts.open(&current, id, session, limit).await)
@@ -1026,11 +1030,10 @@ fn answer_refusal(key: &str, answers: &[AnswerPick]) -> Option<&'static str> {
     controls.then_some("answer text has control characters")
 }
 
-async fn usage_refresh(shared: &Shared, id: String) -> ServerMsg {
-    let failed = |id: String, message: &str| ServerMsg::Error {
-        id: Some(id),
-        message: message.into(),
-    };
+async fn usage_refresh(shared: &Shared, id: String, busy: bool) -> Result<Pending, ServerMsg> {
+    if busy {
+        return Err(failed(id, BUSY));
+    }
     let (reply, answer) = oneshot::channel();
     if shared
         .commands
@@ -1038,16 +1041,18 @@ async fn usage_refresh(shared: &Shared, id: String) -> ServerMsg {
         .await
         .is_err()
     {
-        return failed(id, "could not refresh usage");
+        return Err(failed(id, "could not refresh usage"));
     }
-    match timeout(USAGE_WAIT, answer).await {
-        Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
-        Ok(Ok(Err(message))) => ServerMsg::Error {
-            id: Some(id),
-            message,
-        },
-        _ => failed(id, "could not refresh usage"),
-    }
+    Ok(Box::pin(async move {
+        match timeout(USAGE_WAIT, answer).await {
+            Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
+            Ok(Ok(Err(message))) => ServerMsg::Error {
+                id: Some(id),
+                message,
+            },
+            _ => failed(id, "could not refresh usage"),
+        }
+    }))
 }
 
 /// Reads the next text frame as JSON; anything else, including an oversized frame, gives `None`.
@@ -1711,6 +1716,44 @@ mod tests {
         );
         send_json(&mut ws, &prompt_msg("again", 7)).await;
         let _ = next_act_reply(&fx).await;
+    }
+
+    #[tokio::test]
+    async fn a_pending_usage_refresh_counts_toward_the_cap_and_does_not_block_other_replies() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::UsageRefresh { id: "u".into() }).await;
+        let Ok(Command::UsageRefresh { reply: usage }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the refresh never reached the app")
+        else {
+            panic!("expected a usage refresh command");
+        };
+        send_json(&mut ws, &prompt_msg("a", 7)).await;
+        let act = next_act_reply(&fx).await;
+        let _ = act.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "a".into() }
+        );
+
+        let mut replies = Vec::new();
+        for n in 0..MAX_IN_FLIGHT - 1 {
+            send_json(&mut ws, &prompt_msg(&format!("p{n}"), 7)).await;
+            replies.push(next_act_reply(&fx).await);
+        }
+        send_json(&mut ws, &ClientMsg::UsageRefresh { id: "over".into() }).await;
+        expect_error(&mut ws, "over", "busy").await;
+        assert!(fx.no_command());
+
+        let _ = usage.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "u".into() }
+        );
     }
 
     #[tokio::test]
