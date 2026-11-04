@@ -210,14 +210,17 @@ impl Fleet {
                 s.started_at = at;
                 s.ended_at = None;
                 s.tool = None;
+                s.tools = 0;
             });
+            self.entries[i].offset = 0;
         }
     }
 
     fn notification(&mut self, block: &str, at: u64) {
         let mut hasher = DefaultHasher::new();
         block.hash(&mut hasher);
-        if !self.seen.insert(hasher.finish()) {
+        let hash = hasher.finish();
+        if self.seen.contains(&hash) {
             return;
         }
         let found = tag(block, "task-id")
@@ -236,9 +239,11 @@ impl Fleet {
             Some("killed" | "stopped") => SubagentState::Stopped,
             _ => return,
         };
-        let tools = tag(block, "tool_uses")
+        let usage = block.rfind("</result>").map_or(block, |end| &block[end..]);
+        let tools = tag(usage, "tool_uses")
             .and_then(|n| n.parse().ok())
             .unwrap_or(0);
+        self.seen.insert(hash);
         self.finish(i, state, at, tools);
     }
 
@@ -335,7 +340,17 @@ fn notifications(mut text: &str) -> Vec<&str> {
     let mut found = Vec::new();
     while let Some(start) = text.find(NOTIFICATION_OPEN) {
         let rest = &text[start..];
-        let Some(end) = rest.find(NOTIFICATION_CLOSE) else {
+        let first_close = rest.find(NOTIFICATION_CLOSE);
+        let quoted = match (rest.find("<result>"), first_close) {
+            (Some(open), Some(close)) if open < close => rest[open..]
+                .find("</result>")
+                .map_or(0, |end| open + end + "</result>".len()),
+            _ => 0,
+        };
+        let Some(end) = rest[quoted..]
+            .find(NOTIFICATION_CLOSE)
+            .map(|end| quoted + end)
+        else {
             break;
         };
         let end = end + NOTIFICATION_CLOSE.len();
@@ -782,6 +797,67 @@ mod tests {
                 .iter()
                 .all(|e| fleet.by_tool[&e.sub.tool_id] < MAX_TRACKED)
         );
+    }
+
+    #[test]
+    fn a_result_quoting_notification_markup_does_not_set_the_count_or_end_the_block() {
+        let (mut fleet, _dir) = fleet("quoted");
+        fleet.line(&launch("toolu_1", "Agent", 1));
+        fleet.line(&launched("toolu_1", "a1", 2));
+        let text = "<task-notification><task-id>a1</task-id><tool-use-id>toolu_1</tool-use-id>\
+            <status>completed</status><result>quoted </task-notification>\
+            <tool_uses>99</tool_uses> end</result><usage><tool_uses>3</tool_uses></usage>\
+            </task-notification>";
+        fleet.line(&enqueue(text, 5));
+        let sub = only(&fleet);
+        assert_eq!((sub.state, sub.tools), (SubagentState::Done, 3));
+    }
+
+    #[test]
+    fn a_resumed_agent_counts_its_whole_file_live_and_on_replay() {
+        let (mut live, dir) = fleet("recount");
+        let file = dir.join("s1/subagents/agent-a1.jsonl");
+        let first = [launch("toolu_1", "Agent", 1), launched("toolu_1", "a1", 2)];
+        let done = enqueue(&notification("a1", "toolu_1", "completed", 2), 5);
+        let resume = result("toolu_send", json!({"resumedAgentId": "a1"}), false, 10);
+
+        live.line(&first[0]);
+        live.line(&first[1]);
+        append(&file, &[agent_line("Read", 3), agent_line("Grep", 4)]);
+        live.read_agents();
+        live.line(&done);
+        live.line(&resume);
+        append(
+            &file,
+            &[
+                agent_line("Bash", 11),
+                agent_line("Edit", 12),
+                agent_line("Read", 13),
+            ],
+        );
+        live.read_agents();
+
+        let mut replayed = Fleet::new(&dir.join("s1.jsonl"));
+        for line in [&first[0], &first[1], &done, &resume] {
+            replayed.line(line);
+        }
+        replayed.read_agents();
+
+        assert_eq!(only(&live).tools, 5);
+        assert_eq!(only(&replayed), only(&live));
+    }
+
+    #[test]
+    fn when_every_tracked_agent_is_running_the_oldest_is_dropped() {
+        let (mut fleet, _dir) = fleet("all-running");
+        for n in 0..=MAX_TRACKED {
+            let mut line = launch(&format!("toolu_{n}"), "Agent", 0);
+            line["timestamp"] = json!(format!("2026-01-01T00:{:02}:{:02}.000Z", n / 60, n % 60));
+            fleet.line(&line);
+        }
+        assert_eq!(fleet.entries.len(), MAX_TRACKED);
+        assert!(!fleet.by_tool.contains_key("toolu_0"));
+        assert!(fleet.by_tool.contains_key(&format!("toolu_{MAX_TRACKED}")));
     }
 
     #[test]
