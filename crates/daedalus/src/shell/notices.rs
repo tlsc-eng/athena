@@ -140,7 +140,7 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-fn ago(at: u64) -> String {
+pub(super) fn ago(at: u64) -> String {
     let secs = now_ms().saturating_sub(at) / 1000;
     match secs {
         0..60 => "now".into(),

@@ -89,6 +89,8 @@ pub enum Command {
     },
     /// The number of live connections changed to this total.
     ClientsChanged(usize),
+    /// A pairing was approved and stored, or could not be saved.
+    Paired(Result<(), String>),
 }
 
 /// What phones see; the server numbers each one per connection.
@@ -237,8 +239,13 @@ impl Server {
     pub fn revoke(&self, id: &str) -> io::Result<bool> {
         let removed = lock(&self.shared.devices).revoke(id);
         // The device is gone from memory even when saving failed, so its sockets close either way.
-        let _ = self.shared.revoked.send(id.to_string());
+        self.close_connections_of(id);
         removed
+    }
+
+    /// Closes a device's live connections without touching the store, for a caller that has already removed it.
+    pub fn close_connections_of(&self, id: &str) {
+        let _ = self.shared.revoked.send(id.to_string());
     }
 
     /// Tells every connected phone about a session that needs attention.
@@ -591,6 +598,8 @@ async fn pair(
         Some(Verdict::Allow) => {
             let (login, node) = whois.map(|p| (p.login, p.node)).unwrap_or_default();
             let issued = lock(&shared.devices).issue(&name, &login, &node);
+            let stored = issued.as_ref().map(|_| ()).map_err(|e| e.to_string());
+            let _ = shared.commands.try_send(Command::Paired(stored));
             match issued {
                 Ok((_, token)) => PairReply::Paired {
                     token,
@@ -917,7 +926,7 @@ mod tests {
         async fn next_command(&self) -> Result<Command, async_channel::RecvError> {
             loop {
                 match self.commands.recv().await {
-                    Ok(Command::ClientsChanged(_)) => {}
+                    Ok(Command::ClientsChanged(_) | Command::Paired(_)) => {}
                     other => return other,
                 }
             }
@@ -926,7 +935,7 @@ mod tests {
         /// True when nothing but client counts is queued.
         fn no_command(&self) -> bool {
             while let Ok(command) = self.commands.try_recv() {
-                if !matches!(command, Command::ClientsChanged(_)) {
+                if !matches!(command, Command::ClientsChanged(_) | Command::Paired(_)) {
                     return false;
                 }
             }
@@ -1370,6 +1379,10 @@ mod tests {
             panic!("expected paired");
         };
         assert_eq!(token.len(), 64);
+        assert!(matches!(
+            fx.commands.try_recv(),
+            Ok(Command::Paired(Ok(())))
+        ));
         assert_eq!(server, fx.server.id());
         assert!(
             server.len() == 16

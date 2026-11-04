@@ -32,6 +32,11 @@ impl PairingCode {
         self.code.as_deref().unwrap_or("")
     }
 
+    /// When the code stops working, for the pairing modal's countdown.
+    pub fn expires(&self) -> Instant {
+        self.expires
+    }
+
     /// Spends the code on the first attempt, right or wrong, so a guess cannot be retried.
     pub fn take(&mut self, given: &str, now: Instant) -> bool {
         let Some(code) = self.code.take() else {

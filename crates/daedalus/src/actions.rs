@@ -72,6 +72,7 @@ actions!(
         GoToSymbol,
         GoToWorkspaceSymbol,
         ToggleIdeIntegration,
+        PairIphone,
         SendToClaude,
         OpenRecent,
         ClearRecent,

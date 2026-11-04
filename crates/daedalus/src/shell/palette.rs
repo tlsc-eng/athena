@@ -410,6 +410,7 @@ pub(super) fn commands() -> Vec<(&'static str, Box<dyn Action>)> {
             "Toggle Claude Code integration (diffs, selection, diagnostics)",
             Box::new(actions::ToggleIdeIntegration),
         ),
+        ("Pair iPhone…", Box::new(actions::PairIphone)),
         ("Send selection to Claude", Box::new(actions::SendToClaude)),
         (
             "Claude: Show sessions",

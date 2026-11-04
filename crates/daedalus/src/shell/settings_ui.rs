@@ -10,6 +10,9 @@ use gpui::{
 };
 use serde_json::{Value, json};
 
+use super::notices::ago;
+use super::windows;
+use crate::companion::devices::Device;
 use crate::settings::schema::{Kind, SETTINGS, Setting};
 use crate::settings::{self, Settings};
 
@@ -34,6 +37,7 @@ pub(super) enum SettingsEvent {
         keys: &'static [&'static str],
     },
     OpenJson(Scope),
+    RevokeDevice(String),
 }
 
 /// A file's settings, or why it could not be read.
@@ -119,6 +123,8 @@ pub(super) struct SettingsView {
     errors: HashMap<usize, String>,
     typing: HashMap<usize, Task<()>>,
     menu: Option<(Entity<ContextMenu>, Subscription)>,
+    /// Paired phones as last read; kept when the store is busy saving.
+    devices: Vec<Device>,
     scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -173,6 +179,7 @@ impl SettingsView {
             errors: HashMap::new(),
             typing: HashMap::new(),
             menu: None,
+            devices: Vec::new(),
             scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         };
@@ -513,6 +520,82 @@ impl SettingsView {
             .into_any_element()
     }
 
+    fn render_devices(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme().clone();
+        let rows: Vec<AnyElement> = self
+            .devices
+            .iter()
+            .map(|device| {
+                let id = device.id.clone();
+                let who = [device.node.as_str(), device.login.as_str()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let seen = match ago(device.created_ms).as_str() {
+                    "now" => "Paired now".to_string(),
+                    age => format!("Paired {age} ago"),
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(t.ui(12.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(t.typography.body)
+                                    .text_color(t.color.content)
+                                    .child(device.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(t.typography.caption)
+                                    .text_color(t.color.content_muted)
+                                    .child(if who.is_empty() {
+                                        seen
+                                    } else {
+                                        format!("{who} · {seen}")
+                                    }),
+                            ),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("revoke-{}", device.id)),
+                            "Revoke",
+                            ButtonKind::Secondary,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SettingsEvent::RevokeDevice(id.clone()))
+                        })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .w_full()
+            .max_w(t.ui(880.))
+            .pl(t.ui(14.))
+            .pb(t.ui(10.))
+            .flex()
+            .flex_col()
+            .gap(t.ui(8.))
+            .when(rows.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_size(t.typography.caption)
+                        .text_color(t.color.content_muted)
+                        .child("No paired devices."),
+                )
+            })
+            .children(rows)
+            .into_any_element()
+    }
+
     fn render_row(&self, i: usize, editable: bool, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let s = &SETTINGS[i];
@@ -741,6 +824,11 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
+        if let Some(store) = windows::companion_devices(cx)
+            && let Ok(store) = store.try_lock()
+        {
+            self.devices = store.list().to_vec();
+        }
         let query = self.search.read(cx).text().to_string();
         let shown: Vec<usize> = SETTINGS
             .iter()
@@ -769,6 +857,9 @@ impl Render for SettingsView {
                 );
             }
             body.push(self.render_row(i, editable, cx));
+            if SETTINGS[i].keys == ["companion", "enabled"] {
+                body.push(self.render_devices(cx));
+            }
         }
         if shown.is_empty() {
             body.push(
