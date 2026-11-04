@@ -53,9 +53,12 @@ struct Told {
 }
 
 /// Brings the server in line with the Tailscale addresses now, and says how long until the next look.
-/// Everything that blocks runs on the background executor; `None` means the app is gone.
+/// Starting runs on the background executor; `None` means the app is gone.
 async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration> {
     let background = cx.background_executor().clone();
+    if let Some(closing) = cx.update(windows::take_companion_closing).ok()? {
+        let _ = closing.await;
+    }
     let addrs = background
         .spawn(async {
             let (v4, v6) = tailnet::pick(&tailnet::local_addrs());
@@ -69,13 +72,8 @@ async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration
         Some(true) => return Some(RUNNING_POLL),
         // The old server holds the port until its thread is joined.
         Some(false) => {
-            let closed = cx
-                .update(|cx| {
-                    windows::take_companion(cx).map(|server| windows::close_companion(server, cx))
-                })
-                .ok()?;
-            if let Some(closed) = closed {
-                let _ = closed.await;
+            if let Some(server) = cx.update(windows::take_companion).ok()? {
+                let _ = server.shutdown().await;
             }
         }
         None => {}
@@ -94,7 +92,6 @@ async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration
         return Some(WAITING_POLL);
     }
     let name = name.to_string();
-    // If the setting goes off while this runs, the dropped watch cancels it and the server goes with it.
     match background.spawn(async move { start(addrs, &name) }).await {
         Ok((server, commands)) => {
             told.failed = false;

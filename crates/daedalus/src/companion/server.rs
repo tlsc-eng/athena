@@ -125,12 +125,12 @@ struct Shared {
     whois: WhoisCache,
 }
 
-/// A running companion server. Dropping it closes every connection.
+/// A running companion server. Dropping it starts the stop without waiting; `shutdown` says when it is done.
 pub struct Server {
     shared: Arc<Shared>,
     addrs: Vec<SocketAddr>,
     stop: Option<oneshot::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    closed: Option<futures::channel::oneshot::Receiver<()>>,
 }
 
 impl Server {
@@ -172,7 +172,8 @@ impl Server {
             .build()?;
         let (stop, stopped) = oneshot::channel();
         let serving = shared.clone();
-        let thread = std::thread::Builder::new()
+        let (done, closed) = futures::channel::oneshot::channel();
+        std::thread::Builder::new()
             .name("companion-server".into())
             .spawn(move || {
                 runtime.block_on(async move {
@@ -188,13 +189,14 @@ impl Server {
                 });
                 // Dropping the runtime would wait for an in-flight whois subprocess.
                 runtime.shutdown_background();
+                let _ = done.send(());
             })?;
         tracing::info!(?addrs, "companion server listening");
         let server = Self {
             shared,
             addrs,
             stop: Some(stop),
-            thread: Some(thread),
+            closed: Some(closed),
         };
         Ok((server, rx))
     }
@@ -202,6 +204,12 @@ impl Server {
     /// The addresses actually bound, which differ from the config when it asked for port 0.
     pub fn local_addrs(&self) -> &[SocketAddr] {
         &self.addrs
+    }
+
+    /// Stops serving; the receiver resolves once every listener is closed and the port is free.
+    pub fn shutdown(mut self) -> futures::channel::oneshot::Receiver<()> {
+        drop(self.stop.take());
+        self.closed.take().expect("closed is taken only here")
     }
 
     /// The id phones see in `welcome` and `paired`.
@@ -242,9 +250,6 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         drop(self.stop.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 
@@ -1235,6 +1240,26 @@ mod tests {
         let replaced = start_again(&fx.dir);
         assert!(is_server_id(&replaced));
         assert_eq!(start_again(&fx.dir), replaced);
+    }
+
+    #[tokio::test]
+    async fn shutdown_resolves_once_the_port_is_free() {
+        let fx = Fixture::new();
+        let (server, _) = Server::start(Config {
+            addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+            devices: fx.devices.clone(),
+            data_dir: fx.dir.clone(),
+            cli: None,
+            allow_loopback_for_tests: true,
+            name: "Test Mac".into(),
+            mux_socket: fx.mux.clone(),
+        })
+        .unwrap();
+        let addr = server.local_addrs()[0];
+        let _ = timeout(Duration::from_secs(5), server.shutdown())
+            .await
+            .expect("the server never finished stopping");
+        StdListener::bind(addr).expect("the port was still held");
     }
 
     #[tokio::test]

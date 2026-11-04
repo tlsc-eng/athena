@@ -46,6 +46,7 @@ pub(super) struct Windows {
     _companion_events: Option<Task<()>>,
     _companion_watch: Option<Task<()>>,
     companion_clients: usize,
+    companion_closing: Option<futures::channel::oneshot::Receiver<()>>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -102,6 +103,7 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         _companion_events: None,
         _companion_watch: None,
         companion_clients: 0,
+        companion_closing: None,
         _tasks: Vec::new(),
     });
     let mut near = None;
@@ -611,26 +613,18 @@ pub(super) fn take_companion(cx: &mut App) -> Option<companion_server::Server> {
     server
 }
 
-/// Drops the server on a background thread, since that joins its thread; the receiver resolves once it is gone.
-pub(super) fn close_companion(
-    server: companion_server::Server,
-    cx: &App,
-) -> futures::channel::oneshot::Receiver<()> {
-    let (done, closed) = futures::channel::oneshot::channel();
-    cx.background_executor()
-        .spawn(async move {
-            drop(server);
-            let _ = done.send(());
-        })
-        .detach();
-    closed
-}
-
 pub(super) fn stop_companion(cx: &mut App) {
     cx.global_mut::<Windows>()._companion_watch = None;
     if let Some(server) = take_companion(cx) {
-        drop(close_companion(server, cx));
+        cx.global_mut::<Windows>().companion_closing = Some(server.shutdown());
     }
+}
+
+/// The shutdown `stop_companion` left pending, which a new server must wait for to get the port.
+pub(super) fn take_companion_closing(
+    cx: &mut App,
+) -> Option<futures::channel::oneshot::Receiver<()>> {
+    cx.global_mut::<Windows>().companion_closing.take()
 }
 
 fn set_companion_clients(count: usize, cx: &mut App) {
