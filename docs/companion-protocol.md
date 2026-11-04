@@ -164,7 +164,7 @@ An item has `id`, `pos` (byte offset in the file), `at` (epoch milliseconds) and
 | `cut` | `true` when `text` was truncated. |
 | `tool`, `tool_id` | The tool name and its call id, on `tool` and `question` items. |
 | `summary` | A one-line description of the call, at most 200 characters. |
-| `status` | `pending`, `ok` or `error`. A tool item stays `pending` until its result arrives. |
+| `status` | `pending`, `ok` or `error`. A tool or question item stays `pending` until its result arrives. |
 | `detail` | The first 1 KiB of an error result. |
 | `questions` | On a `question` item: each has `question`, `header`, `multi` and `options` (`label`, `description`). |
 | `answer` | On a `question` item: the result text, cut to 1 KiB. |

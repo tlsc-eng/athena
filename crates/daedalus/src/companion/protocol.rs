@@ -644,6 +644,20 @@ mod tests {
     }
 
     #[test]
+    fn a_welcome_without_features_omits_the_field() {
+        let msg = ServerMsg::Welcome {
+            proto: PROTO,
+            server: "a1b2c3d4e5f60718".into(),
+            name: "Jason's Mac".into(),
+            app: "2.0.1".into(),
+            features: Vec::new(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("features"));
+        assert_eq!(serde_json::from_str::<ServerMsg>(&json).unwrap(), msg);
+    }
+
+    #[test]
     fn an_error_without_an_id_omits_the_field() {
         let msg = ServerMsg::Error {
             id: None,
