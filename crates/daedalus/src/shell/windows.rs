@@ -252,7 +252,7 @@ pub(super) fn handles(cx: &App) -> Vec<WindowHandle<Shell>> {
         .collect()
 }
 
-/// The highest usage level already pushed per profile and window, shared so one crossing pushes once however many windows poll.
+/// The usage level each profile's window last reached, shared so one crossing pushes once however many windows poll.
 pub(super) fn usage_pushed(cx: &mut App) -> &mut HashMap<(String, String), f32> {
     &mut cx.global_mut::<Windows>().usage_pushed
 }

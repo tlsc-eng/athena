@@ -125,15 +125,31 @@ fn pushes_due(
     due
 }
 
-fn local_hhmm(at: i64) -> String {
-    let t = at as libc::time_t;
+/// The API reports a reset a fraction of a second before the minute, so it rounds up to read as 18:00.
+fn round_up_minute(at: i64) -> i64 {
+    (at + 59) / 60 * 60
+}
+
+/// The weekday is only worth its width on a window that resets days away.
+fn reset_text(weekly: bool, weekday: i32, hour: i32, minute: i32) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let day = if weekly {
+        format!("{} ", DAYS[weekday.rem_euclid(7) as usize])
+    } else {
+        String::new()
+    };
+    format!("{day}{hour:02}:{minute:02}")
+}
+
+fn local_reset(label: &str, at: i64) -> String {
+    let t = round_up_minute(at) as libc::time_t;
     // SAFETY: localtime_r only writes the tm it is given.
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
         tm
     };
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    reset_text(label == "7d", tm.tm_wday, tm.tm_hour, tm.tm_min)
 }
 
 fn resets_in(at: i64) -> Option<String> {
@@ -226,7 +242,7 @@ impl Shell {
         windows::mark_companion_dirty(cx);
         if let Some(url) = self.settings.file.companion_push_url() {
             for c in &due {
-                let resets = c.resets_at.map(local_hhmm);
+                let resets = c.resets_at.map(|at| local_reset(&c.label, at));
                 if let Some(push) =
                     usage_push_request(&c.label, c.used, &c.profile, resets.as_deref(), url)
                 {
@@ -670,6 +686,16 @@ mod tests {
         let low = [reading("claude-ai", Some(20.))];
         assert_eq!(pushes_due(&mut shared, &low).len(), 0);
         assert_eq!(pushes_due(&mut shared, &readings).len(), 1);
+    }
+
+    #[test]
+    fn a_reset_a_second_before_the_minute_reads_as_the_minute_and_only_a_week_shows_its_day() {
+        // "2026-10-08T17:59:59.885Z" as the API sends it, truncated to seconds.
+        let at = 1_791_482_399;
+        assert_eq!(round_up_minute(at), 1_791_482_400);
+        assert_eq!(round_up_minute(1_791_482_400), 1_791_482_400);
+        assert_eq!(reset_text(false, 4, 18, 0), "18:00");
+        assert_eq!(reset_text(true, 1, 18, 0), "Mon 18:00");
     }
 
     #[test]
