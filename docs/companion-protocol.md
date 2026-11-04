@@ -59,7 +59,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, random and generated once per server run.
 
 ```json
 {"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1"}
