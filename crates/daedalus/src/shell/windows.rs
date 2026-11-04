@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use daedalus_proto::{AppMsg, AppReply, Notice, NoticeKind, PaneId};
 use daedalus_workspace::{ItemId, ItemKind, Project, WindowMode, WindowState, Workspace};
@@ -28,6 +29,8 @@ use crate::ide;
 
 /// Where a new window lands relative to the one it was opened from, as macOS cascades them.
 const CASCADE: f32 = 28.;
+const SPAWN_SESSION_POLL: Duration = Duration::from_millis(100);
+const SPAWN_SESSION_WAIT: Duration = Duration::from_secs(5);
 
 pub(super) struct Windows {
     path: PathBuf,
@@ -847,12 +850,87 @@ fn route_companion(command: Command, cx: &mut App) {
         Command::Pair { reply, .. } => {
             let _ = reply.send(Verdict::Deny);
         }
-        // Starting Claude from the phone waits for its own card.
-        Command::SpawnClaude { reply, .. } => {
-            let _ = reply.send(Err("not available yet".into()));
-        }
+        Command::SpawnClaude { root, reply } => spawn_claude_for_phone(&root, reply, cx),
         Command::ClientsChanged(count) => set_companion_clients(count, cx),
     }
+}
+
+/// Opens a `claude` tab in the open project at `root` and answers with its pane once phones can attach it.
+fn spawn_claude_for_phone(
+    root: &Path,
+    reply: tokio::sync::oneshot::Sender<Result<u64, String>>,
+    cx: &mut App,
+) {
+    let handles = handles(cx);
+    let roots: Vec<Vec<PathBuf>> = handles
+        .iter()
+        .map(|h| {
+            h.read(cx)
+                .map(|s| {
+                    s.workspace
+                        .projects
+                        .iter()
+                        .map(|p| p.root.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    let Some((window, index)) = find_project(&roots, root) else {
+        let _ = reply.send(Err("project not open".into()));
+        return;
+    };
+    let handle = handles[window];
+    // The command is fixed so nothing the phone sends is ever typed into a shell.
+    let opened = handle.update(cx, |shell, window, cx| {
+        shell.switch_to(index, cx);
+        shell.run_in_new_terminal_tab("claude".into(), window, cx)
+    });
+    let Ok(Some((root, item))) = opened else {
+        let _ = reply.send(Err("could not open a terminal".into()));
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let mut waited = Duration::ZERO;
+        while waited < SPAWN_SESSION_WAIT {
+            let pane = handle
+                .update(cx, |shell, _, cx| {
+                    match shell.items.get(&(root.clone(), item)) {
+                        Some(ItemView::Terminal(t)) => t.read(cx).session(),
+                        _ => None,
+                    }
+                })
+                .ok()
+                .flatten();
+            if let Some(pane) = pane {
+                // The phone attaches right after the reply, and only listed panes pass.
+                let _ = cx.update(|cx| {
+                    cx.global_mut::<Windows>().companion_dirty = true;
+                    super::companion::push_snapshot(cx);
+                });
+                let _ = reply.send(Ok(pane));
+                return;
+            }
+            if reply.is_closed() {
+                return;
+            }
+            cx.background_executor().timer(SPAWN_SESSION_POLL).await;
+            waited += SPAWN_SESSION_POLL;
+        }
+        let _ = reply.send(Err("claude did not start".into()));
+    })
+    .detach();
+}
+
+/// The window and project index whose root is exactly `root`; a folder inside a project is not a match.
+fn find_project(roots: &[Vec<PathBuf>], root: &Path) -> Option<(usize, usize)> {
+    let wanted: PathBuf = root.components().collect();
+    roots.iter().enumerate().find_map(|(window, projects)| {
+        let index = projects
+            .iter()
+            .position(|p| p.components().collect::<PathBuf>() == wanted)?;
+        Some((window, index))
+    })
 }
 
 /// The window whose project holds `path`, the deepest root winning.
@@ -1531,6 +1609,41 @@ impl Shell {
 mod tests {
     use super::*;
     use daedalus_proto::{EditorInfo, ProjectInfo, SourcePosition, TerminalInfo};
+
+    fn open(windows: &[&[&str]]) -> Vec<Vec<PathBuf>> {
+        windows
+            .iter()
+            .map(|w| w.iter().map(PathBuf::from).collect())
+            .collect()
+    }
+
+    #[test]
+    fn find_project_takes_only_an_exact_project_root() {
+        let roots = open(&[&["/code/a", "/code/b"]]);
+        assert_eq!(find_project(&roots, Path::new("/code/b")), Some((0, 1)));
+        assert_eq!(find_project(&roots, Path::new("/code/b/src")), None);
+        assert_eq!(find_project(&roots, Path::new("/code")), None);
+        assert_eq!(find_project(&roots, Path::new("/code/bb")), None);
+        assert_eq!(find_project(&roots, Path::new("/elsewhere")), None);
+    }
+
+    #[test]
+    fn find_project_ignores_trailing_slashes_and_dot_components() {
+        let roots = open(&[&["/code/a"]]);
+        assert_eq!(find_project(&roots, Path::new("/code/a/")), Some((0, 0)));
+        assert_eq!(find_project(&roots, Path::new("/code/./a")), Some((0, 0)));
+        assert_eq!(find_project(&roots, Path::new("/code/a/.")), Some((0, 0)));
+        let roots = open(&[&["/code/a/"]]);
+        assert_eq!(find_project(&roots, Path::new("/code/a")), Some((0, 0)));
+    }
+
+    #[test]
+    fn find_project_searches_every_window() {
+        let roots = open(&[&["/code/a"], &["/code/b", "/code/c"]]);
+        assert_eq!(find_project(&roots, Path::new("/code/a")), Some((0, 0)));
+        assert_eq!(find_project(&roots, Path::new("/code/c")), Some((1, 1)));
+        assert_eq!(find_project(&[], Path::new("/code/a")), None);
+    }
 
     fn route(msg: AppMsg, caller: Option<usize>) -> Target {
         let path_holder = |p: &Path| {

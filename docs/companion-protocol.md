@@ -46,7 +46,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"detach","pane":123}
 ```
 
-`spawn_claude`: start `claude` in an open project root. `id` is echoed in `spawned` or `error`.
+`spawn_claude`: start `claude` in an open project root. `project` must equal a root in the snapshot exactly, as a folder inside a project is refused. `id` is echoed in `spawned` or `error`, and the answer comes once the new pane is in a snapshot, so an `attach` can follow at once.
 
 ```json
 {"type":"spawn_claude","id":"r1","project":"/Users/jason/code/daedalus"}
