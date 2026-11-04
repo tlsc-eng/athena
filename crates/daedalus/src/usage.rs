@@ -272,7 +272,7 @@ fn resets_at(v: &Value) -> Option<i64> {
 }
 
 /// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM|±HHMM)`; `None` if malformed.
-fn parse_rfc3339(s: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339(s: &str) -> Option<i64> {
     let num = |p: &str| {
         (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
             .then(|| p.parse::<i64>().ok())
