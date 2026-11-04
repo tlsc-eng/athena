@@ -89,6 +89,8 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"interrupt","id":"r10","pane":123}
 ```
 
+One `prompt` or `interrupt` per pane at a time: a second one for a pane whose first has no reply yet gets `error` `busy`, without acting on it.
+
 `answer`: answer the dialog open in a Claude pane, one verified key at a time. `key` is the `terminal.dialog.key` the phone showed. The pane must be in the latest snapshot and Claude must be in `needs_input` (`this is not a Claude session` or `Claude is not asking anything` otherwise), and a second answer for the same pane while one runs gets `Already answering`.
 - A `select` dialog takes `answers: [{"pick":["<label>"]}]`; a `review` dialog takes `answers: []` and presses "Submit answers".
 - A `question` dialog takes one entry per question, in tab order, each with the `question` text as the dialog shows it. A single-select entry has one `pick` label or an `other` text, not both. A multi-select entry lists every `pick` it wants checked, plus an optional `other`.
