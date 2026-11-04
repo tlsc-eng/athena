@@ -82,6 +82,13 @@ pub struct PairPeer {
     pub tailnet: Option<tailnet::Peer>,
 }
 
+/// Drops C0 control characters and DEL except `\n` and `\t`, so a pane without bracketed paste gets no escape sequences.
+fn strip_controls(text: &str) -> String {
+    text.chars()
+        .filter(|c| matches!(c, '\n' | '\t') || (*c >= ' ' && *c != '\x7f'))
+        .collect()
+}
+
 /// What a phone asks a pane to do. It has no `Debug` so prompt text cannot reach a log.
 #[derive(Clone, PartialEq)]
 pub enum Action {
@@ -898,6 +905,10 @@ async fn act(
     if matches!(&action, Action::Prompt(text) if text.len() > MAX_PROMPT) {
         return failed(id, "prompt is too long");
     }
+    let action = match action {
+        Action::Prompt(text) => Action::Prompt(strip_controls(&text)),
+        Action::Interrupt => Action::Interrupt,
+    };
     let (reply, answer) = oneshot::channel();
     if shared
         .commands
@@ -1165,6 +1176,7 @@ mod tests {
             claude: None,
             rows: 24,
             cols: 80,
+            dialog: None,
         }
     }
 
@@ -1334,6 +1346,11 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn strip_controls_keeps_newlines_and_tabs_only() {
+        assert_eq!(strip_controls("a\x1b[31mb\x7f\r\nc\td\0"), "a[31mb\nc\td");
     }
 
     #[tokio::test]

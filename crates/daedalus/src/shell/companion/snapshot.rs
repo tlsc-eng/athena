@@ -6,8 +6,9 @@ use daedalus_proto::{PaneId, TodoInfo};
 use daedalus_term::ClaudeState;
 use gpui::App;
 
+use super::dialog;
 use crate::companion::protocol::{
-    Project, Session, SessionState, Terminal, Todo, UsageProfile, UsageStatus, UsageWindow,
+    Dialog, Project, Session, SessionState, Terminal, Todo, UsageProfile, UsageStatus, UsageWindow,
 };
 use crate::companion::server::Snapshot;
 use crate::shell::Shell;
@@ -35,6 +36,7 @@ pub(super) struct TerminalInput {
     pub claude: Option<ClaudeState>,
     pub rows: u16,
     pub cols: u16,
+    pub dialog: Option<Dialog>,
 }
 
 pub(super) struct SessionInput {
@@ -141,7 +143,19 @@ fn terminal(input: &TerminalInput) -> Option<Terminal> {
         claude: input.claude.map(|state| state_of(Some(state))),
         rows: input.rows,
         cols: input.cols,
+        dialog: input.dialog.clone(),
     })
+}
+
+/// Reads the screen only while Claude waits, so a running pane never pays for it.
+fn open_dialog(
+    claude: Option<ClaudeState>,
+    screen: impl FnOnce() -> Vec<String>,
+) -> Option<Dialog> {
+    if claude != Some(ClaudeState::NeedsInput) {
+        return None;
+    }
+    dialog::parse(&screen())
 }
 
 fn session(input: SessionInput, roots: &[&Path]) -> Session {
@@ -228,15 +242,18 @@ impl Shell {
             .map(|(root, view)| {
                 let foreground = view.foreground();
                 let (rows, cols) = view.grid_size();
+                let claude = view.claude_state();
+                let dialog = open_dialog(claude, || view.text_lines(rows as usize));
                 TerminalInput {
                     pane: view.session(),
                     project: root.clone(),
                     title: view.label(),
                     cwd: foreground.as_ref().and_then(|(_, cwd)| cwd.clone()),
                     program: foreground.map(|(name, _)| name),
-                    claude: view.claude_state(),
+                    claude,
                     rows,
                     cols,
+                    dialog,
                 }
             })
             .collect();
@@ -310,6 +327,7 @@ mod tests {
             claude: None,
             rows: 24,
             cols: 80,
+            dialog: None,
         }
     }
 
@@ -355,6 +373,28 @@ mod tests {
         let got = to_snapshot(vec![window(Vec::new(), vec![running, term(Some(2))])]);
         assert_eq!(got.terminals[0].claude, Some(SessionState::Running));
         assert_eq!(got.terminals[1].claude, None);
+    }
+
+    #[test]
+    fn only_a_terminal_that_needs_input_carries_a_dialog() {
+        let screen = || {
+            [" Run it?", " ❯ 1. Yes", "   2. No", " Esc to cancel"]
+                .map(String::from)
+                .to_vec()
+        };
+        let mut waiting = term(Some(1));
+        waiting.claude = Some(ClaudeState::NeedsInput);
+        waiting.dialog = open_dialog(waiting.claude, screen);
+        let mut running = term(Some(2));
+        running.claude = Some(ClaudeState::Running);
+        running.dialog = open_dialog(running.claude, || panic!("a running pane is not read"));
+        let got = to_snapshot(vec![window(
+            Vec::new(),
+            vec![waiting, running, term(Some(3))],
+        )]);
+        let dialog = got.terminals[0].dialog.as_ref().expect("a dialog");
+        assert_eq!(dialog.options.len(), 2);
+        assert!(got.terminals[1].dialog.is_none() && got.terminals[2].dialog.is_none());
     }
 
     #[test]

@@ -931,6 +931,9 @@ fn act_refusal(
     cx: &App,
 ) -> Result<(), &'static str> {
     let v = view.read(cx);
+    if !v.is_attached() {
+        return Err("pane is not open");
+    }
     act::gate(v.is_claude(), v.claude_state(), action)
 }
 

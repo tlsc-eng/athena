@@ -15,6 +15,7 @@ use crate::companion::server::{self, Config, Server};
 use crate::companion::tailnet;
 
 pub(super) mod act;
+mod dialog;
 mod snapshot;
 
 const PORT: u16 = 47123;

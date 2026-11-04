@@ -15,7 +15,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Framing
 
-- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`.
+- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`, and reads `terminal.dialog` only when it lists `dialog`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
 
@@ -76,7 +76,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"transcript_close","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10"}
 ```
 
-`prompt`: type `text` into a terminal pane and submit it. `text` is at most 16 KiB (`prompt is too long` beyond that), and the phone strips C0 control characters except `\n` and `\t`. The pane must be in the latest snapshot (`pane is not open` otherwise). The desktop pastes the text, waits 80 ms, checks the pane again and presses Enter. It refuses with `Claude is asking something; answer it first` when Claude is in `needs_input`, at the first check or at the second. In that case the text may already sit in the prompt. A running Claude accepts it and queues the message. Any text already in the prompt is not checked, and the new text goes after it. `id` is echoed in `sent`, once Enter is pressed, or in `error`. The desktop never logs the text.
+`prompt`: type `text` into a terminal pane and submit it. `text` is at most 16 KiB (`prompt is too long` beyond that), and the desktop strips C0 control characters and DEL except `\n` and `\t`, so the phone need not. The pane must be in the latest snapshot (`pane is not open` otherwise). The desktop pastes the text, waits 80 ms, checks the pane again and presses Enter. It refuses with `Claude is asking something; answer it first` when Claude is in `needs_input`, at the first check or at the second. In that case the text may already sit in the prompt. A running Claude accepts it and queues the message. Any text already in the prompt is not checked, and the new text goes after it. `id` is echoed in `sent`, once Enter is pressed, or in `error`. The desktop never logs the text.
 
 ```json
 {"type":"prompt","id":"r7","pane":123,"text":"run the tests\nthen commit"}
@@ -96,16 +96,29 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
 
 ```json
 {"type":"snapshot","seq":7,"projects":[{"root":"/Users/jason/code/daedalus","name":"daedalus","window":1}],"sessions":[],"terminals":[{"pane":124,"project":"/Users/jason/code/daedalus","title":"zsh","rows":24,"cols":80}]}
+```
+
+`terminal.dialog` is present only while the pane runs Claude in `needs_input` and the desktop recognised the dialog on its screen, and is omitted otherwise. The desktop reads the visible text only, so a dialog it does not recognise is omitted or sent as `unknown`, never guessed. See `design/protocol/snapshot_dialog.json`.
+- `kind` is `select` (a single `❯` list: permission prompt, plan approval, trust dialog), `question` (a list with an Other row, checkboxes or a tab header), `review` (the review screen before a question set is submitted) or `unknown` (it has a known footer and zero, several or unplaceable `❯` rows; show it read-only and offer "Open terminal"). A phone decoding an unrecognised `kind` treats it as `unknown`.
+- `key` is 8 hex characters of FNV-1a. With tabs it hashes the kind and the tab labels, otherwise the kind, title, prompt and option labels. It does not change when the highlight, a checkbox, the input text or the current tab moves.
+- `title`, `lines` (at most 12 of at most 200 characters) and `prompt` are the text above the rows. For a `question`, `title` is the question under the tab header, and `lines` and `prompt` are empty. For `select` and `review`, `prompt` is the last line ending in `?` above the rows and `lines` holds the rest.
+- `options` lists at most 12 rows, in screen order, with labels of at most 200 characters. `description` is the dim line under a row, and `checked` is present only on multi-select rows (`multi` is then true). `input` marks a row that takes typed text: the Other row (`label` is `Other`, `text` empty) and the `Yes, and don’t ask again for` row, whose `text` (at most 500 characters) is the prefix currently in the field.
+- `tabs` is absent without a tab header, and `answered` is true for `☒`. Which tab is current is shown only by colour, so it is not sent. `submit` is the label of the unnumbered `Next` or `Submit` row that follows a multi-select's options.
+- `highlight` is the index of the row with `❯`. When the submit row is focused it equals `options.len()`. It is absent when no row can be placed (`unknown`).
+- `partial` is true when scroll hints (`↑`, `↓`) show, more than 12 rows exist, or a line among the rows could not be placed, and always for `unknown`. A partial dialog is for reading only: the phone offers "Open terminal" and no answer.
+
+```json
+{"type":"snapshot","seq":9,"projects":[],"sessions":[],"terminals":[{"pane":123,"project":"/Users/jason/code/daedalus","title":"claude","program":"claude","claude":"needs_input","rows":40,"cols":120,"dialog":{"key":"5e0b2f11","kind":"question","title":"Which sizes?","tabs":[{"label":"Color","answered":true},{"label":"Size","answered":false}],"multi":true,"options":[{"label":"Red","description":"warm","checked":true},{"label":"Other","checked":false,"input":true,"text":""}],"submit":"Submit","highlight":2,"partial":false}}]}
 ```
 
 `snapshot.usage` lists the Claude plan limits, one entry per Claude sign-in on the Mac, and is omitted when the Mac's usage indicator is off or nothing has been fetched yet. `status` is `ok`, `stale` (the saved sign-in expired), `no_access` (the Keychain refused), `rate_limited` or `unavailable`. `windows` holds the figures and is empty unless `status` is `ok`. A window has a `label` (`5h`, `7d` or a model name), `used` (percent, 0 to 100) and `resets_at` (epoch seconds, omitted when unknown). `message` is present only for `unavailable`. See `design/protocol/snapshot_usage.json`.
