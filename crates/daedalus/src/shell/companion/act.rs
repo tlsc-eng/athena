@@ -1,4 +1,4 @@
-//! Whether a phone's prompt or interrupt may reach a pane in its current state.
+//! Whether a phone's prompt, interrupt or answer may reach a pane in its current state.
 
 use daedalus_term::ClaudeState;
 
@@ -22,6 +22,13 @@ pub(in crate::shell) fn gate(
                 Err("Claude is not running")
             }
         },
+        Action::Answer { .. } => match (is_claude, state) {
+            (false, _) => Err("this is not a Claude session"),
+            (true, Some(ClaudeState::NeedsInput)) => Ok(()),
+            (true, Some(ClaudeState::Running | ClaudeState::Finished) | None) => {
+                Err("Claude is not asking anything")
+            }
+        },
     }
 }
 
@@ -43,6 +50,20 @@ mod tests {
             for state in STATES {
                 let asking = state == Some(ClaudeState::NeedsInput);
                 assert_eq!(gate(is_claude, state, &prompt).is_err(), asking);
+            }
+        }
+    }
+
+    #[test]
+    fn an_answer_needs_claude_asking_something() {
+        let answer = Action::Answer {
+            key: "k".into(),
+            answers: Vec::new(),
+        };
+        for is_claude in [false, true] {
+            for state in STATES {
+                let asking = is_claude && state == Some(ClaudeState::NeedsInput);
+                assert_eq!(gate(is_claude, state, &answer).is_ok(), asking);
             }
         }
     }

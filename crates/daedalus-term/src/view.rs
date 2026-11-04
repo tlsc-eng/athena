@@ -321,6 +321,13 @@ impl TerminalView {
             .unwrap_or_default()
     }
 
+    /// The program asked for application cursor keys, which arrows must then use as `ESC O` sequences.
+    pub fn app_cursor(&self) -> bool {
+        self.terminal
+            .as_ref()
+            .is_some_and(|t| t.mode().contains(TermMode::APP_CURSOR))
+    }
+
     /// The foreground program's name and working directory, as the daemon last reported them.
     pub fn foreground(&self) -> Option<(String, Option<PathBuf>)> {
         self.foreground

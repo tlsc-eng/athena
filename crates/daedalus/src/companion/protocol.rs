@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const PROTO: u32 = 1;
 
 /// Optional capabilities the desktop lists in `welcome`.
-pub const FEATURES: &[&str] = &["transcript", "usage", "act", "dialog"];
+pub const FEATURES: &[&str] = &["transcript", "usage", "act", "dialog", "answer"];
 
 /// Largest payload of one binary frame.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
@@ -84,9 +84,26 @@ pub enum ClientMsg {
         id: String,
         pane: u64,
     },
+    Answer {
+        id: String,
+        pane: u64,
+        key: String,
+        answers: Vec<AnswerPick>,
+    },
     UsageRefresh {
         id: String,
     },
+}
+
+/// What a phone chose for one question; a plain select dialog takes the label alone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnswerPick {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pick: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -662,6 +679,30 @@ mod tests {
             &ClientMsg::Interrupt {
                 id: "r10".into(),
                 pane: 123,
+            },
+        );
+    }
+
+    #[test]
+    fn an_answer_matches_its_fixture() {
+        golden(
+            "answer",
+            &ClientMsg::Answer {
+                id: "r12".into(),
+                pane: 123,
+                key: "3f2a9c10".into(),
+                answers: vec![
+                    AnswerPick {
+                        question: Some("Which colour?".into()),
+                        pick: vec!["Blue".into()],
+                        other: None,
+                    },
+                    AnswerPick {
+                        question: Some("Which sizes?".into()),
+                        pick: vec!["A".into(), "B".into()],
+                        other: Some("XXL".into()),
+                    },
+                ],
             },
         );
     }

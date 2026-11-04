@@ -24,8 +24,8 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
 use super::devices::{Device, Devices, PairingCode};
 use super::protocol::{
-    self, ClientMsg, DropReason, FEATURES, Kind, NoticeKind, PROTO, PairReply, PairRequest,
-    Project, ServerMsg, Session, Terminal, UsageProfile,
+    self, AnswerPick, ClientMsg, DropReason, FEATURES, Kind, NoticeKind, PROTO, PairReply,
+    PairRequest, Project, ServerMsg, Session, Terminal, UsageProfile,
 };
 use super::stream::{Attachments, Out};
 use super::tailnet;
@@ -46,7 +46,13 @@ const PAIR_WAIT: Duration = Duration::from_secs(60);
 const SPAWN_WAIT: Duration = Duration::from_secs(10);
 const USAGE_WAIT: Duration = Duration::from_secs(5);
 const ACT_WAIT: Duration = Duration::from_secs(10);
+const ANSWER_WAIT: Duration = Duration::from_secs(30);
 const MAX_PROMPT: usize = 16 * 1024;
+const MAX_ANSWERS: usize = 8;
+const MAX_PICKS: usize = 12;
+const MAX_LABEL: usize = 200;
+const MAX_KEY: usize = 64;
+const MAX_OTHER: usize = 2 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const PAIR_HEADER: &str = "x-daedalus-pair";
 const VERSION_CLOSE: u16 = 4001;
@@ -94,6 +100,10 @@ fn strip_controls(text: &str) -> String {
 pub enum Action {
     Prompt(String),
     Interrupt,
+    Answer {
+        key: String,
+        answers: Vec<AnswerPick>,
+    },
 }
 
 /// A request the server hands to the app, which answers through `reply`.
@@ -760,6 +770,11 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let current = Arc::clone(&snapshot.borrow());
                                 Some(act(shared, &current, id, pane, Action::Interrupt).await)
                             }
+                            ClientMsg::Answer { id, pane, key, answers } => {
+                                let current = Arc::clone(&snapshot.borrow());
+                                let action = Action::Answer { key, answers };
+                                Some(act(shared, &current, id, pane, action).await)
+                            }
                         };
                         if let Some(reply) = reply && !send(&mut ws, &reply).await {
                             break;
@@ -908,6 +923,16 @@ async fn act(
     let action = match action {
         Action::Prompt(text) => Action::Prompt(strip_controls(&text)),
         Action::Interrupt => Action::Interrupt,
+        Action::Answer { key, answers } => {
+            if let Some(why) = answer_refusal(&key, &answers) {
+                return failed(id, why);
+            }
+            Action::Answer { key, answers }
+        }
+    };
+    let wait = match action {
+        Action::Answer { .. } => ANSWER_WAIT,
+        Action::Prompt(_) | Action::Interrupt => ACT_WAIT,
     };
     let (reply, answer) = oneshot::channel();
     if shared
@@ -922,7 +947,7 @@ async fn act(
     {
         return failed(id, "could not reach the terminal");
     }
-    match timeout(ACT_WAIT, answer).await {
+    match timeout(wait, answer).await {
         Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
         Ok(Ok(Err(message))) => ServerMsg::Error {
             id: Some(id),
@@ -930,6 +955,28 @@ async fn act(
         },
         _ => failed(id, "could not reach the terminal"),
     }
+}
+
+/// Refuses `other` with any control character, even `\n`, since typed into the terminal it would press Enter.
+fn answer_refusal(key: &str, answers: &[AnswerPick]) -> Option<&'static str> {
+    let long = |text: &str| text.chars().count() > MAX_LABEL;
+    let too_large = key.len() > MAX_KEY
+        || answers.len() > MAX_ANSWERS
+        || answers.iter().any(|a| {
+            a.pick.len() > MAX_PICKS
+                || a.pick.iter().any(|p| long(p))
+                || a.question.as_deref().is_some_and(long)
+                || a.other.as_deref().is_some_and(|o| o.len() > MAX_OTHER)
+        });
+    if too_large {
+        return Some("answer is too large");
+    }
+    let controls = answers.iter().any(|a| {
+        a.other
+            .as_deref()
+            .is_some_and(|o| o.chars().any(char::is_control))
+    });
+    controls.then_some("answer text has control characters")
 }
 
 async fn usage_refresh(shared: &Shared, id: String) -> ServerMsg {
@@ -1408,6 +1455,130 @@ mod tests {
         let Ok(Command::Act { reply, .. }) = timeout(Duration::from_secs(5), fx.next_command())
             .await
             .expect("a prompt at the cap never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        let _ = reply.send(Ok(()));
+    }
+
+    fn answer_msg(id: &str, pane: u64, answers: Vec<AnswerPick>) -> ClientMsg {
+        ClientMsg::Answer {
+            id: id.into(),
+            pane,
+            key: "3f2a9c10".into(),
+            answers,
+        }
+    }
+
+    fn pick(labels: &[&str], other: Option<String>) -> AnswerPick {
+        AnswerPick {
+            question: Some("Which?".into()),
+            pick: labels.iter().map(|l| l.to_string()).collect(),
+            other,
+        }
+    }
+
+    async fn expect_error(ws: &mut Ws, id: &str, message: &str) {
+        loop {
+            match next_msg(ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => {
+                    assert_eq!(
+                        other,
+                        ServerMsg::Error {
+                            id: Some(id.into()),
+                            message: message.into()
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_reaches_the_app_as_an_act_and_is_sent() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let answers = vec![pick(&["A", "B"], Some("XXL é".into()))];
+        send_json(&mut ws, &answer_msg("r12", 7, answers.clone())).await;
+        let Ok(Command::Act {
+            pane,
+            action,
+            reply,
+        }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("the answer never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        assert_eq!(pane, 7);
+        assert!(
+            action
+                == Action::Answer {
+                    key: "3f2a9c10".into(),
+                    answers
+                }
+        );
+        let _ = reply.send(Ok(()));
+        loop {
+            match next_msg(&mut ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => {
+                    assert_eq!(other, ServerMsg::Sent { id: "r12".into() });
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_with_oversized_or_control_text_is_refused_without_reaching_the_app() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let refused = [
+            (
+                vec![pick(&["A"], Some("a".repeat(MAX_OTHER + 1)))],
+                "answer is too large",
+            ),
+            (
+                vec![pick(&["A"], Some("a\nb".into()))],
+                "answer text has control characters",
+            ),
+            (
+                vec![pick(&["A"], Some("a\x1b[Bb".into()))],
+                "answer text has control characters",
+            ),
+            (
+                vec![pick(&["A"], None); MAX_ANSWERS + 1],
+                "answer is too large",
+            ),
+            (
+                vec![pick(&["A"; MAX_PICKS + 1], None)],
+                "answer is too large",
+            ),
+            (
+                vec![pick(&[&"a".repeat(MAX_LABEL + 1)], None)],
+                "answer is too large",
+            ),
+        ];
+        for (answers, message) in refused {
+            send_json(&mut ws, &answer_msg("r13", 7, answers)).await;
+            expect_error(&mut ws, "r13", message).await;
+        }
+        assert!(fx.no_command());
+        send_json(&mut ws, &answer_msg("r14", 8, vec![pick(&["A"], None)])).await;
+        expect_error(&mut ws, "r14", "pane is not open").await;
+        assert!(fx.no_command());
+        let at_cap = pick(&["A"], Some("é".repeat(MAX_OTHER / 2)));
+        send_json(&mut ws, &answer_msg("r15", 7, vec![at_cap])).await;
+        let Ok(Command::Act { reply, .. }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("an answer at the cap never reached the app")
         else {
             panic!("expected an act command");
         };

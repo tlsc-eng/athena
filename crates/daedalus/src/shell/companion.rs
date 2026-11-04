@@ -15,6 +15,7 @@ use crate::companion::server::{self, Config, Server};
 use crate::companion::tailnet;
 
 pub(super) mod act;
+pub(super) mod answer;
 mod dialog;
 mod snapshot;
 
