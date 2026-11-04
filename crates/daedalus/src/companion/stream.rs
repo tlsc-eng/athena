@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self as std_mpsc, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use daedalus_proto as mux;
 use tokio::sync::{Notify, mpsc};
@@ -41,12 +42,6 @@ impl Drop for Charge {
 enum Event {
     Msg(ServerMsg),
     Frame(Vec<u8>, Charge),
-}
-
-struct Tagged {
-    pane: u64,
-    id: u64,
-    event: Event,
 }
 
 /// Shared between the async side and the threads of one attachment.
@@ -96,8 +91,8 @@ impl Control {
 }
 
 struct Attachment {
-    id: u64,
     control: Arc<Control>,
+    events: mpsc::Receiver<Event>,
 }
 
 impl Drop for Attachment {
@@ -109,22 +104,17 @@ impl Drop for Attachment {
 /// The panes one WebSocket connection has attached; dropping it hangs up on the daemon.
 pub(super) struct Attachments {
     mux_socket: PathBuf,
-    next_id: u64,
     live: HashMap<u64, Attachment>,
-    events: mpsc::Sender<Tagged>,
-    incoming: mpsc::Receiver<Tagged>,
+    cursor: usize,
     lagged: Arc<Notify>,
 }
 
 impl Attachments {
     pub(super) fn new(mux_socket: PathBuf) -> Self {
-        let (events, incoming) = mpsc::channel(QUEUE);
         Self {
             mux_socket,
-            next_id: 0,
             live: HashMap::new(),
-            events,
-            incoming,
+            cursor: 0,
             lagged: Arc::new(Notify::new()),
         }
     }
@@ -135,15 +125,13 @@ impl Attachments {
             return Err("too many panes attached");
         }
         self.live.remove(&pane);
-        self.next_id += 1;
-        let id = self.next_id;
         let control = Arc::new(Control::default());
         let (input, queued) = std_mpsc::sync_channel(INPUT_QUEUE);
         *control.input.lock().unwrap_or_else(|e| e.into_inner()) = Some(input);
+        let (events, queue) = mpsc::channel(QUEUE);
         let sink = Sink {
             pane,
-            id,
-            events: self.events.clone(),
+            events,
             outstanding: Arc::default(),
             control: control.clone(),
             lagged: self.lagged.clone(),
@@ -157,7 +145,13 @@ impl Attachments {
                 sink.control.stop();
             })
             .map_err(|_| "could not attach")?;
-        self.live.insert(pane, Attachment { id, control });
+        self.live.insert(
+            pane,
+            Attachment {
+                control,
+                events: queue,
+            },
+        );
         Ok(())
     }
 
@@ -194,35 +188,42 @@ impl Attachments {
                     reason: DropReason::Lagging,
                 });
             }
-            tokio::select! {
-                tagged = self.incoming.recv() => {
-                    if let Some(out) = tagged.and_then(|t| self.accept(t)) {
-                        return out;
+            let polled = std::future::poll_fn(|cx| {
+                let mut panes: Vec<u64> = self.live.keys().copied().collect();
+                panes.sort_unstable();
+                if !panes.is_empty() {
+                    let by = self.cursor % panes.len();
+                    panes.rotate_left(by);
+                }
+                for pane in panes {
+                    let Some(attachment) = self.live.get_mut(&pane) else {
+                        continue;
+                    };
+                    if let Poll::Ready(Some(event)) = attachment.events.poll_recv(cx) {
+                        self.cursor = self.cursor.wrapping_add(1);
+                        return Poll::Ready((pane, event));
                     }
                 }
+                Poll::Pending
+            });
+            tokio::select! {
+                (pane, event) = polled => return self.deliver(pane, event),
                 () = self.lagged.notified() => {}
             }
         }
     }
 
-    fn accept(&mut self, tagged: Tagged) -> Option<Out> {
-        if self
-            .live
-            .get(&tagged.pane)
-            .is_none_or(|a| a.id != tagged.id)
-        {
-            return None;
-        }
-        match tagged.event {
-            Event::Frame(bytes, charge) => Some(Out::Frame(bytes, charge)),
+    fn deliver(&mut self, pane: u64, event: Event) -> Out {
+        match event {
+            Event::Frame(bytes, charge) => Out::Frame(bytes, charge),
             Event::Msg(message) => {
                 if matches!(
                     message,
                     ServerMsg::Exited { .. } | ServerMsg::Dropped { .. }
                 ) {
-                    self.live.remove(&tagged.pane);
+                    self.live.remove(&pane);
                 }
-                Some(Out::Msg(message))
+                Out::Msg(message)
             }
         }
     }
@@ -231,8 +232,7 @@ impl Attachments {
 /// The thread side of one attachment; it never blocks on the async side.
 struct Sink {
     pane: u64,
-    id: u64,
-    events: mpsc::Sender<Tagged>,
+    events: mpsc::Sender<Event>,
     outstanding: Arc<AtomicUsize>,
     control: Arc<Control>,
     lagged: Arc<Notify>,
@@ -271,12 +271,7 @@ impl Sink {
     }
 
     fn push(&self, event: Event) -> bool {
-        let tagged = Tagged {
-            pane: self.pane,
-            id: self.id,
-            event,
-        };
-        let sent = self.events.try_send(tagged).is_ok();
+        let sent = self.events.try_send(event).is_ok();
         if !sent {
             self.lag();
         }
@@ -308,11 +303,12 @@ fn stream_pane(socket: &Path, tail: usize, sink: &Sink, queued: std_mpsc::Receiv
         sink.closed();
         return;
     }
+    let control = sink.control.clone();
     let writer = std::thread::Builder::new()
         .name("companion-mux-input".into())
         .spawn(move || {
             for data in queued {
-                if conn.send(&mux::ClientMsg::Input { pane, data }).is_err() {
+                if control.stopped() || conn.send(&mux::ClientMsg::Input { pane, data }).is_err() {
                     break;
                 }
             }

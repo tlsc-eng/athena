@@ -691,15 +691,6 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                     _ => {}
                 }
             }
-            out = attachments.next() => {
-                let sent = match out {
-                    Out::Msg(message) => send(&mut ws, &message).await,
-                    Out::Frame(bytes, _charge) => send_frame(&mut ws, bytes).await,
-                };
-                if !sent {
-                    break;
-                }
-            }
             changed = snapshot.changed() => {
                 if changed.is_err() {
                     break;
@@ -746,6 +737,16 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                 }
             }
             () = tokio::time::sleep_until(last_pong + PONG_TIMEOUT) => break,
+            // Last, so steady output cannot starve the ping and the pong deadline.
+            out = attachments.next() => {
+                let sent = match out {
+                    Out::Msg(message) => send(&mut ws, &message).await,
+                    Out::Frame(bytes, _charge) => send_frame(&mut ws, bytes).await,
+                };
+                if !sent {
+                    break;
+                }
+            }
         }
     }
 }
@@ -1787,6 +1788,85 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_daemon_refusal_drops_the_pane_as_closed() {
+        let fx = Fixture::new();
+        let _mux = FakeMux::start(&fx.mux, |stream, pane| {
+            let kind = mux::ErrorKind::NoSuchPane(pane);
+            mux_send(stream, mux::ServerMsg::Error { kind });
+        });
+        show_panes(&fx, &[7]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::Attach { pane: 7, tail: 0 }).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Dropped {
+                pane: 7,
+                reason: DropReason::Closed
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_stops_reading_input_drops_the_pane_as_lagging() {
+        let fx = Fixture::new();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let mux = FakeMux::start(&fx.mux, move |stream, pane| {
+            mux_attached_only(stream, pane);
+            // Not reading input until released is what makes the daemon look stalled.
+            let _ = released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        });
+        let mut ws = attached(&fx, 7, 0).await;
+        let chunk = vec![b'k'; protocol::MAX_PAYLOAD];
+        for _ in 0..24 {
+            send_input(&mut ws, 7, &chunk).await;
+        }
+        loop {
+            if let Item::Msg(ServerMsg::Dropped { pane, reason }) = next_item(&mut ws).await {
+                assert_eq!((pane, reason), (7, DropReason::Lagging));
+                break;
+            }
+        }
+        release.send(()).unwrap();
+        while !matches!(mux.next(), Seen::Eof) {}
+    }
+
+    #[tokio::test]
+    async fn a_reattach_discards_what_the_old_attachment_still_had_queued() {
+        let fx = Fixture::new();
+        let attaches = AtomicUsize::new(0);
+        let _mux = FakeMux::start(&fx.mux, move |stream, pane| {
+            mux_attached_only(stream, pane);
+            let (data, burst) = if attaches.fetch_add(1, Ordering::SeqCst) == 0 {
+                (b"old".to_vec(), 200)
+            } else {
+                (b"new".to_vec(), 1)
+            };
+            for _ in 0..burst {
+                let data = data.clone();
+                mux_send(stream, mux::ServerMsg::Output { pane, data });
+            }
+        });
+        let mut ws = attached(&fx, 7, 0).await;
+        assert!(matches!(next_item(&mut ws).await, Item::Bytes(7, b) if b == b"old"));
+        send_json(&mut ws, &ClientMsg::Attach { pane: 7, tail: 0 }).await;
+        loop {
+            if let Item::Msg(ServerMsg::Attached { pane: 7, .. }) = next_item(&mut ws).await {
+                break;
+            }
+        }
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::ReplayDone { pane: 7 })
+        ));
+        assert!(matches!(next_item(&mut ws).await, Item::Bytes(7, b) if b == b"new"));
     }
 
     #[test]
