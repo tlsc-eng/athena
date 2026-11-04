@@ -17,6 +17,7 @@ const MAX_TRACKED: usize = 256;
 const NAME_CHARS: usize = 64;
 const NOTIFICATION_OPEN: &str = "<task-notification>";
 const NOTIFICATION_CLOSE: &str = "</task-notification>";
+const FINISH_BUDGET: u64 = 32 << 20;
 const RESULT_OPEN: &str = "<result>";
 const RESULT_CLOSE: &str = "</result>";
 
@@ -24,8 +25,6 @@ const RESULT_CLOSE: &str = "</result>";
 struct Entry {
     sub: Subagent,
     offset: u64,
-    // A notification counts only its own run, so the tools of earlier runs are kept here.
-    base: u32,
 }
 
 /// One `<task-notification>` block with the parts that are safe to read.
@@ -44,6 +43,8 @@ pub(crate) struct Fleet {
     by_agent: HashMap<String, usize>,
     seen: HashSet<u64>,
     changed: bool,
+    // Bytes the finishing agents may still read before the next `read_agents`, so a long replay stays bounded.
+    finish_budget: u64,
 }
 
 impl Fleet {
@@ -55,6 +56,7 @@ impl Fleet {
             by_agent: HashMap::new(),
             seen: HashSet::new(),
             changed: false,
+            finish_budget: FINISH_BUDGET,
         }
     }
 
@@ -93,6 +95,7 @@ impl Fleet {
 
     /// Reads what the running agents wrote to their own files since the last call.
     pub(crate) fn read_agents(&mut self) {
+        self.finish_budget = FINISH_BUDGET;
         for i in 0..self.entries.len() {
             let sub = &self.entries[i].sub;
             if sub.state != SubagentState::Running {
@@ -133,6 +136,7 @@ impl Fleet {
         self.by_agent.clear();
         self.seen.clear();
         self.changed = false;
+        self.finish_budget = FINISH_BUDGET;
     }
 
     fn launch(&mut self, block: &Value, at: u64) {
@@ -169,7 +173,6 @@ impl Fleet {
                 tool: None,
             },
             offset: 0,
-            base: 0,
         });
         self.changed = true;
     }
@@ -217,17 +220,11 @@ impl Fleet {
         if let Some(agent) = agent_id(&outcome["resumedAgentId"])
             && let Some(&i) = self.by_agent.get(agent)
         {
-            let entry = &mut self.entries[i];
-            if entry.sub.state != SubagentState::Running {
-                entry.base = entry.sub.tools;
-            }
-            entry.offset = 0;
             self.edit(i, |s| {
                 s.state = SubagentState::Running;
                 s.started_at = at;
                 s.ended_at = None;
                 s.tool = None;
-                s.tools = 0;
             });
         }
     }
@@ -263,19 +260,15 @@ impl Fleet {
     }
 
     fn finish(&mut self, i: usize, state: SubagentState, at: u64, tools: u32) {
-        let base = self.entries[i].base;
-        // A resumed run's `<tool_uses>` is sometimes per run and sometimes cumulative, so the file decides.
-        let counted = base > 0 && self.tail_agent(i) && self.entries[i].sub.tools > 0;
-        let total = if counted {
-            0
-        } else {
-            base.saturating_add(tools)
-        };
+        // `<tool_uses>` is per run or cumulative depending on the Claude version, so the file decides.
+        let from_file = self.tail_agent(i);
         self.edit(i, |s| {
+            if !(from_file && s.tools > 0) {
+                s.tools = s.tools.max(tools);
+            }
             s.state = state;
             s.ended_at = Some(at);
             s.tool = None;
-            s.tools = s.tools.max(total);
         });
     }
 
@@ -297,6 +290,15 @@ impl Fleet {
             return false;
         };
         let path = self.dir.join(format!("agent-{id}.jsonl"));
+        let Ok(len) = std::fs::metadata(&path).map(|m| m.len()) else {
+            return false;
+        };
+        let offset = self.entries[i].offset;
+        let unread = if len < offset { len } else { len - offset };
+        if unread > self.finish_budget {
+            return false;
+        }
+        self.finish_budget -= unread;
         self.tail(i, &path)
     }
 
@@ -341,8 +343,7 @@ impl Fleet {
             }
         }
         self.changed |= sub != self.entries[i].sub;
-        let base = self.entries[i].base;
-        self.entries[i] = Entry { sub, offset, base };
+        self.entries[i] = Entry { sub, offset };
         true
     }
 }
@@ -373,14 +374,21 @@ fn carried_text(line: &Value) -> Vec<&str> {
 /// the text before `<result>` and a `<usage>` right after it are read.
 fn notifications(mut text: &str) -> Vec<Notice<'_>> {
     let mut found = Vec::new();
+    let mut matching = true;
     while let Some(start) = text.find(NOTIFICATION_OPEN) {
         let rest = &text[start..];
         let Some(first_close) = rest.find(NOTIFICATION_CLOSE) else {
             break;
         };
+        // One unclosed `<result>` means no later one closes either, so stop searching the rest of the text.
         let result = rest[..first_close]
             .find(RESULT_OPEN)
-            .and_then(|open| Some((open, result_end(rest, open)?)));
+            .filter(|_| matching)
+            .and_then(|open| {
+                let end = result_end(rest, open);
+                matching = end.is_some();
+                Some((open, end?))
+            });
         let (head_end, from) = result.unwrap_or((first_close, first_close));
         let Some(close) = rest[from..].find(NOTIFICATION_CLOSE) else {
             break;
@@ -722,7 +730,7 @@ mod tests {
         let sub = only(&fleet);
         assert_eq!(sub.state, SubagentState::Done);
         assert_eq!(sub.ended_at, Some(millis_at(20)));
-        assert_eq!(sub.tools, 8);
+        assert_eq!(sub.tools, 5);
     }
 
     #[test]
@@ -781,10 +789,10 @@ mod tests {
 
         fleet.line(&enqueue(&notification("a1", "toolu_1", "completed", 4), 12));
         let sub = only(&fleet);
-        assert_eq!((sub.tools, sub.tool), (4, None));
+        assert_eq!((sub.tools, sub.tool), (1, None));
         append(&file, &[agent_line("Bash", 13)]);
         fleet.read_agents();
-        assert_eq!(only(&fleet).tools, 4);
+        assert_eq!(only(&fleet).tools, 1);
     }
 
     #[test]
@@ -948,74 +956,169 @@ mod tests {
         assert_eq!(only(&replayed).tools, 5);
     }
 
-    fn resumed_run(name: &str, second_run_reports: u32) -> (Fleet, Fleet) {
+    enum Step {
+        Line(Value),
+        File(Vec<Value>),
+        Poll,
+    }
+
+    type Outcome = Vec<(SubagentState, u32, Option<u64>)>;
+
+    fn outcome(fleet: &Fleet) -> Outcome {
+        fleet
+            .list()
+            .iter()
+            .map(|s| (s.state, s.tools, s.ended_at))
+            .collect()
+    }
+
+    /// Feeds the steps in order, then again from scratch with the finished file, as a reopened chat would.
+    fn live_and_replay(name: &str, steps: &[Step]) -> (Outcome, Outcome) {
         let (mut live, dir) = fleet(name);
         let file = dir.join("s1/subagents/agent-a1.jsonl");
-        let parent = [
-            launch("toolu_1", "Agent", 1),
-            launched("toolu_1", "a1", 2),
-            enqueue(&notification("a1", "toolu_1", "completed", 2), 5),
-            result("toolu_send", json!({"resumedAgentId": "a1"}), false, 10),
-            enqueue(
-                &notification("a1", "toolu_send", "completed", second_run_reports),
-                15,
-            ),
-        ];
-        live.line(&parent[0]);
-        live.line(&parent[1]);
-        append(&file, &[agent_line("Read", 3), agent_line("Grep", 4)]);
-        live.read_agents();
-        live.line(&parent[2]);
-        live.line(&parent[3]);
-        append(
-            &file,
-            &[
-                agent_line("Bash", 11),
-                agent_line("Edit", 12),
-                agent_line("Read", 13),
-            ],
-        );
-        live.line(&parent[4]);
-
-        let mut replayed = Fleet::new(&dir.join("s1.jsonl"));
-        for line in &parent {
-            replayed.line(line);
+        for step in steps {
+            match step {
+                Step::Line(line) => live.line(line),
+                Step::File(lines) => append(&file, lines),
+                Step::Poll => live.read_agents(),
+            }
         }
-        (live, replayed)
+        let mut replayed = Fleet::new(&dir.join("s1.jsonl"));
+        for step in steps {
+            if let Step::Line(line) = step {
+                replayed.line(line);
+            }
+        }
+        replayed.read_agents();
+        (outcome(&live), outcome(&replayed))
+    }
+
+    fn base_steps() -> Vec<Step> {
+        vec![
+            Step::Line(launch("toolu_1", "Agent", 1)),
+            Step::Line(launched("toolu_1", "a1", 2)),
+            Step::File(vec![agent_line("Read", 3), agent_line("Grep", 4)]),
+            Step::Poll,
+        ]
+    }
+
+    fn bare(task: &str, tool_id: &str, status: &str) -> Value {
+        enqueue(
+            &format!(
+                "<task-notification><task-id>{task}</task-id><tool-use-id>{tool_id}</tool-use-id>\
+                 <status>{status}</status></task-notification>"
+            ),
+            5,
+        )
+    }
+
+    fn resume() -> Step {
+        Step::Line(result(
+            "toolu_send",
+            json!({"resumedAgentId": "a1"}),
+            false,
+            10,
+        ))
     }
 
     #[test]
     fn a_resumed_run_takes_its_count_from_the_file_whatever_the_notification_reports() {
         for reported in [3, 5, 9] {
-            let (live, replayed) = resumed_run(&format!("file-count-{reported}"), reported);
-            assert_eq!(only(&live).tools, 5, "live, reported {reported}");
-            assert_eq!(only(&replayed).tools, 5, "replay, reported {reported}");
-            assert_eq!(only(&live).state, SubagentState::Done);
+            let mut steps = base_steps();
+            steps.push(Step::Line(enqueue(
+                &notification("a1", "toolu_1", "completed", 2),
+                5,
+            )));
+            steps.push(resume());
+            steps.push(Step::File(vec![
+                agent_line("Bash", 11),
+                agent_line("Edit", 12),
+                agent_line("Read", 13),
+            ]));
+            steps.push(Step::Line(enqueue(
+                &notification("a1", "toolu_send", "completed", reported),
+                15,
+            )));
+            let (live, replayed) = live_and_replay(&format!("file-count-{reported}"), &steps);
+            let done = vec![(SubagentState::Done, 5, Some(millis_at(15)))];
+            assert_eq!(live, done, "live, reported {reported}");
+            assert_eq!(replayed, done, "replay, reported {reported}");
         }
     }
 
     #[test]
-    fn a_resumed_run_without_a_readable_file_falls_back_to_the_summed_report() {
-        for unreadable in [false, true] {
-            let (mut fleet, dir) = fleet("fallback-count");
-            if unreadable {
-                fs::create_dir_all(dir.join("s1/subagents/agent-a1.jsonl")).unwrap();
-            }
-            fleet.line(&launch("toolu_1", "Agent", 1));
-            fleet.line(&launched("toolu_1", "a1", 2));
-            fleet.line(&enqueue(&notification("a1", "toolu_1", "completed", 4), 5));
-            fleet.line(&result(
-                "toolu_send",
-                json!({"resumedAgentId": "a1"}),
-                false,
-                10,
-            ));
-            fleet.line(&enqueue(
+    fn a_failed_run_without_usage_still_counts_from_the_file_before_and_after_a_resume() {
+        let mut steps = base_steps();
+        steps.push(Step::Line(bare("a1", "toolu_1", "failed")));
+        steps.push(resume());
+        steps.push(Step::File(vec![agent_line("Bash", 11)]));
+        steps.push(Step::Poll);
+        steps.push(Step::Line(enqueue(
+            &notification("a1", "toolu_send", "completed", 1),
+            15,
+        )));
+        let (live, replayed) = live_and_replay("failed-resume", &steps);
+        assert_eq!(live, [(SubagentState::Done, 3, Some(millis_at(15)))]);
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
+    fn a_killed_run_that_is_never_resumed_counts_from_the_file() {
+        let mut steps = base_steps();
+        steps.push(Step::Line(bare("a1", "toolu_1", "killed")));
+        let (live, replayed) = live_and_replay("killed", &steps);
+        assert_eq!(live, [(SubagentState::Stopped, 2, Some(millis_at(5)))]);
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
+    fn a_missing_file_falls_back_to_the_largest_report() {
+        let steps = [
+            Step::Line(launch("toolu_1", "Agent", 1)),
+            Step::Line(launched("toolu_1", "a1", 2)),
+            Step::Line(enqueue(&notification("a1", "toolu_1", "completed", 4), 5)),
+            resume(),
+            Step::Line(enqueue(
                 &notification("a1", "toolu_send", "completed", 2),
                 15,
-            ));
-            assert_eq!(only(&fleet).tools, 6, "unreadable {unreadable}");
-        }
+            )),
+        ];
+        let (live, replayed) = live_and_replay("missing", &steps);
+        assert_eq!(live, [(SubagentState::Done, 4, Some(millis_at(15)))]);
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
+    fn an_unreadable_file_and_an_exhausted_budget_fall_back_to_the_report() {
+        let (mut first, dir) = fleet("unreadable");
+        fs::create_dir_all(dir.join("s1/subagents/agent-a1.jsonl")).unwrap();
+        first.line(&launch("toolu_1", "Agent", 1));
+        first.line(&launched("toolu_1", "a1", 2));
+        first.line(&enqueue(&notification("a1", "toolu_1", "completed", 4), 5));
+        assert_eq!(only(&first).tools, 4);
+
+        let (mut second, dir) = fleet("budget");
+        append(
+            &dir.join("s1/subagents/agent-a1.jsonl"),
+            &[agent_line("Read", 3), agent_line("Grep", 4)],
+        );
+        second.finish_budget = 10;
+        second.line(&launch("toolu_1", "Agent", 1));
+        second.line(&launched("toolu_1", "a1", 2));
+        second.line(&enqueue(&notification("a1", "toolu_1", "completed", 7), 5));
+        assert_eq!(only(&second).tools, 7);
+    }
+
+    #[test]
+    fn many_unclosed_result_fragments_are_scanned_in_linear_time() {
+        let (mut fleet, _dir) = fleet("fragments");
+        fleet.line(&launch("toolu_1", "Agent", 1));
+        fleet.line(&launched("toolu_1", "a1", 2));
+        let text = "<task-notification><result></task-notification>".repeat(8_000);
+        let started = std::time::Instant::now();
+        fleet.line(&enqueue(&text, 5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(only(&fleet).state, SubagentState::Running);
     }
 
     #[test]
@@ -1070,7 +1173,7 @@ mod tests {
         replayed.read_agents();
 
         assert_eq!(only(&live).tools, 5);
-        assert_eq!(only(&replayed), only(&live));
+        assert_eq!(only(&replayed).tools, 5);
     }
 
     #[test]
