@@ -341,7 +341,7 @@ impl Workspace {
         self.active.and_then(|i| self.projects.get(i))
     }
 
-    /// Rail labels, pairwise distinct for distinct names: colliding projects get the letter where their names differ, else a free later letter.
+    /// Rail labels, pairwise distinct for distinct names: colliding projects get the letter where their names differ, else a free later letter. Distinct up to 1296 projects, after which the rest share `··`.
     pub fn monograms(&self) -> Vec<String> {
         let base: Vec<String> = self.projects.iter().map(Project::monogram).collect();
         let names: Vec<Vec<char>> = self
@@ -375,16 +375,19 @@ impl Workspace {
                     .max(1);
                 let divergence = name.get(split).filter(|c| c.is_alphanumeric());
                 let later = name.iter().filter(|c| c.is_alphanumeric()).skip(1);
-                let anything_free = ('A'..='Z').chain('0'..='9');
-                let label = divergence
+                let alphabet = || ('A'..='Z').chain('0'..='9');
+                let lead = (*first == '?').then_some(&'?');
+                let label = lead
                     .into_iter()
+                    .chain(divergence)
                     .chain(later)
                     .copied()
                     .chain('2'..='9')
-                    .chain(anything_free)
+                    .chain(alphabet())
                     .map(|c| format!("{first}{c}"))
+                    .chain(alphabet().flat_map(|a| alphabet().map(move |b| format!("{a}{b}"))))
                     .find(|l| !labels.contains(l))
-                    .unwrap_or_else(|| base[i].clone());
+                    .unwrap_or_else(|| "··".to_owned());
                 labels.push(label.clone());
                 label
             })
@@ -681,6 +684,24 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn labels_stay_distinct_and_non_empty_past_the_first_letter_candidates() {
+        for name in ["ab", "---"] {
+            let paths: Vec<String> = (0..40).map(|i| format!("/{i}/{name}")).collect();
+            let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let labels = ws(&refs).monograms();
+            let unique: std::collections::HashSet<_> = labels.iter().collect();
+            assert_eq!(unique.len(), 40, "{name}");
+            assert!(labels.iter().all(|l| !l.is_empty()), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_lone_name_without_alphanumerics_gets_a_double_question_mark() {
+        assert_eq!(ws(&["/n/---"]).monograms(), ["??"]);
+        assert_eq!(ws(&["/a/---", "/b/---"]).monograms(), ["??", "?2"]);
     }
 
     #[test]
