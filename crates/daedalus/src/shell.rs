@@ -110,6 +110,8 @@ pub struct Shell {
     palette_closing: Option<(palette::Palette, motion::Closing)>,
     /// Set while the launch splash covers the window, which native previews would otherwise draw over.
     splash: Option<std::time::Instant>,
+    /// Set once the splash has opened the whole window, so previews may draw over what is left of it.
+    splash_revealed: bool,
     /// Each project's files as last walked, listed while Go to File walks them again.
     palette_files: HashMap<PathBuf, Rc<Vec<String>>>,
     context_menu: Option<(gpui::Entity<daedalus_ui::ContextMenu>, Subscription)>,
@@ -259,6 +261,7 @@ impl Shell {
             palette: None,
             palette_closing: None,
             splash: None,
+            splash_revealed: false,
             palette_files: HashMap::new(),
             context_menu: None,
             item_menus: HashSet::new(),
