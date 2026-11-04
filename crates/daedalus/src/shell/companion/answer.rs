@@ -79,8 +79,13 @@ impl Typed {
             .enumerate()
             .filter(|(i, _)| *i != self.at)
             .map(|(_, o)| &o.label);
-        d.kind == DialogKind::Question
-            && d.title == self.title
+        // Typed text can turn a single select into a plain `Select`, with only its first title line.
+        matches!(d.kind, DialogKind::Question | DialogKind::Select)
+            && (d.title == self.title
+                || self
+                    .title
+                    .as_deref()
+                    .is_some_and(|t| title_matches(d.title.as_deref(), t)))
             && d.options.len() == self.others.len() + 1
             && others.eq(self.others.iter())
     }
@@ -107,9 +112,10 @@ impl Expect {
                     && n.options.len() == before.options.len()
                     && n.options.get(*i).is_some_and(|o| o.checked == Some(*on))
             }),
-            Self::InputStartsWith(i, text) => {
-                now.is_some_and(|n| n.options.get(*i).is_some_and(|o| shows(o, text)))
-            }
+            Self::InputStartsWith(i, text) => now.is_some_and(|n| {
+                title_matches(n.title.as_deref(), before.title.as_deref().unwrap_or(""))
+                    && n.options.get(*i).is_some_and(|o| shows(o, text))
+            }),
             Self::TitleIs(q) => now.is_some_and(|n| {
                 n.kind == DialogKind::Question && title_matches(n.title.as_deref(), q)
             }),
@@ -146,6 +152,9 @@ fn plan(d: &Dialog, goal: &Goal, p: &mut Progress, app: bool) -> Plan {
         return Err("The question changed");
     }
     match d.kind {
+        DialogKind::Select if p.typed.as_ref().is_some_and(|t| t.fits(d)) => {
+            question(d, goal, p, app)
+        }
         DialogKind::Select => select(d, goal, p, app),
         DialogKind::Question => question(d, goal, p, app),
         DialogKind::Review => review(d, goal, p, app),
@@ -445,11 +454,12 @@ fn answer_index(d: &Dialog, answers: &[AnswerPick]) -> Result<usize, &'static st
 /// Whether the row holds the start of `text`, however it renders once typed into.
 fn shows(option: &DialogOption, text: &str) -> bool {
     let start = norm(&text.chars().take(SHOWN_CHARS).collect::<String>());
-    let row = norm(&format!(
-        "{} {}",
-        option.text.as_deref().unwrap_or_default(),
-        option.label
-    ));
+    // An input row's label is a name, not what was typed.
+    let row = if option.input {
+        norm(option.text.as_deref().unwrap_or_default())
+    } else {
+        norm(&option.label)
+    };
     row.contains(&start)
 }
 
@@ -640,6 +650,68 @@ mod tests {
         d
     }
 
+    /// The single-select fixture after `text` went into its Other row, as the parser reads it.
+    fn typed_single(text: &str) -> Dialog {
+        let d = parse(&SINGLE.replace("3. Other", &format!("3. {text}")));
+        assert_eq!(d.kind, DialogKind::Select);
+        d
+    }
+
+    #[test]
+    fn the_next_bash_prompt_with_the_same_labels_is_another_dialog() {
+        let d = parse(BASH);
+        let next = parse(&BASH.replace("   npm test\n", "   rm -rf build\n"));
+        assert_eq!(
+            d.options.iter().map(|o| &o.label).collect::<Vec<_>>(),
+            next.options.iter().map(|o| &o.label).collect::<Vec<_>>()
+        );
+        let g = goal(&d, vec![pick(None, &["Yes"], None)]);
+        let (keys, end) = play(g, vec![Some(next)], false);
+        assert!(keys.is_empty());
+        assert_aborted(end, "The question changed");
+    }
+
+    #[test]
+    fn a_tabbed_form_with_other_questions_aborts_on_the_title_check() {
+        let d = parse(TABS);
+        let mut other_form = d.clone();
+        other_form.title = Some("Which shoe?".into());
+        let g = tabbed_goal(&d);
+        let (keys, end) = play(g, vec![Some(other_form)], false);
+        assert!(keys.is_empty());
+        assert_aborted(end, "no answer is for this question");
+    }
+
+    #[test]
+    fn a_review_of_other_answers_has_another_key() {
+        let d = clean_review();
+        let other = parse(&REVIEW.replace("→ Blue", "→ Red"));
+        assert_ne!(d.key, other.key);
+        let g = goal(&d, Vec::new());
+        let (keys, end) = play(g, vec![Some(other)], false);
+        assert!(keys.is_empty());
+        assert_aborted(end, "The question changed");
+    }
+
+    #[test]
+    fn a_short_text_is_not_found_in_the_name_of_an_empty_input_row() {
+        let d = parse(SINGLE);
+        let g = goal(&d, vec![pick(Some("Which colour?"), &[], Some("t"))]);
+        let (keys, end) = play(g, vec![Some(at(d.clone(), 2)), Some(at(d, 2))], false);
+        assert_eq!(keys, [b"t".to_vec()]);
+        assert_aborted(end, "did not match");
+    }
+
+    #[test]
+    fn typing_is_checked_against_the_same_title() {
+        let d = parse(SINGLE);
+        let g = goal(&d, vec![pick(Some("Which colour?"), &[], Some("hello"))]);
+        let mut elsewhere = at(typed_single("hello"), 2);
+        elsewhere.title = Some("Which shoe?".into());
+        let (_, end) = play(g, vec![Some(at(d, 2)), Some(elsewhere)], false);
+        assert_aborted(end, "did not match");
+    }
+
     #[test]
     fn a_select_walks_up_to_the_target_then_enters() {
         let d = parse(BASH);
@@ -777,7 +849,7 @@ mod tests {
             Some(d.clone()),
             Some(at(d.clone(), 1)),
             Some(at(d.clone(), 2)),
-            Some(at(typed(d.clone(), 2, "héllo wörld"), 2)),
+            Some(at(typed_single("héllo wörld"), 2)),
             None,
         ];
         let (keys, end) = play(g, screens, false);
@@ -789,7 +861,7 @@ mod tests {
     fn the_highlight_is_put_back_on_the_typed_row_before_enter() {
         let d = parse(SINGLE);
         let g = goal(&d, vec![pick(Some("Which colour?"), &[], Some("hello"))]);
-        let after = typed(d.clone(), 2, "hello");
+        let after = typed_single("hello");
         let screens = vec![
             Some(at(d, 2)),
             Some(at(after.clone(), 1)),
