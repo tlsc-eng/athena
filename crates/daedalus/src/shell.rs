@@ -9,6 +9,7 @@ mod claude_sessions;
 mod code_actions;
 mod codelens;
 mod companion;
+mod companion_ui;
 mod conflicts;
 mod containers_view;
 mod debug;
@@ -155,6 +156,7 @@ pub struct Shell {
     pending_open: Option<PathBuf>,
     ide: claude_ide::IdeState,
     usage: usage_view::UsageState,
+    pairing: Option<companion_ui::Pairing>,
     bell: notices::BellState,
     _usage: Option<Task<()>>,
     zoomed: Option<PaneId>,
@@ -298,6 +300,7 @@ impl Shell {
             pending_open: None,
             ide: claude_ide::IdeState::default(),
             usage: usage_view::UsageState::default(),
+            pairing: None,
             bell: notices::BellState::new(cx),
             _usage: None,
             zoomed: None,
@@ -952,6 +955,9 @@ impl Render for Shell {
                 }),
             )
             .on_action(
+                cx.listener(|this, _: &crate::actions::PairIphone, w, cx| this.open_pairing(w, cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &crate::actions::OpenSettingsJson, w, cx| {
                     this.open_settings_file(w, cx)
                 }),
@@ -1000,6 +1006,7 @@ impl Render for Shell {
             .children(self.render_bell_popover(window, cx))
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
+            .children(self.render_pairing(cx))
             .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
             .children(self.render_splash(cx))
     }

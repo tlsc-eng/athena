@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use daedalus_proto::{AppMsg, AppReply, Notice, NoticeKind, PaneId};
@@ -23,8 +23,9 @@ use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
 use crate::app_socket::Request;
+use crate::companion::devices::Devices;
 use crate::companion::protocol::NoticeKind as PushKind;
-use crate::companion::server::{self as companion_server, Command, Verdict};
+use crate::companion::server::{self as companion_server, Command};
 use crate::ide;
 
 /// Where a new window lands relative to the one it was opened from, as macOS cascades them.
@@ -56,6 +57,10 @@ pub(super) struct Windows {
     companion_dirty: bool,
     _companion_ticker: Option<Task<()>>,
     companion_closing: Option<futures::channel::oneshot::Receiver<()>>,
+    /// Shared with every server so a device can be revoked while none runs.
+    companion_devices: Option<Arc<Mutex<Devices>>>,
+    /// The window whose pairing modal is open, which a pairing prompt also goes to.
+    pairing_window: Option<AnyWindowHandle>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -116,6 +121,8 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         companion_dirty: false,
         _companion_ticker: None,
         companion_closing: None,
+        companion_devices: None,
+        pairing_window: None,
         _tasks: Vec::new(),
     });
     let mut near = None;
@@ -660,6 +667,26 @@ pub(super) fn take_companion_closing(
     cx.global_mut::<Windows>().companion_closing.take()
 }
 
+pub(super) fn companion_devices(cx: &App) -> Option<Arc<Mutex<Devices>>> {
+    cx.try_global::<Windows>()?.companion_devices.clone()
+}
+
+/// Keeps the first store handed in, so two loads that raced end up sharing one.
+pub(super) fn store_companion_devices(devices: Devices, cx: &mut App) -> Arc<Mutex<Devices>> {
+    cx.global_mut::<Windows>()
+        .companion_devices
+        .get_or_insert_with(|| Arc::new(Mutex::new(devices)))
+        .clone()
+}
+
+pub(super) fn pairing_window(cx: &App) -> Option<AnyWindowHandle> {
+    cx.try_global::<Windows>()?.pairing_window
+}
+
+pub(super) fn set_pairing_window(window: Option<AnyWindowHandle>, cx: &mut App) {
+    cx.global_mut::<Windows>().pairing_window = window;
+}
+
 fn set_companion_clients(count: usize, cx: &mut App) {
     let windows = cx.global_mut::<Windows>();
     let before = std::mem::replace(&mut windows.companion_clients, count);
@@ -846,10 +873,11 @@ fn route_ide(event: ide::Event, cx: &mut App) {
 
 fn route_companion(command: Command, cx: &mut App) {
     match command {
-        // Pairing waits for the pairing UI.
-        Command::Pair { reply, .. } => {
-            let _ = reply.send(Verdict::Deny);
-        }
+        Command::Pair {
+            device,
+            peer,
+            reply,
+        } => super::companion_ui::ask_to_pair(device, peer, reply, cx),
         Command::SpawnClaude { root, reply } => spawn_claude_for_phone(&root, reply, cx),
         Command::ClientsChanged(count) => set_companion_clients(count, cx),
     }

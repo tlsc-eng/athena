@@ -590,6 +590,7 @@ impl Shell {
 
     pub(super) fn new_settings_view(&mut self, root: &Path, cx: &mut Context<Self>) -> ItemView {
         let fallback = self.settings_fallback();
+        super::companion::show_devices(cx);
         let view = cx.new(|cx| SettingsView::new(root.to_path_buf(), fallback, cx));
         let root = root.to_path_buf();
         cx.subscribe(
@@ -613,6 +614,7 @@ impl Shell {
                     scope: Scope::Project,
                     keys,
                 } => this.write_project_setting(&root, keys, None, cx),
+                SettingsEvent::RevokeDevice(id) => super::companion::revoke_device(id.clone(), cx),
                 SettingsEvent::OpenJson(scope) => {
                     let path = match scope {
                         Scope::User => settings::ensure_file(),

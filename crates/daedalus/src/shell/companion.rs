@@ -1,7 +1,8 @@
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Context, Task};
@@ -97,7 +98,15 @@ async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration
         return Some(WAITING_POLL);
     }
     let name = name.to_string();
-    match background.spawn(async move { start(addrs, &name) }).await {
+    let started = match load_devices(cx).await? {
+        Ok(devices) => {
+            background
+                .spawn(async move { start(addrs, &name, devices) })
+                .await
+        }
+        Err(e) => Err(e),
+    };
+    match started {
         Ok((server, commands)) => {
             told.failed = false;
             cx.update(|cx| windows::set_companion(server, commands, cx))
@@ -171,17 +180,88 @@ fn refresh_sessions(cx: &mut App) {
     }
 }
 
+fn data_dir() -> io::Result<PathBuf> {
+    Ok(daedalus_proto::data_dir()
+        .map_err(io::Error::other)?
+        .join("companion"))
+}
+
+/// The shared device store, read from disk once on the background executor; `None` means the app is gone.
+async fn load_devices(cx: &mut AsyncApp) -> Option<io::Result<Arc<Mutex<Devices>>>> {
+    if let Some(devices) = cx.update(|cx| windows::companion_devices(cx)).ok()? {
+        return Some(Ok(devices));
+    }
+    let loaded = cx
+        .background_executor()
+        .spawn(async { data_dir().map(|dir| Devices::load(&dir)) })
+        .await;
+    Some(match loaded {
+        Ok(devices) => Ok(cx
+            .update(|cx| windows::store_companion_devices(devices, cx))
+            .ok()?),
+        Err(e) => Err(e),
+    })
+}
+
+/// Reads the device list for Settings, which shows it while the server is off.
+pub(super) fn show_devices(cx: &mut App) {
+    if windows::companion_devices(cx).is_some() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        if let Some(Ok(_)) = load_devices(cx).await {
+            let _ = cx.update(redraw_windows);
+        }
+    })
+    .detach();
+}
+
+/// Removes a paired device; the file write runs on the background executor.
+pub(super) fn revoke_device(id: String, cx: &mut App) {
+    let Some(devices) = windows::companion_devices(cx) else {
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let target = id.clone();
+        let saved = cx
+            .background_executor()
+            .spawn(async move {
+                devices
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .revoke(&target)
+            })
+            .await;
+        let _ = cx.update(|cx| {
+            // The store has dropped it already, so this only closes the device's open connections.
+            if let Some(server) = windows::companion(cx) {
+                let _ = server.revoke(&id);
+            }
+            if let Err(e) = saved {
+                notice("Could not save the device list", format!("{e}"), cx);
+            }
+            redraw_windows(cx);
+        });
+    })
+    .detach();
+}
+
+fn redraw_windows(cx: &mut App) {
+    for handle in windows::handles(cx) {
+        let _ = handle.update(cx, |_, _, cx| cx.notify());
+    }
+}
+
 fn start(
     addrs: Vec<SocketAddr>,
     name: &str,
+    devices: Arc<Mutex<Devices>>,
 ) -> io::Result<(Server, async_channel::Receiver<server::Command>)> {
-    let dir = daedalus_proto::data_dir()
-        .map_err(io::Error::other)?
-        .join("companion");
+    let dir = data_dir()?;
     let mux_socket = daedalus_proto::socket_path().map_err(io::Error::other)?;
     Server::start(Config {
         addrs,
-        devices: Arc::new(Mutex::new(Devices::load(&dir))),
+        devices,
         data_dir: dir,
         cli: tailnet::cli(),
         allow_loopback_for_tests: false,
