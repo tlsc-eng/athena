@@ -10,7 +10,7 @@ use gpui::{
     PromptLevel, Window, div, prelude::*,
 };
 
-use super::Shell;
+use super::{Shell, windows};
 use crate::transcripts;
 use crate::usage::{self, Profile, Status};
 
@@ -55,6 +55,11 @@ fn choose<'a>(
                 .filter(|(_, s)| matches!(s, Status::Windows(w) if !w.is_empty()))
                 .max_by(|(_, a), (_, b)| peak(a).total_cmp(&peak(b)))
         })
+}
+
+/// A refresh waits out `MIN_REFRESH` and any rate-limit retry-after since the last fetch.
+fn refresh_allowed(since_fetch: Option<Duration>, retry_after: Duration) -> bool {
+    since_fetch.is_none_or(|elapsed| elapsed >= MIN_REFRESH.max(retry_after))
 }
 
 fn resets_in(at: i64) -> Option<String> {
@@ -167,6 +172,7 @@ impl Shell {
         self.usage.readings = readings;
         self.usage.latest = latest;
         self.usage.fetched = Some(Instant::now());
+        windows::mark_companion_dirty(cx);
         for title in crossings {
             self.local_notice(
                 NoticeKind::Message {
@@ -206,12 +212,27 @@ impl Shell {
         .detach();
     }
 
-    fn refresh_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
+    /// The readings the phone may see, none while the indicator is off.
+    pub(super) fn usage_readings(&self) -> Vec<(Profile, Status)> {
+        if self.workspace.usage_indicator {
+            self.usage.readings.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(super) fn refresh_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let retry_after = self
             .usage
-            .fetched
-            .is_none_or(|t| t.elapsed() >= MIN_REFRESH)
-        {
+            .readings
+            .iter()
+            .filter_map(|(_, s)| match s {
+                Status::RateLimited(d) => Some(*d),
+                _ => None,
+            })
+            .max()
+            .unwrap_or_default();
+        if refresh_allowed(self.usage.fetched.map(|t| t.elapsed()), retry_after) {
             self.usage.fetched = Some(Instant::now());
             self.poll_usage(true, window, cx);
         }
@@ -544,5 +565,15 @@ mod tests {
         assert_eq!(name(Some("claude-gone")), Some("claude-ai"), "busiest");
         assert_eq!(name(None), Some("claude-ai"));
         assert_eq!(choose(&[reading("claude-ai", None)], None), None);
+    }
+
+    #[test]
+    fn a_refresh_waits_for_the_minimum_gap_and_any_retry_after() {
+        let secs = Duration::from_secs;
+        assert!(refresh_allowed(None, secs(300)));
+        assert!(!refresh_allowed(Some(secs(30)), Duration::ZERO));
+        assert!(!refresh_allowed(Some(secs(120)), secs(300)));
+        assert!(refresh_allowed(Some(secs(61)), Duration::ZERO));
+        assert!(refresh_allowed(Some(secs(300)), secs(300)));
     }
 }
