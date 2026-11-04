@@ -9,6 +9,7 @@
     "usage",
     "act",
     "dialog",
-    "answer"
+    "answer",
+    "subagents"
   ]
 }

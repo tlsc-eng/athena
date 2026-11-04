@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
 use tokio::time::{Interval, MissedTickBehavior};
 
-use super::protocol::{Item, ServerMsg, TranscriptKind};
+use super::protocol::{Item, ServerMsg, Subagent, TranscriptKind};
 use super::server::Snapshot;
 use super::transcript::{Feed, Read};
 use crate::transcripts;
@@ -28,6 +28,10 @@ struct Open {
     feed: Arc<Mutex<Feed>>,
     stamp: Stamp,
     limit: usize,
+    // Agents run and write their own files while the parent is idle, so the stamp alone cannot trigger a read.
+    agents: bool,
+    // Fleet edits beyond the capped list must not resend an identical one.
+    sent: Vec<Subagent>,
 }
 
 /// Up to four transcripts of one connection, polled for growth every half second.
@@ -84,14 +88,24 @@ impl Transcripts {
         .await
         .ok()
         .flatten();
-        let Some((path, stamp, feed)) = loaded else {
+        let Some((path, stamp, mut feed)) = loaded else {
             return error(id, "transcript not found");
         };
         let limit = clamp(limit);
         let page = page_message(&session, &feed, limit);
+        let agents = feed.subagents();
+        feed.take_subagents_changed();
+        let running = feed.agents_running();
         self.forget(&session);
         self.epoch += 1;
         let epoch = self.epoch;
+        let sent = agents.clone();
+        if !agents.is_empty() {
+            self.ready.push_back(ServerMsg::Subagents {
+                session: session.clone(),
+                agents,
+            });
+        }
         self.open.insert(
             session,
             Open {
@@ -100,6 +114,8 @@ impl Transcripts {
                 feed: Arc::new(Mutex::new(feed)),
                 stamp,
                 limit,
+                agents: running,
+                sent,
             },
         );
         page
@@ -154,8 +170,9 @@ impl Transcripts {
 
     fn forget(&mut self, session: &str) {
         self.open.remove(session);
-        self.ready
-            .retain(|m| !matches!(m, ServerMsg::Transcript { session: s, .. } if s == session));
+        self.ready.retain(|m| {
+            !matches!(m, ServerMsg::Transcript { session: s, .. } | ServerMsg::Subagents { session: s, .. } if s == session)
+        });
     }
 
     fn start_reading(&mut self) {
@@ -164,7 +181,7 @@ impl Transcripts {
             .iter_mut()
             .filter_map(|(session, open)| {
                 let now = stamp(&open.path);
-                (now != open.stamp).then(|| {
+                (now != open.stamp || open.agents).then(|| {
                     open.stamp = now;
                     (session.clone(), open.epoch, open.feed.clone())
                 })
@@ -185,10 +202,11 @@ impl Transcripts {
     }
 
     fn deliver(&mut self, session: &str, epoch: u64, read: Read) {
-        let Some(open) = self.open.get(session).filter(|o| o.epoch == epoch) else {
+        let Some(open) = self.open.get_mut(session).filter(|o| o.epoch == epoch) else {
             return;
         };
-        let feed = lock(&open.feed);
+        let mut feed = lock(&open.feed);
+        let reset = matches!(read, Read::Reset);
         match read {
             Read::Reset => self
                 .ready
@@ -205,6 +223,21 @@ impl Transcripts {
                     });
                 }
             }
+        }
+        let changed = feed.take_subagents_changed();
+        open.agents = feed.agents_running();
+        if reset {
+            open.sent.clear();
+        }
+        let agents = feed.subagents();
+        if (changed || reset) && agents != open.sent {
+            open.sent.clone_from(&agents);
+            self.ready
+                .retain(|m| !matches!(m, ServerMsg::Subagents { session: s, .. } if s == session));
+            self.ready.push_back(ServerMsg::Subagents {
+                session: session.to_string(),
+                agents,
+            });
         }
     }
 }
@@ -334,5 +367,129 @@ mod tests {
         let size = serde_json::to_vec(&message).unwrap().len();
         assert!(size <= MAX_MESSAGE, "{size} bytes");
         assert!(size > MAX_MESSAGE - 4_000, "{size} bytes");
+    }
+
+    fn queued(session: &str) -> ServerMsg {
+        ServerMsg::Subagents {
+            session: session.into(),
+            agents: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_session_drops_its_queued_subagents() {
+        let mut feeds = Transcripts::new(None);
+        feeds.ready.push_back(queued("s1"));
+        feeds.ready.push_back(queued("s2"));
+        feeds.forget("s1");
+        assert!(matches!(
+            feeds.ready.make_contiguous(),
+            [ServerMsg::Subagents { session, .. }] if session == "s2"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_idle_transcript_is_read_again_only_while_its_agents_run() {
+        let path = std::env::temp_dir().join(format!("daedalus-feed-{}.jsonl", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        for (agents, reads) in [(true, true), (false, false)] {
+            let mut feeds = Transcripts::new(None);
+            feeds.open.insert(
+                "s1".into(),
+                Open {
+                    epoch: 1,
+                    path: path.clone(),
+                    feed: Arc::new(Mutex::new(Feed::new(path.clone()))),
+                    stamp: stamp(&path),
+                    limit: 10,
+                    agents,
+                    sent: Vec::new(),
+                },
+            );
+            feeds.start_reading();
+            assert_eq!(feeds.reading.is_some(), reads);
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_change_beyond_the_capped_list_is_not_sent() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("daedalus-feed-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let agents = dir.join("s1/subagents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let path = dir.join("s1.jsonl");
+        let mut parent = String::new();
+        for n in 0..21 {
+            parent += &serde_json::json!({
+                "type": "assistant", "timestamp": format!("2026-01-01T00:00:{n:02}Z"),
+                "message": {"content": [{"type": "tool_use", "id": format!("t{n}"), "name": "Agent",
+                    "input": {"description": "d", "subagent_type": "builder"}}]},
+            })
+            .to_string();
+            parent.push('\n');
+            for (id, agent) in [(0, "a0"), (20, "a20")] {
+                if n == id {
+                    parent += &serde_json::json!({
+                        "type": "user", "timestamp": format!("2026-01-01T00:00:{n:02}Z"),
+                        "message": {"content": [{"type": "tool_result", "tool_use_id": format!("t{n}"), "content": "ok"}]},
+                        "toolUseResult": {"status": "async_launched", "agentId": agent},
+                    })
+                    .to_string();
+                    parent.push('\n');
+                }
+            }
+        }
+        std::fs::write(&path, parent).unwrap();
+        let tool_use = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant", "timestamp": "2026-01-01T01:00:00Z",
+                "message": {"content": [{"type": "tool_use", "id": "x", "name": "Read", "input": {}}]},
+            })
+        );
+        let mut feed = Feed::new(path.clone());
+        feed.read_on();
+        feed.take_subagents_changed();
+        let mut feeds = Transcripts::new(None);
+        let sent = feed.subagents();
+        assert_eq!(sent.len(), 20);
+        feeds.open.insert(
+            "s1".into(),
+            Open {
+                epoch: 1,
+                path: path.clone(),
+                feed: Arc::new(Mutex::new(feed)),
+                stamp: None,
+                limit: 10,
+                agents: true,
+                sent,
+            },
+        );
+        let grow = |agent: &str| {
+            let file = agents.join(format!("agent-{agent}.jsonl"));
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(file)
+                .unwrap();
+            file.write_all(tool_use.as_bytes()).unwrap();
+        };
+        let read = |feeds: &Transcripts| lock(&feeds.open["s1"].feed).read_on();
+
+        grow("a0");
+        let read_on = read(&feeds);
+        feeds.deliver("s1", 1, read_on);
+        assert!(feeds.ready.is_empty(), "the 21st agent is not in the list");
+
+        grow("a20");
+        let read_on = read(&feeds);
+        feeds.deliver("s1", 1, read_on);
+        assert!(matches!(
+            feeds.ready.make_contiguous(),
+            [ServerMsg::Subagents { agents, .. }] if agents.len() == 20
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
