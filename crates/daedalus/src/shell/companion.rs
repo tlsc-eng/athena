@@ -2,19 +2,24 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use gpui::{App, AsyncApp, Context};
+use gpui::{App, AsyncApp, Context, Task};
 
 use super::Shell;
 use super::windows;
 use crate::companion::devices::Devices;
-use crate::companion::server::{self, Config, Server};
+use crate::companion::server::{self, Config, Server, Snapshot};
 use crate::companion::tailnet;
+
+mod snapshot;
 
 const PORT: u16 = 47123;
 const WAITING_POLL: Duration = Duration::from_secs(10);
 const RUNNING_POLL: Duration = Duration::from_secs(30);
+const TICK: Duration = Duration::from_millis(250);
+const REBUILD: Duration = Duration::from_secs(1);
+const SESSIONS_REFRESH: Duration = Duration::from_secs(5);
 
 impl Shell {
     /// Starts the phone companion's watch when `companion.enabled` is on and stops everything when it is off.
@@ -113,6 +118,65 @@ async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration
             }
             Some(WAITING_POLL)
         }
+    }
+}
+
+/// Keeps the server's snapshot current while a phone is connected; it does nothing without one.
+pub(super) fn tick_snapshots(cx: &mut App) -> Task<()> {
+    cx.spawn(async move |cx| {
+        let mut last: Option<Arc<Snapshot>> = None;
+        let mut built: Option<Instant> = None;
+        let mut refreshed: Option<Instant> = None;
+        loop {
+            cx.background_executor().timer(TICK).await;
+            let ticked = cx.update(|cx| {
+                if windows::companion_clients(cx) == 0 {
+                    (last, built, refreshed) = (None, None, None);
+                    return;
+                }
+                if refreshed.is_none_or(|at| at.elapsed() >= SESSIONS_REFRESH) {
+                    refresh_sessions(cx);
+                    refreshed = Some(Instant::now());
+                }
+                let dirty = windows::take_companion_dirty(cx);
+                if dirty || built.is_none_or(|at| at.elapsed() >= REBUILD) {
+                    last = send_snapshot(last.take(), cx);
+                    built = Some(Instant::now());
+                }
+            });
+            if ticked.is_err() {
+                return;
+            }
+        }
+    })
+}
+
+/// Sends the server a snapshot of every window now, for a phone that just connected.
+pub(super) fn push_snapshot(cx: &mut App) {
+    windows::take_companion_dirty(cx);
+    send_snapshot(None, cx);
+}
+
+/// Builds the snapshot and hands it to the server unless it equals `last`, returning what is now sent.
+fn send_snapshot(last: Option<Arc<Snapshot>>, cx: &mut App) -> Option<Arc<Snapshot>> {
+    let snapshot = Arc::new(snapshot::to_snapshot(snapshot::gather(cx)));
+    if last.as_deref() == Some(&*snapshot) {
+        return last;
+    }
+    if let Some(server) = windows::companion(cx) {
+        server.set_snapshot(snapshot.clone());
+    }
+    Some(snapshot)
+}
+
+/// Loads each window's session list even when its Sessions panel is hidden, so labels are there.
+fn refresh_sessions(cx: &mut App) {
+    for handle in windows::handles(cx) {
+        let _ = handle.update(cx, |shell, _, cx| {
+            if let Some(root) = shell.workspace.active_project().map(|p| p.root.clone()) {
+                shell.refresh_sessions(&root, cx);
+            }
+        });
     }
 }
 

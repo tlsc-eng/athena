@@ -304,6 +304,11 @@ impl TerminalView {
         self.claude_state
     }
 
+    /// The grid's rows and columns as the shell last sized it.
+    pub fn grid_size(&self) -> (u16, u16) {
+        (self.grid.rows, self.grid.cols)
+    }
+
     /// A bell rang since the user last looked at this terminal.
     pub fn has_bell(&self) -> bool {
         self.terminal.as_ref().is_some_and(|t| t.bell)

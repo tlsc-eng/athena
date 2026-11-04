@@ -179,6 +179,12 @@ impl SessionsState {
         self.panes.get(&pane).map(String::as_str)
     }
 
+    /// The todos and plan `session`'s hooks last reported.
+    pub(super) fn plan_of(&self, session: &str) -> Option<(&[TodoInfo], Option<&str>)> {
+        let live = self.live.get(session)?;
+        Some((&live.todos, live.plan.as_deref()))
+    }
+
     /// Where `session` started, as its SessionStart hook said.
     pub(super) fn cwd_of(&self, session: &str) -> Option<&Path> {
         self.cwds.get(session).map(PathBuf::as_path)
@@ -577,7 +583,7 @@ impl Shell {
 
     /// Reads the lists again when they are stale, or a terminal now runs a session in a project
     /// they have not covered.
-    fn refresh_sessions(&mut self, root: &Path, cx: &mut Context<Self>) {
+    pub(super) fn refresh_sessions(&mut self, root: &Path, cx: &mut Context<Self>) {
         let state = &self.review.sessions;
         let stale = state.loaded_at.is_none_or(|at| at.elapsed() > STALE_AFTER);
         let idle = state.loading.is_none();
