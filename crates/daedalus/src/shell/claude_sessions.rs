@@ -77,6 +77,8 @@ pub(super) struct SessionsState {
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.
     panes: HashMap<PaneId, String>,
+    /// When each session was first bound to a pane here.
+    bound_at: HashMap<String, SystemTime>,
     /// Where each session started, as its SessionStart hook said.
     cwds: HashMap<String, PathBuf>,
     /// `live::locate` per cwd, read by a load in the background so drawing never touches the disk.
@@ -108,6 +110,9 @@ impl SessionsState {
             return;
         }
         self.panes.retain(|p, s| *p == pane || *s != session);
+        self.bound_at
+            .entry(session.clone())
+            .or_insert_with(SystemTime::now);
         self.panes.insert(pane, session);
     }
 
@@ -1116,6 +1121,18 @@ mod tests {
         let mut all: Vec<_> = state.panes.iter().map(|(p, s)| (*p, s.as_str())).collect();
         all.sort();
         all
+    }
+
+    #[test]
+    fn binding_again_keeps_the_first_bind_time() {
+        let mut state = SessionsState::default();
+        state.bind(1, "a".into());
+        let first = state.bound_at["a"];
+        state.bound_at.insert("a".into(), SystemTime::UNIX_EPOCH);
+        state.bind(1, "a".into());
+        state.bind(2, "a".into());
+        assert_ne!(first, SystemTime::UNIX_EPOCH);
+        assert_eq!(state.bound_at["a"], SystemTime::UNIX_EPOCH);
     }
 
     #[test]

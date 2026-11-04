@@ -9,7 +9,7 @@ use gpui::{App, AsyncApp, Context, Task};
 use super::Shell;
 use super::windows;
 use crate::companion::devices::Devices;
-use crate::companion::server::{self, Config, Server, Snapshot};
+use crate::companion::server::{self, Config, Server};
 use crate::companion::tailnet;
 
 mod snapshot;
@@ -124,14 +124,13 @@ async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration
 /// Keeps the server's snapshot current while a phone is connected; it does nothing without one.
 pub(super) fn tick_snapshots(cx: &mut App) -> Task<()> {
     cx.spawn(async move |cx| {
-        let mut last: Option<Arc<Snapshot>> = None;
         let mut built: Option<Instant> = None;
         let mut refreshed: Option<Instant> = None;
         loop {
             cx.background_executor().timer(TICK).await;
             let ticked = cx.update(|cx| {
                 if windows::companion_clients(cx) == 0 {
-                    (last, built, refreshed) = (None, None, None);
+                    (built, refreshed) = (None, None);
                     return;
                 }
                 if refreshed.is_none_or(|at| at.elapsed() >= SESSIONS_REFRESH) {
@@ -140,7 +139,7 @@ pub(super) fn tick_snapshots(cx: &mut App) -> Task<()> {
                 }
                 let dirty = windows::take_companion_dirty(cx);
                 if dirty || built.is_none_or(|at| at.elapsed() >= REBUILD) {
-                    last = send_snapshot(last.take(), cx);
+                    push_snapshot(cx);
                     built = Some(Instant::now());
                 }
             });
@@ -151,22 +150,14 @@ pub(super) fn tick_snapshots(cx: &mut App) -> Task<()> {
     })
 }
 
-/// Sends the server a snapshot of every window now, for a phone that just connected.
+/// Builds the snapshot and hands it to the server, which skips one equal to what it holds.
 pub(super) fn push_snapshot(cx: &mut App) {
     windows::take_companion_dirty(cx);
-    send_snapshot(None, cx);
-}
-
-/// Builds the snapshot and hands it to the server unless it equals `last`, returning what is now sent.
-fn send_snapshot(last: Option<Arc<Snapshot>>, cx: &mut App) -> Option<Arc<Snapshot>> {
-    let snapshot = Arc::new(snapshot::to_snapshot(snapshot::gather(cx)));
-    if last.as_deref() == Some(&*snapshot) {
-        return last;
-    }
+    let snapshot = snapshot::to_snapshot(snapshot::gather(cx));
+    windows::prune_companion_needs(&snapshot, cx);
     if let Some(server) = windows::companion(cx) {
-        server.set_snapshot(snapshot.clone());
+        server.set_snapshot(Arc::new(snapshot));
     }
-    Some(snapshot)
 }
 
 /// Loads each window's session list even when its Sessions panel is hidden, so labels are there.

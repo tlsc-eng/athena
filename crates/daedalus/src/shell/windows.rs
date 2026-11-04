@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use daedalus_proto::{AppMsg, AppReply, Notice, NoticeKind, PaneId};
 use daedalus_workspace::{ItemId, ItemKind, Project, WindowMode, WindowState, Workspace};
@@ -618,6 +619,13 @@ pub(super) fn companion_needs(cx: &App) -> &HashMap<PaneId, String> {
     &cx.global::<Windows>().companion_needs
 }
 
+/// Forgets the questions of panes no terminal shows any more.
+pub(super) fn prune_companion_needs(snapshot: &companion_server::Snapshot, cx: &mut App) {
+    cx.global_mut::<Windows>()
+        .companion_needs
+        .retain(|pane, _| snapshot.terminals.iter().any(|t| t.pane == *pane));
+}
+
 pub(super) fn take_companion_dirty(cx: &mut App) -> bool {
     std::mem::take(&mut cx.global_mut::<Windows>().companion_dirty)
 }
@@ -628,6 +636,9 @@ pub(super) fn take_companion(cx: &mut App) -> Option<companion_server::Server> {
     windows._companion_events = None;
     windows._companion_ticker = None;
     let server = windows.companion.take();
+    if let Some(server) = &server {
+        server.set_snapshot(Arc::default());
+    }
     set_companion_clients(0, cx);
     server
 }
@@ -654,6 +665,10 @@ fn set_companion_clients(count: usize, cx: &mut App) {
     }
     if before == 0 {
         super::companion::push_snapshot(cx);
+    } else if count == 0
+        && let Some(server) = companion(cx)
+    {
+        server.set_snapshot(Arc::default());
     }
     for handle in handles(cx) {
         let _ = handle.update(cx, |_, _, cx| cx.notify());

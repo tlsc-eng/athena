@@ -358,7 +358,6 @@ impl Shell {
             .keys()
             .copied()
             .chain(rows.keys().copied().filter(|id| !running.contains_key(id)));
-        let now = SystemTime::now();
         let mut out: Vec<LiveSession> = ids
             .map(|id| {
                 let term = running.get(id);
@@ -390,14 +389,12 @@ impl Shell {
                     unread: term.is_some_and(|t| unread(t.state, t.bell)),
                     todos: live.and_then(|l| todo_counts(&l.todos)),
                     files: row.map_or(0, |r| r.files.len()),
-                    // A live session with no transcript row yet is current, not the oldest.
+                    // A live session with no transcript row yet is current, not the oldest; its bind
+                    // time stands in for now so the value holds still between reads.
                     modified: row.map_or_else(
                         || {
-                            if term.is_some() {
-                                now
-                            } else {
-                                SystemTime::UNIX_EPOCH
-                            }
+                            term.and_then(|_| state.bound_at.get(id).copied())
+                                .unwrap_or(SystemTime::UNIX_EPOCH)
                         },
                         |r| r.modified,
                     ),

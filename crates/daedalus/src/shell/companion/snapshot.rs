@@ -91,8 +91,8 @@ fn session(input: SessionInput, roots: &[&Path]) -> Session {
     } = input;
     let state = state_of(live.state);
     Session {
-        project: owner(roots, &live.main_root)
-            .or_else(|| owner(roots, &live.cwd))
+        project: owner(roots, &live.cwd)
+            .or_else(|| owner(roots, &live.main_root))
             .map(path_string),
         id: live.id,
         label: live.label,
@@ -321,17 +321,30 @@ mod tests {
     }
 
     #[test]
-    fn the_deepest_open_root_wins() {
+    fn the_deepest_open_root_holding_the_cwd_wins() {
         let mut nested = window(vec![input(live("n", None))], Vec::new());
         nested
             .projects
             .push(("/code/app/crates/inner".into(), "inner".into()));
         nested.sessions[0].live.cwd = "/code/app/crates/inner/src".into();
-        nested.sessions[0].live.main_root = "/code/app/crates/inner".into();
         let got = to_snapshot(vec![nested]);
         assert_eq!(
             got.sessions[0].project.as_deref(),
             Some("/code/app/crates/inner")
+        );
+    }
+
+    #[test]
+    fn a_worktree_opened_as_its_own_project_owns_its_sessions() {
+        let mut open = window(vec![input(live("w", None))], Vec::new());
+        open.projects
+            .push(("/code/app-worktrees/fix".into(), "fix".into()));
+        open.sessions[0].live.cwd = "/code/app-worktrees/fix/src".into();
+        open.sessions[0].live.main_root = "/code/app".into();
+        let got = to_snapshot(vec![open]);
+        assert_eq!(
+            got.sessions[0].project.as_deref(),
+            Some("/code/app-worktrees/fix")
         );
     }
 
