@@ -1,0 +1,12 @@
+ Bash command
+
+   npm test
+   Run the test suite
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: npm test *
+   3. Yes, and switch to auto mode
+   4. No
+
+ Esc to cancel · Tab to amend
