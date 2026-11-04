@@ -3,5 +3,9 @@
   "proto": 1,
   "server": "a1b2c3d4e5f60718",
   "name": "Jason's Mac",
-  "app": "2.0.1"
+  "app": "2.0.1",
+  "features": [
+    "transcript",
+    "act"
+  ]
 }
