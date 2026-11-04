@@ -21,6 +21,7 @@ use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
 use crate::app_socket::Request;
+use crate::companion::server::{self as companion_server, Command, Verdict};
 use crate::ide;
 
 /// Where a new window lands relative to the one it was opened from, as macOS cascades them.
@@ -41,6 +42,10 @@ pub(super) struct Windows {
     ide: Option<ide::Server>,
     ide_clients: HashMap<u64, Option<i32>>,
     _ide_events: Option<Task<()>>,
+    companion: Option<companion_server::Server>,
+    _companion_events: Option<Task<()>>,
+    _companion_watch: Option<Task<()>>,
+    companion_clients: usize,
     _tasks: Vec<Task<()>>,
 }
 
@@ -93,6 +98,10 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         ide: None,
         ide_clients: HashMap::new(),
         _ide_events: None,
+        companion: None,
+        _companion_events: None,
+        _companion_watch: None,
+        companion_clients: 0,
         _tasks: Vec::new(),
     });
     let mut near = None;
@@ -221,7 +230,7 @@ fn handles(cx: &App) -> Vec<WindowHandle<Shell>> {
 }
 
 /// The window commands from outside act on: the one last in use, else the first.
-fn focused(cx: &App) -> Option<WindowHandle<Shell>> {
+pub(super) fn focused(cx: &App) -> Option<WindowHandle<Shell>> {
     let windows = cx.global::<Windows>();
     windows
         .open
@@ -559,6 +568,63 @@ pub(super) fn stop_ide(cx: &mut App) {
     }
 }
 
+pub(super) fn companion(cx: &App) -> Option<&companion_server::Server> {
+    cx.try_global::<Windows>()?.companion.as_ref()
+}
+
+pub(super) fn companion_clients(cx: &App) -> usize {
+    cx.try_global::<Windows>()
+        .map_or(0, |w| w.companion_clients)
+}
+
+pub(super) fn companion_watching(cx: &App) -> bool {
+    cx.global::<Windows>()._companion_watch.is_some()
+}
+
+pub(super) fn watch_companion(task: Task<()>, cx: &mut App) {
+    cx.global_mut::<Windows>()._companion_watch = Some(task);
+}
+
+pub(super) fn set_companion(
+    server: companion_server::Server,
+    commands: async_channel::Receiver<Command>,
+    cx: &mut App,
+) {
+    let task = cx.spawn(async move |cx| {
+        while let Ok(command) = commands.recv().await {
+            if cx.update(|cx| route_companion(command, cx)).is_err() {
+                return;
+            }
+        }
+    });
+    let windows = cx.global_mut::<Windows>();
+    windows.companion = Some(server);
+    windows._companion_events = Some(task);
+}
+
+/// Closes the server and its connections but keeps the watch that may start it again.
+pub(super) fn drop_companion_server(cx: &mut App) {
+    let windows = cx.global_mut::<Windows>();
+    windows._companion_events = None;
+    windows.companion = None;
+    set_companion_clients(0, cx);
+}
+
+pub(super) fn stop_companion(cx: &mut App) {
+    cx.global_mut::<Windows>()._companion_watch = None;
+    drop_companion_server(cx);
+}
+
+fn set_companion_clients(count: usize, cx: &mut App) {
+    let windows = cx.global_mut::<Windows>();
+    if std::mem::replace(&mut windows.companion_clients, count) == count {
+        return;
+    }
+    for handle in handles(cx) {
+        let _ = handle.update(cx, |_, _, cx| cx.notify());
+    }
+}
+
 /// Claude Code hears that pending proposals were rejected, and the lock file goes.
 pub(super) fn quit_ide(cx: &mut App) {
     if cx.has_global::<Windows>() {
@@ -722,6 +788,20 @@ fn route_ide(event: ide::Event, cx: &mut App) {
                 }
             }
         }
+    }
+}
+
+fn route_companion(command: Command, cx: &mut App) {
+    match command {
+        // Pairing waits for the pairing UI.
+        Command::Pair { reply, .. } => {
+            let _ = reply.send(Verdict::Deny);
+        }
+        // Starting Claude from the phone waits for its own card.
+        Command::SpawnClaude { reply, .. } => {
+            let _ = reply.send(Err("not available yet".into()));
+        }
+        Command::ClientsChanged(count) => set_companion_clients(count, cx),
     }
 }
 

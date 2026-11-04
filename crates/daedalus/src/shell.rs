@@ -8,6 +8,7 @@ mod claude_ide;
 mod claude_sessions;
 mod code_actions;
 mod codelens;
+mod companion;
 mod conflicts;
 mod containers_view;
 mod debug;
@@ -333,6 +334,7 @@ impl Shell {
         shell.start_keymap(window, cx);
         shell.start_settings(window, cx);
         shell.sync_claude_hooks(cx);
+        shell.sync_companion(cx);
         crate::system_notify::set_badge(shell.unread());
         if splash {
             shell.begin_splash(cx);

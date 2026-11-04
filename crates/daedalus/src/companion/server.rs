@@ -87,6 +87,8 @@ pub enum Command {
         root: PathBuf,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    /// The number of live connections changed to this total.
+    ClientsChanged(usize),
 }
 
 /// What phones see; the server numbers each one per connection.
@@ -513,6 +515,7 @@ impl Slot {
             return None;
         }
         *count += 1;
+        notify_clients(shared, &live);
         Some(Self {
             shared: shared.clone(),
             device: device.to_string(),
@@ -529,8 +532,16 @@ impl Drop for Slot {
             if *count == 0 {
                 live.remove(&self.device);
             }
+            notify_clients(&self.shared, &live);
         }
     }
+}
+
+/// Sends under the `live` lock so totals reach the app in the order they were counted.
+fn notify_clients(shared: &Shared, live: &HashMap<String, usize>) {
+    let _ = shared
+        .commands
+        .try_send(Command::ClientsChanged(live.values().sum()));
 }
 
 async fn pair(
@@ -882,6 +893,25 @@ mod tests {
             }
         }
 
+        async fn next_command(&self) -> Result<Command, async_channel::RecvError> {
+            loop {
+                match self.commands.recv().await {
+                    Ok(Command::ClientsChanged(_)) => {}
+                    other => return other,
+                }
+            }
+        }
+
+        /// True when nothing but client counts is queued.
+        fn no_command(&self) -> bool {
+            while let Ok(command) = self.commands.try_recv() {
+                if !matches!(command, Command::ClientsChanged(_)) {
+                    return false;
+                }
+            }
+            true
+        }
+
         fn pair_device(&self) -> (String, String) {
             let (device, token) = lock(&self.devices).issue("Phone", "a@b.c", "node").unwrap();
             (device.id, token)
@@ -1074,7 +1104,7 @@ mod tests {
         send_json(&mut ws, &hello(PROTO)).await;
         send_spawn(&mut ws).await;
         assert_unanswered(&mut ws).await;
-        assert!(fx.commands.try_recv().is_err());
+        assert!(fx.no_command());
     }
 
     #[tokio::test]
@@ -1086,7 +1116,7 @@ mod tests {
         assert!(fx.server.revoke(&id).unwrap());
         send_spawn(&mut ws).await;
         assert_unanswered(&mut ws).await;
-        assert!(fx.commands.try_recv().is_err());
+        assert!(fx.no_command());
     }
 
     /// A revoke that lands while `spawn_claude` is waiting must beat the next queued request.
@@ -1099,7 +1129,7 @@ mod tests {
             let mut ws = fx.welcomed(&token).await;
             send_spawn(&mut ws).await;
             let Ok(Command::SpawnClaude { reply, .. }) =
-                timeout(Duration::from_secs(5), fx.commands.recv())
+                timeout(Duration::from_secs(5), fx.next_command())
                     .await
                     .expect("the first spawn never reached the app")
             else {
@@ -1110,7 +1140,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let _ = reply.send(Ok(1));
             tokio::time::sleep(Duration::from_millis(100)).await;
-            assert!(fx.commands.try_recv().is_err());
+            assert!(fx.no_command());
         }
     }
 
@@ -1241,7 +1271,7 @@ mod tests {
             device,
             peer,
             reply,
-        }) = timeout(Duration::from_secs(5), fx.commands.recv())
+        }) = timeout(Duration::from_secs(5), fx.next_command())
             .await
             .unwrap()
         else {
@@ -1312,7 +1342,7 @@ mod tests {
             },
         )
         .await;
-        let Ok(Command::Pair { reply, .. }) = fx.commands.recv().await else {
+        let Ok(Command::Pair { reply, .. }) = fx.next_command().await else {
             panic!("expected a pair command");
         };
         reply.send(Verdict::Deny).unwrap();
@@ -1333,6 +1363,22 @@ mod tests {
         let mut ws = fx.connect(&token).await.unwrap();
         send_json(&mut ws, &hello(PROTO + 1)).await;
         assert_eq!(close_code(&mut ws).await, Some(CloseCode::Library(4001)));
+    }
+
+    #[tokio::test]
+    async fn the_app_hears_the_total_of_live_connections() {
+        let fx = Fixture::new();
+        let (_, token) = fx.pair_device();
+        let ws = fx.welcomed(&token).await;
+        let heard = timeout(Duration::from_secs(5), fx.commands.recv())
+            .await
+            .unwrap();
+        assert!(matches!(heard, Ok(Command::ClientsChanged(1))));
+        drop(ws);
+        let heard = timeout(Duration::from_secs(5), fx.commands.recv())
+            .await
+            .unwrap();
+        assert!(matches!(heard, Ok(Command::ClientsChanged(0))));
     }
 
     #[tokio::test]
