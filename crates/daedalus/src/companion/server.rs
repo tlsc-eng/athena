@@ -1,14 +1,17 @@
 //! The tailnet WebSocket server that phones pair with and connect to.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener as StdListener};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use futures::stream::FuturesUnordered;
 use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -39,7 +42,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PER_DEVICE: usize = 4;
 const MAX_INPUT: usize = 64 * 1024;
 const MAX_MESSAGE: usize = 1 << 20;
-const PING_EVERY: Duration = Duration::from_secs(20);
+// Short under test so a ping can be observed in real time without a paused clock.
+const PING_EVERY: Duration = Duration::from_millis(if cfg!(test) { 100 } else { 20_000 });
 const PONG_TIMEOUT: Duration = Duration::from_secs(45);
 const SNAPSHOT_GAP: Duration = Duration::from_millis(250);
 const PAIR_WAIT: Duration = Duration::from_secs(60);
@@ -47,6 +51,8 @@ const SPAWN_WAIT: Duration = Duration::from_secs(10);
 const USAGE_WAIT: Duration = Duration::from_secs(5);
 const ACT_WAIT: Duration = Duration::from_secs(10);
 const ANSWER_WAIT: Duration = Duration::from_secs(30);
+const MAX_IN_FLIGHT: usize = 8;
+const BUSY: &str = "busy";
 const MAX_PROMPT: usize = 16 * 1024;
 const MAX_ANSWERS: usize = 8;
 const MAX_PICKS: usize = 12;
@@ -682,6 +688,12 @@ fn clean_name(raw: &str) -> String {
     }
 }
 
+/// A request already forwarded to the app, resolving to its reply once the app answers or the wait runs out.
+type Pending = Pin<Box<dyn Future<Output = ServerMsg> + Send>>;
+
+/// A `Pending` tagged with the pane its act holds, so the pane frees when the reply resolves.
+type Queued = Pin<Box<dyn Future<Output = (Option<u64>, ServerMsg)> + Send>>;
+
 async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut snapshot = shared.snapshot.subscribe();
     let mut notices = shared.notices.subscribe();
@@ -692,6 +704,8 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut seq = 0u64;
     let mut attachments = Attachments::new(shared.mux_socket.clone());
     let mut transcripts = Transcripts::new(shared.home.clone());
+    let mut pending = FuturesUnordered::<Queued>::new();
+    let mut acting = HashSet::<u64>::new();
     loop {
         tokio::select! {
             // Biased so a queued revoke wins over a request already readable on the socket.
@@ -748,9 +762,15 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                             }
                             ClientMsg::SpawnClaude { id, project } => {
                                 let current = Arc::clone(&snapshot.borrow());
-                                Some(spawn_claude(shared, &current, id, project).await)
+                                let busy = pending.len() >= MAX_IN_FLIGHT;
+                                let started = spawn_claude(shared, &current, id, project, busy).await;
+                                queue(&mut pending, &mut acting, None, started)
                             }
-                            ClientMsg::UsageRefresh { id } => Some(usage_refresh(shared, id).await),
+                            ClientMsg::UsageRefresh { id } => {
+                                let busy = pending.len() >= MAX_IN_FLIGHT;
+                                let started = usage_refresh(shared, id, busy).await;
+                                queue(&mut pending, &mut acting, None, started)
+                            }
                             ClientMsg::TranscriptOpen { id, session, limit } => {
                                 let current = Arc::clone(&snapshot.borrow());
                                 Some(transcripts.open(&current, id, session, limit).await)
@@ -764,16 +784,22 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                             }
                             ClientMsg::Prompt { id, pane, text } => {
                                 let current = Arc::clone(&snapshot.borrow());
-                                Some(act(shared, &current, id, pane, Action::Prompt(text)).await)
+                                let busy = pending.len() >= MAX_IN_FLIGHT || acting.contains(&pane);
+                                let started = act(shared, &current, id, pane, Action::Prompt(text), busy).await;
+                                queue(&mut pending, &mut acting, Some(pane), started)
                             }
                             ClientMsg::Interrupt { id, pane } => {
                                 let current = Arc::clone(&snapshot.borrow());
-                                Some(act(shared, &current, id, pane, Action::Interrupt).await)
+                                let busy = pending.len() >= MAX_IN_FLIGHT || acting.contains(&pane);
+                                let started = act(shared, &current, id, pane, Action::Interrupt, busy).await;
+                                queue(&mut pending, &mut acting, Some(pane), started)
                             }
                             ClientMsg::Answer { id, pane, key, answers } => {
                                 let current = Arc::clone(&snapshot.borrow());
                                 let action = Action::Answer { key, answers };
-                                Some(act(shared, &current, id, pane, action).await)
+                                let busy = pending.len() >= MAX_IN_FLIGHT;
+                                let started = act(shared, &current, id, pane, action, busy).await;
+                                queue(&mut pending, &mut acting, None, started)
                             }
                         };
                         if let Some(reply) = reply && !send(&mut ws, &reply).await {
@@ -839,6 +865,14 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            Some((pane, reply)) = pending.next(), if !pending.is_empty() => {
+                if let Some(pane) = pane {
+                    acting.remove(&pane);
+                }
+                if !send(&mut ws, &reply).await {
+                    break;
+                }
+            }
             _ = ping.tick() => {
                 if !is_paired(shared, &slot.device) {
                     close(&mut ws, CloseCode::Policy, "device revoked").await;
@@ -872,18 +906,46 @@ fn is_paired(shared: &Shared, device: &str) -> bool {
     lock(&shared.devices).list().iter().any(|d| d.id == device)
 }
 
+fn failed(id: String, message: &str) -> ServerMsg {
+    ServerMsg::Error {
+        id: Some(id),
+        message: message.into(),
+    }
+}
+
+/// Parks a started request for its reply and returns the immediate refusal, if any.
+///
+/// A `pane` is held in `acting` until the reply resolves, so a second prompt cannot land between a paste and its Enter.
+fn queue(
+    pending: &mut FuturesUnordered<Queued>,
+    acting: &mut HashSet<u64>,
+    pane: Option<u64>,
+    started: Result<Pending, ServerMsg>,
+) -> Option<ServerMsg> {
+    match started {
+        Ok(reply) => {
+            if let Some(pane) = pane {
+                acting.insert(pane);
+            }
+            pending.push(Box::pin(async move { (pane, reply.await) }));
+            None
+        }
+        Err(refusal) => Some(refusal),
+    }
+}
+
 async fn spawn_claude(
     shared: &Shared,
     snapshot: &Snapshot,
     id: String,
     project: String,
-) -> ServerMsg {
-    let failed = |id: String, message: &str| ServerMsg::Error {
-        id: Some(id),
-        message: message.into(),
-    };
+    busy: bool,
+) -> Result<Pending, ServerMsg> {
     if !snapshot.projects.iter().any(|p| p.root == project) {
-        return failed(id, "project is not open in a window");
+        return Err(failed(id, "project is not open in a window"));
+    }
+    if busy {
+        return Err(failed(id, BUSY));
     }
     let (reply, answer) = oneshot::channel();
     let command = Command::SpawnClaude {
@@ -891,16 +953,18 @@ async fn spawn_claude(
         reply,
     };
     if shared.commands.send(command).await.is_err() {
-        return failed(id, "could not start claude");
+        return Err(failed(id, "could not start claude"));
     }
-    match timeout(SPAWN_WAIT, answer).await {
-        Ok(Ok(Ok(pane))) => ServerMsg::Spawned { id, pane },
-        Ok(Ok(Err(message))) => ServerMsg::Error {
-            id: Some(id),
-            message,
-        },
-        _ => failed(id, "could not start claude"),
-    }
+    Ok(Box::pin(async move {
+        match timeout(SPAWN_WAIT, answer).await {
+            Ok(Ok(Ok(pane))) => ServerMsg::Spawned { id, pane },
+            Ok(Ok(Err(message))) => ServerMsg::Error {
+                id: Some(id),
+                message,
+            },
+            _ => failed(id, "could not start claude"),
+        }
+    }))
 }
 
 async fn act(
@@ -909,27 +973,27 @@ async fn act(
     id: String,
     pane: u64,
     action: Action,
-) -> ServerMsg {
-    let failed = |id: String, message: &str| ServerMsg::Error {
-        id: Some(id),
-        message: message.into(),
-    };
+    busy: bool,
+) -> Result<Pending, ServerMsg> {
     if !snapshot.terminals.iter().any(|t| t.pane == pane) {
-        return failed(id, "pane is not open");
+        return Err(failed(id, "pane is not open"));
     }
     if matches!(&action, Action::Prompt(text) if text.len() > MAX_PROMPT) {
-        return failed(id, "prompt is too long");
+        return Err(failed(id, "prompt is too long"));
     }
     let action = match action {
         Action::Prompt(text) => Action::Prompt(strip_controls(&text)),
         Action::Interrupt => Action::Interrupt,
         Action::Answer { key, answers } => {
             if let Some(why) = answer_refusal(&key, &answers) {
-                return failed(id, why);
+                return Err(failed(id, why));
             }
             Action::Answer { key, answers }
         }
     };
+    if busy {
+        return Err(failed(id, BUSY));
+    }
     let wait = match action {
         Action::Answer { .. } => ANSWER_WAIT,
         Action::Prompt(_) | Action::Interrupt => ACT_WAIT,
@@ -945,16 +1009,18 @@ async fn act(
         .await
         .is_err()
     {
-        return failed(id, "could not reach the terminal");
+        return Err(failed(id, "could not reach the terminal"));
     }
-    match timeout(wait, answer).await {
-        Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
-        Ok(Ok(Err(message))) => ServerMsg::Error {
-            id: Some(id),
-            message,
-        },
-        _ => failed(id, "could not reach the terminal"),
-    }
+    Ok(Box::pin(async move {
+        match timeout(wait, answer).await {
+            Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
+            Ok(Ok(Err(message))) => ServerMsg::Error {
+                id: Some(id),
+                message,
+            },
+            _ => failed(id, "could not reach the terminal"),
+        }
+    }))
 }
 
 /// Refuses `other` with any control character, even `\n`, since typed into the terminal it would press Enter.
@@ -979,11 +1045,10 @@ fn answer_refusal(key: &str, answers: &[AnswerPick]) -> Option<&'static str> {
     controls.then_some("answer text has control characters")
 }
 
-async fn usage_refresh(shared: &Shared, id: String) -> ServerMsg {
-    let failed = |id: String, message: &str| ServerMsg::Error {
-        id: Some(id),
-        message: message.into(),
-    };
+async fn usage_refresh(shared: &Shared, id: String, busy: bool) -> Result<Pending, ServerMsg> {
+    if busy {
+        return Err(failed(id, BUSY));
+    }
     let (reply, answer) = oneshot::channel();
     if shared
         .commands
@@ -991,16 +1056,18 @@ async fn usage_refresh(shared: &Shared, id: String) -> ServerMsg {
         .await
         .is_err()
     {
-        return failed(id, "could not refresh usage");
+        return Err(failed(id, "could not refresh usage"));
     }
-    match timeout(USAGE_WAIT, answer).await {
-        Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
-        Ok(Ok(Err(message))) => ServerMsg::Error {
-            id: Some(id),
-            message,
-        },
-        _ => failed(id, "could not refresh usage"),
-    }
+    Ok(Box::pin(async move {
+        match timeout(USAGE_WAIT, answer).await {
+            Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
+            Ok(Ok(Err(message))) => ServerMsg::Error {
+                id: Some(id),
+                message,
+            },
+            _ => failed(id, "could not refresh usage"),
+        }
+    }))
 }
 
 /// Reads the next text frame as JSON; anything else, including an oversized frame, gives `None`.
@@ -1327,9 +1394,8 @@ mod tests {
         assert!(fx.no_command());
     }
 
-    /// A revoke that lands while `spawn_claude` is waiting must beat the next queued request.
     #[tokio::test]
-    async fn a_revoke_during_a_spawn_beats_the_next_queued_request() {
+    async fn a_revoke_during_a_spawn_drops_its_reply_and_serves_nothing_more() {
         let fx = Fixture::new();
         open_project(&fx);
         for _ in 0..30 {
@@ -1343,18 +1409,21 @@ mod tests {
             else {
                 panic!("expected a spawn command");
             };
-            send_spawn(&mut ws).await;
             assert!(fx.server.revoke(&id).unwrap());
             tokio::time::sleep(Duration::from_millis(50)).await;
             let _ = reply.send(Ok(1));
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_unanswered(&mut ws).await;
             assert!(fx.no_command());
         }
     }
 
     fn open_pane(fx: &Fixture, pane: u64) {
+        open_panes(fx, &[pane]);
+    }
+
+    fn open_panes(fx: &Fixture, panes: &[u64]) {
         fx.server.set_snapshot(Arc::new(Snapshot {
-            terminals: vec![terminal(pane)],
+            terminals: panes.iter().map(|&pane| terminal(pane)).collect(),
             ..Snapshot::default()
         }));
     }
@@ -1532,6 +1601,252 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn prompt_msg(id: &str, pane: u64) -> ClientMsg {
+        ClientMsg::Prompt {
+            id: id.into(),
+            pane,
+            text: "go".into(),
+        }
+    }
+
+    async fn next_act_reply(fx: &Fixture) -> oneshot::Sender<Result<(), String>> {
+        let Ok(Command::Act { reply, .. }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("the request never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        reply
+    }
+
+    async fn next_non_snapshot(ws: &mut Ws) -> ServerMsg {
+        loop {
+            match next_msg(ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// Accepts one socket and returns the client plus the server's unpolled `connect`, so a test decides when it runs.
+    async fn connect_in_process(fx: &Fixture, device: &str) -> (Ws, impl Future<Output = ()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shared = Arc::clone(&fx.server.shared);
+        let device = device.to_string();
+        let server_side = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        };
+        let client_side = async {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            client_async(format!("ws://{addr}/"), stream)
+                .await
+                .unwrap()
+                .0
+        };
+        let (ws, client) = tokio::join!(server_side, client_side);
+        let revoked = shared.revoked.subscribe();
+        let slot = Slot::reserve(&shared, &device, revoked).unwrap();
+        (client, async move { connect(ws, slot, &shared).await })
+    }
+
+    #[tokio::test]
+    async fn a_pending_answer_does_not_freeze_snapshots_or_pings() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &answer_msg("r1", 7, vec![pick(&["A"], None)])).await;
+        let reply = next_act_reply(&fx).await;
+
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            terminals: vec![terminal(7), terminal(8)],
+            ..Snapshot::default()
+        }));
+        let (mut saw_snapshot, mut saw_ping) = (false, false);
+        while !(saw_snapshot && saw_ping) {
+            let frame = timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("a snapshot or ping never arrived while the answer was pending")
+                .expect("closed")
+                .expect("socket error");
+            match frame {
+                Message::Text(text) => match serde_json::from_str(text.as_str()).unwrap() {
+                    ServerMsg::Snapshot { terminals, .. } => saw_snapshot |= terminals.len() == 2,
+                    other => panic!("answered before the app replied: {other:?}"),
+                },
+                Message::Ping(_) => saw_ping = true,
+                _ => {}
+            }
+        }
+
+        let _ = reply.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "r1".into() }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_readable_when_a_revoke_lands_is_not_served() {
+        let fx = Fixture::new();
+        open_project(&fx);
+        for _ in 0..30 {
+            let (id, _) = fx.pair_device();
+            let (mut ws, server) = connect_in_process(&fx, &id).await;
+            let mut server = Box::pin(server);
+            assert!(futures::poll!(server.as_mut()).is_pending());
+            send_spawn(&mut ws).await;
+            // The runtime only learns the request is readable once its I/O driver turns, which an idle wait does.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(fx.server.revoke(&id).unwrap());
+            timeout(Duration::from_secs(5), server)
+                .await
+                .expect("the connection outlived its revoke");
+            assert!(fx.no_command());
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_get_their_own_replies_by_id() {
+        let fx = Fixture::new();
+        open_panes(&fx, &[7, 8]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &prompt_msg("a", 7)).await;
+        let first = next_act_reply(&fx).await;
+        send_json(&mut ws, &prompt_msg("b", 8)).await;
+        let second = next_act_reply(&fx).await;
+
+        let _ = second.send(Err("nope".into()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Error {
+                id: Some("b".into()),
+                message: "nope".into()
+            }
+        );
+        let _ = first.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "a".into() }
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_beyond_the_in_flight_cap_get_busy_and_are_not_forwarded() {
+        let fx = Fixture::new();
+        let panes: Vec<u64> = (1..=MAX_IN_FLIGHT as u64 + 1).collect();
+        open_panes(&fx, &panes);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let mut replies = Vec::new();
+        for (n, &pane) in panes.iter().take(MAX_IN_FLIGHT).enumerate() {
+            send_json(&mut ws, &prompt_msg(&format!("p{n}"), pane)).await;
+            replies.push(next_act_reply(&fx).await);
+        }
+        send_json(&mut ws, &prompt_msg("over", panes[MAX_IN_FLIGHT])).await;
+        expect_error(&mut ws, "over", "busy").await;
+        assert!(fx.no_command());
+
+        let _ = replies.remove(0).send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "p0".into() }
+        );
+        send_json(&mut ws, &prompt_msg("again", panes[0])).await;
+        let _ = next_act_reply(&fx).await;
+    }
+
+    #[tokio::test]
+    async fn a_second_act_for_a_pane_with_one_pending_gets_busy_and_is_not_forwarded() {
+        let fx = Fixture::new();
+        open_panes(&fx, &[7, 8]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &prompt_msg("first", 7)).await;
+        let first = next_act_reply(&fx).await;
+        send_json(&mut ws, &prompt_msg("second", 7)).await;
+        expect_error(&mut ws, "second", "busy").await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Interrupt {
+                id: "stop".into(),
+                pane: 7,
+            },
+        )
+        .await;
+        expect_error(&mut ws, "stop", "busy").await;
+        assert!(fx.no_command());
+
+        send_json(&mut ws, &prompt_msg("other", 8)).await;
+        let other = next_act_reply(&fx).await;
+
+        let _ = first.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "first".into() }
+        );
+        send_json(&mut ws, &prompt_msg("third", 7)).await;
+        let third = next_act_reply(&fx).await;
+        let _ = (other, third);
+    }
+
+    #[tokio::test]
+    async fn a_pending_usage_refresh_counts_toward_the_cap_and_does_not_block_other_replies() {
+        let fx = Fixture::new();
+        let panes: Vec<u64> = (1..=MAX_IN_FLIGHT as u64).collect();
+        open_panes(&fx, &panes);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::UsageRefresh { id: "u".into() }).await;
+        let Ok(Command::UsageRefresh { reply: usage }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the refresh never reached the app")
+        else {
+            panic!("expected a usage refresh command");
+        };
+        send_json(&mut ws, &prompt_msg("a", panes[0])).await;
+        let act = next_act_reply(&fx).await;
+        let _ = act.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "a".into() }
+        );
+
+        let mut replies = Vec::new();
+        for (n, &pane) in panes.iter().take(MAX_IN_FLIGHT - 1).enumerate() {
+            send_json(&mut ws, &prompt_msg(&format!("p{n}"), pane)).await;
+            replies.push(next_act_reply(&fx).await);
+        }
+        send_json(&mut ws, &ClientMsg::UsageRefresh { id: "over".into() }).await;
+        expect_error(&mut ws, "over", "busy").await;
+        assert!(fx.no_command());
+
+        let _ = usage.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "u".into() }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revoke_while_a_reply_is_pending_closes_the_socket() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (id, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &prompt_msg("a", 7)).await;
+        let _reply = next_act_reply(&fx).await;
+        assert!(fx.server.revoke(&id).unwrap());
+        let code = timeout(Duration::from_secs(1), close_code(&mut ws))
+            .await
+            .expect("no close frame while a reply was pending");
+        assert_eq!(code, Some(CloseCode::Policy));
     }
 
     #[tokio::test]
