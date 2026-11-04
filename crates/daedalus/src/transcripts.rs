@@ -127,8 +127,14 @@ struct ContentOnly {
     content: Value,
 }
 
+/// What a person typed, before it is shortened for a title.
+pub(crate) enum Typed {
+    Text(String),
+    Command(String),
+}
+
 /// The text a person typed, or `None` for a tool result or a line the harness added.
-fn prompt_text(content: &Value) -> Option<String> {
+pub(crate) fn typed_text(content: &Value) -> Option<Typed> {
     let text = match content {
         Value::String(s) => s.clone(),
         Value::Array(blocks) => {
@@ -140,7 +146,7 @@ fn prompt_text(content: &Value) -> Option<String> {
                 .filter(|b| b["type"] == "text")
                 .filter_map(|b| b["text"].as_str())
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join("\n")
         }
         _ => return None,
     };
@@ -154,13 +160,19 @@ fn prompt_text(content: &Value) -> Option<String> {
             .and_then(|a| a.split("</command-args>").next())
             .map(str::trim)
             .unwrap_or_default();
-        return Some(one_line(&format!("{name} {args}")));
+        return Some(Typed::Command(format!("{name} {args}").trim().to_string()));
     }
     // Hook output, reminders and local command echoes are wrapped in tags; typed text is not.
     if text.is_empty() || text.starts_with('<') {
         return None;
     }
-    Some(one_line(text))
+    Some(Typed::Text(text.to_string()))
+}
+
+fn prompt_text(content: &Value) -> Option<String> {
+    match typed_text(content)? {
+        Typed::Text(t) | Typed::Command(t) => Some(one_line(&t)),
+    }
 }
 
 fn one_line(text: &str) -> String {
@@ -222,7 +234,7 @@ impl Reader {
 
 /// Reads the next whole line into `buf` and returns its length on disk, or `None` at the end or
 /// at a line still being written. Past [`MAX_LINE`] only that much is kept, which reads as malformed.
-fn next_line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> Option<u64> {
+pub(crate) fn next_line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> Option<u64> {
     buf.clear();
     let n = input.by_ref().take(MAX_LINE).read_until(b'\n', buf).ok()? as u64;
     if buf.ends_with(b"\n") {
@@ -335,6 +347,20 @@ fn project_dirs(home: &Path, root: &Path) -> Vec<(Profile, PathBuf)> {
                 .map(move |d| (profile.clone(), d))
         })
         .collect()
+}
+
+/// The transcript of session `id` in whichever profile holds it for the project at `cwd`.
+// Only the companion's transcript server calls this, and it is not wired in yet.
+#[allow(dead_code)]
+pub fn find(home: &Path, cwd: &Path, id: &str) -> Option<PathBuf> {
+    if !crate::snapshots::valid_session(id) {
+        return None;
+    }
+    let name = format!("{id}.jsonl");
+    project_dirs(home, cwd)
+        .into_iter()
+        .map(|(_, dir)| dir.join(&name))
+        .find(|path| path.is_file())
 }
 
 /// The profile holding the project's most recently written transcript, from file times alone.
