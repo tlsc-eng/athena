@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, SystemTime};
 
 use tokio::task::JoinHandle;
@@ -32,7 +32,7 @@ struct Open {
 
 /// Up to four transcripts of one connection, polled for growth every half second.
 pub(super) struct Transcripts {
-    home: PathBuf,
+    home: Option<PathBuf>,
     open: HashMap<String, Open>,
     epoch: u64,
     reading: Option<JoinHandle<Reads>>,
@@ -41,7 +41,7 @@ pub(super) struct Transcripts {
 }
 
 impl Transcripts {
-    pub(super) fn new(home: PathBuf) -> Self {
+    pub(super) fn new(home: Option<PathBuf>) -> Self {
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + POLL, POLL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Self {
@@ -68,7 +68,9 @@ impl Transcripts {
         if !self.open.contains_key(&session) && self.open.len() >= MAX_OPEN {
             return error(id, "too many transcripts open");
         }
-        let home = self.home.clone();
+        let Some(home) = self.home.clone() else {
+            return error(id, "transcript not found");
+        };
         let (cwd, root) = (PathBuf::from(&known.cwd), PathBuf::from(&known.main_root));
         let wanted = session.clone();
         let loaded = tokio::task::spawn_blocking(move || {
@@ -109,7 +111,13 @@ impl Transcripts {
             return error(id, "transcript is not open");
         };
         let budget = budget(&session, TranscriptKind::Older);
-        let (items, older) = lock(&open.feed).page(Some(before), clamp(limit), budget);
+        // A poll may be re-parsing the file under this lock, and the socket task must not wait on it.
+        let feed = match open.feed.try_lock() {
+            Ok(feed) => feed,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => return error(id, "busy"),
+        };
+        let (items, older) = feed.page(Some(before), clamp(limit), budget);
         ServerMsg::Transcript {
             session,
             kind: TranscriptKind::Older,
@@ -309,8 +317,22 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_leaves_room_for_the_envelope() {
-        let wide = budget(&"s".repeat(100), TranscriptKind::Append);
-        assert!(wide < MAX_MESSAGE - 100);
+    fn a_full_chunk_serializes_within_the_message_cap() {
+        let session = "s".repeat(128);
+        let items: Vec<Item> = (0..400).map(|n| item(n, &"x".repeat(2_000))).collect();
+        let first = chunks(items.iter(), budget(&session, TranscriptKind::Append))
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(first.len() < items.len());
+        let message = ServerMsg::Transcript {
+            session,
+            kind: TranscriptKind::Append,
+            items: first,
+            before: Some(u64::MAX),
+        };
+        let size = serde_json::to_vec(&message).unwrap().len();
+        assert!(size <= MAX_MESSAGE, "{size} bytes");
+        assert!(size > MAX_MESSAGE - 4_000, "{size} bytes");
     }
 }

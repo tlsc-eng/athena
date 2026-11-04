@@ -64,7 +64,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"transcript_open","id":"r5","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","limit":60}
 ```
 
-`transcript_more`: load items older than `before`, a `pos` from an earlier `transcript`. The answer is a `transcript` of kind `older`. `limit` is at most 200, and a session that is not followed gets an `error` with the `id`.
+`transcript_more`: load items older than `before`, a `pos` from an earlier `transcript`. The answer is a `transcript` of kind `older`. `limit` is at most 200, and a session that is not followed gets an `error` with the `id`, and so does a request that arrives while the desktop is re-reading that file (`busy`).
 
 ```json
 {"type":"transcript_more","id":"r6","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","before":123456,"limit":60}

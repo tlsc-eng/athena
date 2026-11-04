@@ -24,8 +24,8 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
 use super::devices::{Device, Devices, PairingCode};
 use super::protocol::{
-    self, ClientMsg, DropReason, Kind, NoticeKind, PROTO, PairReply, PairRequest, Project,
-    ServerMsg, Session, Terminal, UsageProfile,
+    self, ClientMsg, DropReason, FEATURES, Kind, NoticeKind, PROTO, PairReply, PairRequest,
+    Project, ServerMsg, Session, Terminal, UsageProfile,
 };
 use super::stream::{Attachments, Out};
 use super::tailnet;
@@ -49,8 +49,6 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const PAIR_HEADER: &str = "x-daedalus-pair";
 const VERSION_CLOSE: u16 = 4001;
 const MAX_DEVICE_NAME: usize = 64;
-// `act` joins this once the desktop handles prompt and interrupt.
-const FEATURES: &[&str] = &["transcript", "usage"];
 
 pub struct Config {
     pub addrs: Vec<SocketAddr>,
@@ -65,7 +63,7 @@ pub struct Config {
     /// The session daemon's Unix socket, where attached panes are streamed from.
     pub mux_socket: PathBuf,
     /// Where Claude's `.claude*` profile directories live.
-    pub home: PathBuf,
+    pub home: Option<PathBuf>,
 }
 
 /// The answer to a pairing prompt.
@@ -127,7 +125,7 @@ struct Shared {
     pairing: Mutex<Option<PairingCode>>,
     cli: Option<PathBuf>,
     mux_socket: PathBuf,
-    home: PathBuf,
+    home: Option<PathBuf>,
     allow_loopback: bool,
     commands: async_channel::Sender<Command>,
     snapshot: watch::Sender<Arc<Snapshot>>,
@@ -974,7 +972,7 @@ mod tests {
                 allow_loopback_for_tests: true,
                 name: "Test Mac".into(),
                 mux_socket: mux.clone(),
-                home: dir.join("home"),
+                home: Some(dir.join("home")),
             })
             .unwrap();
             Self {
@@ -1334,7 +1332,7 @@ mod tests {
                 allow_loopback_for_tests: true,
                 name: "Test Mac".into(),
                 mux_socket: fx.mux.clone(),
-                home: dir.join("home"),
+                home: Some(dir.join("home")),
             })
             .unwrap();
             server.id().to_string()
@@ -1366,7 +1364,7 @@ mod tests {
             allow_loopback_for_tests: true,
             name: "Test Mac".into(),
             mux_socket: fx.mux.clone(),
-            home: fx.dir.join("home"),
+            home: Some(fx.dir.join("home")),
         })
         .unwrap();
         let addr = server.local_addrs()[0];
@@ -1387,7 +1385,7 @@ mod tests {
             allow_loopback_for_tests: true,
             name: "Test Mac".into(),
             mux_socket: fx.mux.clone(),
-            home: fx.dir.join("home"),
+            home: Some(fx.dir.join("home")),
         })
         .unwrap();
         let (_, token) = fx.pair_device();
