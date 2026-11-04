@@ -896,20 +896,17 @@ fn route_companion(command: Command, cx: &mut App) {
     }
 }
 
-/// Refreshes the plan limits through the oldest window, which the snapshot also reads; its own throttle applies.
+/// Refreshes the plan limits through the first window whose usage indicator is on, as the snapshot reads them from.
+/// Its own throttle applies.
 fn refresh_usage_for_phone(reply: tokio::sync::oneshot::Sender<Result<(), String>>, cx: &mut App) {
-    let answer = match handles(cx).first() {
+    let on = handles(cx)
+        .into_iter()
+        .find(|h| h.read(cx).is_ok_and(|s| s.workspace.usage_indicator));
+    let answer = match on {
         Some(handle) => handle
-            .update(cx, |shell, window, cx| {
-                if shell.workspace.usage_indicator {
-                    shell.refresh_usage(window, cx);
-                    Ok(())
-                } else {
-                    Err("usage indicator is off".to_string())
-                }
-            })
-            .unwrap_or_else(|_| Err("no window is open".into())),
-        None => Err("no window is open".into()),
+            .update(cx, |shell, window, cx| shell.refresh_usage(window, cx))
+            .map_err(|_| "no window is open".to_string()),
+        None => Err("usage indicator is off".to_string()),
     };
     let _ = reply.send(answer);
 }
