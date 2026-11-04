@@ -45,6 +45,8 @@ const SNAPSHOT_GAP: Duration = Duration::from_millis(250);
 const PAIR_WAIT: Duration = Duration::from_secs(60);
 const SPAWN_WAIT: Duration = Duration::from_secs(10);
 const USAGE_WAIT: Duration = Duration::from_secs(5);
+const ACT_WAIT: Duration = Duration::from_secs(10);
+const MAX_PROMPT: usize = 16 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const PAIR_HEADER: &str = "x-daedalus-pair";
 const VERSION_CLOSE: u16 = 4001;
@@ -80,6 +82,20 @@ pub struct PairPeer {
     pub tailnet: Option<tailnet::Peer>,
 }
 
+/// Drops C0 control characters and DEL except `\n` and `\t`, so a pane without bracketed paste gets no escape sequences.
+fn strip_controls(text: &str) -> String {
+    text.chars()
+        .filter(|c| matches!(c, '\n' | '\t') || (*c >= ' ' && *c != '\x7f'))
+        .collect()
+}
+
+/// What a phone asks a pane to do. It has no `Debug` so prompt text cannot reach a log.
+#[derive(Clone, PartialEq)]
+pub enum Action {
+    Prompt(String),
+    Interrupt,
+}
+
 /// A request the server hands to the app, which answers through `reply`.
 pub enum Command {
     Pair {
@@ -90,6 +106,12 @@ pub enum Command {
     SpawnClaude {
         root: PathBuf,
         reply: oneshot::Sender<Result<u64, String>>,
+    },
+    /// Type into or interrupt a terminal pane.
+    Act {
+        pane: u64,
+        action: Action,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Fetch the plan limits again unless the last fetch is recent.
     UsageRefresh {
@@ -730,11 +752,14 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 transcripts.close(&session);
                                 None
                             }
-                            ClientMsg::Prompt { id, .. }
-                            | ClientMsg::Interrupt { id, .. } => Some(ServerMsg::Error {
-                                id: Some(id),
-                                message: "not supported".into(),
-                            }),
+                            ClientMsg::Prompt { id, pane, text } => {
+                                let current = Arc::clone(&snapshot.borrow());
+                                Some(act(shared, &current, id, pane, Action::Prompt(text)).await)
+                            }
+                            ClientMsg::Interrupt { id, pane } => {
+                                let current = Arc::clone(&snapshot.borrow());
+                                Some(act(shared, &current, id, pane, Action::Interrupt).await)
+                            }
                         };
                         if let Some(reply) = reply && !send(&mut ws, &reply).await {
                             break;
@@ -860,6 +885,50 @@ async fn spawn_claude(
             message,
         },
         _ => failed(id, "could not start claude"),
+    }
+}
+
+async fn act(
+    shared: &Shared,
+    snapshot: &Snapshot,
+    id: String,
+    pane: u64,
+    action: Action,
+) -> ServerMsg {
+    let failed = |id: String, message: &str| ServerMsg::Error {
+        id: Some(id),
+        message: message.into(),
+    };
+    if !snapshot.terminals.iter().any(|t| t.pane == pane) {
+        return failed(id, "pane is not open");
+    }
+    if matches!(&action, Action::Prompt(text) if text.len() > MAX_PROMPT) {
+        return failed(id, "prompt is too long");
+    }
+    let action = match action {
+        Action::Prompt(text) => Action::Prompt(strip_controls(&text)),
+        Action::Interrupt => Action::Interrupt,
+    };
+    let (reply, answer) = oneshot::channel();
+    if shared
+        .commands
+        .send(Command::Act {
+            pane,
+            action,
+            reply,
+        })
+        .await
+        .is_err()
+    {
+        return failed(id, "could not reach the terminal");
+    }
+    match timeout(ACT_WAIT, answer).await {
+        Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
+        Ok(Ok(Err(message))) => ServerMsg::Error {
+            id: Some(id),
+            message,
+        },
+        _ => failed(id, "could not reach the terminal"),
     }
 }
 
@@ -1233,6 +1302,187 @@ mod tests {
             let _ = reply.send(Ok(1));
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert!(fx.no_command());
+        }
+    }
+
+    fn open_pane(fx: &Fixture, pane: u64) {
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            terminals: vec![terminal(pane)],
+            ..Snapshot::default()
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_reaches_the_app_with_its_text_and_is_sent() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let prompt = ClientMsg::Prompt {
+            id: "r7".into(),
+            pane: 7,
+            text: "run the tests\nthen commit".into(),
+        };
+        send_json(&mut ws, &prompt).await;
+        let Ok(Command::Act {
+            pane,
+            action,
+            reply,
+        }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("the prompt never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        assert_eq!(pane, 7);
+        assert!(action == Action::Prompt("run the tests\nthen commit".into()));
+        let _ = reply.send(Ok(()));
+        loop {
+            match next_msg(&mut ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => {
+                    assert_eq!(other, ServerMsg::Sent { id: "r7".into() });
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prompt_reaches_the_app_without_control_characters() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let prompt = ClientMsg::Prompt {
+            id: "r7".into(),
+            pane: 7,
+            text: "a\x1b[201~b\rc\nd".into(),
+        };
+        send_json(&mut ws, &prompt).await;
+        let Ok(Command::Act { action, reply, .. }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the prompt never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        assert!(action == Action::Prompt("a[201~bc\nd".into()));
+        let _ = reply.send(Ok(()));
+    }
+
+    #[test]
+    fn strip_controls_keeps_newlines_and_tabs_only() {
+        assert_eq!(strip_controls("a\x1b[31mb\x7f\r\nc\td\0"), "a[31mb\nc\td");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_over_16_kib_is_refused_without_reaching_the_app() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let at = |len: usize| ClientMsg::Prompt {
+            id: "r8".into(),
+            pane: 7,
+            text: "a".repeat(len),
+        };
+        send_json(&mut ws, &at(MAX_PROMPT + 1)).await;
+        loop {
+            match next_msg(&mut ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => {
+                    assert_eq!(
+                        other,
+                        ServerMsg::Error {
+                            id: Some("r8".into()),
+                            message: "prompt is too long".into()
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(fx.no_command());
+        send_json(&mut ws, &at(MAX_PROMPT)).await;
+        let Ok(Command::Act { reply, .. }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("a prompt at the cap never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        let _ = reply.send(Ok(()));
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_for_a_pane_missing_from_the_snapshot_is_an_error() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Interrupt {
+                id: "r9".into(),
+                pane: 8,
+            },
+        )
+        .await;
+        loop {
+            match next_msg(&mut ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => {
+                    assert_eq!(
+                        other,
+                        ServerMsg::Error {
+                            id: Some("r9".into()),
+                            message: "pane is not open".into()
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn a_refused_act_comes_back_as_an_error() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Interrupt {
+                id: "r9".into(),
+                pane: 7,
+            },
+        )
+        .await;
+        let Ok(Command::Act { action, reply, .. }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the interrupt never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        assert!(action == Action::Interrupt);
+        let _ = reply.send(Err("Claude is not running".into()));
+        loop {
+            match next_msg(&mut ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => {
+                    assert_eq!(
+                        other,
+                        ServerMsg::Error {
+                            id: Some("r9".into()),
+                            message: "Claude is not running".into()
+                        }
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -2245,7 +2495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn welcome_lists_the_transcript_feature_and_not_act() {
+    async fn welcome_lists_the_transcript_and_act_features() {
         let fx = Fixture::new();
         let (_, token) = fx.pair_device();
         let mut ws = fx.connect(&token).await.unwrap();
@@ -2254,7 +2504,7 @@ mod tests {
             panic!("expected a welcome");
         };
         assert!(features.iter().any(|f| f == "transcript"));
-        assert!(!features.iter().any(|f| f == "act"));
+        assert!(features.iter().any(|f| f == "act"));
     }
 
     #[tokio::test]

@@ -11,21 +11,23 @@ use std::time::Duration;
 use daedalus_proto::{AppMsg, AppReply, Notice, NoticeKind, PaneId};
 use daedalus_workspace::{ItemId, ItemKind, Project, WindowMode, WindowState, Workspace};
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, Context, Global, PromptLevel, Task, TitlebarOptions,
-    Window, WindowBounds, WindowHandle, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, Context, Entity, Global, PromptLevel, Task,
+    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, point, px, size,
 };
 
 use super::Shell;
 use super::bridge::hook_claude_holds_terminal;
 use super::claude_sessions::live::Waiting;
 use super::claude_sessions::{Bindings, SessionsState};
+use super::companion::act;
 use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
+use super::review_comments::delivery::SUBMIT_DELAY;
 use crate::app_socket::Request;
 use crate::companion::devices::Devices;
 use crate::companion::protocol::NoticeKind as PushKind;
-use crate::companion::server::{self as companion_server, Command};
+use crate::companion::server::{self as companion_server, Action, Command};
 use crate::ide;
 
 /// Where a new window lands relative to the one it was opened from, as macOS cascades them.
@@ -896,6 +898,11 @@ fn route_companion(command: Command, cx: &mut App) {
             reply,
         } => super::companion_ui::ask_to_pair(device, peer, reply, cx),
         Command::SpawnClaude { root, reply } => spawn_claude_for_phone(&root, reply, cx),
+        Command::Act {
+            pane,
+            action,
+            reply,
+        } => act_for_phone(pane, action, reply, cx),
         Command::UsageRefresh { reply } => refresh_usage_for_phone(reply, cx),
         Command::ClientsChanged(count) => set_companion_clients(count, cx),
         Command::Paired(Ok(())) => super::companion::redraw_windows(cx),
@@ -916,6 +923,65 @@ fn refresh_usage_for_phone(reply: tokio::sync::oneshot::Sender<Result<(), String
         None => Err("usage indicator is off".to_string()),
     };
     let _ = reply.send(answer);
+}
+
+fn act_refusal(
+    view: &Entity<daedalus_term::TerminalView>,
+    action: &Action,
+    cx: &App,
+) -> Result<(), &'static str> {
+    let v = view.read(cx);
+    if !v.is_attached() {
+        return Err("pane is not open");
+    }
+    act::gate(v.is_claude(), v.claude_state(), action)
+}
+
+/// Types a phone's prompt into a terminal, or presses Esc in it, and answers once the keys are written.
+fn act_for_phone(
+    pane: PaneId,
+    action: Action,
+    reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    cx: &mut App,
+) {
+    let view = session_holder(pane, cx).and_then(|handle| {
+        let shell = handle.read(cx).ok()?;
+        match shell.items.get(&shell.find_session(pane)?) {
+            Some(ItemView::Terminal(t)) => Some(t.clone()),
+            _ => None,
+        }
+    });
+    let Some(view) = view else {
+        let _ = reply.send(Err("pane is not open".into()));
+        return;
+    };
+    if let Err(why) = act_refusal(&view, &action, cx) {
+        let _ = reply.send(Err(why.into()));
+        return;
+    }
+    match &action {
+        Action::Interrupt => {
+            view.update(cx, |v, cx| v.type_text(b"\x1b".to_vec(), cx));
+            let _ = reply.send(Ok(()));
+        }
+        Action::Prompt(text) => {
+            view.update(cx, |v, cx| v.paste_text(text, cx));
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(SUBMIT_DELAY).await;
+                let sent = cx.update(|cx| {
+                    act_refusal(&view, &action, cx)?;
+                    view.update(cx, |v, cx| v.submit(cx));
+                    Ok::<(), &str>(())
+                });
+                let _ = reply.send(match sent {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(why)) => Err(why.to_string()),
+                    Err(_) => Err("Daedalus is closing".into()),
+                });
+            })
+            .detach();
+        }
+    }
 }
 
 /// Opens a `claude` tab in the open project at `root` and answers with its pane once phones can attach it.

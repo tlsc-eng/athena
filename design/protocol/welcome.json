@@ -7,6 +7,7 @@
   "features": [
     "transcript",
     "usage",
+    "act",
     "dialog"
   ]
 }

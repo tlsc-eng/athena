@@ -337,6 +337,11 @@ impl TerminalView {
         self.stale.is_some()
     }
 
+    /// Keys sent now reach a shell; before the first attach they are dropped.
+    pub fn is_attached(&self) -> bool {
+        self.terminal.is_some()
+    }
+
     /// The daemon pane this view shows, once attached.
     pub fn session(&self) -> Option<PaneId> {
         self.pane
