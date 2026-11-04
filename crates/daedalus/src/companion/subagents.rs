@@ -17,11 +17,22 @@ const MAX_TRACKED: usize = 256;
 const NAME_CHARS: usize = 64;
 const NOTIFICATION_OPEN: &str = "<task-notification>";
 const NOTIFICATION_CLOSE: &str = "</task-notification>";
+const RESULT_OPEN: &str = "<result>";
+const RESULT_CLOSE: &str = "</result>";
 
 #[derive(Debug)]
 struct Entry {
     sub: Subagent,
     offset: u64,
+    // A notification counts only its own run, so the tools of earlier runs are kept here.
+    base: u32,
+}
+
+/// One `<task-notification>` block with the parts that are safe to read.
+struct Notice<'a> {
+    block: &'a str,
+    head: &'a str,
+    usage: &'a str,
 }
 
 /// The sub-agents of one parent transcript, fed by its lines and by tails of the agents' files.
@@ -54,8 +65,8 @@ impl Fleet {
         }
         let at = line["timestamp"].as_str().map_or(0, millis);
         for text in carried_text(line) {
-            for block in notifications(text) {
-                self.notification(block, at);
+            for notice in notifications(text) {
+                self.notification(&notice, at);
             }
         }
         let content = line["message"]["content"].as_array();
@@ -158,6 +169,7 @@ impl Fleet {
                 tool: None,
             },
             offset: 0,
+            base: 0,
         });
         self.changed = true;
     }
@@ -205,6 +217,11 @@ impl Fleet {
         if let Some(agent) = agent_id(&outcome["resumedAgentId"])
             && let Some(&i) = self.by_agent.get(agent)
         {
+            let entry = &mut self.entries[i];
+            if entry.sub.state != SubagentState::Running {
+                entry.base = entry.sub.tools;
+            }
+            entry.offset = 0;
             self.edit(i, |s| {
                 s.state = SubagentState::Running;
                 s.started_at = at;
@@ -212,20 +229,19 @@ impl Fleet {
                 s.tool = None;
                 s.tools = 0;
             });
-            self.entries[i].offset = 0;
         }
     }
 
-    fn notification(&mut self, block: &str, at: u64) {
+    fn notification(&mut self, notice: &Notice, at: u64) {
         let mut hasher = DefaultHasher::new();
-        block.hash(&mut hasher);
+        notice.block.hash(&mut hasher);
         let hash = hasher.finish();
         if self.seen.contains(&hash) {
             return;
         }
-        let found = tag(block, "task-id")
+        let found = tag(notice.head, "task-id")
             .and_then(|id| self.by_agent.get(id))
-            .or_else(|| tag(block, "tool-use-id").and_then(|id| self.by_tool.get(id)))
+            .or_else(|| tag(notice.head, "tool-use-id").and_then(|id| self.by_tool.get(id)))
             .copied();
         let Some(i) = found else {
             return;
@@ -233,14 +249,13 @@ impl Fleet {
         if self.entries[i].sub.state != SubagentState::Running {
             return;
         }
-        let state = match tag(block, "status") {
+        let state = match tag(notice.head, "status") {
             Some("completed") => SubagentState::Done,
             Some("failed") => SubagentState::Failed,
             Some("killed" | "stopped") => SubagentState::Stopped,
             _ => return,
         };
-        let usage = block.rfind("</result>").map_or(block, |end| &block[end..]);
-        let tools = tag(usage, "tool_uses")
+        let tools = tag(notice.usage, "tool_uses")
             .and_then(|n| n.parse().ok())
             .unwrap_or(0);
         self.seen.insert(hash);
@@ -248,11 +263,12 @@ impl Fleet {
     }
 
     fn finish(&mut self, i: usize, state: SubagentState, at: u64, tools: u32) {
+        let total = self.entries[i].base.saturating_add(tools);
         self.edit(i, |s| {
             s.state = state;
             s.ended_at = Some(at);
             s.tool = None;
-            s.tools = s.tools.max(tools);
+            s.tools = s.tools.max(total);
         });
     }
 
@@ -310,7 +326,8 @@ impl Fleet {
             }
         }
         self.changed |= sub != self.entries[i].sub;
-        self.entries[i] = Entry { sub, offset };
+        let base = self.entries[i].base;
+        self.entries[i] = Entry { sub, offset, base };
     }
 }
 
@@ -336,28 +353,65 @@ fn carried_text(line: &Value) -> Vec<&str> {
     }
 }
 
-fn notifications(mut text: &str) -> Vec<&str> {
+/// A closing tag quoted inside `<result>` is skipped by matching the result's own tags, and only
+/// the text before `<result>` and a `<usage>` right after it are read.
+fn notifications(mut text: &str) -> Vec<Notice<'_>> {
     let mut found = Vec::new();
     while let Some(start) = text.find(NOTIFICATION_OPEN) {
         let rest = &text[start..];
-        let first_close = rest.find(NOTIFICATION_CLOSE);
-        let quoted = match (rest.find("<result>"), first_close) {
-            (Some(open), Some(close)) if open < close => rest[open..]
-                .find("</result>")
-                .map_or(0, |end| open + end + "</result>".len()),
-            _ => 0,
-        };
-        let Some(end) = rest[quoted..]
-            .find(NOTIFICATION_CLOSE)
-            .map(|end| quoted + end)
-        else {
+        let Some(first_close) = rest.find(NOTIFICATION_CLOSE) else {
             break;
         };
-        let end = end + NOTIFICATION_CLOSE.len();
-        found.push(&rest[..end]);
+        let result = rest
+            .find(RESULT_OPEN)
+            .filter(|&open| open < first_close)
+            .and_then(|open| Some((open, result_end(rest, open)?)));
+        let (head_end, from) = result.unwrap_or((first_close, first_close));
+        let Some(close) = rest[from..].find(NOTIFICATION_CLOSE) else {
+            break;
+        };
+        let end = from + close + NOTIFICATION_CLOSE.len();
+        let usage = result.map_or("", |(_, result_end)| {
+            usage_after(&rest[result_end..from + close])
+        });
+        found.push(Notice {
+            block: &rest[..end],
+            head: &rest[..head_end],
+            usage,
+        });
         text = &rest[end..];
     }
     found
+}
+
+/// The offset just past the `</result>` that closes the `<result>` at `open`, counting quoted pairs.
+fn result_end(rest: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut at = open;
+    loop {
+        let next_close = rest[at..].find(RESULT_CLOSE)?;
+        match rest[at..].find(RESULT_OPEN) {
+            Some(next_open) if next_open < next_close => {
+                depth += 1;
+                at += next_open + RESULT_OPEN.len();
+            }
+            _ => {
+                depth -= 1;
+                at += next_close + RESULT_CLOSE.len();
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+        }
+    }
+}
+
+fn usage_after(tail: &str) -> &str {
+    tail.trim_start()
+        .strip_prefix("<usage>")
+        .map_or("", |body| {
+            body.find("</usage>").map_or(body, |end| &body[..end])
+        })
 }
 
 fn tag<'a>(block: &'a str, name: &str) -> Option<&'a str> {
@@ -648,7 +702,7 @@ mod tests {
         let sub = only(&fleet);
         assert_eq!(sub.state, SubagentState::Done);
         assert_eq!(sub.ended_at, Some(millis_at(20)));
-        assert_eq!(sub.tools, 5);
+        assert_eq!(sub.tools, 8);
     }
 
     #[test]
@@ -811,6 +865,67 @@ mod tests {
         fleet.line(&enqueue(text, 5));
         let sub = only(&fleet);
         assert_eq!((sub.state, sub.tools), (SubagentState::Done, 3));
+    }
+
+    #[test]
+    fn a_report_quoting_a_whole_notification_changes_nothing_about_the_outer_one() {
+        let (mut fleet, _dir) = fleet("quoted-whole");
+        fleet.line(&launch("toolu_1", "Agent", 1));
+        fleet.line(&launched("toolu_1", "a1", 2));
+        fleet.line(&launch("toolu_2", "Agent", 1));
+        fleet.line(&launched("toolu_2", "zz", 2));
+        let text = "<task-notification><task-id>a1</task-id><tool-use-id>toolu_1</tool-use-id>\
+            <status>completed</status><summary>s</summary><result>report: <task-notification>\
+            <task-id>zz</task-id><status>failed</status><result>inner</result>\
+            <usage><tool_uses>99</tool_uses></usage></task-notification> end</result>\
+            <usage><tool_uses>3</tool_uses></usage></task-notification>";
+        fleet.line(&enqueue(text, 5));
+        let list = fleet.list();
+        let by = |id: &str| list.iter().find(|s| s.tool_id == id).unwrap().clone();
+        assert_eq!(
+            (by("toolu_1").state, by("toolu_1").tools),
+            (SubagentState::Done, 3)
+        );
+        assert_eq!(by("toolu_2").state, SubagentState::Running);
+    }
+
+    #[test]
+    fn a_resumed_run_that_has_ended_adds_to_the_earlier_runs_live_and_on_replay() {
+        let (mut live, dir) = fleet("cumulative");
+        let file = dir.join("s1/subagents/agent-a1.jsonl");
+        let parent = [
+            launch("toolu_1", "Agent", 1),
+            launched("toolu_1", "a1", 2),
+            enqueue(&notification("a1", "toolu_1", "completed", 2), 5),
+            result("toolu_send", json!({"resumedAgentId": "a1"}), false, 10),
+            enqueue(&notification("a1", "toolu_send", "completed", 3), 15),
+        ];
+
+        live.line(&parent[0]);
+        live.line(&parent[1]);
+        append(&file, &[agent_line("Read", 3), agent_line("Grep", 4)]);
+        live.read_agents();
+        live.line(&parent[2]);
+        live.line(&parent[3]);
+        append(
+            &file,
+            &[
+                agent_line("Bash", 11),
+                agent_line("Edit", 12),
+                agent_line("Read", 13),
+            ],
+        );
+        live.read_agents();
+        live.line(&parent[4]);
+
+        let mut replayed = Fleet::new(&dir.join("s1.jsonl"));
+        for line in &parent {
+            replayed.line(line);
+        }
+        replayed.read_agents();
+
+        assert_eq!(only(&live).tools, 5);
+        assert_eq!(only(&replayed).tools, 5);
     }
 
     #[test]
