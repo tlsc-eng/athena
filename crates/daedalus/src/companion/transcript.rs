@@ -14,7 +14,7 @@ use crate::transcripts::{Typed, next_line, typed_text};
 const ASSISTANT_CAP: usize = 24 << 10;
 const USER_CAP: usize = 8 << 10;
 const DETAIL_CAP: usize = 1 << 10;
-const SUMMARY_CHARS: usize = 200;
+pub(super) const SUMMARY_CHARS: usize = 200;
 
 /// One transcript file, parsed into items as far as it has been read.
 #[derive(Debug)]
@@ -267,7 +267,7 @@ impl Feed {
     }
 }
 
-fn flag(value: &Value, key: &str) -> bool {
+pub(super) fn flag(value: &Value, key: &str) -> bool {
     value[key].as_bool().unwrap_or(false)
 }
 
@@ -383,7 +383,7 @@ fn clip(text: &str, max: usize) -> (String, bool) {
     (text[..end].to_string(), true)
 }
 
-fn clip_chars(text: &str, max: usize) -> (String, bool) {
+pub(super) fn clip_chars(text: &str, max: usize) -> (String, bool) {
     match text.char_indices().nth(max) {
         Some((end, _)) => (text[..end].to_string(), true),
         None => (text.to_string(), false),
@@ -391,7 +391,7 @@ fn clip_chars(text: &str, max: usize) -> (String, bool) {
 }
 
 /// Milliseconds since the epoch for an RFC 3339 timestamp, 0 when it does not parse.
-fn millis(stamp: &str) -> u64 {
+pub(super) fn millis(stamp: &str) -> u64 {
     let Some(secs) = crate::usage::parse_rfc3339(stamp) else {
         return 0;
     };

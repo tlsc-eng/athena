@@ -211,6 +211,29 @@ An item has `id`, `pos` (byte offset in the file), `at` (epoch milliseconds) and
 | `questions` | On a `question` item: each has `question`, `header`, `multi` and `options` (`label`, `description`). |
 | `answer` | On a `question` item: the result text, cut to 1 KiB. |
 
+`subagents`: the sub-agents Claude launched in a session with an open transcript, as the desktop reads them from the transcript and the agents' own files. The list is complete, so each message replaces the phone's copy for that session, and a `transcript` message of kind `page` clears it. It carries no prompt or result text, only the call's short `description` and tool names.
+
+```json
+{"type":"subagents","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","agents":[{"tool_id":"toolu_01A","agent_id":"a1b2c3d4e5f607182","agent_type":"builder","description":"Build the transcript parser","state":"running","started_at":1767225600000,"active_at":1767225660000,"tools":12,"tool":"Bash"},{"tool_id":"toolu_01B","agent_id":"a9f8e7d6c5b4a3921","agent_type":"Explore","description":"Find the callers","state":"done","started_at":1767225500000,"ended_at":1767225590000,"tools":7}]}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `tool_id` | Id of the `Agent` call that launched it. It joins to `tool_id` on the chat item. |
+| `agent_id` | Claude's agent id, once the launch result has arrived. |
+| `agent_type` | The call's `subagent_type`, at most 64 characters, `""` when absent. |
+| `description` | The call's `description`, at most 200 characters. |
+| `state` | `running`, `done`, `failed` or `stopped`. A phone treats any other value as unknown. |
+| `started_at` | Epoch milliseconds of the launch, or of the latest resume. |
+| `ended_at` | Epoch milliseconds when it reached a terminal state. Absent while `running`. |
+| `active_at` | Epoch milliseconds of the newest assistant line in the agent's own file. |
+| `tools` | Tool calls so far. Omitted when 0. |
+| `tool` | The latest tool name, at most 64 characters. Sent only while `running`. |
+
+The optional fields are omitted when absent. The list holds at most 20 agents: running ones first, newest `started_at` first, then ended ones, newest `ended_at` first. Only the session's own direct sub-agents are listed.
+
+The desktop sends `subagents` after the `page` of a `transcript_open` and after a reset page when the list is not empty, and whenever the list changes while the transcript is open, even to empty. At most one is queued per session, and a newer one replaces it. The phone sends nothing new.
+
 `sent`: answer to `prompt`, `interrupt` or `answer` once the keys have been written to the pane, and to `usage_refresh` once the desktop has handled it.
 
 ```json

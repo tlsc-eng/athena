@@ -1,0 +1,27 @@
+{
+  "type": "subagents",
+  "session": "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10",
+  "agents": [
+    {
+      "tool_id": "toolu_01A",
+      "agent_id": "a1b2c3d4e5f607182",
+      "agent_type": "builder",
+      "description": "Build the transcript parser",
+      "state": "running",
+      "started_at": 1767225600000,
+      "active_at": 1767225660000,
+      "tools": 12,
+      "tool": "Bash"
+    },
+    {
+      "tool_id": "toolu_01B",
+      "agent_id": "a9f8e7d6c5b4a3921",
+      "agent_type": "Explore",
+      "description": "Find the callers",
+      "state": "done",
+      "started_at": 1767225500000,
+      "ended_at": 1767225590000,
+      "tools": 7
+    }
+  ]
+}
