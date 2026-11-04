@@ -267,6 +267,10 @@ fn start(
 ) -> io::Result<(Server, async_channel::Receiver<server::Command>)> {
     let dir = data_dir()?;
     let mux_socket = daedalus_proto::socket_path().map_err(io::Error::other)?;
+    let home = std::env::home_dir();
+    if home.is_none() {
+        tracing::warn!("companion: no home directory, so transcripts cannot be read");
+    }
     Server::start(Config {
         addrs,
         devices,
@@ -275,6 +279,7 @@ fn start(
         allow_loopback_for_tests: false,
         name: name.to_string(),
         mux_socket,
+        home,
     })
 }
 

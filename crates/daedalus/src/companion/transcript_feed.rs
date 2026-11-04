@@ -1,0 +1,338 @@
+//! The transcripts one phone connection has open, and the messages that keep them current.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::{Duration, SystemTime};
+
+use tokio::task::JoinHandle;
+use tokio::time::{Interval, MissedTickBehavior};
+
+use super::protocol::{Item, ServerMsg, TranscriptKind};
+use super::server::Snapshot;
+use super::transcript::{Feed, Read};
+use crate::transcripts;
+
+const MAX_OPEN: usize = 4;
+const MAX_LIMIT: usize = 200;
+const MAX_MESSAGE: usize = 512 << 10;
+const POLL: Duration = Duration::from_millis(500);
+
+type Stamp = Option<(u64, Option<SystemTime>)>;
+type Reads = Vec<(String, u64, Read)>;
+
+struct Open {
+    // Tells a read that started before a reopen apart from the current feed.
+    epoch: u64,
+    path: PathBuf,
+    feed: Arc<Mutex<Feed>>,
+    stamp: Stamp,
+    limit: usize,
+}
+
+/// Up to four transcripts of one connection, polled for growth every half second.
+pub(super) struct Transcripts {
+    home: Option<PathBuf>,
+    open: HashMap<String, Open>,
+    epoch: u64,
+    reading: Option<JoinHandle<Reads>>,
+    ready: VecDeque<ServerMsg>,
+    tick: Interval,
+}
+
+impl Transcripts {
+    pub(super) fn new(home: Option<PathBuf>) -> Self {
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + POLL, POLL);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        Self {
+            home,
+            open: HashMap::new(),
+            epoch: 0,
+            reading: None,
+            ready: VecDeque::new(),
+            tick,
+        }
+    }
+
+    /// Reads the session's transcript and answers with its newest page; opening it again starts over.
+    pub(super) async fn open(
+        &mut self,
+        snapshot: &Snapshot,
+        id: String,
+        session: String,
+        limit: u32,
+    ) -> ServerMsg {
+        let Some(known) = snapshot.sessions.iter().find(|s| s.id == session) else {
+            return error(id, "session is not open");
+        };
+        if !self.open.contains_key(&session) && self.open.len() >= MAX_OPEN {
+            return error(id, "too many transcripts open");
+        }
+        let Some(home) = self.home.clone() else {
+            return error(id, "transcript not found");
+        };
+        let (cwd, root) = (PathBuf::from(&known.cwd), PathBuf::from(&known.main_root));
+        let wanted = session.clone();
+        let loaded = tokio::task::spawn_blocking(move || {
+            let path = transcripts::find(&home, &cwd, &wanted)
+                .or_else(|| transcripts::find(&home, &root, &wanted))?;
+            let stamp = stamp(&path);
+            let mut feed = Feed::new(path.clone());
+            feed.read_on();
+            Some((path, stamp, feed))
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((path, stamp, feed)) = loaded else {
+            return error(id, "transcript not found");
+        };
+        let limit = clamp(limit);
+        let page = page_message(&session, &feed, limit);
+        self.forget(&session);
+        self.epoch += 1;
+        let epoch = self.epoch;
+        self.open.insert(
+            session,
+            Open {
+                epoch,
+                path,
+                feed: Arc::new(Mutex::new(feed)),
+                stamp,
+                limit,
+            },
+        );
+        page
+    }
+
+    /// The page of items older than `before`.
+    pub(super) fn more(&self, id: String, session: String, before: u64, limit: u32) -> ServerMsg {
+        let Some(open) = self.open.get(&session) else {
+            return error(id, "transcript is not open");
+        };
+        let budget = budget(&session, TranscriptKind::Older);
+        // A poll may be re-parsing the file under this lock, and the socket task must not wait on it.
+        let feed = match open.feed.try_lock() {
+            Ok(feed) => feed,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => return error(id, "busy"),
+        };
+        let (items, older) = feed.page(Some(before), clamp(limit), budget);
+        ServerMsg::Transcript {
+            session,
+            kind: TranscriptKind::Older,
+            items,
+            before: older,
+        }
+    }
+
+    pub(super) fn close(&mut self, session: &str) {
+        self.forget(session);
+    }
+
+    /// The next `transcript` message for the phone; safe to cancel.
+    pub(super) async fn next(&mut self) -> ServerMsg {
+        loop {
+            if let Some(message) = self.ready.pop_front() {
+                return message;
+            }
+            if let Some(reading) = &mut self.reading {
+                let done = reading.await;
+                self.reading = None;
+                for (session, epoch, read) in done.unwrap_or_default() {
+                    self.deliver(&session, epoch, read);
+                }
+                continue;
+            }
+            if self.open.is_empty() {
+                std::future::pending::<()>().await;
+            }
+            self.tick.tick().await;
+            self.start_reading();
+        }
+    }
+
+    fn forget(&mut self, session: &str) {
+        self.open.remove(session);
+        self.ready
+            .retain(|m| !matches!(m, ServerMsg::Transcript { session: s, .. } if s == session));
+    }
+
+    fn start_reading(&mut self) {
+        let changed: Vec<_> = self
+            .open
+            .iter_mut()
+            .filter_map(|(session, open)| {
+                let now = stamp(&open.path);
+                (now != open.stamp).then(|| {
+                    open.stamp = now;
+                    (session.clone(), open.epoch, open.feed.clone())
+                })
+            })
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        self.reading = Some(tokio::task::spawn_blocking(move || {
+            changed
+                .into_iter()
+                .map(|(session, epoch, feed)| {
+                    let read = lock(&feed).read_on();
+                    (session, epoch, read)
+                })
+                .collect()
+        }));
+    }
+
+    fn deliver(&mut self, session: &str, epoch: u64, read: Read) {
+        let Some(open) = self.open.get(session).filter(|o| o.epoch == epoch) else {
+            return;
+        };
+        let feed = lock(&open.feed);
+        match read {
+            Read::Reset => self
+                .ready
+                .push_back(page_message(session, &feed, open.limit)),
+            Read::Changed(indices) => {
+                let items = indices.iter().filter_map(|&i| feed.items().get(i));
+                let budget = budget(session, TranscriptKind::Append);
+                for chunk in chunks(items, budget) {
+                    self.ready.push_back(ServerMsg::Transcript {
+                        session: session.to_string(),
+                        kind: TranscriptKind::Append,
+                        items: chunk,
+                        before: None,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn error(id: String, message: &str) -> ServerMsg {
+    ServerMsg::Error {
+        id: Some(id),
+        message: message.into(),
+    }
+}
+
+fn clamp(limit: u32) -> usize {
+    usize::try_from(limit).map_or(MAX_LIMIT, |l| l.min(MAX_LIMIT))
+}
+
+fn lock(feed: &Mutex<Feed>) -> MutexGuard<'_, Feed> {
+    feed.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn stamp(path: &Path) -> Stamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()))
+}
+
+fn page_message(session: &str, feed: &Feed, limit: usize) -> ServerMsg {
+    let (items, before) = feed.page(None, limit, budget(session, TranscriptKind::Page));
+    ServerMsg::Transcript {
+        session: session.to_string(),
+        kind: TranscriptKind::Page,
+        items,
+        before,
+    }
+}
+
+/// What the items of one message may take up once the rest of the message is counted.
+fn budget(session: &str, kind: TranscriptKind) -> usize {
+    let envelope = ServerMsg::Transcript {
+        session: session.to_string(),
+        kind,
+        items: Vec::new(),
+        before: Some(u64::MAX),
+    };
+    let overhead = serde_json::to_vec(&envelope).map_or(0, |v| v.len());
+    MAX_MESSAGE.saturating_sub(overhead)
+}
+
+fn item_size(item: &Item) -> usize {
+    serde_json::to_vec(item).map_or(0, |v| v.len() + 1)
+}
+
+fn chunks<'a>(items: impl Iterator<Item = &'a Item>, budget: usize) -> Vec<Vec<Item>> {
+    let mut out = Vec::new();
+    let mut chunk = Vec::new();
+    let mut size = 0;
+    for item in items {
+        let n = item_size(item);
+        if !chunk.is_empty() && size + n > budget {
+            out.push(std::mem::take(&mut chunk));
+            size = 0;
+        }
+        chunk.push(item.clone());
+        size += n;
+    }
+    if !chunk.is_empty() {
+        out.push(chunk);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::companion::protocol::ItemKind;
+
+    fn item(n: u64, text: &str) -> Item {
+        Item {
+            id: format!("i{n}"),
+            pos: n,
+            at: 0,
+            kind: ItemKind::Assistant,
+            text: Some(text.into()),
+            cut: false,
+            tool: None,
+            tool_id: None,
+            summary: None,
+            status: None,
+            detail: None,
+            questions: Vec::new(),
+            answer: None,
+        }
+    }
+
+    #[test]
+    fn appended_items_are_split_to_fit_the_budget() {
+        let items: Vec<Item> = (0..6).map(|n| item(n, &"x".repeat(100))).collect();
+        let one = item_size(&items[0]);
+        let parts = chunks(items.iter(), one * 2 + 1);
+        assert_eq!(
+            parts.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![2, 2, 2]
+        );
+        assert!(parts.iter().flatten().map(|i| i.pos).eq(0..6));
+    }
+
+    #[test]
+    fn an_item_over_the_budget_still_goes_out_alone() {
+        let items = [item(0, &"x".repeat(100)), item(1, "y")];
+        let parts = chunks(items.iter(), 10);
+        assert_eq!(parts.iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 1]);
+    }
+
+    #[test]
+    fn a_full_chunk_serializes_within_the_message_cap() {
+        let session = "s".repeat(128);
+        let items: Vec<Item> = (0..400).map(|n| item(n, &"x".repeat(2_000))).collect();
+        let first = chunks(items.iter(), budget(&session, TranscriptKind::Append))
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(first.len() < items.len());
+        let message = ServerMsg::Transcript {
+            session,
+            kind: TranscriptKind::Append,
+            items: first,
+            before: Some(u64::MAX),
+        };
+        let size = serde_json::to_vec(&message).unwrap().len();
+        assert!(size <= MAX_MESSAGE, "{size} bytes");
+        assert!(size > MAX_MESSAGE - 4_000, "{size} bytes");
+    }
+}

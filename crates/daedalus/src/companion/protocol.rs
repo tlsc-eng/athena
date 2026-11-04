@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const PROTO: u32 = 1;
 
 /// Optional capabilities the desktop lists in `welcome`.
-pub const FEATURES: &[&str] = &["transcript", "act", "usage"];
+pub const FEATURES: &[&str] = &["transcript", "usage"];
 
 /// Largest payload of one binary frame.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
