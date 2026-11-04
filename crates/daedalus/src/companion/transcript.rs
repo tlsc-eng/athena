@@ -1,5 +1,6 @@
 //! Turns a Claude Code JSONL transcript into chat items, read on as the file grows.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Seek, SeekFrom};
@@ -22,8 +23,13 @@ pub(crate) struct Feed {
     offset: u64,
     items: Vec<Item>,
     tools: HashMap<String, usize>,
-    /// Set when the file shrank and was read again from the start; the caller clears it.
-    pub(crate) reset: bool,
+}
+
+/// What a read found: items to upsert, or a file that shrank and was read again from the start.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Read {
+    Changed(Vec<usize>),
+    Reset,
 }
 
 impl Feed {
@@ -33,27 +39,26 @@ impl Feed {
             offset: 0,
             items: Vec::new(),
             tools: HashMap::new(),
-            reset: false,
         }
     }
 
-    /// Reads the lines written since the last call and returns the indices of new or changed items.
-    pub(crate) fn read_on(&mut self) -> Vec<usize> {
+    /// Reads the lines written since the last call.
+    pub(crate) fn read_on(&mut self) -> Read {
         let Ok(file) = File::open(&self.path) else {
-            return Vec::new();
+            return Read::Changed(Vec::new());
         };
         let Ok(len) = file.metadata().map(|m| m.len()) else {
-            return Vec::new();
+            return Read::Changed(Vec::new());
         };
-        if len < self.offset {
+        let reset = len < self.offset;
+        if reset {
             self.offset = 0;
             self.items.clear();
             self.tools.clear();
-            self.reset = true;
         }
         let mut input = BufReader::new(file);
         if input.seek(SeekFrom::Start(self.offset)).is_err() {
-            return Vec::new();
+            return Read::Changed(Vec::new());
         }
         let mut changed = Vec::new();
         let mut buf = Vec::new();
@@ -63,9 +68,12 @@ impl Feed {
             }
             self.offset += n;
         }
+        if reset {
+            return Read::Reset;
+        }
         changed.sort_unstable();
         changed.dedup();
-        changed
+        Read::Changed(changed)
     }
 
     pub(crate) fn items(&self) -> &[Item] {
@@ -74,6 +82,8 @@ impl Feed {
 
     /// The newest items strictly older than `before`, whole lines at a time, and the offset to
     /// ask for the rest from, or `None` when nothing older exists.
+    ///
+    /// `budget_bytes` covers only the items, so the caller subtracts the message envelope.
     pub(crate) fn page(
         &self,
         before: Option<u64>,
@@ -84,7 +94,7 @@ impl Feed {
             Some(b) => self.items.partition_point(|i| i.pos < b),
             None => self.items.len(),
         };
-        let mut start = end.saturating_sub(limit);
+        let mut start = end.saturating_sub(limit.max(1));
         while start > 0 && start < end && self.items[start - 1].pos == self.items[start].pos {
             start -= 1;
         }
@@ -117,6 +127,20 @@ impl Feed {
             .map_or_else(|| format!("p{pos}"), str::to_string);
         let cwd = line["cwd"].as_str().map(Path::new);
         let content = &line["message"]["content"];
+        if kind == "user" && flag(line, "isCompactSummary") {
+            let note = text_item(format!("{uuid}#0"), pos, at, ItemKind::Note, "");
+            self.push(
+                Item {
+                    text: Some("Conversation compacted".into()),
+                    ..note
+                },
+                changed,
+            );
+            return;
+        }
+        if flag(line, "isVisibleInTranscriptOnly") {
+            return;
+        }
         if kind == "assistant" {
             for (n, block) in blocks(content).iter().enumerate() {
                 match block["type"].as_str() {
@@ -131,20 +155,6 @@ impl Feed {
                     _ => {}
                 }
             }
-            return;
-        }
-        if flag(line, "isCompactSummary") {
-            let note = text_item(format!("{uuid}#0"), pos, at, ItemKind::Note, "");
-            self.push(
-                Item {
-                    text: Some("Conversation compacted".into()),
-                    ..note
-                },
-                changed,
-            );
-            return;
-        }
-        if flag(line, "isVisibleInTranscriptOnly") {
             return;
         }
         if let Some(results) = content.as_array() {
@@ -192,8 +202,13 @@ impl Feed {
         };
         let name = block["name"].as_str().unwrap_or_default();
         let input = &block["input"];
-        let (summary, cut) = clip_chars(&summary(name, input, cwd), SUMMARY_CHARS);
+        let (summary, summary_cut) = clip_chars(&summary(name, input, cwd), SUMMARY_CHARS);
         let question = name == "AskUserQuestion";
+        let (questions, questions_cut) = if question {
+            questions(input)
+        } else {
+            (Vec::new(), false)
+        };
         let item = Item {
             id: id.to_string(),
             pos,
@@ -204,17 +219,13 @@ impl Feed {
                 ItemKind::Tool
             },
             text: None,
-            cut,
+            cut: summary_cut || questions_cut,
             tool: Some(name.to_string()),
             tool_id: Some(id.to_string()),
             summary: (!summary.is_empty()).then_some(summary),
             status: Some(ItemStatus::Pending),
             detail: None,
-            questions: if question {
-                questions(input)
-            } else {
-                Vec::new()
-            },
+            questions,
             answer: None,
         };
         self.push(item, changed);
@@ -319,9 +330,14 @@ fn summary(tool: &str, input: &Value, cwd: Option<&Path>) -> String {
     }
 }
 
-fn questions(input: &Value) -> Vec<Question> {
-    let text = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_string();
-    input["questions"]
+fn questions(input: &Value) -> (Vec<Question>, bool) {
+    let cut = Cell::new(false);
+    let text = |v: &Value, key: &str| {
+        let (text, clipped) = clip(v[key].as_str().unwrap_or_default(), DETAIL_CAP);
+        cut.set(cut.get() || clipped);
+        text
+    };
+    let questions = input["questions"]
         .as_array()
         .into_iter()
         .flatten()
@@ -339,7 +355,8 @@ fn questions(input: &Value) -> Vec<Question> {
                 })
                 .collect(),
         })
-        .collect()
+        .collect();
+    (questions, cut.get())
 }
 
 fn result_text(content: &Value) -> String {
@@ -418,6 +435,13 @@ mod tests {
         file.write_all(text.as_bytes()).unwrap();
     }
 
+    fn changed(read: Read) -> Vec<usize> {
+        match read {
+            Read::Changed(indices) => indices,
+            Read::Reset => panic!("unexpected reset"),
+        }
+    }
+
     fn user(uuid: &str, content: Value) -> Value {
         json!({ "type": "user", "uuid": uuid, "cwd": "/work/app",
             "timestamp": "2026-01-01T00:00:00.250Z", "message": { "role": "user", "content": content } })
@@ -464,7 +488,7 @@ mod tests {
                 "isVisibleInTranscriptOnly": true, "message": { "content": "summary" } }),
             user("u4", json!("[Request interrupted by user]")),
         ]);
-        assert_eq!(feed.read_on().len(), 9);
+        assert_eq!(changed(feed.read_on()).len(), 9);
         let items = feed.items();
         assert_eq!(items[0].kind, ItemKind::User);
         assert_eq!(items[0].text.as_deref(), Some("fix the bug\nplease"));
@@ -509,7 +533,7 @@ mod tests {
                   "input": { "questions": [] } },
             ]),
         )]);
-        assert_eq!(feed.read_on(), vec![0, 1]);
+        assert_eq!(changed(feed.read_on()), vec![0, 1]);
         append(
             &path,
             &(user(
@@ -524,7 +548,7 @@ mod tests {
             .to_string()
                 + "\n"),
         );
-        assert_eq!(feed.read_on(), vec![0, 1]);
+        assert_eq!(changed(feed.read_on()), vec![0, 1]);
         assert_eq!(feed.items()[0].status, Some(ItemStatus::Error));
         assert_eq!(feed.items()[0].detail.as_deref(), Some("boom"));
         assert_eq!(feed.items()[1].status, Some(ItemStatus::Ok));
@@ -540,16 +564,19 @@ mod tests {
         meta["isMeta"] = json!(true);
         let mut hidden = user("u3", json!("hidden"));
         hidden["isVisibleInTranscriptOnly"] = json!(true);
+        let mut hidden_reply = assistant("a2", json!([{ "type": "text", "text": "hidden" }]));
+        hidden_reply["isVisibleInTranscriptOnly"] = json!(true);
         let (mut feed, path) = feed(&[
             side,
             meta,
             hidden,
+            hidden_reply,
             json!({ "type": "summary", "summary": "x" }),
             assistant("a1", json!([{ "type": "thinking", "thinking": "" }])),
             user("u4", json!("<system-reminder>x</system-reminder>")),
         ]);
         append(&path, "not json\n");
-        assert!(feed.read_on().is_empty());
+        assert!(changed(feed.read_on()).is_empty());
     }
 
     #[test]
@@ -558,9 +585,9 @@ mod tests {
         let second = user("u2", json!("two")).to_string();
         let (head, tail) = second.split_at(20);
         append(&path, head);
-        assert_eq!(feed.read_on(), vec![0]);
+        assert_eq!(changed(feed.read_on()), vec![0]);
         append(&path, &format!("{tail}\n"));
-        assert_eq!(feed.read_on(), vec![1]);
+        assert_eq!(changed(feed.read_on()), vec![1]);
         assert_eq!(feed.items()[1].text.as_deref(), Some("two"));
     }
 
@@ -569,8 +596,7 @@ mod tests {
         let (mut feed, path) = feed(&[user("u1", json!("one")), user("u2", json!("two"))]);
         feed.read_on();
         write(&path, &[user("u3", json!("new"))]);
-        assert_eq!(feed.read_on(), vec![0]);
-        assert!(feed.reset);
+        assert_eq!(feed.read_on(), Read::Reset);
         assert_eq!(feed.items().len(), 1);
         assert_eq!(feed.items()[0].text.as_deref(), Some("new"));
     }
@@ -610,6 +636,42 @@ mod tests {
         )]);
         feed.read_on();
         assert_eq!(feed.page(None, 1, usize::MAX).0.len(), 3);
+    }
+
+    #[test]
+    fn a_zero_limit_still_returns_the_newest_line() {
+        let feed = numbered(3);
+        let (page, before) = feed.page(None, 0, usize::MAX);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, "u2#0");
+        assert_eq!(before, Some(page[0].pos));
+        let (page, before) = feed.page(Some(u64::MAX), 0, usize::MAX);
+        assert_eq!(page[0].id, "u2#0");
+        assert!(before.is_some());
+        assert!(feed.page(Some(0), 0, usize::MAX).0.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_question_is_cut_and_flagged() {
+        let big = "q".repeat(DETAIL_CAP * 2);
+        let (mut feed, _) = feed(&[assistant(
+            "a1",
+            json!([{ "type": "tool_use", "id": "toolu_1", "name": "AskUserQuestion",
+                "input": { "questions": [{ "question": big, "header": big,
+                    "options": [{ "label": big, "description": big }] }] } }]),
+        )]);
+        feed.read_on();
+        let item = &feed.items()[0];
+        let q = &item.questions[0];
+        assert!(item.cut);
+        for field in [
+            &q.question,
+            &q.header,
+            &q.options[0].label,
+            &q.options[0].description,
+        ] {
+            assert_eq!(field.len(), DETAIL_CAP);
+        }
     }
 
     #[test]
