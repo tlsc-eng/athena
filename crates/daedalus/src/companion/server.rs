@@ -1047,6 +1047,31 @@ mod tests {
         assert!(fx.commands.try_recv().is_err());
     }
 
+    /// A revoke that lands while `spawn_claude` is waiting must beat the next queued request.
+    #[tokio::test]
+    async fn a_revoke_during_a_spawn_beats_the_next_queued_request() {
+        let fx = Fixture::new();
+        open_project(&fx);
+        for _ in 0..8 {
+            let (id, token) = fx.pair_device();
+            let mut ws = fx.welcomed(&token).await;
+            send_spawn(&mut ws).await;
+            let Ok(Command::SpawnClaude { reply, .. }) =
+                timeout(Duration::from_secs(5), fx.commands.recv())
+                    .await
+                    .expect("the first spawn never reached the app")
+            else {
+                panic!("expected a spawn command");
+            };
+            send_spawn(&mut ws).await;
+            assert!(fx.server.revoke(&id).unwrap());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = reply.send(Ok(1));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(fx.commands.try_recv().is_err());
+        }
+    }
+
     #[tokio::test]
     async fn handshake_slots_are_shared_between_listeners() {
         let fx = Fixture::listening_on(2);
