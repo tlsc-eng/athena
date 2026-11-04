@@ -219,6 +219,10 @@ fn question(d: &Dialog, goal: &Goal, p: &mut Progress, app: bool) -> Plan {
     if !p.rewound {
         return back(d, goal, at, app);
     }
+    // The parser reads an Other row with desk-typed text as a plain option, so a missing input row means text we must not type into.
+    if p.typed.is_none() && !d.options.iter().any(|o| o.input) {
+        return Err("the Other row holds text from the desk");
+    }
     let pick = &goal.answers[at];
     if d.multi {
         multi(d, pick, p, app, tabbed)
@@ -453,7 +457,7 @@ fn answer_index(d: &Dialog, answers: &[AnswerPick]) -> Result<usize, &'static st
 
 /// Whether the row holds the start of `text`, however it renders once typed into.
 fn shows(option: &DialogOption, text: &str) -> bool {
-    let start = norm(&text.chars().take(SHOWN_CHARS).collect::<String>());
+    let start: String = norm(text).chars().take(SHOWN_CHARS).collect();
     // An input row's label is a name, not what was typed.
     let row = if option.input {
         norm(option.text.as_deref().unwrap_or_default())
@@ -933,13 +937,30 @@ mod tests {
     }
 
     #[test]
-    fn an_input_row_holding_other_text_aborts() {
-        let mut d = parse(SINGLE);
-        d.options[2].text = Some("desk typing".into());
-        let g = goal(&d, vec![pick(Some("Which colour?"), &[], Some("hello"))]);
-        let (keys, end) = play(g, vec![Some(at(d, 2))], false);
-        assert!(keys.is_empty());
-        assert_aborted(end, "already holds");
+    fn an_other_row_holding_desk_text_aborts_before_any_key() {
+        let d = parse(&MULTI.replace("3. [ ] Other", "3. [ ] desk typing"));
+        assert_eq!(d.kind, DialogKind::Question);
+        assert!(!d.options.iter().any(|o| o.input));
+        for answer in [
+            pick(Some("Which sizes?"), &["A"], Some("hello")),
+            pick(Some("Which sizes?"), &["A"], None),
+            pick(Some("Which sizes?"), &["B"], None),
+        ] {
+            let g = goal(&d, vec![answer]);
+            let (keys, end) = play(g, vec![Some(d.clone())], false);
+            assert!(keys.is_empty());
+            assert_aborted(end, "holds text from the desk");
+        }
+    }
+
+    #[test]
+    fn leading_spaces_in_the_text_do_not_make_an_empty_match() {
+        let d = parse(SINGLE);
+        let text = format!("{}hello", " ".repeat(40));
+        let g = goal(&d, vec![pick(Some("Which colour?"), &[], Some(&text))]);
+        let (keys, end) = play(g, vec![Some(at(d.clone(), 2)), Some(at(d, 2))], false);
+        assert_eq!(keys, [text.into_bytes()]);
+        assert_aborted(end, "did not match");
     }
 
     #[test]
