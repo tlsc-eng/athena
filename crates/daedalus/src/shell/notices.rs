@@ -206,6 +206,63 @@ pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, Str
     }
 }
 
+/// An ntfy push built from a notice; the prompt text stays out because the server is third-party.
+#[derive(Debug, PartialEq)]
+pub(super) struct Push {
+    pub url: String,
+    pub headers: [(&'static str, &'static str); 2],
+    pub title: &'static str,
+    pub body: String,
+}
+
+/// The push for a "needs input" notice, or `None` for other notices or an unset `url`.
+pub(super) fn push_request(kind: &NoticeKind, project: Option<&str>, url: &str) -> Option<Push> {
+    let url = url.trim();
+    if url.is_empty() || !matches!(kind, NoticeKind::ClaudeNeedsInput { .. }) {
+        return None;
+    }
+    Some(Push {
+        url: url.into(),
+        headers: [("Priority", "high"), ("Tags", "robot")],
+        title: "Claude needs input",
+        body: format!("Waiting in {}", project.unwrap_or("Daedalus")),
+    })
+}
+
+/// Runs curl detached so a slow or unreachable server never holds up the UI.
+fn send_push(push: Push) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    std::thread::spawn(move || {
+        let mut cmd = Command::new("/usr/bin/curl");
+        cmd.args(["-fsS", "--max-time", "10", "-H"])
+            .arg(format!("Title: {}", push.title));
+        for (name, value) in push.headers {
+            cmd.arg("-H").arg(format!("{name}: {value}"));
+        }
+        cmd.args(["--data-binary", "@-"])
+            .arg(&push.url)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let result = cmd.spawn().and_then(|mut child| {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(push.body.as_bytes())?;
+            }
+            child.wait_with_output()
+        });
+        match result {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => tracing::warn!(
+                "push failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => tracing::warn!("push failed: {e}"),
+        }
+    });
+}
+
 /// Listens for the daemon's notices for as long as Daedalus runs, handing each to its window.
 pub(super) fn subscribe(cx: &mut App) -> Task<()> {
     cx.spawn(async move |cx| {
@@ -511,6 +568,15 @@ impl Shell {
                 crate::system_notify::post(notification.id, &title, &body);
             } else {
                 self.show_toast(notification.id, None, TOAST_FOR, cx);
+            }
+            if let Some(url) = self.settings.file.companion_push_url()
+                && let Some(push) = push_request(
+                    &notification.kind,
+                    self.project_name(&notification.project).as_deref(),
+                    url,
+                )
+            {
+                send_push(push);
             }
         }
         self.notices.borrow_mut().push(notification);
@@ -1038,6 +1104,30 @@ mod tests {
     use super::*;
     use daedalus_workspace::Item;
     use gpui::{point, size};
+
+    #[test]
+    fn only_a_needs_input_notice_with_a_url_makes_a_push_and_it_leaves_the_prompt_out() {
+        let ask = NoticeKind::ClaudeNeedsInput {
+            message: "rm -rf secrets?".into(),
+        };
+        let url = "https://ntfy.sh/topic";
+        let push = push_request(&ask, Some("api"), url).unwrap();
+        assert_eq!(push.url, url);
+        assert_eq!(push.title, "Claude needs input");
+        assert_eq!(push.body, "Waiting in api");
+        assert_eq!(push.headers, [("Priority", "high"), ("Tags", "robot")]);
+        assert!(!format!("{push:?}").contains("secrets"));
+        assert_eq!(
+            push_request(&ask, None, url).unwrap().body,
+            "Waiting in Daedalus"
+        );
+        assert_eq!(push_request(&ask, Some("api"), ""), None);
+        assert_eq!(push_request(&ask, Some("api"), "  "), None);
+        assert_eq!(
+            push_request(&NoticeKind::ClaudeStopped, Some("api"), url),
+            None
+        );
+    }
 
     #[test]
     fn a_notice_finds_its_terminal_after_it_moves_and_not_the_one_reusing_its_id() {

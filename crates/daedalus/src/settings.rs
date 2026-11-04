@@ -48,6 +48,8 @@ pub struct Settings {
     pub claude_hooks: Option<bool>,
     /// `companion.enabled`: lets a paired iPhone reach this Mac over Tailscale; off unless turned on.
     pub companion_enabled: Option<bool>,
+    /// `companion.push_url`: the ntfy topic URL that gets a push when Claude needs input; unset sends nothing.
+    pub companion_push_url: Option<String>,
     /// `claude.profiles`: folder prefix (`/` or `~/`) to config folder name, such as `claude-tlsc`.
     pub claude_profiles: Vec<(String, String)>,
 }
@@ -234,6 +236,13 @@ impl Settings {
 
     pub fn companion_enabled(&self) -> bool {
         self.companion_enabled.unwrap_or(false)
+    }
+
+    pub fn companion_push_url(&self) -> Option<&str> {
+        self.companion_push_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
     }
 
     /// The Claude Code profile `claude.profiles` names for `root`; the longest matching folder wins.
@@ -511,6 +520,7 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
         ("editor.font_size", s.editor.font_size.take().is_some()),
         ("claude.hooks", s.claude_hooks.take().is_some()),
         ("companion.enabled", s.companion_enabled.take().is_some()),
+        ("companion.push_url", s.companion_push_url.take().is_some()),
         (
             "claude.profiles",
             !std::mem::take(&mut s.claude_profiles).is_empty(),
@@ -760,10 +770,14 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                         .iter()
                         .try_for_each(|(name, value)| match name.as_str() {
                             "enabled" => companion_enabled(&mut settings, value),
+                            "push_url" => companion_push_url(&mut settings, value),
                             _ => Err(format!("has no setting \"{name}\"")),
                         })
                 }
-                _ => Err("must be {\"enabled\": true or false}".into()),
+                _ => Err(
+                    "must be {\"enabled\": true or false, \"push_url\": \"https://ntfy.sh/topic\"}"
+                        .into(),
+                ),
             },
             k if k.len() > 2 && k.starts_with('[') && k.ends_with(']') => {
                 let lang = settings
@@ -804,6 +818,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 Some(("claude", "hooks")) => claude_hooks(&mut settings, value),
                 Some(("claude", "profiles")) => claude_profiles(&mut settings, value),
                 Some(("companion", "enabled")) => companion_enabled(&mut settings, value),
+                Some(("companion", "push_url")) => companion_push_url(&mut settings, value),
                 _ => Err("is not a setting".into()),
             },
         };
@@ -826,6 +841,13 @@ fn companion_enabled(settings: &mut Settings, value: &Value) -> Result<(), Strin
         .as_bool()
         .map(|on| settings.companion_enabled = Some(on))
         .ok_or_else(|| "must be true or false".to_string())
+}
+
+fn companion_push_url(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    value
+        .as_str()
+        .map(|url| settings.companion_push_url = Some(url.into()))
+        .ok_or_else(|| "must be a URL string".to_string())
 }
 
 /// Reads `{"~/code/ai": "ai"}`; `ai`, `claude-ai` and `~/.claude-ai` all name `~/.claude-ai`.
@@ -1635,6 +1657,25 @@ pub(crate) mod tests {
             assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
             assert!(!s.companion_enabled(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_push_url_is_unset_unless_a_nonblank_string_is_given_in_either_spelling() {
+        assert_eq!(Settings::default().companion_push_url(), None);
+        for set in [
+            r#"{"companion": {"push_url": " https://ntfy.sh/t "}}"#,
+            r#"{"companion.push_url": "https://ntfy.sh/t"}"#,
+        ] {
+            let (s, problems) = parse(set).unwrap();
+            assert!(problems.is_empty(), "{set}: {problems:?}");
+            assert_eq!(s.companion_push_url(), Some("https://ntfy.sh/t"), "{set}");
+        }
+        let (s, problems) = parse(r#"{"companion.push_url": "  "}"#).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.companion_push_url(), None);
+        let (s, problems) = parse(r#"{"companion.push_url": 1}"#).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(s.companion_push_url(), None);
     }
 
     #[test]

@@ -141,6 +141,7 @@ impl Setting {
             ["eslint", "fixOnSave"] => flag(s.eslint_fix_on_save),
             ["claude", "hooks"] => flag(s.claude_hooks),
             ["companion", "enabled"] => flag(s.companion_enabled),
+            ["companion", "push_url"] => s.companion_push_url.clone().map(Value::from),
             ["claude", "profiles"] => (!s.claude_profiles.is_empty()).then(|| {
                 Value::Object(
                     s.claude_profiles
@@ -519,6 +520,20 @@ pub static SETTINGS: &[Setting] = &[
                       Tailscale.",
         group: Group::Claude,
         kind: TOGGLE_OFF,
+        user_only: true,
+        also: None,
+    },
+    Setting {
+        keys: &["companion", "push_url"],
+        aliases: &[],
+        title: "Phone Push URL (ntfy)",
+        description: "An ntfy topic URL that gets a push when Claude needs input and you are \
+                      not watching that tab; left unset, nothing is sent.",
+        group: Group::Claude,
+        kind: Kind::Json {
+            schema: r#"{"type": "string", "pattern": "^https?://"}"#,
+            example: r#""https://ntfy.sh/my-secret-topic""#,
+        },
         user_only: true,
         also: None,
     },
