@@ -1,0 +1,49 @@
+{
+  "type": "snapshot",
+  "seq": 9,
+  "projects": [],
+  "sessions": [],
+  "terminals": [
+    {
+      "pane": 123,
+      "project": "/Users/jason/code/daedalus",
+      "title": "claude",
+      "program": "claude",
+      "claude": "needs_input",
+      "rows": 40,
+      "cols": 120,
+      "dialog": {
+        "key": "5e0b2f11",
+        "kind": "question",
+        "title": "Which sizes?",
+        "tabs": [
+          {
+            "label": "Color",
+            "answered": true
+          },
+          {
+            "label": "Size",
+            "answered": false
+          }
+        ],
+        "multi": true,
+        "options": [
+          {
+            "label": "Red",
+            "description": "warm",
+            "checked": true
+          },
+          {
+            "label": "Other",
+            "checked": false,
+            "input": true,
+            "text": ""
+          }
+        ],
+        "submit": "Submit",
+        "highlight": 2,
+        "partial": false
+      }
+    }
+  ]
+}

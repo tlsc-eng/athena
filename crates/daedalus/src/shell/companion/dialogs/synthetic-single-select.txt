@@ -1,0 +1,8 @@
+ Which colour?
+
+ ❯ 1. Red
+      The warm one
+   2. Blue
+   3. Other
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel

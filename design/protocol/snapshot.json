@@ -45,7 +45,32 @@
       "cwd": "/Users/jason/code/daedalus/.claude/worktrees/bridge",
       "claude": "needs_input",
       "rows": 40,
-      "cols": 120
+      "cols": 120,
+      "dialog": {
+        "key": "d41c9a07",
+        "kind": "select",
+        "title": "Bash command",
+        "lines": [
+          "npm test",
+          "Run the test suite"
+        ],
+        "prompt": "Do you want to proceed?",
+        "options": [
+          {
+            "label": "Yes"
+          },
+          {
+            "label": "Yes, and don’t ask again for",
+            "input": true,
+            "text": "npm test *"
+          },
+          {
+            "label": "No"
+          }
+        ],
+        "highlight": 0,
+        "partial": false
+      }
     },
     {
       "pane": 124,

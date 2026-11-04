@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const PROTO: u32 = 1;
 
 /// Optional capabilities the desktop lists in `welcome`.
-pub const FEATURES: &[&str] = &["transcript", "usage"];
+pub const FEATURES: &[&str] = &["transcript", "usage", "dialog"];
 
 /// Largest payload of one binary frame.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
@@ -315,6 +315,59 @@ pub struct Terminal {
     pub claude: Option<SessionState>,
     pub rows: u16,
     pub cols: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<Dialog>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DialogKind {
+    Select,
+    Question,
+    Review,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DialogTab {
+    pub label: String,
+    pub answered: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DialogOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Dialog {
+    pub key: String,
+    pub kind: DialogKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<DialogTab>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi: bool,
+    pub options: Vec<DialogOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<u32>,
+    #[serde(default)]
+    pub partial: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +432,77 @@ mod tests {
     }
 
     const SESSION_ID: &str = "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10";
+
+    fn option(label: &str) -> DialogOption {
+        DialogOption {
+            label: label.into(),
+            description: None,
+            checked: None,
+            input: false,
+            text: None,
+        }
+    }
+
+    fn bash_dialog() -> Dialog {
+        Dialog {
+            key: "d41c9a07".into(),
+            kind: DialogKind::Select,
+            title: Some("Bash command".into()),
+            lines: vec!["npm test".into(), "Run the test suite".into()],
+            prompt: Some("Do you want to proceed?".into()),
+            tabs: Vec::new(),
+            multi: false,
+            options: vec![
+                option("Yes"),
+                DialogOption {
+                    input: true,
+                    text: Some("npm test *".into()),
+                    ..option("Yes, and don’t ask again for")
+                },
+                option("No"),
+            ],
+            submit: None,
+            highlight: Some(0),
+            partial: false,
+        }
+    }
+
+    fn question_dialog() -> Dialog {
+        Dialog {
+            key: "5e0b2f11".into(),
+            kind: DialogKind::Question,
+            title: Some("Which sizes?".into()),
+            lines: Vec::new(),
+            prompt: None,
+            tabs: vec![
+                DialogTab {
+                    label: "Color".into(),
+                    answered: true,
+                },
+                DialogTab {
+                    label: "Size".into(),
+                    answered: false,
+                },
+            ],
+            multi: true,
+            options: vec![
+                DialogOption {
+                    description: Some("warm".into()),
+                    checked: Some(true),
+                    ..option("Red")
+                },
+                DialogOption {
+                    checked: Some(false),
+                    input: true,
+                    text: Some(String::new()),
+                    ..option("Other")
+                },
+            ],
+            submit: Some("Submit".into()),
+            highlight: Some(2),
+            partial: false,
+        }
+    }
 
     fn item(id: &str, pos: u64, kind: ItemKind) -> Item {
         Item {
@@ -551,6 +675,30 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_with_a_dialog_matches_its_fixture() {
+        golden(
+            "snapshot_dialog",
+            &ServerMsg::Snapshot {
+                seq: 9,
+                projects: Vec::new(),
+                sessions: Vec::new(),
+                terminals: vec![Terminal {
+                    pane: 123,
+                    project: "/Users/jason/code/daedalus".into(),
+                    title: "claude".into(),
+                    program: Some("claude".into()),
+                    cwd: None,
+                    claude: Some(SessionState::NeedsInput),
+                    rows: 40,
+                    cols: 120,
+                    dialog: Some(question_dialog()),
+                }],
+                usage: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
     fn a_snapshot_with_usage_matches_its_fixture() {
         let window = |label: &str, used, resets_at| UsageWindow {
             label: label.into(),
@@ -628,6 +776,7 @@ mod tests {
                         claude: Some(SessionState::NeedsInput),
                         rows: 40,
                         cols: 120,
+                        dialog: Some(bash_dialog()),
                     },
                     Terminal {
                         pane: 124,
@@ -638,6 +787,7 @@ mod tests {
                         claude: None,
                         rows: 24,
                         cols: 80,
+                        dialog: None,
                     },
                 ],
                 usage: Vec::new(),

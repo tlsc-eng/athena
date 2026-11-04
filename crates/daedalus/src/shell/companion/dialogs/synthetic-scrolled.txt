@@ -1,0 +1,7 @@
+ Pick a branch
+
+ ↑ 3. feat/c
+ ❯ 4. feat/d
+ ↓ 5. feat/e
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel

@@ -1107,6 +1107,7 @@ mod tests {
             claude: None,
             rows: 24,
             cols: 80,
+            dialog: None,
         }
     }
 

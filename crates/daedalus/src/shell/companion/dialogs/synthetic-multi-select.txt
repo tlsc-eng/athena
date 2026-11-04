@@ -1,0 +1,9 @@
+ Which sizes?
+
+ ❯ 1. [ ] A
+   2. [✔] B
+   3. [ ] Other
+
+     Submit
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel
