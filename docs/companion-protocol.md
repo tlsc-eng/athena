@@ -18,6 +18,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 - Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`, and reads `terminal.dialog` only when it lists `dialog`, and sends `answer` only when it lists `answer`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
+- Replies to `spawn_claude`, `prompt`, `interrupt` and `answer` come when the desktop has finished, not in request order, and `snapshot` and ping frames keep flowing in between. The phone matches a reply to its request by `id`. The desktop holds at most 8 such requests per connection and answers a ninth at once with `error` `busy`, without acting on it.
 
 ## Session flow
 
