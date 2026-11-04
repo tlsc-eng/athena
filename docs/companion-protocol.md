@@ -15,7 +15,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Framing
 
-- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` is a decode error.
+- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript and act messages only when `welcome.features` lists `transcript` and `act`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
 
@@ -58,12 +58,42 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"refresh"}
 ```
 
-## Desktop to phone (`/v1/connect`)
-
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it.
+`transcript_open`: start following a session's conversation. The desktop answers with a `transcript` of kind `page` holding the newest `limit` items (at most 200), then sends `append` messages as the file grows. `session` must be an id in the latest snapshot, and a connection follows at most 4 sessions. Failures come back as `error` with the `id`.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1"}
+{"type":"transcript_open","id":"r5","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","limit":60}
+```
+
+`transcript_more`: load items older than `before`, a `pos` from an earlier `transcript`. The answer is a `transcript` of kind `older`. `limit` is at most 200.
+
+```json
+{"type":"transcript_more","id":"r6","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","before":123456,"limit":60}
+```
+
+`transcript_close`: stop following a session. The server sends nothing back.
+
+```json
+{"type":"transcript_close","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10"}
+```
+
+`prompt`: type `text` into a terminal pane and submit it. `text` is at most 16 KiB, and the phone strips C0 control characters except `\n` and `\t`. The server refuses a pane that is not a terminal, and a Claude pane that is in `needs_input`. A running Claude accepts it and queues the message. `id` is echoed in `sent` or `error`.
+
+```json
+{"type":"prompt","id":"r7","pane":123,"text":"run the tests\nthen commit"}
+```
+
+`interrupt`: send Esc to a pane whose Claude is `running`. `id` is echoed in `sent` or `error`.
+
+```json
+{"type":"interrupt","id":"r10","pane":123}
+```
+
+## Desktop to phone (`/v1/connect`)
+
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `act` for `prompt` and `interrupt`), and is omitted when empty.
+
+```json
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","act"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -112,6 +142,37 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ```json
 {"type":"notice","pane":123,"kind":"needs_input","message":"Run cargo test?","at":1767225600000}
+```
+
+`transcript`: a part of a session's conversation, in file order. `kind` says how the phone applies `items`:
+
+- `page` replaces everything. It is sent on open, and again when the file shrinks or is replaced.
+- `older` prepends.
+- `append` upserts by `id`: new items, or tool items whose result has arrived.
+
+`before` is the `pos` to pass to `transcript_more`, and is absent when the page reaches the start of the file. Each message is at most 512 KiB serialized, so the desktop drops the oldest items of a page to fit.
+
+```json
+{"type":"transcript","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","kind":"page","items":[{"id":"u1","pos":1024,"at":1767225600000,"kind":"user","text":"run the tests"}],"before":1024}
+```
+
+An item has `id`, `pos` (byte offset in the file), `at` (epoch milliseconds) and `kind`, which is `user`, `assistant`, `tool`, `question` or `note`. `note` covers compaction, interruptions and `/command` lines. The other fields are optional and omitted when absent:
+
+| Field | Meaning |
+| --- | --- |
+| `text` | The message text. Caps: assistant 24 KiB, user 8 KiB. |
+| `cut` | `true` when `text` was truncated. |
+| `tool`, `tool_id` | The tool name and its call id, on `tool` and `question` items. |
+| `summary` | A one-line description of the call, at most 200 characters. |
+| `status` | `pending`, `ok` or `error`. A tool or question item stays `pending` until its result arrives. |
+| `detail` | The first 1 KiB of an error result. |
+| `questions` | On a `question` item: each has `question`, `header`, `multi` and `options` (`label`, `description`). |
+| `answer` | On a `question` item: the result text, cut to 1 KiB. |
+
+`sent`: answer to `prompt` or `interrupt` once the keys have been written to the pane.
+
+```json
+{"type":"sent","id":"r7"}
 ```
 
 ## Pair endpoint (`/v1/pair`)

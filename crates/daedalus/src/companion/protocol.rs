@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTO: u32 = 1;
 
+/// Optional capabilities the desktop lists in `welcome`.
+pub const FEATURES: &[&str] = &["transcript", "act"];
+
 /// Largest payload of one binary frame.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
 
@@ -58,6 +61,29 @@ pub enum ClientMsg {
         project: String,
     },
     Refresh,
+    TranscriptOpen {
+        id: String,
+        session: String,
+        limit: u32,
+    },
+    TranscriptMore {
+        id: String,
+        session: String,
+        before: u64,
+        limit: u32,
+    },
+    TranscriptClose {
+        session: String,
+    },
+    Prompt {
+        id: String,
+        pane: u64,
+        text: String,
+    },
+    Interrupt {
+        id: String,
+        pane: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -68,6 +94,8 @@ pub enum ServerMsg {
         server: String,
         name: String,
         app: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     Snapshot {
         seq: u64,
@@ -107,6 +135,16 @@ pub enum ServerMsg {
         message: String,
         at: u64,
     },
+    Transcript {
+        session: String,
+        kind: TranscriptKind,
+        items: Vec<Item>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+    },
+    Sent {
+        id: String,
+    },
 }
 
 /// Sent by the phone on the pair endpoint.
@@ -142,6 +180,74 @@ pub enum DropReason {
 pub enum NoticeKind {
     NeedsInput,
     Stopped,
+}
+
+/// How the phone applies a `transcript` message to its copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptKind {
+    Page,
+    Older,
+    Append,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    User,
+    Assistant,
+    Tool,
+    Question,
+    Note,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemStatus {
+    Pending,
+    Ok,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    pub question: String,
+    pub header: String,
+    pub multi: bool,
+    pub options: Vec<QuestionOption>,
+}
+
+/// One entry of a session transcript, identified by `id` and located by its byte offset `pos`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Item {
+    pub id: String,
+    pub pos: u64,
+    pub at: u64,
+    pub kind: ItemKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ItemStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<Question>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,9 +345,77 @@ mod tests {
         assert_eq!(&parsed, msg);
     }
 
+    const SESSION_ID: &str = "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10";
+
+    fn item(id: &str, pos: u64, kind: ItemKind) -> Item {
+        Item {
+            id: id.into(),
+            pos,
+            at: 1_767_225_600_000,
+            kind,
+            text: None,
+            cut: false,
+            tool: None,
+            tool_id: None,
+            summary: None,
+            status: None,
+            detail: None,
+            questions: Vec::new(),
+            answer: None,
+        }
+    }
+
+    fn items() -> Vec<Item> {
+        vec![
+            Item {
+                text: Some("run the tests".into()),
+                ..item("u1", 1_024, ItemKind::User)
+            },
+            Item {
+                text: Some("Running them now, and the output is long".into()),
+                cut: true,
+                ..item("a1", 1_300, ItemKind::Assistant)
+            },
+            Item {
+                tool: Some("Bash".into()),
+                tool_id: Some("toolu_01abc".into()),
+                summary: Some("cargo test -p daedalus".into()),
+                status: Some(ItemStatus::Error),
+                detail: Some("error[E0432]: unresolved import".into()),
+                ..item("t1", 1_800, ItemKind::Tool)
+            },
+            Item {
+                tool: Some("AskUserQuestion".into()),
+                tool_id: Some("toolu_01def".into()),
+                status: Some(ItemStatus::Ok),
+                questions: vec![Question {
+                    question: "Which database?".into(),
+                    header: "Database".into(),
+                    multi: false,
+                    options: vec![
+                        QuestionOption {
+                            label: "SQLite".into(),
+                            description: "Embedded, no server".into(),
+                        },
+                        QuestionOption {
+                            label: "Postgres".into(),
+                            description: "Hosted, shared".into(),
+                        },
+                    ],
+                }],
+                answer: Some("SQLite".into()),
+                ..item("q1", 2_400, ItemKind::Question)
+            },
+            Item {
+                text: Some("Conversation compacted".into()),
+                ..item("n1", 3_000, ItemKind::Note)
+            },
+        ]
+    }
+
     fn session() -> Session {
         Session {
-            id: "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10".into(),
+            id: SESSION_ID.into(),
             label: "Add the phone bridge".into(),
             pane: Some(123),
             project: Some("/Users/jason/code/daedalus".into()),
@@ -295,6 +469,44 @@ mod tests {
             },
         );
         golden("refresh", &ClientMsg::Refresh);
+        golden(
+            "transcript_open",
+            &ClientMsg::TranscriptOpen {
+                id: "r5".into(),
+                session: SESSION_ID.into(),
+                limit: 60,
+            },
+        );
+        golden(
+            "transcript_more",
+            &ClientMsg::TranscriptMore {
+                id: "r6".into(),
+                session: SESSION_ID.into(),
+                before: 123_456,
+                limit: 60,
+            },
+        );
+        golden(
+            "transcript_close",
+            &ClientMsg::TranscriptClose {
+                session: SESSION_ID.into(),
+            },
+        );
+        golden(
+            "prompt",
+            &ClientMsg::Prompt {
+                id: "r7".into(),
+                pane: 123,
+                text: "run the tests\nthen commit".into(),
+            },
+        );
+        golden(
+            "interrupt",
+            &ClientMsg::Interrupt {
+                id: "r10".into(),
+                pane: 123,
+            },
+        );
     }
 
     #[test]
@@ -306,8 +518,19 @@ mod tests {
                 server: "a1b2c3d4e5f60718".into(),
                 name: "Jason's Mac".into(),
                 app: "2.0.1".into(),
+                features: FEATURES.iter().map(|f| f.to_string()).collect(),
             },
         );
+        golden(
+            "transcript",
+            &ServerMsg::Transcript {
+                session: SESSION_ID.into(),
+                kind: TranscriptKind::Page,
+                items: items(),
+                before: Some(1_024),
+            },
+        );
+        golden("sent", &ServerMsg::Sent { id: "r7".into() });
         golden(
             "snapshot",
             &ServerMsg::Snapshot {
@@ -417,6 +640,20 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"exited","pane":5}"#);
+        assert_eq!(serde_json::from_str::<ServerMsg>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn a_welcome_without_features_omits_the_field() {
+        let msg = ServerMsg::Welcome {
+            proto: PROTO,
+            server: "a1b2c3d4e5f60718".into(),
+            name: "Jason's Mac".into(),
+            app: "2.0.1".into(),
+            features: Vec::new(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("features"));
         assert_eq!(serde_json::from_str::<ServerMsg>(&json).unwrap(), msg);
     }
 

@@ -1,0 +1,68 @@
+{
+  "type": "transcript",
+  "session": "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10",
+  "kind": "page",
+  "items": [
+    {
+      "id": "u1",
+      "pos": 1024,
+      "at": 1767225600000,
+      "kind": "user",
+      "text": "run the tests"
+    },
+    {
+      "id": "a1",
+      "pos": 1300,
+      "at": 1767225600000,
+      "kind": "assistant",
+      "text": "Running them now, and the output is long",
+      "cut": true
+    },
+    {
+      "id": "t1",
+      "pos": 1800,
+      "at": 1767225600000,
+      "kind": "tool",
+      "tool": "Bash",
+      "tool_id": "toolu_01abc",
+      "summary": "cargo test -p daedalus",
+      "status": "error",
+      "detail": "error[E0432]: unresolved import"
+    },
+    {
+      "id": "q1",
+      "pos": 2400,
+      "at": 1767225600000,
+      "kind": "question",
+      "tool": "AskUserQuestion",
+      "tool_id": "toolu_01def",
+      "status": "ok",
+      "questions": [
+        {
+          "question": "Which database?",
+          "header": "Database",
+          "multi": false,
+          "options": [
+            {
+              "label": "SQLite",
+              "description": "Embedded, no server"
+            },
+            {
+              "label": "Postgres",
+              "description": "Hosted, shared"
+            }
+          ]
+        }
+      ],
+      "answer": "SQLite"
+    },
+    {
+      "id": "n1",
+      "pos": 3000,
+      "at": 1767225600000,
+      "kind": "note",
+      "text": "Conversation compacted"
+    }
+  ],
+  "before": 1024
+}

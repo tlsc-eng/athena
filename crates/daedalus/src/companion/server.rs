@@ -441,6 +441,7 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
                 server: shared.id.clone(),
                 name: shared.name.clone(),
                 app: env!("CARGO_PKG_VERSION").into(),
+                features: Vec::new(),
             };
             if !send(&mut ws, &welcome).await {
                 return None;
@@ -705,6 +706,14 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let current = Arc::clone(&snapshot.borrow());
                                 Some(spawn_claude(shared, &current, id, project).await)
                             }
+                            ClientMsg::TranscriptOpen { id, .. }
+                            | ClientMsg::TranscriptMore { id, .. }
+                            | ClientMsg::Prompt { id, .. }
+                            | ClientMsg::Interrupt { id, .. } => Some(ServerMsg::Error {
+                                id: Some(id),
+                                message: "not supported".into(),
+                            }),
+                            ClientMsg::TranscriptClose { .. } => None,
                         };
                         if let Some(reply) = reply && !send(&mut ws, &reply).await {
                             break;
