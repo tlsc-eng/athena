@@ -1348,6 +1348,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_prompt_reaches_the_app_without_control_characters() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let prompt = ClientMsg::Prompt {
+            id: "r7".into(),
+            pane: 7,
+            text: "a\x1b[201~b\rc\nd".into(),
+        };
+        send_json(&mut ws, &prompt).await;
+        let Ok(Command::Act { action, reply, .. }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the prompt never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        assert!(action == Action::Prompt("a[201~bc\nd".into()));
+        let _ = reply.send(Ok(()));
+    }
+
     #[test]
     fn strip_controls_keeps_newlines_and_tabs_only() {
         assert_eq!(strip_controls("a\x1b[31mb\x7f\r\nc\td\0"), "a[31mb\nc\td");
