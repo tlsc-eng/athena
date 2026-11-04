@@ -167,6 +167,10 @@ pub enum ServerMsg {
     Sent {
         id: String,
     },
+    Subagents {
+        session: String,
+        agents: Vec<Subagent>,
+    },
 }
 
 /// Sent by the phone on the pair endpoint.
@@ -211,6 +215,39 @@ pub enum TranscriptKind {
     Page,
     Older,
     Append,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentState {
+    Running,
+    Done,
+    Failed,
+    Stopped,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A sub-agent Claude launched with an `Agent` call, joined to its chat item by `tool_id`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Subagent {
+    pub tool_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    pub agent_type: String,
+    pub description: String,
+    pub state: SubagentState,
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tools: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -797,6 +834,38 @@ mod tests {
             },
         );
         golden("sent", &ServerMsg::Sent { id: "r7".into() });
+        golden(
+            "subagents",
+            &ServerMsg::Subagents {
+                session: SESSION_ID.into(),
+                agents: vec![
+                    Subagent {
+                        tool_id: "toolu_01A".into(),
+                        agent_id: Some("a1b2c3d4e5f607182".into()),
+                        agent_type: "builder".into(),
+                        description: "Build the transcript parser".into(),
+                        state: SubagentState::Running,
+                        started_at: 1_767_225_600_000,
+                        ended_at: None,
+                        active_at: Some(1_767_225_660_000),
+                        tools: 12,
+                        tool: Some("Bash".into()),
+                    },
+                    Subagent {
+                        tool_id: "toolu_01B".into(),
+                        agent_id: Some("a9f8e7d6c5b4a3921".into()),
+                        agent_type: "Explore".into(),
+                        description: "Find the callers".into(),
+                        state: SubagentState::Done,
+                        started_at: 1_767_225_500_000,
+                        ended_at: Some(1_767_225_590_000),
+                        active_at: None,
+                        tools: 7,
+                        tool: None,
+                    },
+                ],
+            },
+        );
         golden(
             "snapshot",
             &ServerMsg::Snapshot {

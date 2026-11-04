@@ -5,6 +5,7 @@ pub(crate) mod devices;
 pub mod protocol;
 pub mod server;
 mod stream;
+mod subagents;
 pub mod tailnet;
 pub(crate) mod transcript;
 mod transcript_feed;
