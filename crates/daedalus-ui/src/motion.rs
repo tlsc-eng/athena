@@ -2,21 +2,40 @@ use std::time::{Duration, Instant};
 
 use gpui::{Animation, AnimationExt, AnyElement, ElementId, IntoElement};
 
-/// CSS-style cubic-bezier easing, solved for t by Newton iteration.
+/// CSS-style cubic-bezier easing, solved for t by Newton iteration with a bisection fallback.
 pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> impl Fn(f32) -> f32 + Clone {
     move |x| {
         let bez = |a: f32, b: f32, t: f32| {
             3. * a * (1. - t).powi(2) * t + 3. * b * (1. - t) * t * t + t.powi(3)
         };
         let mut t = x;
+        let mut converged = false;
         for _ in 0..8 {
             let err = bez(x1, x2, t) - x;
+            if err.abs() < 1e-6 {
+                converged = true;
+                break;
+            }
             let slope =
                 3. * (1. - t).powi(2) * x1 + 6. * (1. - t) * t * (x2 - x1) + 3. * t * t * (1. - x2);
             if slope.abs() < 1e-6 {
                 break;
             }
             t -= err / slope;
+            if !(0. ..=1.).contains(&t) {
+                break;
+            }
+        }
+        if !converged {
+            let (mut lo, mut hi) = (0., 1.);
+            for _ in 0..32 {
+                t = (lo + hi) / 2.;
+                if bez(x1, x2, t) < x {
+                    lo = t;
+                } else {
+                    hi = t;
+                }
+            }
         }
         bez(y1, y2, t.clamp(0., 1.))
     }
@@ -183,5 +202,76 @@ mod tests {
     fn exit_is_back_loaded() {
         let ease = ease_exit();
         assert!(ease(0.5) < 0.5);
+    }
+
+    type Ease = Box<dyn Fn(f32) -> f32>;
+
+    fn eases() -> [(&'static str, Ease); 3] {
+        [
+            ("standard", Box::new(ease_standard())),
+            ("enter", Box::new(ease_enter())),
+            ("exit", Box::new(ease_exit())),
+        ]
+    }
+
+    #[test]
+    fn eases_hit_both_endpoints() {
+        for (name, ease) in eases() {
+            assert_eq!(ease(0.), 0., "{name}");
+            assert!((ease(1.) - 1.).abs() < 1e-6, "{name}");
+        }
+    }
+
+    #[test]
+    fn eases_are_monotonic_finite_and_in_unit_range() {
+        const N: usize = 10_000;
+        for (name, ease) in eases() {
+            let mut prev = 0.;
+            for i in 0..=N {
+                let y = ease(i as f32 / N as f32);
+                assert!(
+                    y.is_finite() && (0. ..=1.).contains(&y),
+                    "{name} at {i}: {y}"
+                );
+                assert!(y >= prev - 1e-6, "{name} decreased at {i}: {prev} -> {y}");
+                prev = y;
+            }
+        }
+    }
+
+    #[test]
+    fn enter_does_not_overshoot_near_zero() {
+        assert!(ease_enter()(0.005) < 0.2);
+    }
+
+    #[test]
+    fn eases_match_bisection_reference() {
+        let bez = |a: f64, b: f64, t: f64| {
+            3. * a * (1. - t).powi(2) * t + 3. * b * (1. - t) * t * t + t.powi(3)
+        };
+        for ((name, ease), params) in
+            eases()
+                .into_iter()
+                .zip([EASE_STANDARD, EASE_ENTER, EASE_EXIT])
+        {
+            let [x1, y1, x2, y2] = params.map(f64::from);
+            for i in 0..=1000 {
+                let x = i as f64 / 1000.;
+                let (mut lo, mut hi) = (0., 1.);
+                for _ in 0..60 {
+                    let mid = (lo + hi) / 2.;
+                    if bez(x1, x2, mid) < x {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let expected = bez(y1, y2, (lo + hi) / 2.);
+                assert!(
+                    (f64::from(ease(x as f32)) - expected).abs() < 1e-4,
+                    "{name} at x = {x}"
+                );
+            }
+        }
     }
 }
