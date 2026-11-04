@@ -17,6 +17,8 @@ use crate::companion::tailnet;
 
 /// Shorter than the server's 60 s wait, so the phone is told no before it gives up.
 const ANSWER_FOR: Duration = Duration::from_secs(55);
+/// More than the server needs to save a paired device.
+const STORED_WITHIN: Duration = Duration::from_millis(500);
 const MODULE: f32 = 4.;
 const QUIET_MODULES: usize = 4;
 
@@ -280,8 +282,12 @@ impl Shell {
             } else {
                 Verdict::Deny
             };
-            if reply.send(verdict).is_ok() && allowed {
-                let _ = this.update_in(cx, |shell, window, cx| shell.close_pairing(window, cx));
+            let _ = reply.send(verdict);
+            let _ = this.update_in(cx, |shell, window, cx| shell.close_pairing(window, cx));
+            if allowed {
+                // The server stores the device right after it reads the verdict.
+                cx.background_executor().timer(STORED_WITHIN).await;
+                let _ = cx.update(|_, cx| super::companion::redraw_windows(cx));
             }
         })
         .detach();
@@ -292,12 +298,14 @@ impl Shell {
         let t = cx.theme().clone();
         let left = open.expires.saturating_duration_since(Instant::now());
         let module = px(MODULE);
+        // The Camera app may not read an inverted code, so the dark theme still gets dark on light.
+        let light = daedalus_ui::Theme::light(false).color;
         let code = match &open.grid {
             Some(grid) => div()
                 .p(px(QUIET_MODULES as f32 * MODULE))
                 .flex()
                 .flex_col()
-                .bg(t.color.surface)
+                .bg(light.surface)
                 .border_1()
                 .border_color(t.color.border)
                 .children(grid.dark.chunks(grid.width).map(|row| {
@@ -309,7 +317,7 @@ impl Shell {
                                 .flex_none()
                                 .h(module)
                                 .w(px(len as f32 * MODULE))
-                                .when(dark, |el| el.bg(t.color.content))
+                                .when(dark, |el| el.bg(light.content))
                         }))
                 }))
                 .into_any_element(),

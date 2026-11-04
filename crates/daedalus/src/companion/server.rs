@@ -237,8 +237,13 @@ impl Server {
     pub fn revoke(&self, id: &str) -> io::Result<bool> {
         let removed = lock(&self.shared.devices).revoke(id);
         // The device is gone from memory even when saving failed, so its sockets close either way.
-        let _ = self.shared.revoked.send(id.to_string());
+        self.close_connections_of(id);
         removed
+    }
+
+    /// Closes a device's live connections without touching the store, for a caller that has already removed it.
+    pub fn close_connections_of(&self, id: &str) {
+        let _ = self.shared.revoked.send(id.to_string());
     }
 
     /// Tells every connected phone about a session that needs attention.

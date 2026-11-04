@@ -129,3 +129,21 @@ On approval the desktop answers `paired` and closes. The token is 64 hex charact
 ```
 
 Otherwise it answers `error` (without `id`) and closes.
+
+## Pairing URL
+
+The pairing QR code encodes one URL; the code in it is the `X-Daedalus-Pair` value for `/v1/pair`.
+
+```
+daedalus://pair?host=mac.tail1234.ts.net&ip=100.64.1.2&port=47123&code=0123456789abcdef0123456789abcdef&sid=a1b2c3d4e5f60718
+```
+
+| Key | Value |
+| --- | --- |
+| `host` | The Mac's MagicDNS name. Omitted when it could not be looked up. |
+| `ip` | The Mac's Tailscale IPv4 address. Omitted when it has none. |
+| `port` | The server's port. |
+| `code` | The one-time pairing code: 32 lowercase hex characters, valid for 5 minutes and one attempt. |
+| `sid` | The server id from `welcome`: 16 lowercase hex characters. |
+
+`host` or `ip` may be omitted but never both. Values are percent-encoded.

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use gpui::{App, AsyncApp, Context, Task};
 
 use super::Shell;
+use super::item::ItemView;
 use super::windows;
 use crate::companion::devices::Devices;
 use crate::companion::server::{self, Config, Server};
@@ -233,9 +234,8 @@ pub(super) fn revoke_device(id: String, cx: &mut App) {
             })
             .await;
         let _ = cx.update(|cx| {
-            // The store has dropped it already, so this only closes the device's open connections.
             if let Some(server) = windows::companion(cx) {
-                let _ = server.revoke(&id);
+                server.close_connections_of(&id);
             }
             if let Err(e) = saved {
                 notice("Could not save the device list", format!("{e}"), cx);
@@ -246,9 +246,17 @@ pub(super) fn revoke_device(id: String, cx: &mut App) {
     .detach();
 }
 
-fn redraw_windows(cx: &mut App) {
+/// Settings is a cached view, so the windows' own redraw does not reach its device list.
+pub(super) fn redraw_windows(cx: &mut App) {
     for handle in windows::handles(cx) {
-        let _ = handle.update(cx, |_, _, cx| cx.notify());
+        let _ = handle.update(cx, |shell, _, cx| {
+            for item in shell.items.values() {
+                if let ItemView::Settings(view) = item {
+                    view.update(cx, |_, cx| cx.notify());
+                }
+            }
+            cx.notify();
+        });
     }
 }
 

@@ -482,6 +482,12 @@ fn forget(window: AnyWindowHandle, cx: &mut App) {
     if windows.focused == Some(window) {
         windows.focused = windows.open.first().map(|o| o.handle.into());
     }
+    if windows.pairing_window == Some(window) {
+        windows.pairing_window = None;
+        if let Some(server) = &windows.companion {
+            server.set_pairing_code(None);
+        }
+    }
 }
 
 /// Whether `window` is the only one left, whose closing quits as it always has.
