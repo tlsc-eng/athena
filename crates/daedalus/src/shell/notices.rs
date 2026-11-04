@@ -210,23 +210,40 @@ pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, Str
 #[derive(Debug, PartialEq)]
 pub(super) struct Push {
     pub url: String,
-    pub headers: [(&'static str, &'static str); 2],
-    pub title: &'static str,
+    pub headers: [(&'static str, &'static str); 3],
     pub body: String,
 }
 
-/// The push for a "needs input" notice, or `None` for other notices or an unset `url`.
+/// The push for a "needs input" notice, or `None` for other notices or a `url` that is not http(s).
 pub(super) fn push_request(kind: &NoticeKind, project: Option<&str>, url: &str) -> Option<Push> {
     let url = url.trim();
-    if url.is_empty() || !matches!(kind, NoticeKind::ClaudeNeedsInput { .. }) {
+    let http = url.starts_with("http://") || url.starts_with("https://");
+    if !http || !matches!(kind, NoticeKind::ClaudeNeedsInput { .. }) {
         return None;
     }
     Some(Push {
         url: url.into(),
-        headers: [("Priority", "high"), ("Tags", "robot")],
-        title: "Claude needs input",
+        headers: [
+            ("Title", "Claude needs input"),
+            ("Priority", "high"),
+            ("Tags", "robot"),
+        ],
         body: format!("Waiting in {}", project.unwrap_or("Daedalus")),
     })
+}
+
+/// The curl arguments for a push; the body goes on stdin, and `--` keeps the URL from reading as an option.
+fn curl_args(push: &Push) -> Vec<String> {
+    let mut args: Vec<String> = ["-fsS", "--max-time", "10", "--proto", "=http,https"]
+        .map(String::from)
+        .into();
+    for (name, value) in push.headers {
+        args.push("-H".into());
+        args.push(format!("{name}: {value}"));
+    }
+    args.extend(["--data-binary", "@-", "--"].map(String::from));
+    args.push(push.url.clone());
+    args
 }
 
 /// Runs curl detached so a slow or unreachable server never holds up the UI.
@@ -235,30 +252,27 @@ fn send_push(push: Push) {
     use std::process::{Command, Stdio};
 
     std::thread::spawn(move || {
-        let mut cmd = Command::new("/usr/bin/curl");
-        cmd.args(["-fsS", "--max-time", "10", "-H"])
-            .arg(format!("Title: {}", push.title));
-        for (name, value) in push.headers {
-            cmd.arg("-H").arg(format!("{name}: {value}"));
-        }
-        cmd.args(["--data-binary", "@-"])
-            .arg(&push.url)
+        let child = Command::new("/usr/bin/curl")
+            .args(curl_args(&push))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let result = cmd.spawn().and_then(|mut child| {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(push.body.as_bytes())?;
-            }
-            child.wait_with_output()
-        });
-        match result {
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match child {
+            Ok(child) => child,
+            Err(e) => return tracing::warn!("push failed: {e}"),
+        };
+        let wrote = child
+            .stdin
+            .take()
+            .map_or(Ok(()), |mut stdin| stdin.write_all(push.body.as_bytes()));
+        match child.wait_with_output() {
             Ok(out) if out.status.success() => {}
             Ok(out) => tracing::warn!(
-                "push failed: {}",
+                "push failed: {}; stdin: {wrote:?}",
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
-            Err(e) => tracing::warn!("push failed: {e}"),
+            Err(e) => tracing::warn!("push failed: {e}; stdin: {wrote:?}"),
         }
     });
 }
@@ -1113,9 +1127,15 @@ mod tests {
         let url = "https://ntfy.sh/topic";
         let push = push_request(&ask, Some("api"), url).unwrap();
         assert_eq!(push.url, url);
-        assert_eq!(push.title, "Claude needs input");
         assert_eq!(push.body, "Waiting in api");
-        assert_eq!(push.headers, [("Priority", "high"), ("Tags", "robot")]);
+        assert_eq!(
+            push.headers,
+            [
+                ("Title", "Claude needs input"),
+                ("Priority", "high"),
+                ("Tags", "robot")
+            ]
+        );
         assert!(!format!("{push:?}").contains("secrets"));
         assert_eq!(
             push_request(&ask, None, url).unwrap().body,
@@ -1123,10 +1143,28 @@ mod tests {
         );
         assert_eq!(push_request(&ask, Some("api"), ""), None);
         assert_eq!(push_request(&ask, Some("api"), "  "), None);
+        assert_eq!(push_request(&ask, Some("api"), "-oowned"), None);
+        assert_eq!(push_request(&ask, Some("api"), "file:///etc/hosts"), None);
         assert_eq!(
             push_request(&NoticeKind::ClaudeStopped, Some("api"), url),
             None
         );
+    }
+
+    #[test]
+    fn curl_gets_the_url_last_after_a_double_dash_and_the_body_only_on_stdin() {
+        let ask = NoticeKind::ClaudeNeedsInput {
+            message: "m".into(),
+        };
+        let push = push_request(&ask, Some("api"), "https://ntfy.sh/t").unwrap();
+        let args = curl_args(&push);
+        let n = args.len();
+        assert_eq!(args[n - 1], "https://ntfy.sh/t");
+        assert_eq!(args[n - 2], "--");
+        let proto = args.iter().position(|a| a == "--proto").unwrap();
+        assert_eq!(args[proto + 1], "=http,https");
+        assert!(args.contains(&"Title: Claude needs input".to_string()));
+        assert!(!args.iter().any(|a| a.contains("Waiting in")));
     }
 
     #[test]

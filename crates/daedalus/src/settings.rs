@@ -2514,11 +2514,13 @@ pub(crate) mod tests {
                 "[go]": {"format_on_save": false},
                 "lsp": {"gopls": {"hints": {"assignVariableTypes": true}}},
                 "theme": "dark", "window.zoom_level": 2,
-                "claude": {"hooks": false}, "companion.enabled": true}"#,
+                "claude": {"hooks": false}, "companion.enabled": true,
+                "companion.push_url": "https://x"}"#,
         )
         .unwrap();
-        assert_eq!(problems.len(), 4, "{problems:?}");
+        assert_eq!(problems.len(), 5, "{problems:?}");
         assert_eq!(project.companion_enabled, None);
+        assert_eq!(project.companion_push_url, None);
         assert_eq!(project.theme, None);
         assert_eq!(project.claude_hooks, None);
         let both = user.overlaid(&project);
