@@ -23,7 +23,8 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 1. The phone sends `hello` first. If the `proto` major differs, the server closes with code 4001.
 2. The server answers `welcome`, then a `snapshot`, and another whenever state changes (at most every 250 ms).
-3. `attach` starts a pane: `attached`, binary output frames for the replay tail, `replay_done`, then live frames.
+3. `attach` starts a pane: `attached`, binary output frames for the replay tail, `replay_done`, then live frames. A pane that is not in the latest snapshot gets an `error`, and so does a ninth pane: a connection streams at most 8 panes at once.
+4. Input is a binary frame of kind `2`. It is ignored for a pane that is not attached, and the server forwards it to the terminal in order.
 
 ## Phone to desktop (`/v1/connect`)
 
@@ -33,13 +34,13 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"hello","proto":1,"app":"0.1.0","device":"Jason's iPhone"}
 ```
 
-`attach`: replay up to `tail` bytes (capped at 1 MiB), then stream live output.
+`attach`: replay up to `tail` bytes (capped at 1 MiB), then stream live output. When the replay is cut, it starts after the first newline of the newest `tail` bytes, or at the cut if there is none. Attaching a pane that is already attached replaces the earlier attachment and replays again.
 
 ```json
 {"type":"attach","pane":123,"tail":262144}
 ```
 
-`detach`: stop streaming a pane.
+`detach`: stop streaming a pane. The server sends nothing back, and closing the socket detaches every pane.
 
 ```json
 {"type":"detach","pane":123}
@@ -89,7 +90,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"exited","pane":123,"code":0}
 ```
 
-`dropped`: the server stopped streaming a pane (`lagging` or `closed`). The phone re-attaches when the pane is visible.
+`dropped`: the server stopped streaming a pane. `lagging` means the phone read too slowly (more than 2 MiB of output waiting to be sent) or its input could not be forwarded fast enough, and `closed` means the session daemon could not be reached or hung up. Frames already queued for the pane are discarded. The phone re-attaches when the pane is visible.
 
 ```json
 {"type":"dropped","pane":123,"reason":"lagging"}

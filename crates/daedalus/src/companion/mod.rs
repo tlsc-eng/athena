@@ -4,4 +4,5 @@
 mod devices;
 pub mod protocol;
 pub mod server;
+mod stream;
 pub mod tailnet;

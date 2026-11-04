@@ -24,9 +24,10 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
 use super::devices::{Device, Devices, PairingCode};
 use super::protocol::{
-    self, ClientMsg, NoticeKind, PROTO, PairReply, PairRequest, Project, ServerMsg, Session,
-    Terminal,
+    self, ClientMsg, DropReason, Kind, NoticeKind, PROTO, PairReply, PairRequest, Project,
+    ServerMsg, Session, Terminal,
 };
+use super::stream::{Attachments, Out};
 use super::tailnet;
 use crate::ide::lock::{token, write_private};
 
@@ -57,6 +58,8 @@ pub struct Config {
     pub allow_loopback_for_tests: bool,
     /// The Mac's name, shown on the phone.
     pub name: String,
+    /// The session daemon's Unix socket, where attached panes are streamed from.
+    pub mux_socket: PathBuf,
 }
 
 /// The answer to a pairing prompt.
@@ -108,6 +111,7 @@ struct Shared {
     devices: Arc<Mutex<Devices>>,
     pairing: Mutex<Option<PairingCode>>,
     cli: Option<PathBuf>,
+    mux_socket: PathBuf,
     allow_loopback: bool,
     commands: async_channel::Sender<Command>,
     snapshot: watch::Sender<Arc<Snapshot>>,
@@ -148,6 +152,7 @@ impl Server {
             devices: config.devices,
             pairing: Mutex::new(None),
             cli: config.cli,
+            mux_socket: config.mux_socket,
             allow_loopback: config.allow_loopback_for_tests,
             commands,
             snapshot: watch::channel(Arc::default()).0,
@@ -600,6 +605,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut dirty = true;
     let mut next_snapshot = Instant::now();
     let mut seq = 0u64;
+    let mut attachments = Attachments::new(shared.mux_socket.clone());
     loop {
         tokio::select! {
             // Biased so a queued revoke wins over a request already readable on the socket.
@@ -637,9 +643,22 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 dirty = true;
                                 None
                             }
-                            ClientMsg::Detach { .. } => None,
-                            ClientMsg::Attach { pane, .. } => {
-                                Some(attach(&snapshot.borrow(), pane))
+                            ClientMsg::Detach { pane } => {
+                                attachments.detach(pane);
+                                None
+                            }
+                            ClientMsg::Attach { pane, tail } => {
+                                // Only panes the phone was shown may be attached, so it cannot probe for others.
+                                let open = snapshot.borrow().terminals.iter().any(|t| t.pane == pane);
+                                let refused = if open {
+                                    attachments.attach(pane, tail).err()
+                                } else {
+                                    Some("pane is not open")
+                                };
+                                refused.map(|message| ServerMsg::Error {
+                                    id: None,
+                                    message: message.into(),
+                                })
                             }
                             ClientMsg::SpawnClaude { id, project } => {
                                 let current = Arc::clone(&snapshot.borrow());
@@ -659,7 +678,26 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                         close(&mut ws, code, "invalid frame").await;
                         break;
                     }
+                    Message::Binary(bytes) => {
+                        if let Some((Kind::Input, pane, data)) = protocol::parse(&bytes)
+                            && !attachments.input(pane, data)
+                        {
+                            let dropped = ServerMsg::Dropped { pane, reason: DropReason::Lagging };
+                            if !send(&mut ws, &dropped).await {
+                                break;
+                            }
+                        }
+                    }
                     _ => {}
+                }
+            }
+            out = attachments.next() => {
+                let sent = match out {
+                    Out::Msg(message) => send(&mut ws, &message).await,
+                    Out::Frame(bytes, _charge) => send_frame(&mut ws, bytes).await,
+                };
+                if !sent {
+                    break;
                 }
             }
             changed = snapshot.changed() => {
@@ -716,19 +754,6 @@ fn is_paired(shared: &Shared, device: &str) -> bool {
     lock(&shared.devices).list().iter().any(|d| d.id == device)
 }
 
-/// Only panes the phone has been shown may be attached, so it cannot probe for others.
-fn attach(snapshot: &Snapshot, pane: u64) -> ServerMsg {
-    let message = if snapshot.terminals.iter().any(|t| t.pane == pane) {
-        "attaching panes is not available yet"
-    } else {
-        "pane is not open"
-    };
-    ServerMsg::Error {
-        id: None,
-        message: message.into(),
-    }
-}
-
 async fn spawn_claude(
     shared: &Shared,
     snapshot: &Snapshot,
@@ -783,6 +808,13 @@ async fn send<T: Serialize>(ws: &mut Ws, message: &T) -> bool {
     )
 }
 
+async fn send_frame(ws: &mut Ws, bytes: Vec<u8>) -> bool {
+    matches!(
+        timeout(SEND_TIMEOUT, ws.send(Message::binary(bytes))).await,
+        Ok(Ok(()))
+    )
+}
+
 async fn close(ws: &mut Ws, code: CloseCode, reason: &'static str) {
     let frame = CloseFrame {
         code,
@@ -793,8 +825,11 @@ async fn close(ws: &mut Ws, code: CloseCode, reason: &'static str) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant as StdInstant;
+
+    use daedalus_proto as mux;
 
     use tokio_tungstenite::client_async;
     use tokio_tungstenite::tungstenite::Error as WsError;
@@ -805,6 +840,7 @@ mod tests {
 
     struct Fixture {
         dir: PathBuf,
+        mux: PathBuf,
         devices: Arc<Mutex<Devices>>,
         server: Server,
         commands: async_channel::Receiver<Command>,
@@ -823,6 +859,8 @@ mod tests {
                 std::process::id()
             ));
             let _ = std::fs::remove_dir_all(&dir);
+            // sun_path is 104 bytes on macOS, which `temp_dir` can exceed.
+            let mux = PathBuf::from(format!("/tmp/dmx-{}-{n}.sock", std::process::id()));
             let devices = Arc::new(Mutex::new(Devices::load(&dir)));
             let (server, commands) = Server::start(Config {
                 addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0)); listeners],
@@ -831,10 +869,12 @@ mod tests {
                 cli: None,
                 allow_loopback_for_tests: true,
                 name: "Test Mac".into(),
+                mux_socket: mux.clone(),
             })
             .unwrap();
             Self {
                 dir,
+                mux,
                 devices,
                 server,
                 commands,
@@ -882,6 +922,7 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
+            let _ = std::fs::remove_file(&self.mux);
         }
     }
 
@@ -1128,6 +1169,7 @@ mod tests {
                 cli: None,
                 allow_loopback_for_tests: true,
                 name: "Test Mac".into(),
+                mux_socket: fx.mux.clone(),
             })
             .unwrap();
             server.id().to_string()
@@ -1366,6 +1408,385 @@ mod tests {
             panic!("expected an error");
         };
         assert_eq!(message, "pane is not open");
+    }
+
+    enum Seen {
+        Input(u64, Vec<u8>),
+        Eof,
+    }
+
+    /// Stands in for the session daemon; `script` runs on each `Attach`.
+    struct FakeMux {
+        seen: std::sync::mpsc::Receiver<Seen>,
+        path: PathBuf,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FakeMux {
+        fn start(
+            path: &Path,
+            script: impl Fn(&mut UnixStream, u64) + Send + Sync + 'static,
+        ) -> Self {
+            let listener = UnixListener::bind(path).unwrap();
+            let (seen_tx, seen) = std::sync::mpsc::channel();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let script = Arc::new(script);
+            let stopping = stop.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { break };
+                    if stopping.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let (seen_tx, script) = (seen_tx.clone(), script.clone());
+                    std::thread::spawn(move || serve_mux(stream, &*script, &seen_tx));
+                }
+            });
+            Self {
+                seen,
+                path: path.to_path_buf(),
+                stop,
+            }
+        }
+
+        fn next(&self) -> Seen {
+            self.seen
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the fake daemon saw nothing")
+        }
+
+        fn expect_eof(&self) {
+            assert!(matches!(self.next(), Seen::Eof), "expected a hang-up");
+        }
+    }
+
+    impl Drop for FakeMux {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = UnixStream::connect(&self.path);
+        }
+    }
+
+    fn serve_mux(
+        mut stream: UnixStream,
+        script: &(dyn Fn(&mut UnixStream, u64) + Send + Sync),
+        seen: &std::sync::mpsc::Sender<Seen>,
+    ) {
+        let hello: Option<mux::ClientMsg> = mux::read_frame(&mut stream).unwrap();
+        assert!(matches!(hello, Some(mux::ClientMsg::Hello { .. })));
+        let reply = mux::ServerMsg::Hello {
+            proto: mux::PROTO_VERSION,
+            pid: 0,
+            panes: 0,
+        };
+        mux::write_frame(&mut stream, &reply).unwrap();
+        loop {
+            let message: std::io::Result<Option<mux::ClientMsg>> = mux::read_frame(&mut stream);
+            match message {
+                Ok(Some(mux::ClientMsg::Attach { pane })) => script(&mut stream, pane),
+                Ok(Some(mux::ClientMsg::Input { pane, data })) => {
+                    let _ = seen.send(Seen::Input(pane, data));
+                }
+                Ok(Some(_)) => {}
+                _ => {
+                    let _ = seen.send(Seen::Eof);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn mux_send(stream: &mut UnixStream, message: mux::ServerMsg) -> bool {
+        mux::write_frame(stream, &message).is_ok()
+    }
+
+    fn mux_attached(stream: &mut UnixStream, pane: u64) {
+        mux_send(
+            stream,
+            mux::ServerMsg::Attached {
+                pane,
+                rows: 30,
+                cols: 100,
+            },
+        );
+    }
+
+    /// Replays `aaaa\nbbbb\ncccc\n` in three pieces, then sends `live`.
+    fn mux_replay_then_live(stream: &mut UnixStream, pane: u64) {
+        mux_attached(stream, pane);
+        for piece in [&b"aaaa\nbb"[..], b"bb\ncccc", b"\n"] {
+            let data = piece.to_vec();
+            mux_send(stream, mux::ServerMsg::Output { pane, data });
+        }
+        mux_send(stream, mux::ServerMsg::ReplayDone { pane });
+        let data = b"live".to_vec();
+        mux_send(stream, mux::ServerMsg::Output { pane, data });
+    }
+
+    fn mux_attached_only(stream: &mut UnixStream, pane: u64) {
+        mux_attached(stream, pane);
+        mux_send(stream, mux::ServerMsg::ReplayDone { pane });
+    }
+
+    #[derive(Debug)]
+    enum Item {
+        Msg(ServerMsg),
+        Bytes(u64, Vec<u8>),
+    }
+
+    /// The next message or output frame, skipping snapshots.
+    async fn next_item(ws: &mut Ws) -> Item {
+        loop {
+            let message = timeout(Duration::from_secs(10), ws.next())
+                .await
+                .expect("timed out")
+                .expect("closed")
+                .expect("socket error");
+            match message {
+                Message::Text(text) => match serde_json::from_str(text.as_str()).unwrap() {
+                    ServerMsg::Snapshot { .. } => {}
+                    other => return Item::Msg(other),
+                },
+                Message::Binary(bytes) => {
+                    let (kind, pane, payload) = protocol::parse(&bytes).unwrap();
+                    assert_eq!(kind, Kind::Output);
+                    assert!(payload.len() <= protocol::MAX_PAYLOAD);
+                    return Item::Bytes(pane, payload.to_vec());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn show_panes(fx: &Fixture, panes: &[u64]) {
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            terminals: panes.iter().map(|&p| terminal(p)).collect(),
+            ..Snapshot::default()
+        }));
+    }
+
+    /// Welcomes a new phone and attaches `pane`, returning after the replay finished.
+    async fn attached(fx: &Fixture, pane: u64, tail: u64) -> Ws {
+        show_panes(fx, &[pane]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::Attach { pane, tail }).await;
+        loop {
+            if let Item::Msg(ServerMsg::ReplayDone { .. }) = next_item(&mut ws).await {
+                return ws;
+            }
+        }
+    }
+
+    async fn send_input(ws: &mut Ws, pane: u64, data: &[u8]) {
+        let frame = protocol::frame(Kind::Input, pane, data);
+        ws.send(Message::binary(frame)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_attached_pane_gets_its_trimmed_tail_then_live_output() {
+        let fx = Fixture::new();
+        let _mux = FakeMux::start(&fx.mux, mux_replay_then_live);
+        show_panes(&fx, &[7]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::Attach { pane: 7, tail: 10 }).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Attached {
+                pane: 7,
+                rows: 30,
+                cols: 100
+            })
+        ));
+        let mut tail = Vec::new();
+        loop {
+            match next_item(&mut ws).await {
+                Item::Bytes(7, bytes) => tail.extend(bytes),
+                Item::Msg(ServerMsg::ReplayDone { pane: 7 }) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(tail, b"cccc\n");
+        assert!(matches!(next_item(&mut ws).await, Item::Bytes(7, b) if b == b"live"));
+    }
+
+    #[tokio::test]
+    async fn input_reaches_the_daemon_for_attached_panes_only() {
+        let fx = Fixture::new();
+        let mux = FakeMux::start(&fx.mux, mux_attached_only);
+        let mut ws = attached(&fx, 7, 0).await;
+        send_input(&mut ws, 8, b"ignored").await;
+        send_input(&mut ws, 7, b"ls\n").await;
+        let Seen::Input(pane, data) = mux.next() else {
+            panic!("expected input");
+        };
+        assert_eq!((pane, data), (7, b"ls\n".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn large_input_arrives_in_order_in_small_chunks() {
+        let fx = Fixture::new();
+        let mux = FakeMux::start(&fx.mux, mux_attached_only);
+        let mut ws = attached(&fx, 7, 0).await;
+        let sent: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        send_input(&mut ws, 7, &sent).await;
+        let mut sizes = Vec::new();
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            let Seen::Input(7, data) = mux.next() else {
+                panic!("expected input");
+            };
+            sizes.push(data.len());
+            got.extend(data);
+        }
+        assert_eq!(sizes, [4096, 4096, 1808]);
+        assert_eq!(got, sent);
+    }
+
+    #[tokio::test]
+    async fn detaching_hangs_up_on_the_daemon() {
+        let fx = Fixture::new();
+        let mux = FakeMux::start(&fx.mux, mux_attached_only);
+        let mut ws = attached(&fx, 7, 0).await;
+        send_json(&mut ws, &ClientMsg::Detach { pane: 7 }).await;
+        mux.expect_eof();
+    }
+
+    #[tokio::test]
+    async fn closing_the_socket_hangs_up_on_the_daemon() {
+        let fx = Fixture::new();
+        let mux = FakeMux::start(&fx.mux, mux_attached_only);
+        let ws = attached(&fx, 7, 0).await;
+        drop(ws);
+        mux.expect_eof();
+    }
+
+    #[tokio::test]
+    async fn revoking_a_device_hangs_up_on_the_daemon() {
+        let fx = Fixture::new();
+        let mux = FakeMux::start(&fx.mux, mux_attached_only);
+        show_panes(&fx, &[7]);
+        let (device, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::Attach { pane: 7, tail: 0 }).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Attached { .. })
+        ));
+        fx.server.revoke(&device).unwrap();
+        mux.expect_eof();
+    }
+
+    #[tokio::test]
+    async fn an_exited_pane_is_reported_with_its_code() {
+        let fx = Fixture::new();
+        let _mux = FakeMux::start(&fx.mux, |stream, pane| {
+            mux_attached_only(stream, pane);
+            mux_send(
+                stream,
+                mux::ServerMsg::Exited {
+                    pane,
+                    code: Some(3),
+                },
+            );
+        });
+        let mut ws = attached(&fx, 7, 0).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Exited {
+                pane: 7,
+                code: Some(3)
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_daemon_drops_the_pane_as_closed() {
+        let fx = Fixture::new();
+        show_panes(&fx, &[7]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::Attach { pane: 7, tail: 0 }).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Dropped {
+                pane: 7,
+                reason: DropReason::Closed
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_daemon_hang_up_without_an_exit_drops_the_pane_as_closed() {
+        let fx = Fixture::new();
+        let _mux = FakeMux::start(&fx.mux, |stream, pane| {
+            mux_attached_only(stream, pane);
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+        let mut ws = attached(&fx, 7, 0).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Dropped {
+                pane: 7,
+                reason: DropReason::Closed
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn eight_panes_can_be_attached_and_a_reattach_replaces() {
+        let fx = Fixture::new();
+        let mux = FakeMux::start(&fx.mux, mux_attached_only);
+        show_panes(&fx, &(1..=9).collect::<Vec<_>>());
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        for pane in 1..=8 {
+            send_json(&mut ws, &ClientMsg::Attach { pane, tail: 0 }).await;
+        }
+        let mut done = 0;
+        while done < 8 {
+            if let Item::Msg(ServerMsg::ReplayDone { .. }) = next_item(&mut ws).await {
+                done += 1;
+            }
+        }
+        send_json(&mut ws, &ClientMsg::Attach { pane: 9, tail: 0 }).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Error { id: None, .. })
+        ));
+        send_json(&mut ws, &ClientMsg::Attach { pane: 1, tail: 0 }).await;
+        assert!(matches!(
+            next_item(&mut ws).await,
+            Item::Msg(ServerMsg::Attached { pane: 1, .. })
+        ));
+        mux.expect_eof();
+    }
+
+    #[tokio::test]
+    async fn a_phone_that_stops_reading_is_dropped_as_lagging() {
+        let fx = Fixture::new();
+        let mux = FakeMux::start(&fx.mux, |stream, pane| {
+            mux_attached_only(stream, pane);
+            for _ in 0..256 {
+                let data = vec![b'x'; 256 * 1024];
+                if !mux_send(stream, mux::ServerMsg::Output { pane, data }) {
+                    break;
+                }
+            }
+        });
+        show_panes(&fx, &[7]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::Attach { pane: 7, tail: 0 }).await;
+        // The phone reads nothing until the server has hung up on the daemon.
+        mux.expect_eof();
+        loop {
+            if let Item::Msg(ServerMsg::Dropped { pane, reason }) = next_item(&mut ws).await {
+                assert_eq!((pane, reason), (7, DropReason::Lagging));
+                break;
+            }
+        }
     }
 
     #[test]
