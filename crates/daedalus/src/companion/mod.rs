@@ -7,3 +7,4 @@ pub mod server;
 mod stream;
 pub mod tailnet;
 pub(crate) mod transcript;
+mod transcript_feed;

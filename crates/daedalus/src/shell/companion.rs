@@ -275,6 +275,7 @@ fn start(
         allow_loopback_for_tests: false,
         name: name.to_string(),
         mux_socket,
+        home: std::env::home_dir().unwrap_or_default(),
     })
 }
 

@@ -350,8 +350,6 @@ fn project_dirs(home: &Path, root: &Path) -> Vec<(Profile, PathBuf)> {
 }
 
 /// The transcript of session `id` in whichever profile holds it for the project at `cwd`.
-// Only the companion's transcript server calls this, and it is not wired in yet.
-#[allow(dead_code)]
 pub fn find(home: &Path, cwd: &Path, id: &str) -> Option<PathBuf> {
     if !crate::snapshots::valid_session(id) {
         return None;
