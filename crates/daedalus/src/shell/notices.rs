@@ -206,29 +206,51 @@ pub(super) fn describe(kind: &NoticeKind, project: Option<&str>) -> (String, Str
     }
 }
 
-/// An ntfy push built from a notice; the prompt text stays out because the server is third-party.
+/// An ntfy push; a notice's prompt text stays out of it because the server is third-party.
 #[derive(Debug, PartialEq)]
 pub(super) struct Push {
     pub url: String,
-    pub headers: [(&'static str, &'static str); 3],
+    pub title: String,
+    pub headers: [(&'static str, &'static str); 2],
     pub body: String,
+}
+
+/// The trimmed `url`, or `None` when it is not http(s), so it can never read as a curl option or a file.
+fn http_url(url: &str) -> Option<&str> {
+    let url = url.trim();
+    (url.starts_with("http://") || url.starts_with("https://")).then_some(url)
 }
 
 /// The push for a "needs input" notice, or `None` for other notices or a `url` that is not http(s).
 pub(super) fn push_request(kind: &NoticeKind, project: Option<&str>, url: &str) -> Option<Push> {
-    let url = url.trim();
-    let http = url.starts_with("http://") || url.starts_with("https://");
-    if !http || !matches!(kind, NoticeKind::ClaudeNeedsInput { .. }) {
+    let url = http_url(url)?;
+    if !matches!(kind, NoticeKind::ClaudeNeedsInput { .. }) {
         return None;
     }
     Some(Push {
         url: url.into(),
-        headers: [
-            ("Title", "Claude needs input"),
-            ("Priority", "high"),
-            ("Tags", "robot"),
-        ],
+        title: "Claude needs input".into(),
+        headers: [("Priority", "high"), ("Tags", "robot")],
         body: format!("Waiting in {}", project.unwrap_or("Daedalus")),
+    })
+}
+
+/// The push for a plan limit passing its alert level; the profile goes in the body so the title stays ASCII.
+pub(super) fn usage_push_request(
+    label: &str,
+    used: f32,
+    profile: &str,
+    resets: Option<&str>,
+    url: &str,
+) -> Option<Push> {
+    Some(Push {
+        url: http_url(url)?.into(),
+        title: format!("Claude {label} limit at {used:.0}%"),
+        headers: [("Priority", "high"), ("Tags", "warning")],
+        body: match resets {
+            Some(at) => format!("{profile} \u{b7} resets {at}"),
+            None => profile.into(),
+        },
     })
 }
 
@@ -237,7 +259,8 @@ fn curl_args(push: &Push) -> Vec<String> {
     let mut args: Vec<String> = ["-fsS", "--max-time", "10", "--proto", "=http,https"]
         .map(String::from)
         .into();
-    for (name, value) in push.headers {
+    let title = ("Title", push.title.as_str());
+    for (name, value) in std::iter::once(title).chain(push.headers) {
         args.push("-H".into());
         args.push(format!("{name}: {value}"));
     }
@@ -247,7 +270,7 @@ fn curl_args(push: &Push) -> Vec<String> {
 }
 
 /// Runs curl detached so a slow or unreachable server never holds up the UI.
-fn send_push(push: Push) {
+pub(super) fn send_push(push: Push) {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -1128,14 +1151,8 @@ mod tests {
         let push = push_request(&ask, Some("api"), url).unwrap();
         assert_eq!(push.url, url);
         assert_eq!(push.body, "Waiting in api");
-        assert_eq!(
-            push.headers,
-            [
-                ("Title", "Claude needs input"),
-                ("Priority", "high"),
-                ("Tags", "robot")
-            ]
-        );
+        assert_eq!(push.title, "Claude needs input");
+        assert_eq!(push.headers, [("Priority", "high"), ("Tags", "robot")]);
         assert!(!format!("{push:?}").contains("secrets"));
         assert_eq!(
             push_request(&ask, None, url).unwrap().body,
@@ -1149,6 +1166,37 @@ mod tests {
             push_request(&NoticeKind::ClaudeStopped, Some("api"), url),
             None
         );
+    }
+
+    #[test]
+    fn a_usage_push_names_the_window_and_percent_and_puts_the_profile_in_the_body() {
+        let url = "https://ntfy.sh/topic";
+        let push = usage_push_request("5h", 91.4, "claude-tlsc", Some("17:59"), url).unwrap();
+        assert_eq!(push.url, url);
+        assert_eq!(push.title, "Claude 5h limit at 91%");
+        assert!(push.title.is_ascii());
+        assert_eq!(push.body, "claude-tlsc \u{b7} resets 17:59");
+        assert_eq!(push.headers, [("Priority", "high"), ("Tags", "warning")]);
+        let bare = usage_push_request("7d", 90., "claude-ai", None, url).unwrap();
+        assert_eq!(bare.body, "claude-ai");
+        for bad in ["", "  ", "-oowned", "file:///etc/hosts"] {
+            assert_eq!(usage_push_request("5h", 95., "p", None, bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_usage_push_keeps_curl_s_url_last_and_proto_guard_and_the_body_off_the_command_line() {
+        let push =
+            usage_push_request("5h", 95., "claude-ai", Some("09:05"), "https://ntfy.sh/t").unwrap();
+        let args = curl_args(&push);
+        let n = args.len();
+        assert_eq!(args[n - 1], "https://ntfy.sh/t");
+        assert_eq!(args[n - 2], "--");
+        let proto = args.iter().position(|a| a == "--proto").unwrap();
+        assert_eq!(args[proto + 1], "=http,https");
+        assert!(args.contains(&"Title: Claude 5h limit at 95%".to_string()));
+        assert!(args.contains(&"Tags: warning".to_string()));
+        assert!(!args.iter().any(|a| a.contains("claude-ai")));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use gpui::{
     PromptLevel, Window, div, prelude::*,
 };
 
+use super::notices::{send_push, usage_push_request};
 use super::{Shell, windows};
 use crate::transcripts;
 use crate::usage::{self, Profile, Status};
@@ -18,6 +19,8 @@ const POLL: Duration = Duration::from_secs(5 * 60);
 /// Refresh presses closer together than this reuse the last reading.
 const MIN_REFRESH: Duration = Duration::from_secs(60);
 const LEVELS: [f32; 2] = [75., 90.];
+/// Lower levels stay in the app; a phone buzz is for a limit that is about to bite.
+const PUSH_LEVEL: f32 = 90.;
 
 #[derive(Default)]
 pub(super) struct UsageState {
@@ -60,6 +63,77 @@ fn choose<'a>(
 /// A refresh waits out `MIN_REFRESH` and any rate-limit retry-after since the last fetch.
 fn refresh_allowed(since_fetch: Option<Duration>, retry_after: Duration) -> bool {
     since_fetch.is_none_or(|elapsed| elapsed >= MIN_REFRESH.max(retry_after))
+}
+
+struct Crossing {
+    profile: String,
+    label: String,
+    used: f32,
+    level: f32,
+    resets_at: Option<i64>,
+}
+
+impl Crossing {
+    fn pushes(&self) -> bool {
+        self.level >= PUSH_LEVEL
+    }
+}
+
+/// The levels newly passed since the last reading, recording what was announced.
+fn crossings(
+    announced: &mut HashMap<(String, String), f32>,
+    readings: &[(Profile, Status)],
+) -> Vec<Crossing> {
+    let mut crossings = Vec::new();
+    for (profile, status) in readings {
+        let Status::Windows(windows) = status else {
+            continue;
+        };
+        for w in windows
+            .iter()
+            .filter(|w| w.label == "5h" || w.label == "7d")
+        {
+            let key = (profile.name.clone(), w.label.clone());
+            let level = LEVELS
+                .iter()
+                .copied()
+                .filter(|l| w.used >= *l)
+                .fold(0., f32::max);
+            let previous = announced.get(&key).copied().unwrap_or(0.);
+            if level > previous {
+                crossings.push(Crossing {
+                    profile: profile.name.clone(),
+                    label: w.label.clone(),
+                    used: w.used,
+                    level,
+                    resets_at: w.resets_at,
+                });
+            }
+            announced.insert(key, level);
+        }
+    }
+    crossings
+}
+
+/// The crossings that push, tracked in `pushed` so windows sharing it never push one twice.
+fn pushes_due(
+    pushed: &mut HashMap<(String, String), f32>,
+    readings: &[(Profile, Status)],
+) -> Vec<Crossing> {
+    let mut due = crossings(pushed, readings);
+    due.retain(Crossing::pushes);
+    due
+}
+
+fn local_hhmm(at: i64) -> String {
+    let t = at as libc::time_t;
+    // SAFETY: localtime_r only writes the tm it is given.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 fn resets_in(at: i64) -> Option<String> {
@@ -144,39 +218,26 @@ impl Shell {
         latest: HashMap<PathBuf, String>,
         cx: &mut Context<Self>,
     ) {
-        let mut crossings = Vec::new();
-        for (profile, status) in &readings {
-            let Status::Windows(windows) = status else {
-                continue;
-            };
-            for w in windows
-                .iter()
-                .filter(|w| w.label == "5h" || w.label == "7d")
-            {
-                let key = (profile.name.clone(), w.label.clone());
-                let level = LEVELS
-                    .iter()
-                    .copied()
-                    .filter(|l| w.used >= *l)
-                    .fold(0., f32::max);
-                let previous = self.usage.announced.get(&key).copied().unwrap_or(0.);
-                if level > previous {
-                    crossings.push(format!(
-                        "{} {} limit at {:.0}%",
-                        profile.name, w.label, w.used
-                    ));
-                }
-                self.usage.announced.insert(key, level);
-            }
-        }
+        let crossings = crossings(&mut self.usage.announced, &readings);
+        let due = pushes_due(windows::usage_pushed(cx), &readings);
         self.usage.readings = readings;
         self.usage.latest = latest;
         self.usage.fetched = Some(Instant::now());
         windows::mark_companion_dirty(cx);
-        for title in crossings {
+        if let Some(url) = self.settings.file.companion_push_url() {
+            for c in &due {
+                let resets = c.resets_at.map(local_hhmm);
+                if let Some(push) =
+                    usage_push_request(&c.label, c.used, &c.profile, resets.as_deref(), url)
+                {
+                    send_push(push);
+                }
+            }
+        }
+        for c in crossings {
             self.local_notice(
                 NoticeKind::Message {
-                    title,
+                    title: format!("{} {} limit at {:.0}%", c.profile, c.label, c.used),
                     body: "Claude plan usage".into(),
                 },
                 cx,
@@ -575,5 +636,63 @@ mod tests {
         assert!(!refresh_allowed(Some(secs(120)), secs(300)));
         assert!(refresh_allowed(Some(secs(61)), Duration::ZERO));
         assert!(refresh_allowed(Some(secs(300)), secs(300)));
+    }
+
+    #[test]
+    fn only_a_crossing_into_ninety_pushes_and_not_again_until_usage_drops_and_rises() {
+        let mut announced = HashMap::new();
+        let mut pushed = |used: f32| {
+            crossings(&mut announced, &[reading("claude-ai", Some(used))])
+                .iter()
+                .map(Crossing::pushes)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pushed(50.), Vec::<bool>::new());
+        assert_eq!(pushed(76.), [false], "75 is a local notice only");
+        assert_eq!(pushed(91.), [true]);
+        assert_eq!(pushed(95.), Vec::<bool>::new());
+        assert_eq!(pushed(10.), Vec::<bool>::new());
+        assert_eq!(pushed(92.), [true], "usage reset, so it crosses again");
+    }
+
+    #[test]
+    fn windows_sharing_the_pushed_levels_push_a_crossing_once_between_them() {
+        let (mut shared, mut first, mut second) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let readings = [reading("claude-ai", Some(91.))];
+        assert_eq!(pushes_due(&mut shared, &readings).len(), 1);
+        assert_eq!(pushes_due(&mut shared, &readings).len(), 0);
+        assert_eq!(crossings(&mut first, &readings).len(), 1);
+        assert_eq!(
+            crossings(&mut second, &readings).len(),
+            1,
+            "each window still tells its user"
+        );
+        let low = [reading("claude-ai", Some(20.))];
+        assert_eq!(pushes_due(&mut shared, &low).len(), 0);
+        assert_eq!(pushes_due(&mut shared, &readings).len(), 1);
+    }
+
+    #[test]
+    fn a_jump_straight_past_ninety_pushes_once_and_other_windows_are_left_out() {
+        let mut announced = HashMap::new();
+        let readings = [(
+            Profile::named("claude-ai"),
+            Status::Windows(vec![
+                usage::Window {
+                    label: "7d".into(),
+                    used: 93.,
+                    resets_at: Some(1_791_921_599),
+                },
+                usage::Window {
+                    label: "Fable".into(),
+                    used: 99.,
+                    resets_at: None,
+                },
+            ]),
+        )];
+        let found = crossings(&mut announced, &readings);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].pushes());
+        assert_eq!((found[0].label.as_str(), found[0].used), ("7d", 93.));
     }
 }
