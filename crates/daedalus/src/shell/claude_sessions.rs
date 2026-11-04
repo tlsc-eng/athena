@@ -91,6 +91,7 @@ pub(super) struct SessionsState {
 #[derive(Default)]
 pub(super) struct Bindings {
     panes: HashMap<PaneId, String>,
+    bound_at: HashMap<String, SystemTime>,
     cwds: HashMap<String, PathBuf>,
     live: HashMap<String, LivePlan>,
 }
@@ -98,6 +99,7 @@ pub(super) struct Bindings {
 impl Bindings {
     pub(super) fn extend(&mut self, other: Bindings) {
         self.panes.extend(other.panes);
+        self.bound_at.extend(other.bound_at);
         self.cwds.extend(other.cwds);
         self.live.extend(other.live);
     }
@@ -123,6 +125,9 @@ impl SessionsState {
             let Some(session) = self.panes.remove(pane) else {
                 continue;
             };
+            if let Some(at) = self.bound_at.remove(&session) {
+                out.bound_at.insert(session.clone(), at);
+            }
             if let Some(cwd) = self.cwds.remove(&session) {
                 out.cwds.insert(session.clone(), cwd);
             }
@@ -135,6 +140,7 @@ impl SessionsState {
     }
 
     pub(super) fn absorb(&mut self, moved: Bindings) {
+        self.bound_at.extend(moved.bound_at);
         for (pane, session) in moved.panes {
             self.bind(pane, session);
         }
@@ -145,6 +151,7 @@ impl SessionsState {
     /// Forgets which pane runs `session`, as another window now does.
     pub(super) fn unbind(&mut self, session: &str) -> bool {
         let before = self.panes.len();
+        self.bound_at.remove(session);
         self.panes.retain(|_, s| s != session);
         self.panes.len() != before
     }

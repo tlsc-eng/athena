@@ -66,7 +66,25 @@ pub(super) fn to_snapshot(windows: Vec<WindowInput>) -> Snapshot {
         );
     }
     snapshot.terminals.sort_by_key(|t| t.pane);
+    dedup_sessions(&mut snapshot.sessions);
     snapshot
+}
+
+/// Windows can both list one session; keep the copy that runs in a pane, else the first.
+fn dedup_sessions(sessions: &mut Vec<Session>) {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut kept: Vec<Session> = Vec::with_capacity(sessions.len());
+    for session in sessions.drain(..) {
+        match seen.get(&session.id) {
+            Some(&at) if kept[at].pane.is_none() && session.pane.is_some() => kept[at] = session,
+            Some(_) => {}
+            None => {
+                seen.insert(session.id.clone(), kept.len());
+                kept.push(session);
+            }
+        }
+    }
+    *sessions = kept;
 }
 
 fn terminal(input: &TerminalInput) -> Option<Terminal> {
@@ -268,7 +286,8 @@ mod tests {
             None,
         ]
         .into_iter()
-        .map(|state| input(live("s", state)))
+        .enumerate()
+        .map(|(i, state)| input(live(&format!("s{i}"), state)))
         .collect();
         let got = to_snapshot(vec![window(sessions, Vec::new())]);
         let states: Vec<_> = got.sessions.iter().map(|s| s.state).collect();
@@ -346,6 +365,31 @@ mod tests {
             got.sessions[0].project.as_deref(),
             Some("/code/app-worktrees/fix")
         );
+    }
+
+    #[test]
+    fn a_session_two_windows_list_appears_once_with_its_pane() {
+        let mut idle = live("dup", None);
+        idle.pane = None;
+        let mut first = window(vec![input(idle), input(live("only", None))], Vec::new());
+        first.id = 1;
+        let mut second = window(
+            vec![input(live("dup", Some(ClaudeState::Running)))],
+            Vec::new(),
+        );
+        second.id = 2;
+        let got = to_snapshot(vec![first, second]);
+        let ids: Vec<_> = got.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["dup", "only"]);
+        assert_eq!(got.sessions[0].pane, Some(7));
+
+        let mut a = live("same", None);
+        a.label = "first".into();
+        let mut b = live("same", None);
+        b.label = "second".into();
+        let got = to_snapshot(vec![window(vec![input(a), input(b)], Vec::new())]);
+        assert_eq!(got.sessions.len(), 1);
+        assert_eq!(got.sessions[0].label, "first");
     }
 
     #[test]
