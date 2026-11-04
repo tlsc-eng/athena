@@ -11,7 +11,7 @@ The server listens on `ws://<tailscale-addr>:47123`.
 | `GET /v1/pair` | `X-Daedalus-Pair: <code>` | One pairing exchange, then the socket closes. |
 | `GET /v1/connect` | `Authorization: Bearer <device token>` | The long-lived session. |
 
-A request with an `Origin` header is refused with 403. The server pings every 20 s and drops a peer that sends no pong for 45 s.
+A request with an `Origin` header is refused with 403. The server pings every 20 s and drops a peer that sends no pong for 45 s. `/v1/connect` answers 401 before the upgrade for a bad or revoked token and 429 when the device already has 4 connections, and a live socket is closed with code 1008 (Policy) when its device is revoked.
 
 ## Framing
 

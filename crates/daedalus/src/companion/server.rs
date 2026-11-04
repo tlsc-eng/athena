@@ -450,6 +450,8 @@ fn admit(
             Ok((response, Route::Pair))
         }
         "/v1/connect" => {
+            // Subscribed before the token check so a revoke after it cannot be missed.
+            let revoked = shared.revoked.subscribe();
             let token = header("authorization")
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .unwrap_or_default();
@@ -460,7 +462,7 @@ fn admit(
             if !same_owner(&device, whois) {
                 return Err(refuse(StatusCode::UNAUTHORIZED));
             }
-            let Some(slot) = Slot::reserve(shared, &device.id) else {
+            let Some(slot) = Slot::reserve(shared, &device.id, revoked) else {
                 return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
             };
             Ok((response, Route::Connect(slot)))
@@ -491,7 +493,11 @@ struct Slot {
 }
 
 impl Slot {
-    fn reserve(shared: &Arc<Shared>, device: &str) -> Option<Self> {
+    fn reserve(
+        shared: &Arc<Shared>,
+        device: &str,
+        revoked: broadcast::Receiver<String>,
+    ) -> Option<Self> {
         let mut live = lock(&shared.live);
         let count = live.entry(device.to_string()).or_default();
         if *count >= MAX_PER_DEVICE {
@@ -501,7 +507,7 @@ impl Slot {
         Some(Self {
             shared: shared.clone(),
             device: device.to_string(),
-            revoked: shared.revoked.subscribe(),
+            revoked,
         })
     }
 }
@@ -960,6 +966,16 @@ mod tests {
             .await
             .expect("no close frame within a second of the revoke");
         assert_eq!(code, Some(CloseCode::Policy));
+    }
+
+    #[tokio::test]
+    async fn a_revoke_after_subscribing_reaches_the_reserved_slot() {
+        let fx = Fixture::new();
+        let (id, _) = fx.pair_device();
+        let revoked = fx.server.shared.revoked.subscribe();
+        assert!(fx.server.revoke(&id).unwrap());
+        let mut slot = Slot::reserve(&fx.server.shared, &id, revoked).unwrap();
+        assert_eq!(slot.revoked.try_recv(), Ok(id));
     }
 
     #[tokio::test]
