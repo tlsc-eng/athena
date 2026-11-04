@@ -1052,7 +1052,7 @@ mod tests {
     async fn a_revoke_during_a_spawn_beats_the_next_queued_request() {
         let fx = Fixture::new();
         open_project(&fx);
-        for _ in 0..8 {
+        for _ in 0..30 {
             let (id, token) = fx.pair_device();
             let mut ws = fx.welcomed(&token).await;
             send_spawn(&mut ws).await;
