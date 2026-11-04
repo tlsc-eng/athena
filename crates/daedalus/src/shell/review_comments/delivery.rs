@@ -18,7 +18,7 @@ use crate::snapshots;
 
 /// Claude Code reads a paste and an Enter that arrive together as one multi-line paste, so the
 /// Enter waits for the paste to be taken in.
-const SUBMIT_DELAY: Duration = Duration::from_millis(80);
+pub(in crate::shell) const SUBMIT_DELAY: Duration = Duration::from_millis(80);
 
 const NOT_RUNNING: &str = "Claude isn't running for that session. Resume it first.";
 

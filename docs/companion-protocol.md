@@ -15,7 +15,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Framing
 
-- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `act` and `usage`.
+- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
 
@@ -76,13 +76,13 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"transcript_close","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10"}
 ```
 
-`prompt`: type `text` into a terminal pane and submit it. `text` is at most 16 KiB, and the phone strips C0 control characters except `\n` and `\t`. The server refuses a pane that is not a terminal, and a Claude pane that is in `needs_input`. A running Claude accepts it and queues the message. `id` is echoed in `sent` or `error`.
+`prompt`: type `text` into a terminal pane and submit it. `text` is at most 16 KiB (`prompt is too long` beyond that), and the phone strips C0 control characters except `\n` and `\t`. The pane must be in the latest snapshot (`pane is not open` otherwise). The desktop pastes the text, waits 80 ms, checks the pane again and presses Enter. It refuses with `Claude is asking something; answer it first` when Claude is in `needs_input`, at the first check or at the second. In that case the text may already sit in the prompt. A running Claude accepts it and queues the message. Any text already in the prompt is not checked, and the new text goes after it. `id` is echoed in `sent`, once Enter is pressed, or in `error`. The desktop never logs the text.
 
 ```json
 {"type":"prompt","id":"r7","pane":123,"text":"run the tests\nthen commit"}
 ```
 
-`interrupt`: send Esc to a pane whose Claude is `running`. `id` is echoed in `sent` or `error`.
+`interrupt`: send Esc to a pane whose Claude is `running`. A pane that is not in the latest snapshot gets `pane is not open`, one that is not a Claude session gets `this is not a Claude session`, and Claude in any other state gets `Claude is not running`. `id` is echoed in `sent` or `error`.
 
 ```json
 {"type":"interrupt","id":"r10","pane":123}
@@ -96,10 +96,10 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `act` for `prompt` and `interrupt`, `usage` for `snapshot.usage` and `usage_refresh`), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","act","usage"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.

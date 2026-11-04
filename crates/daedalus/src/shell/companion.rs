@@ -14,6 +14,7 @@ use crate::companion::devices::Devices;
 use crate::companion::server::{self, Config, Server};
 use crate::companion::tailnet;
 
+pub(super) mod act;
 mod snapshot;
 
 const PORT: u16 = 47123;
