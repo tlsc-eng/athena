@@ -20,6 +20,7 @@ pub use project::{LinterTrust, PANEL_IDS, Panel, Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
 pub use windows::{WindowEntry, list_parked, park, parked_sessions, retain_parked, take_parked};
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -341,7 +342,7 @@ impl Workspace {
         self.active.and_then(|i| self.projects.get(i))
     }
 
-    /// Rail labels, pairwise distinct for distinct names: colliding projects get the letter where their names differ, else a free later letter.
+    /// Rail labels, pairwise distinct for distinct names: colliding projects get the letter where their names differ, else a free later letter. Distinct up to 1296 projects, after which the rest share `··`.
     pub fn monograms(&self) -> Vec<String> {
         let base: Vec<String> = self.projects.iter().map(Project::monogram).collect();
         let names: Vec<Vec<char>> = self
@@ -349,20 +350,19 @@ impl Workspace {
             .iter()
             .map(|p| p.name().to_uppercase().chars().collect())
             .collect();
-        let collides = |i: usize| (0..base.len()).any(|j| j != i && base[j] == base[i]);
-        let mut labels: Vec<String> = (0..base.len())
-            .filter(|&i| !collides(i))
+        let needs_label =
+            |i: usize| base[i].is_empty() || (0..base.len()).any(|j| j != i && base[j] == base[i]);
+        let mut labels: HashSet<String> = (0..base.len())
+            .filter(|&i| !needs_label(i))
             .map(|i| base[i].clone())
             .collect();
         (0..base.len())
             .map(|i| {
-                if !collides(i) {
+                if !needs_label(i) {
                     return base[i].clone();
                 }
                 let name = &names[i];
-                let Some(first) = name.iter().find(|c| c.is_alphanumeric()) else {
-                    return base[i].clone();
-                };
+                let first = name.iter().find(|c| c.is_alphanumeric()).unwrap_or(&'?');
                 let split = (0..base.len())
                     .filter(|&j| j != i && base[j] == base[i])
                     .map(|j| {
@@ -376,16 +376,20 @@ impl Workspace {
                     .max(1);
                 let divergence = name.get(split).filter(|c| c.is_alphanumeric());
                 let later = name.iter().filter(|c| c.is_alphanumeric()).skip(1);
-                let digits = '2'..='9';
-                let label = divergence
+                let alphabet = || ('A'..='Z').chain('0'..='9');
+                let lead = (*first == '?').then_some(&'?');
+                let label = lead
                     .into_iter()
+                    .chain(divergence)
                     .chain(later)
                     .copied()
-                    .chain(digits)
+                    .chain('2'..='9')
+                    .chain(alphabet())
                     .map(|c| format!("{first}{c}"))
+                    .chain(alphabet().flat_map(|a| alphabet().map(move |b| format!("{a}{b}"))))
                     .find(|l| !labels.contains(l))
-                    .unwrap_or_else(|| base[i].clone());
-                labels.push(label.clone());
+                    .unwrap_or_else(|| "··".to_owned());
+                labels.insert(label.clone());
                 label
             })
             .collect()
@@ -642,6 +646,63 @@ mod tests {
     fn a_resolved_monogram_never_takes_another_projects_label() {
         let w = ws(&["/n/hephaestus", "/n/hestia", "/n/hephaestus-saas"]);
         assert_eq!(w.monograms(), ["HP", "HE", "HS"]);
+    }
+
+    #[test]
+    fn labels_stay_distinct_once_the_digit_candidates_run_out() {
+        let ten = ws(&[
+            "/0/ab", "/1/ab", "/2/ab", "/3/ab", "/4/ab", "/5/ab", "/6/ab", "/7/ab", "/8/ab",
+            "/9/ab",
+        ]);
+        let mut crowded = ten.monograms();
+        crowded.sort();
+        crowded.dedup();
+        assert_eq!(crowded.len(), 10);
+
+        let w = ws(&[
+            "/n/a-b", "/n/a_b", "/n/a2", "/n/a3", "/n/a4", "/n/a5", "/n/a6", "/n/a7", "/n/a8",
+            "/n/a9",
+        ]);
+        let mut labels = w.monograms();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), 10);
+    }
+
+    #[test]
+    fn names_without_alphanumerics_get_distinct_question_mark_labels() {
+        let w = ws(&["/a/---", "/b/---", "/c/___"]);
+        let labels = w.monograms();
+        assert!(
+            labels
+                .iter()
+                .all(|l| l.starts_with('?') && l.chars().count() == 2)
+        );
+        assert_eq!(
+            labels
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn labels_stay_distinct_and_non_empty_past_the_first_letter_candidates() {
+        for name in ["ab", "---"] {
+            let paths: Vec<String> = (0..40).map(|i| format!("/{i}/{name}")).collect();
+            let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let labels = ws(&refs).monograms();
+            let unique: std::collections::HashSet<_> = labels.iter().collect();
+            assert_eq!(unique.len(), 40, "{name}");
+            assert!(labels.iter().all(|l| !l.is_empty()), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_lone_name_without_alphanumerics_gets_a_double_question_mark() {
+        assert_eq!(ws(&["/n/---"]).monograms(), ["??"]);
+        assert_eq!(ws(&["/a/---", "/b/---"]).monograms(), ["??", "?2"]);
     }
 
     #[test]
