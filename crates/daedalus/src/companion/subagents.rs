@@ -25,6 +25,8 @@ const RESULT_CLOSE: &str = "</result>";
 struct Entry {
     sub: Subagent,
     offset: u64,
+    // Set when the read budget refused the file, so a later `read_agents` counts it from the start.
+    recount: bool,
 }
 
 /// One `<task-notification>` block with the parts that are safe to read.
@@ -45,6 +47,7 @@ pub(crate) struct Fleet {
     changed: bool,
     // Bytes the finishing agents may still read before the next `read_agents`, so a long replay stays bounded.
     finish_budget: u64,
+    finish_cap: u64,
 }
 
 impl Fleet {
@@ -57,6 +60,7 @@ impl Fleet {
             seen: HashSet::new(),
             changed: false,
             finish_budget: FINISH_BUDGET,
+            finish_cap: FINISH_BUDGET,
         }
     }
 
@@ -95,7 +99,8 @@ impl Fleet {
 
     /// Reads what the running agents wrote to their own files since the last call.
     pub(crate) fn read_agents(&mut self) {
-        self.finish_budget = FINISH_BUDGET;
+        self.finish_budget = self.finish_cap;
+        self.recount();
         for i in 0..self.entries.len() {
             let sub = &self.entries[i].sub;
             if sub.state != SubagentState::Running {
@@ -109,10 +114,11 @@ impl Fleet {
         }
     }
 
+    /// True while an agent runs or a refused recount is still owed, so the caller keeps polling.
     pub(crate) fn running(&self) -> bool {
         self.entries
             .iter()
-            .any(|e| e.sub.state == SubagentState::Running)
+            .any(|e| e.sub.state == SubagentState::Running || e.recount)
     }
 
     /// Running agents first, newest start first, then ended ones, newest end first.
@@ -136,7 +142,7 @@ impl Fleet {
         self.by_agent.clear();
         self.seen.clear();
         self.changed = false;
-        self.finish_budget = FINISH_BUDGET;
+        self.finish_budget = self.finish_cap;
     }
 
     fn launch(&mut self, block: &Value, at: u64) {
@@ -173,6 +179,7 @@ impl Fleet {
                 tool: None,
             },
             offset: 0,
+            recount: false,
         });
         self.changed = true;
     }
@@ -207,14 +214,14 @@ impl Fleet {
     fn result(&mut self, block: &Value, outcome: &Value, at: u64) {
         let tool_id = block["tool_use_id"].as_str().unwrap_or_default();
         if let Some(&i) = self.by_tool.get(tool_id) {
+            if let Some(agent) = agent_id(&outcome["agentId"]) {
+                self.bind(i, agent);
+            }
             if flag(block, "is_error") {
                 self.finish(i, SubagentState::Failed, at, 0);
             } else if outcome["status"] == "completed" {
                 let tools = count(&outcome["totalToolUseCount"]);
                 self.finish(i, SubagentState::Done, at, tools);
-            }
-            if let Some(agent) = agent_id(&outcome["agentId"]) {
-                self.bind(i, agent);
             }
         }
         if let Some(agent) = agent_id(&outcome["resumedAgentId"])
@@ -296,10 +303,46 @@ impl Fleet {
         let offset = self.entries[i].offset;
         let unread = if len < offset { len } else { len - offset };
         if unread > self.finish_budget {
+            // A file over the whole cap can never be recounted, so it stays on the fallback.
+            self.entries[i].recount = unread <= self.finish_cap;
             return false;
         }
         self.finish_budget -= unread;
         self.tail(i, &path)
+    }
+
+    fn recount(&mut self) {
+        for i in 0..self.entries.len() {
+            if !self.entries[i].recount {
+                continue;
+            }
+            let Some(id) = &self.entries[i].sub.agent_id else {
+                self.entries[i].recount = false;
+                continue;
+            };
+            let path = self.dir.join(format!("agent-{id}.jsonl"));
+            let Ok(len) = std::fs::metadata(&path).map(|m| m.len()) else {
+                self.entries[i].recount = false;
+                continue;
+            };
+            if len > self.finish_cap {
+                self.entries[i].recount = false;
+            } else if len <= self.finish_budget {
+                self.finish_budget -= len;
+                let kept = self.entries[i].sub.tools;
+                self.entries[i].offset = 0;
+                self.tail(i, &path);
+                self.entries[i].recount = false;
+                self.edit(i, |s| {
+                    if s.tools == 0 {
+                        s.tools = kept;
+                    }
+                    if s.state != SubagentState::Running {
+                        s.tool = None;
+                    }
+                });
+            }
+        }
     }
 
     fn tail(&mut self, i: usize, path: &Path) -> bool {
@@ -313,6 +356,9 @@ impl Fleet {
         let mut offset = self.entries[i].offset;
         if len < offset {
             offset = 0;
+        }
+        let from_start = offset == 0;
+        if from_start {
             sub.tools = 0;
             sub.tool = None;
             sub.active_at = None;
@@ -343,7 +389,12 @@ impl Fleet {
             }
         }
         self.changed |= sub != self.entries[i].sub;
-        self.entries[i] = Entry { sub, offset };
+        let recount = self.entries[i].recount && !from_start;
+        self.entries[i] = Entry {
+            sub,
+            offset,
+            recount,
+        };
         true
     }
 }
@@ -1072,6 +1123,80 @@ mod tests {
     }
 
     #[test]
+    fn a_foreground_agent_counts_from_its_file_and_a_resume_does_not_double_it() {
+        let steps = [
+            Step::Line(launch("toolu_1", "Agent", 1)),
+            Step::File(vec![agent_line("Read", 3), agent_line("Grep", 4)]),
+            Step::Line(result(
+                "toolu_1",
+                json!({"status": "completed", "agentId": "a1", "totalToolUseCount": 2}),
+                false,
+                4,
+            )),
+            resume(),
+            Step::File(vec![
+                agent_line("Bash", 11),
+                agent_line("Edit", 12),
+                agent_line("Read", 13),
+            ]),
+            Step::Poll,
+            Step::Line(enqueue(&notification("a1", "toolu_1", "completed", 3), 15)),
+        ];
+        let (live, replayed) = live_and_replay("foreground-resume", &steps);
+        assert_eq!(live, [(SubagentState::Done, 5, Some(millis_at(15)))]);
+        assert_eq!(replayed, live);
+    }
+
+    fn budgeted(name: &str, cap_files: u64) -> (Fleet, PathBuf, u64) {
+        let (mut fleet, dir) = fleet(name);
+        let lines = [agent_line("Read", 3), agent_line("Grep", 4)];
+        let size: u64 = lines.iter().map(|l| l.to_string().len() as u64 + 1).sum();
+        for n in 1..=3 {
+            append(&dir.join(format!("s1/subagents/agent-a{n}.jsonl")), &lines);
+        }
+        fleet.finish_cap = size * cap_files + 1;
+        fleet.finish_budget = fleet.finish_cap;
+        for n in 1..=3 {
+            fleet.line(&launch(&format!("toolu_{n}"), "Agent", n));
+            fleet.line(&launched(&format!("toolu_{n}"), &format!("a{n}"), n));
+            fleet.line(&enqueue(
+                &notification(&format!("a{n}"), &format!("toolu_{n}"), "completed", 9),
+                10 + n,
+            ));
+        }
+        (fleet, dir, size)
+    }
+
+    #[test]
+    fn refused_recounts_catch_up_over_successive_polls() {
+        let (mut fleet, _dir, _) = budgeted("catch-up", 1);
+        let counts = |f: &Fleet| f.list().iter().map(|s| s.tools).collect::<Vec<_>>();
+        assert_eq!(counts(&fleet), [9, 9, 2]);
+        assert!(fleet.running());
+
+        fleet.read_agents();
+        assert_eq!(counts(&fleet), [9, 2, 2]);
+        assert!(fleet.running());
+
+        fleet.read_agents();
+        assert_eq!(counts(&fleet), [2, 2, 2]);
+        assert!(!fleet.running());
+        assert!(fleet.take_changed());
+        fleet.read_agents();
+        assert!(!fleet.take_changed());
+    }
+
+    #[test]
+    fn a_file_over_the_whole_budget_stays_on_the_fallback_without_polling_forever() {
+        let (mut fleet, _dir, _) = budgeted("over-cap", 0);
+        assert!(fleet.list().iter().all(|s| s.tools == 9));
+        assert!(!fleet.running());
+        fleet.read_agents();
+        assert!(fleet.list().iter().all(|s| s.tools == 9));
+        assert!(!fleet.running());
+    }
+
+    #[test]
     fn a_missing_file_falls_back_to_the_largest_report() {
         let steps = [
             Step::Line(launch("toolu_1", "Agent", 1)),
@@ -1114,7 +1239,7 @@ mod tests {
         let (mut fleet, _dir) = fleet("fragments");
         fleet.line(&launch("toolu_1", "Agent", 1));
         fleet.line(&launched("toolu_1", "a1", 2));
-        let text = "<task-notification><result></task-notification>".repeat(8_000);
+        let text = "<task-notification><result></task-notification>".repeat(24_000);
         let started = std::time::Instant::now();
         fleet.line(&enqueue(&text, 5));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
