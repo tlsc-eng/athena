@@ -263,7 +263,14 @@ impl Fleet {
     }
 
     fn finish(&mut self, i: usize, state: SubagentState, at: u64, tools: u32) {
-        let total = self.entries[i].base.saturating_add(tools);
+        let base = self.entries[i].base;
+        // A resumed run's `<tool_uses>` is sometimes per run and sometimes cumulative, so the file decides.
+        let counted = base > 0 && self.tail_agent(i) && self.entries[i].sub.tools > 0;
+        let total = if counted {
+            0
+        } else {
+            base.saturating_add(tools)
+        };
         self.edit(i, |s| {
             s.state = state;
             s.ended_at = Some(at);
@@ -285,12 +292,20 @@ impl Fleet {
         self.changed |= differs;
     }
 
-    fn tail(&mut self, i: usize, path: &Path) {
+    fn tail_agent(&mut self, i: usize) -> bool {
+        let Some(id) = &self.entries[i].sub.agent_id else {
+            return false;
+        };
+        let path = self.dir.join(format!("agent-{id}.jsonl"));
+        self.tail(i, &path)
+    }
+
+    fn tail(&mut self, i: usize, path: &Path) -> bool {
         let Ok(file) = File::open(path) else {
-            return;
+            return false;
         };
         let Ok(len) = file.metadata().map(|m| m.len()) else {
-            return;
+            return false;
         };
         let mut sub = self.entries[i].sub.clone();
         let mut offset = self.entries[i].offset;
@@ -302,7 +317,7 @@ impl Fleet {
         }
         let mut input = BufReader::new(file);
         if input.seek(SeekFrom::Start(offset)).is_err() {
-            return;
+            return false;
         }
         let mut buf = Vec::new();
         while let Some(n) = next_line(&mut input, &mut buf) {
@@ -328,6 +343,7 @@ impl Fleet {
         self.changed |= sub != self.entries[i].sub;
         let base = self.entries[i].base;
         self.entries[i] = Entry { sub, offset, base };
+        true
     }
 }
 
@@ -362,9 +378,8 @@ fn notifications(mut text: &str) -> Vec<Notice<'_>> {
         let Some(first_close) = rest.find(NOTIFICATION_CLOSE) else {
             break;
         };
-        let result = rest
+        let result = rest[..first_close]
             .find(RESULT_OPEN)
-            .filter(|&open| open < first_close)
             .and_then(|open| Some((open, result_end(rest, open)?)));
         let (head_end, from) = result.unwrap_or((first_close, first_close));
         let Some(close) = rest[from..].find(NOTIFICATION_CLOSE) else {
@@ -386,21 +401,26 @@ fn notifications(mut text: &str) -> Vec<Notice<'_>> {
 
 /// The offset just past the `</result>` that closes the `<result>` at `open`, counting quoted pairs.
 fn result_end(rest: &str, open: usize) -> Option<usize> {
+    let find = |tag: &str, from: usize| rest[from..].find(tag).map(|at| from + at);
     let mut depth = 0usize;
     let mut at = open;
+    let mut next_open = find(RESULT_OPEN, at);
+    let mut next_close = find(RESULT_CLOSE, at);
     loop {
-        let next_close = rest[at..].find(RESULT_CLOSE)?;
-        match rest[at..].find(RESULT_OPEN) {
-            Some(next_open) if next_open < next_close => {
+        let close = next_close?;
+        match next_open {
+            Some(opened) if opened < close => {
                 depth += 1;
-                at += next_open + RESULT_OPEN.len();
+                at = opened + RESULT_OPEN.len();
+                next_open = find(RESULT_OPEN, at);
             }
             _ => {
                 depth -= 1;
-                at += next_close + RESULT_CLOSE.len();
+                at = close + RESULT_CLOSE.len();
                 if depth == 0 {
                     return Some(at);
                 }
+                next_close = find(RESULT_CLOSE, at);
             }
         }
     }
@@ -926,6 +946,97 @@ mod tests {
 
         assert_eq!(only(&live).tools, 5);
         assert_eq!(only(&replayed).tools, 5);
+    }
+
+    fn resumed_run(name: &str, second_run_reports: u32) -> (Fleet, Fleet) {
+        let (mut live, dir) = fleet(name);
+        let file = dir.join("s1/subagents/agent-a1.jsonl");
+        let parent = [
+            launch("toolu_1", "Agent", 1),
+            launched("toolu_1", "a1", 2),
+            enqueue(&notification("a1", "toolu_1", "completed", 2), 5),
+            result("toolu_send", json!({"resumedAgentId": "a1"}), false, 10),
+            enqueue(
+                &notification("a1", "toolu_send", "completed", second_run_reports),
+                15,
+            ),
+        ];
+        live.line(&parent[0]);
+        live.line(&parent[1]);
+        append(&file, &[agent_line("Read", 3), agent_line("Grep", 4)]);
+        live.read_agents();
+        live.line(&parent[2]);
+        live.line(&parent[3]);
+        append(
+            &file,
+            &[
+                agent_line("Bash", 11),
+                agent_line("Edit", 12),
+                agent_line("Read", 13),
+            ],
+        );
+        live.line(&parent[4]);
+
+        let mut replayed = Fleet::new(&dir.join("s1.jsonl"));
+        for line in &parent {
+            replayed.line(line);
+        }
+        (live, replayed)
+    }
+
+    #[test]
+    fn a_resumed_run_takes_its_count_from_the_file_whatever_the_notification_reports() {
+        for reported in [3, 5, 9] {
+            let (live, replayed) = resumed_run(&format!("file-count-{reported}"), reported);
+            assert_eq!(only(&live).tools, 5, "live, reported {reported}");
+            assert_eq!(only(&replayed).tools, 5, "replay, reported {reported}");
+            assert_eq!(only(&live).state, SubagentState::Done);
+        }
+    }
+
+    #[test]
+    fn a_resumed_run_without_a_readable_file_falls_back_to_the_summed_report() {
+        for unreadable in [false, true] {
+            let (mut fleet, dir) = fleet("fallback-count");
+            if unreadable {
+                fs::create_dir_all(dir.join("s1/subagents/agent-a1.jsonl")).unwrap();
+            }
+            fleet.line(&launch("toolu_1", "Agent", 1));
+            fleet.line(&launched("toolu_1", "a1", 2));
+            fleet.line(&enqueue(&notification("a1", "toolu_1", "completed", 4), 5));
+            fleet.line(&result(
+                "toolu_send",
+                json!({"resumedAgentId": "a1"}),
+                false,
+                10,
+            ));
+            fleet.line(&enqueue(
+                &notification("a1", "toolu_send", "completed", 2),
+                15,
+            ));
+            assert_eq!(only(&fleet).tools, 6, "unreadable {unreadable}");
+        }
+    }
+
+    #[test]
+    fn a_deeply_nested_report_is_scanned_in_linear_time() {
+        let (mut fleet, _dir) = fleet("nested");
+        fleet.line(&launch("toolu_1", "Agent", 1));
+        fleet.line(&launched("toolu_1", "a1", 2));
+        let depth = 20_000;
+        let text = format!(
+            "<task-notification><task-id>a1</task-id><status>completed</status><result>{}{}</result>\
+             <usage><tool_uses>3</tool_uses></usage></task-notification>",
+            RESULT_OPEN.repeat(depth),
+            RESULT_CLOSE.repeat(depth),
+        );
+        let started = std::time::Instant::now();
+        fleet.line(&enqueue(&text, 5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            (only(&fleet).state, only(&fleet).tools),
+            (SubagentState::Done, 3)
+        );
     }
 
     #[test]
