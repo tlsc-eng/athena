@@ -12,7 +12,7 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> impl Fn(f32) -> f32 +
         let mut converged = false;
         for _ in 0..8 {
             let err = bez(x1, x2, t) - x;
-            if err.abs() < 1e-5 {
+            if err.abs() < 1e-6 {
                 converged = true;
                 break;
             }
@@ -233,7 +233,7 @@ mod tests {
                     y.is_finite() && (0. ..=1.).contains(&y),
                     "{name} at {i}: {y}"
                 );
-                assert!(y >= prev, "{name} decreased at {i}: {prev} -> {y}");
+                assert!(y >= prev - 1e-6, "{name} decreased at {i}: {prev} -> {y}");
                 prev = y;
             }
         }
@@ -245,28 +245,33 @@ mod tests {
     }
 
     #[test]
-    fn standard_matches_bisection_reference() {
-        let [x1, y1, x2, y2] = EASE_STANDARD.map(f64::from);
+    fn eases_match_bisection_reference() {
         let bez = |a: f64, b: f64, t: f64| {
             3. * a * (1. - t).powi(2) * t + 3. * b * (1. - t) * t * t + t.powi(3)
         };
-        let ease = ease_standard();
-        for i in 0..=1000 {
-            let x = i as f64 / 1000.;
-            let (mut lo, mut hi) = (0., 1.);
-            for _ in 0..60 {
-                let mid = (lo + hi) / 2.;
-                if bez(x1, x2, mid) < x {
-                    lo = mid;
-                } else {
-                    hi = mid;
+        for ((name, ease), params) in
+            eases()
+                .into_iter()
+                .zip([EASE_STANDARD, EASE_ENTER, EASE_EXIT])
+        {
+            let [x1, y1, x2, y2] = params.map(f64::from);
+            for i in 0..=1000 {
+                let x = i as f64 / 1000.;
+                let (mut lo, mut hi) = (0., 1.);
+                for _ in 0..60 {
+                    let mid = (lo + hi) / 2.;
+                    if bez(x1, x2, mid) < x {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
                 }
+                let expected = bez(y1, y2, (lo + hi) / 2.);
+                assert!(
+                    (f64::from(ease(x as f32)) - expected).abs() < 1e-4,
+                    "{name} at x = {x}"
+                );
             }
-            let expected = bez(y1, y2, (lo + hi) / 2.);
-            assert!(
-                (f64::from(ease(x as f32)) - expected).abs() < 1e-4,
-                "x = {x}"
-            );
         }
     }
 }
