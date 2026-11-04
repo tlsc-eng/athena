@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const PROTO: u32 = 1;
 
 /// Optional capabilities the desktop lists in `welcome`.
-pub const FEATURES: &[&str] = &["transcript", "act"];
+pub const FEATURES: &[&str] = &["transcript", "act", "usage"];
 
 /// Largest payload of one binary frame.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
@@ -84,6 +84,9 @@ pub enum ClientMsg {
         id: String,
         pane: u64,
     },
+    UsageRefresh {
+        id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -102,6 +105,8 @@ pub enum ServerMsg {
         projects: Vec<Project>,
         sessions: Vec<Session>,
         terminals: Vec<Terminal>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        usage: Vec<UsageProfile>,
     },
     Attached {
         pane: u64,
@@ -312,6 +317,34 @@ pub struct Terminal {
     pub cols: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageStatus {
+    Ok,
+    Stale,
+    NoAccess,
+    RateLimited,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    pub label: String,
+    pub used: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+}
+
+/// One Claude sign-in's plan limits; `windows` is empty unless `status` is `ok`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageProfile {
+    pub profile: String,
+    pub status: UsageStatus,
+    pub windows: Vec<UsageWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -510,6 +543,50 @@ mod tests {
     }
 
     #[test]
+    fn a_usage_refresh_matches_its_fixture() {
+        golden(
+            "usage_refresh",
+            &ClientMsg::UsageRefresh { id: "r11".into() },
+        );
+    }
+
+    #[test]
+    fn a_snapshot_with_usage_matches_its_fixture() {
+        let window = |label: &str, used, resets_at| UsageWindow {
+            label: label.into(),
+            used,
+            resets_at,
+        };
+        golden(
+            "snapshot_usage",
+            &ServerMsg::Snapshot {
+                seq: 8,
+                projects: Vec::new(),
+                sessions: Vec::new(),
+                terminals: Vec::new(),
+                usage: vec![
+                    UsageProfile {
+                        profile: "claude".into(),
+                        status: UsageStatus::Ok,
+                        windows: vec![
+                            window("5h", 42.5, Some(1_767_240_000)),
+                            window("7d", 18., Some(1_767_700_000)),
+                            window("Opus", 7., None),
+                        ],
+                        message: None,
+                    },
+                    UsageProfile {
+                        profile: "claude-work".into(),
+                        status: UsageStatus::Unavailable,
+                        windows: Vec::new(),
+                        message: Some("the usage service did not answer".into()),
+                    },
+                ],
+            },
+        );
+    }
+
+    #[test]
     fn the_desktop_to_phone_messages_match_their_fixtures() {
         golden(
             "welcome",
@@ -563,6 +640,7 @@ mod tests {
                         cols: 80,
                     },
                 ],
+                usage: Vec::new(),
             },
         );
         golden(

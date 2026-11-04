@@ -6,12 +6,15 @@ use daedalus_proto::{PaneId, TodoInfo};
 use daedalus_term::ClaudeState;
 use gpui::App;
 
-use crate::companion::protocol::{Project, Session, SessionState, Terminal, Todo};
+use crate::companion::protocol::{
+    Project, Session, SessionState, Terminal, Todo, UsageProfile, UsageStatus, UsageWindow,
+};
 use crate::companion::server::Snapshot;
 use crate::shell::Shell;
 use crate::shell::claude_sessions::live::LiveSession;
 use crate::shell::item::ItemView;
 use crate::shell::windows;
+use crate::usage::{Profile, Status};
 
 /// What one window shows, read from memory so the main thread never waits on the disk.
 pub(super) struct WindowInput {
@@ -19,6 +22,8 @@ pub(super) struct WindowInput {
     pub projects: Vec<(PathBuf, String)>,
     pub terminals: Vec<TerminalInput>,
     pub sessions: Vec<SessionInput>,
+    /// Empty while the usage indicator is off or before the first fetch.
+    pub usage: Vec<(Profile, Status)>,
 }
 
 pub(super) struct TerminalInput {
@@ -42,6 +47,12 @@ pub(super) struct SessionInput {
 
 pub(super) fn to_snapshot(windows: Vec<WindowInput>) -> Snapshot {
     let mut snapshot = Snapshot::default();
+    // Profiles are global, so the first window that has readings speaks for all.
+    let usage = windows
+        .iter()
+        .find(|w| !w.usage.is_empty())
+        .map(|w| w.usage.clone())
+        .unwrap_or_default();
     for window in windows {
         let roots: Vec<&Path> = window
             .projects
@@ -67,7 +78,40 @@ pub(super) fn to_snapshot(windows: Vec<WindowInput>) -> Snapshot {
     }
     snapshot.terminals.sort_by_key(|t| t.pane);
     dedup_sessions(&mut snapshot.sessions);
+    snapshot.usage = usage
+        .iter()
+        .map(|(profile, status)| usage_profile(profile, status))
+        .collect();
     snapshot
+}
+
+fn usage_profile(profile: &Profile, status: &Status) -> UsageProfile {
+    let (status, windows, message) = match status {
+        Status::Windows(windows) => (
+            UsageStatus::Ok,
+            windows
+                .iter()
+                .map(|w| UsageWindow {
+                    label: w.label.clone(),
+                    used: w.used,
+                    resets_at: w.resets_at,
+                })
+                .collect(),
+            None,
+        ),
+        Status::Stale => (UsageStatus::Stale, Vec::new(), None),
+        Status::NoAccess => (UsageStatus::NoAccess, Vec::new(), None),
+        Status::RateLimited(_) => (UsageStatus::RateLimited, Vec::new(), None),
+        Status::Unavailable(message) => {
+            (UsageStatus::Unavailable, Vec::new(), Some(message.clone()))
+        }
+    };
+    UsageProfile {
+        profile: profile.name.clone(),
+        status,
+        windows,
+        message,
+    }
 }
 
 /// Windows can both list one session; keep the copy that runs in a pane, else the first.
@@ -219,6 +263,7 @@ impl Shell {
                 .collect(),
             terminals,
             sessions,
+            usage: self.usage_readings(),
         }
     }
 }
@@ -274,6 +319,7 @@ mod tests {
             projects: vec![("/code/app".into(), "app".into())],
             terminals,
             sessions,
+            usage: Vec::new(),
         }
     }
 
@@ -431,5 +477,52 @@ mod tests {
             )])
         };
         assert_eq!(build(), build());
+    }
+
+    #[test]
+    fn usage_statuses_map_to_the_protocol() {
+        let profile = Profile::named("claude");
+        let windows = Status::Windows(vec![crate::usage::Window {
+            label: "5h".into(),
+            used: 42.5,
+            resets_at: Some(100),
+        }]);
+        let ok = usage_profile(&profile, &windows);
+        assert_eq!(ok.status, UsageStatus::Ok);
+        assert_eq!(ok.windows[0].label, "5h");
+        assert_eq!(ok.windows[0].resets_at, Some(100));
+        let cases = [
+            (Status::Stale, UsageStatus::Stale),
+            (Status::NoAccess, UsageStatus::NoAccess),
+            (
+                Status::RateLimited(Duration::from_secs(30)),
+                UsageStatus::RateLimited,
+            ),
+        ];
+        for (status, want) in cases {
+            let got = usage_profile(&profile, &status);
+            assert_eq!(
+                (got.status, got.windows.len(), got.message),
+                (want, 0, None)
+            );
+        }
+        let down = usage_profile(&profile, &Status::Unavailable("offline".into()));
+        assert_eq!(down.status, UsageStatus::Unavailable);
+        assert_eq!(down.message.as_deref(), Some("offline"));
+    }
+
+    #[test]
+    fn the_first_window_with_readings_supplies_the_usage() {
+        let empty = window(Vec::new(), Vec::new());
+        let mut full = window(Vec::new(), Vec::new());
+        full.usage = vec![(Profile::named("claude"), Status::Stale)];
+        let got = to_snapshot(vec![empty, full]);
+        assert_eq!(got.usage.len(), 1);
+        assert_eq!(got.usage[0].profile, "claude");
+        assert!(
+            to_snapshot(vec![window(Vec::new(), Vec::new())])
+                .usage
+                .is_empty()
+        );
     }
 }

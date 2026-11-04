@@ -15,7 +15,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Framing
 
-- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript and act messages only when `welcome.features` lists `transcript` and `act`.
+- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `act` and `usage`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
 
@@ -88,18 +88,30 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"interrupt","id":"r10","pane":123}
 ```
 
-## Desktop to phone (`/v1/connect`)
-
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `act` for `prompt` and `interrupt`), and is omitted when empty.
+`usage_refresh`: fetch the Claude plan limits again. The desktop fetches at most once every 60 s, so a request inside that window changes nothing and the phone keeps the current `usage`. `id` is echoed in `sent` straight away, and the new figures arrive in a later `snapshot`. When the Mac's usage indicator is off, the answer is `error` with `usage indicator is off`.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","act"]}
+{"type":"usage_refresh","id":"r11"}
+```
+
+## Desktop to phone (`/v1/connect`)
+
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `act` for `prompt` and `interrupt`, `usage` for `snapshot.usage` and `usage_refresh`), and is omitted when empty.
+
+```json
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","act","usage"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
 
 ```json
 {"type":"snapshot","seq":7,"projects":[{"root":"/Users/jason/code/daedalus","name":"daedalus","window":1}],"sessions":[],"terminals":[{"pane":124,"project":"/Users/jason/code/daedalus","title":"zsh","rows":24,"cols":80}]}
+```
+
+`snapshot.usage` lists the Claude plan limits, one entry per Claude sign-in on the Mac, and is omitted when the Mac's usage indicator is off or nothing has been fetched yet. `status` is `ok`, `stale` (the saved sign-in expired), `no_access` (the Keychain refused), `rate_limited` or `unavailable`. `windows` holds the figures and is empty unless `status` is `ok`. A window has a `label` (`5h`, `7d` or a model name), `used` (percent, 0 to 100) and `resets_at` (epoch seconds, omitted when unknown). `message` is present only for `unavailable`. See `design/protocol/snapshot_usage.json`.
+
+```json
+{"type":"snapshot","seq":8,"projects":[],"sessions":[],"terminals":[],"usage":[{"profile":"claude","status":"ok","windows":[{"label":"5h","used":42.5,"resets_at":1767240000},{"label":"7d","used":18.0,"resets_at":1767700000},{"label":"Opus","used":7.0}]},{"profile":"claude-work","status":"unavailable","windows":[],"message":"the usage service did not answer"}]}
 ```
 
 `attached`: the pane's size, sent before its replay.
@@ -169,7 +181,7 @@ An item has `id`, `pos` (byte offset in the file), `at` (epoch milliseconds) and
 | `questions` | On a `question` item: each has `question`, `header`, `multi` and `options` (`label`, `description`). |
 | `answer` | On a `question` item: the result text, cut to 1 KiB. |
 
-`sent`: answer to `prompt` or `interrupt` once the keys have been written to the pane.
+`sent`: answer to `prompt` or `interrupt` once the keys have been written to the pane, and to `usage_refresh` once the desktop has handled it.
 
 ```json
 {"type":"sent","id":"r7"}

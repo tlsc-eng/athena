@@ -25,7 +25,7 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 use super::devices::{Device, Devices, PairingCode};
 use super::protocol::{
     self, ClientMsg, DropReason, Kind, NoticeKind, PROTO, PairReply, PairRequest, Project,
-    ServerMsg, Session, Terminal,
+    ServerMsg, Session, Terminal, UsageProfile,
 };
 use super::stream::{Attachments, Out};
 use super::tailnet;
@@ -43,6 +43,7 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(45);
 const SNAPSHOT_GAP: Duration = Duration::from_millis(250);
 const PAIR_WAIT: Duration = Duration::from_secs(60);
 const SPAWN_WAIT: Duration = Duration::from_secs(10);
+const USAGE_WAIT: Duration = Duration::from_secs(5);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const PAIR_HEADER: &str = "x-daedalus-pair";
 const VERSION_CLOSE: u16 = 4001;
@@ -87,6 +88,10 @@ pub enum Command {
         root: PathBuf,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    /// Fetch the plan limits again unless the last fetch is recent.
+    UsageRefresh {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// The number of live connections changed to this total.
     ClientsChanged(usize),
     /// A pairing was approved and stored, or could not be saved.
@@ -99,6 +104,7 @@ pub struct Snapshot {
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
     pub terminals: Vec<Terminal>,
+    pub usage: Vec<UsageProfile>,
 }
 
 #[derive(Clone, Debug)]
@@ -706,6 +712,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let current = Arc::clone(&snapshot.borrow());
                                 Some(spawn_claude(shared, &current, id, project).await)
                             }
+                            ClientMsg::UsageRefresh { id } => Some(usage_refresh(shared, id).await),
                             ClientMsg::TranscriptOpen { id, .. }
                             | ClientMsg::TranscriptMore { id, .. }
                             | ClientMsg::Prompt { id, .. }
@@ -757,6 +764,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                     projects: current.projects.clone(),
                     sessions: current.sessions.clone(),
                     terminals: current.terminals.clone(),
+                    usage: current.usage.clone(),
                 };
                 if !send(&mut ws, &message).await {
                     break;
@@ -833,6 +841,30 @@ async fn spawn_claude(
             message,
         },
         _ => failed(id, "could not start claude"),
+    }
+}
+
+async fn usage_refresh(shared: &Shared, id: String) -> ServerMsg {
+    let failed = |id: String, message: &str| ServerMsg::Error {
+        id: Some(id),
+        message: message.into(),
+    };
+    let (reply, answer) = oneshot::channel();
+    if shared
+        .commands
+        .send(Command::UsageRefresh { reply })
+        .await
+        .is_err()
+    {
+        return failed(id, "could not refresh usage");
+    }
+    match timeout(USAGE_WAIT, answer).await {
+        Ok(Ok(Ok(()))) => ServerMsg::Sent { id },
+        Ok(Ok(Err(message))) => ServerMsg::Error {
+            id: Some(id),
+            message,
+        },
+        _ => failed(id, "could not refresh usage"),
     }
 }
 
@@ -1181,6 +1213,46 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert!(fx.no_command());
         }
+    }
+
+    async fn usage_refresh_answer(fx: &Fixture, answer: Result<(), String>) -> ServerMsg {
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::UsageRefresh { id: "r11".into() }).await;
+        let Ok(Command::UsageRefresh { reply }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the refresh never reached the app")
+        else {
+            panic!("expected a usage refresh command");
+        };
+        let _ = reply.send(answer);
+        loop {
+            match next_msg(&mut ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => return other,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_usage_refresh_reaches_the_app_and_is_sent() {
+        let fx = Fixture::new();
+        let got = usage_refresh_answer(&fx, Ok(())).await;
+        assert_eq!(got, ServerMsg::Sent { id: "r11".into() });
+    }
+
+    #[tokio::test]
+    async fn a_refused_usage_refresh_comes_back_as_an_error() {
+        let fx = Fixture::new();
+        let got = usage_refresh_answer(&fx, Err("usage indicator is off".into())).await;
+        assert_eq!(
+            got,
+            ServerMsg::Error {
+                id: Some("r11".into()),
+                message: "usage indicator is off".into()
+            }
+        );
     }
 
     #[tokio::test]

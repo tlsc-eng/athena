@@ -10,7 +10,7 @@ use gpui::{
     PromptLevel, Window, div, prelude::*,
 };
 
-use super::Shell;
+use super::{Shell, windows};
 use crate::transcripts;
 use crate::usage::{self, Profile, Status};
 
@@ -167,6 +167,7 @@ impl Shell {
         self.usage.readings = readings;
         self.usage.latest = latest;
         self.usage.fetched = Some(Instant::now());
+        windows::mark_companion_dirty(cx);
         for title in crossings {
             self.local_notice(
                 NoticeKind::Message {
@@ -206,7 +207,16 @@ impl Shell {
         .detach();
     }
 
-    fn refresh_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The readings the phone may see, none while the indicator is off.
+    pub(super) fn usage_readings(&self) -> Vec<(Profile, Status)> {
+        if self.workspace.usage_indicator {
+            self.usage.readings.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(super) fn refresh_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .usage
             .fetched

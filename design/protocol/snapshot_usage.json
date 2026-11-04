@@ -1,0 +1,35 @@
+{
+  "type": "snapshot",
+  "seq": 8,
+  "projects": [],
+  "sessions": [],
+  "terminals": [],
+  "usage": [
+    {
+      "profile": "claude",
+      "status": "ok",
+      "windows": [
+        {
+          "label": "5h",
+          "used": 42.5,
+          "resets_at": 1767240000
+        },
+        {
+          "label": "7d",
+          "used": 18.0,
+          "resets_at": 1767700000
+        },
+        {
+          "label": "Opus",
+          "used": 7.0
+        }
+      ]
+    },
+    {
+      "profile": "claude-work",
+      "status": "unavailable",
+      "windows": [],
+      "message": "the usage service did not answer"
+    }
+  ]
+}

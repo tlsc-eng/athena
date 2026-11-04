@@ -642,6 +642,10 @@ pub(super) fn prune_companion_needs(snapshot: &companion_server::Snapshot, cx: &
         .retain(|pane, _| snapshot.terminals.iter().any(|t| t.pane == *pane));
 }
 
+pub(super) fn mark_companion_dirty(cx: &mut App) {
+    cx.global_mut::<Windows>().companion_dirty = true;
+}
+
 pub(super) fn take_companion_dirty(cx: &mut App) -> bool {
     std::mem::take(&mut cx.global_mut::<Windows>().companion_dirty)
 }
@@ -885,10 +889,29 @@ fn route_companion(command: Command, cx: &mut App) {
             reply,
         } => super::companion_ui::ask_to_pair(device, peer, reply, cx),
         Command::SpawnClaude { root, reply } => spawn_claude_for_phone(&root, reply, cx),
+        Command::UsageRefresh { reply } => refresh_usage_for_phone(reply, cx),
         Command::ClientsChanged(count) => set_companion_clients(count, cx),
         Command::Paired(Ok(())) => super::companion::redraw_windows(cx),
         Command::Paired(Err(e)) => super::companion::notice("Couldn't save paired iPhone", e, cx),
     }
+}
+
+/// Refreshes the plan limits through the oldest window, which the snapshot also reads; its own throttle applies.
+fn refresh_usage_for_phone(reply: tokio::sync::oneshot::Sender<Result<(), String>>, cx: &mut App) {
+    let answer = match handles(cx).first() {
+        Some(handle) => handle
+            .update(cx, |shell, window, cx| {
+                if shell.workspace.usage_indicator {
+                    shell.refresh_usage(window, cx);
+                    Ok(())
+                } else {
+                    Err("usage indicator is off".to_string())
+                }
+            })
+            .unwrap_or_else(|_| Err("no window is open".into())),
+        None => Err("no window is open".into()),
+    };
+    let _ = reply.send(answer);
 }
 
 /// Opens a `claude` tab in the open project at `root` and answers with its pane once phones can attach it.
