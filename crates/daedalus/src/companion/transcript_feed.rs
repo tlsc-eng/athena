@@ -28,6 +28,8 @@ struct Open {
     feed: Arc<Mutex<Feed>>,
     stamp: Stamp,
     limit: usize,
+    // Agents run and write their own files while the parent is idle, so the stamp alone cannot trigger a read.
+    agents: bool,
 }
 
 /// Up to four transcripts of one connection, polled for growth every half second.
@@ -84,14 +86,23 @@ impl Transcripts {
         .await
         .ok()
         .flatten();
-        let Some((path, stamp, feed)) = loaded else {
+        let Some((path, stamp, mut feed)) = loaded else {
             return error(id, "transcript not found");
         };
         let limit = clamp(limit);
         let page = page_message(&session, &feed, limit);
+        let agents = feed.subagents();
+        feed.take_subagents_changed();
+        let running = feed.agents_running();
         self.forget(&session);
         self.epoch += 1;
         let epoch = self.epoch;
+        if !agents.is_empty() {
+            self.ready.push_back(ServerMsg::Subagents {
+                session: session.clone(),
+                agents,
+            });
+        }
         self.open.insert(
             session,
             Open {
@@ -100,6 +111,7 @@ impl Transcripts {
                 feed: Arc::new(Mutex::new(feed)),
                 stamp,
                 limit,
+                agents: running,
             },
         );
         page
@@ -154,8 +166,9 @@ impl Transcripts {
 
     fn forget(&mut self, session: &str) {
         self.open.remove(session);
-        self.ready
-            .retain(|m| !matches!(m, ServerMsg::Transcript { session: s, .. } if s == session));
+        self.ready.retain(|m| {
+            !matches!(m, ServerMsg::Transcript { session: s, .. } | ServerMsg::Subagents { session: s, .. } if s == session)
+        });
     }
 
     fn start_reading(&mut self) {
@@ -164,7 +177,7 @@ impl Transcripts {
             .iter_mut()
             .filter_map(|(session, open)| {
                 let now = stamp(&open.path);
-                (now != open.stamp).then(|| {
+                (now != open.stamp || open.agents).then(|| {
                     open.stamp = now;
                     (session.clone(), open.epoch, open.feed.clone())
                 })
@@ -185,10 +198,11 @@ impl Transcripts {
     }
 
     fn deliver(&mut self, session: &str, epoch: u64, read: Read) {
-        let Some(open) = self.open.get(session).filter(|o| o.epoch == epoch) else {
+        let Some(open) = self.open.get_mut(session).filter(|o| o.epoch == epoch) else {
             return;
         };
-        let feed = lock(&open.feed);
+        let mut feed = lock(&open.feed);
+        let reset = matches!(read, Read::Reset);
         match read {
             Read::Reset => self
                 .ready
@@ -205,6 +219,17 @@ impl Transcripts {
                     });
                 }
             }
+        }
+        let changed = feed.take_subagents_changed();
+        let agents = feed.subagents();
+        open.agents = feed.agents_running();
+        if changed || (reset && !agents.is_empty()) {
+            self.ready
+                .retain(|m| !matches!(m, ServerMsg::Subagents { session: s, .. } if s == session));
+            self.ready.push_back(ServerMsg::Subagents {
+                session: session.to_string(),
+                agents,
+            });
         }
     }
 }
@@ -334,5 +359,47 @@ mod tests {
         let size = serde_json::to_vec(&message).unwrap().len();
         assert!(size <= MAX_MESSAGE, "{size} bytes");
         assert!(size > MAX_MESSAGE - 4_000, "{size} bytes");
+    }
+
+    fn queued(session: &str) -> ServerMsg {
+        ServerMsg::Subagents {
+            session: session.into(),
+            agents: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_session_drops_its_queued_subagents() {
+        let mut feeds = Transcripts::new(None);
+        feeds.ready.push_back(queued("s1"));
+        feeds.ready.push_back(queued("s2"));
+        feeds.forget("s1");
+        assert!(matches!(
+            feeds.ready.make_contiguous(),
+            [ServerMsg::Subagents { session, .. }] if session == "s2"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_idle_transcript_is_read_again_only_while_its_agents_run() {
+        let path = std::env::temp_dir().join(format!("daedalus-feed-{}.jsonl", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        for (agents, reads) in [(true, true), (false, false)] {
+            let mut feeds = Transcripts::new(None);
+            feeds.open.insert(
+                "s1".into(),
+                Open {
+                    epoch: 1,
+                    path: path.clone(),
+                    feed: Arc::new(Mutex::new(Feed::new(path.clone()))),
+                    stamp: stamp(&path),
+                    limit: 10,
+                    agents,
+                },
+            );
+            feeds.start_reading();
+            assert_eq!(feeds.reading.is_some(), reads);
+        }
+        std::fs::remove_file(&path).unwrap();
     }
 }

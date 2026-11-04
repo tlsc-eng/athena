@@ -2976,6 +2976,69 @@ mod tests {
         next_transcript(ws).await
     }
 
+    fn append_lines(path: &Path, lines: &[serde_json::Value]) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+    }
+
+    fn agent_launch(tool_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant", "uuid": format!("u-{tool_id}"),
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"content": [{
+                "type": "tool_use", "id": tool_id, "name": "Agent",
+                "input": {"description": "Check the parser", "subagent_type": "builder"},
+            }]},
+        })
+    }
+
+    fn agent_launched(tool_id: &str, agent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "user", "uuid": format!("r-{tool_id}"),
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "content": "ok"}]},
+            "toolUseResult": {"status": "async_launched", "agentId": agent},
+        })
+    }
+
+    fn agent_tool_use() -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant", "timestamp": "2026-01-01T00:00:02Z",
+            "message": {"content": [{"type": "tool_use", "id": "t", "name": "Read", "input": {}}]},
+        })
+    }
+
+    fn agent_file(parent: &Path, agent: &str) -> PathBuf {
+        let dir = parent.with_extension("").join("subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("agent-{agent}.jsonl"))
+    }
+
+    fn write_running_agent(fx: &Fixture, id: &str) -> (PathBuf, PathBuf) {
+        let parent = transcript_path(fx, id);
+        append_lines(
+            &parent,
+            &[agent_launch("toolu_1"), agent_launched("toolu_1", "a1")],
+        );
+        let agent = agent_file(&parent, "a1");
+        append_lines(&agent, &[agent_tool_use()]);
+        (parent, agent)
+    }
+
+    async fn next_agents(ws: &mut Ws) -> Vec<protocol::Subagent> {
+        let ServerMsg::Subagents { agents, .. } = next_transcript(ws).await else {
+            panic!("expected subagents");
+        };
+        agents
+    }
+
     fn texts(items: &[protocol::Item]) -> Vec<&str> {
         items.iter().filter_map(|i| i.text.as_deref()).collect()
     }
@@ -3161,5 +3224,106 @@ mod tests {
         append_reply(&path, 1);
         let quiet = timeout(Duration::from_millis(1500), next_transcript(&mut ws)).await;
         assert!(quiet.is_err(), "got {quiet:?} after the close");
+    }
+
+    #[tokio::test]
+    async fn opening_a_transcript_with_agents_follows_the_page_with_their_state() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        write_running_agent(&fx, "s1");
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        assert!(matches!(
+            open_transcript(&mut ws, "s1", 10).await,
+            ServerMsg::Transcript { .. }
+        ));
+        let agents = next_agents(&mut ws).await;
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].tool_id, "toolu_1");
+        assert_eq!(agents[0].state, protocol::SubagentState::Running);
+        assert_eq!(agents[0].tools, 1);
+    }
+
+    #[tokio::test]
+    async fn an_agent_file_written_while_the_parent_is_idle_is_sent() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let (_, agent) = write_running_agent(&fx, "s1");
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        next_agents(&mut ws).await;
+        append_lines(&agent, &[agent_tool_use()]);
+        let started = StdInstant::now();
+        let agents = next_agents(&mut ws).await;
+        assert_eq!(agents[0].tools, 2);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_finished_notification_in_the_parent_marks_the_agent_done() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let (parent, _) = write_running_agent(&fx, "s1");
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        next_agents(&mut ws).await;
+        let text = "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n\
+                    <status>completed</status>\n<usage><tool_uses>1</tool_uses></usage>\n</task-notification>";
+        append_lines(
+            &parent,
+            &[serde_json::json!({
+                "type": "queue-operation", "operation": "enqueue",
+                "timestamp": "2026-01-01T00:00:03Z", "content": text,
+            })],
+        );
+        let agents = next_agents(&mut ws).await;
+        assert_eq!(agents[0].state, protocol::SubagentState::Done);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_agent_list_is_not_sent_again() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        write_running_agent(&fx, "s1");
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        next_agents(&mut ws).await;
+        let quiet = timeout(Duration::from_millis(1500), next_transcript(&mut ws)).await;
+        assert!(quiet.is_err(), "got {quiet:?} with nothing changed");
+    }
+
+    #[tokio::test]
+    async fn a_transcript_without_agents_never_sends_subagents() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let path = write_replies(&fx, "s1", 1);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        append_reply(&path, 1);
+        assert!(matches!(
+            next_transcript(&mut ws).await,
+            ServerMsg::Transcript { .. }
+        ));
+        let quiet = timeout(Duration::from_millis(1500), next_transcript(&mut ws)).await;
+        assert!(quiet.is_err(), "got {quiet:?}");
+    }
+
+    #[tokio::test]
+    async fn at_most_twenty_agents_are_sent() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let parent = transcript_path(&fx, "s1");
+        let launches: Vec<_> = (0..25)
+            .map(|n| agent_launch(&format!("toolu_{n}")))
+            .collect();
+        append_lines(&parent, &launches);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        assert_eq!(next_agents(&mut ws).await.len(), 20);
     }
 }

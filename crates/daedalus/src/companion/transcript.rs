@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::protocol::{Item, ItemKind, ItemStatus, Question, QuestionOption};
+use super::protocol::{Item, ItemKind, ItemStatus, Question, QuestionOption, Subagent};
+use super::subagents::Fleet;
 use crate::transcripts::{Typed, next_line, typed_text};
 
 const ASSISTANT_CAP: usize = 24 << 10;
@@ -23,6 +24,7 @@ pub(crate) struct Feed {
     offset: u64,
     items: Vec<Item>,
     tools: HashMap<String, usize>,
+    fleet: Fleet,
 }
 
 /// What a read found: items to upsert, or a file that shrank and was read again from the start.
@@ -35,6 +37,7 @@ pub(crate) enum Read {
 impl Feed {
     pub(crate) fn new(path: PathBuf) -> Self {
         Feed {
+            fleet: Fleet::new(&path),
             path,
             offset: 0,
             items: Vec::new(),
@@ -55,6 +58,7 @@ impl Feed {
             self.offset = 0;
             self.items.clear();
             self.tools.clear();
+            self.fleet.clear();
         }
         let mut input = BufReader::new(file);
         if input.seek(SeekFrom::Start(self.offset)).is_err() {
@@ -68,6 +72,7 @@ impl Feed {
             }
             self.offset += n;
         }
+        self.fleet.read_agents();
         if reset {
             return Read::Reset;
         }
@@ -78,6 +83,19 @@ impl Feed {
 
     pub(crate) fn items(&self) -> &[Item] {
         &self.items
+    }
+
+    pub(crate) fn subagents(&self) -> Vec<Subagent> {
+        self.fleet.list()
+    }
+
+    /// True while the sub-agents need polling even though the transcript file itself is idle.
+    pub(crate) fn agents_running(&self) -> bool {
+        self.fleet.running()
+    }
+
+    pub(crate) fn take_subagents_changed(&mut self) -> bool {
+        self.fleet.take_changed()
     }
 
     /// The newest items strictly older than `before`, whole lines at a time, and the offset to
@@ -114,6 +132,7 @@ impl Feed {
     }
 
     fn line(&mut self, line: &Value, pos: u64, changed: &mut Vec<usize>) {
+        self.fleet.line(line);
         let kind = line["type"].as_str().unwrap_or_default();
         if !matches!(kind, "user" | "assistant")
             || flag(line, "isSidechain")
