@@ -20,6 +20,7 @@ pub use project::{LinterTrust, PANEL_IDS, Panel, Project, git_branch};
 pub use scope::{denied, resolve_in_roots};
 pub use windows::{WindowEntry, list_parked, park, parked_sessions, retain_parked, take_parked};
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -351,7 +352,7 @@ impl Workspace {
             .collect();
         let needs_label =
             |i: usize| base[i].is_empty() || (0..base.len()).any(|j| j != i && base[j] == base[i]);
-        let mut labels: Vec<String> = (0..base.len())
+        let mut labels: HashSet<String> = (0..base.len())
             .filter(|&i| !needs_label(i))
             .map(|i| base[i].clone())
             .collect();
@@ -388,7 +389,7 @@ impl Workspace {
                     .chain(alphabet().flat_map(|a| alphabet().map(move |b| format!("{a}{b}"))))
                     .find(|l| !labels.contains(l))
                     .unwrap_or_else(|| "··".to_owned());
-                labels.push(label.clone());
+                labels.insert(label.clone());
                 label
             })
             .collect()
