@@ -140,6 +140,7 @@ impl Setting {
             ["window", "zoom_level"] => s.zoom_level.map(Value::from),
             ["eslint", "fixOnSave"] => flag(s.eslint_fix_on_save),
             ["claude", "hooks"] => flag(s.claude_hooks),
+            ["companion", "enabled"] => flag(s.companion_enabled),
             ["claude", "profiles"] => (!s.claude_profiles.is_empty()).then(|| {
                 Value::Object(
                     s.claude_profiles
@@ -511,6 +512,17 @@ pub static SETTINGS: &[Setting] = &[
         also: None,
     },
     Setting {
+        keys: &["companion", "enabled"],
+        aliases: &[],
+        title: "Phone Companion (Daedalus for iPhone)",
+        description: "Lets a paired iPhone see Claude sessions and type in terminals over \
+                      Tailscale.",
+        group: Group::Claude,
+        kind: TOGGLE_OFF,
+        user_only: true,
+        also: None,
+    },
+    Setting {
         keys: &["claude", "profiles"],
         aliases: &[],
         title: "Profiles by Folder",
@@ -792,6 +804,7 @@ mod tests {
             format!("ide {}", prefs.ide_integration),
             format!("eslint {}", s.eslint_fix_on_save()),
             format!("hooks {}", s.claude_hooks()),
+            format!("companion {}", s.companion_enabled()),
         ]
     }
 

@@ -1,7 +1,7 @@
-// The GUI wires the server in a follow-up card; until then nothing calls these modules.
+// Pairing, snapshot and push APIs are used by the later cards (D6 to D8), not yet by the GUI.
 #![allow(dead_code)]
 
-mod devices;
+pub(crate) mod devices;
 pub mod protocol;
 pub mod server;
 mod stream;

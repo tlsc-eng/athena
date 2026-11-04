@@ -87,6 +87,8 @@ pub enum Command {
         root: PathBuf,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    /// The number of live connections changed to this total.
+    ClientsChanged(usize),
 }
 
 /// What phones see; the server numbers each one per connection.
@@ -117,17 +119,18 @@ struct Shared {
     snapshot: watch::Sender<Arc<Snapshot>>,
     notices: broadcast::Sender<Notice>,
     live: Mutex<HashMap<String, usize>>,
+    welcomed: Mutex<usize>,
     revoked: broadcast::Sender<String>,
     handshakes: Arc<Semaphore>,
     whois: WhoisCache,
 }
 
-/// A running companion server. Dropping it closes every connection.
+/// A running companion server. Dropping it starts the stop without waiting; `shutdown` says when it is done.
 pub struct Server {
     shared: Arc<Shared>,
     addrs: Vec<SocketAddr>,
     stop: Option<oneshot::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    closed: Option<futures::channel::oneshot::Receiver<()>>,
 }
 
 impl Server {
@@ -158,6 +161,7 @@ impl Server {
             snapshot: watch::channel(Arc::default()).0,
             notices: broadcast::channel(64).0,
             live: Mutex::default(),
+            welcomed: Mutex::default(),
             revoked: broadcast::channel(16).0,
             handshakes: Arc::new(Semaphore::new(MAX_HANDSHAKES)),
             whois: WhoisCache::default(),
@@ -168,7 +172,8 @@ impl Server {
             .build()?;
         let (stop, stopped) = oneshot::channel();
         let serving = shared.clone();
-        let thread = std::thread::Builder::new()
+        let (done, closed) = futures::channel::oneshot::channel();
+        std::thread::Builder::new()
             .name("companion-server".into())
             .spawn(move || {
                 runtime.block_on(async move {
@@ -184,13 +189,14 @@ impl Server {
                 });
                 // Dropping the runtime would wait for an in-flight whois subprocess.
                 runtime.shutdown_background();
+                let _ = done.send(());
             })?;
         tracing::info!(?addrs, "companion server listening");
         let server = Self {
             shared,
             addrs,
             stop: Some(stop),
-            thread: Some(thread),
+            closed: Some(closed),
         };
         Ok((server, rx))
     }
@@ -198,6 +204,12 @@ impl Server {
     /// The addresses actually bound, which differ from the config when it asked for port 0.
     pub fn local_addrs(&self) -> &[SocketAddr] {
         &self.addrs
+    }
+
+    /// Stops serving; the receiver resolves once every listener is closed and the port is free.
+    pub fn shutdown(mut self) -> futures::channel::oneshot::Receiver<()> {
+        drop(self.stop.take());
+        self.closed.take().expect("closed is taken only here")
     }
 
     /// The id phones see in `welcome` and `paired`.
@@ -238,9 +250,6 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         drop(self.stop.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 
@@ -403,7 +412,7 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
             }
             Some(Opened::Pair(ws, device, whois))
         }
-        Route::Connect(slot) => {
+        Route::Connect(mut slot) => {
             let ClientMsg::Hello { proto, .. } = read_json(&mut ws).await? else {
                 return None;
             };
@@ -426,9 +435,11 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
                 name: shared.name.clone(),
                 app: env!("CARGO_PKG_VERSION").into(),
             };
-            send(&mut ws, &welcome)
-                .await
-                .then_some(Opened::Connect(ws, slot))
+            if !send(&mut ws, &welcome).await {
+                return None;
+            }
+            slot.welcome();
+            Some(Opened::Connect(ws, slot))
         }
     }
 }
@@ -499,6 +510,7 @@ struct Slot {
     shared: Arc<Shared>,
     device: String,
     revoked: broadcast::Receiver<String>,
+    welcomed: bool,
 }
 
 impl Slot {
@@ -517,7 +529,16 @@ impl Slot {
             shared: shared.clone(),
             device: device.to_string(),
             revoked,
+            welcomed: false,
         })
+    }
+
+    /// Counts the connection for the app, which a handshake that fails before `welcome` must not.
+    fn welcome(&mut self) {
+        self.welcomed = true;
+        let mut total = lock(&self.shared.welcomed);
+        *total += 1;
+        notify_clients(&self.shared, *total);
     }
 }
 
@@ -530,7 +551,18 @@ impl Drop for Slot {
                 live.remove(&self.device);
             }
         }
+        drop(live);
+        if self.welcomed {
+            let mut total = lock(&self.shared.welcomed);
+            *total -= 1;
+            notify_clients(&self.shared, *total);
+        }
     }
+}
+
+/// Sends under the `welcomed` lock so totals reach the app in the order they were counted.
+fn notify_clients(shared: &Shared, total: usize) {
+    let _ = shared.commands.try_send(Command::ClientsChanged(total));
 }
 
 async fn pair(
@@ -882,6 +914,25 @@ mod tests {
             }
         }
 
+        async fn next_command(&self) -> Result<Command, async_channel::RecvError> {
+            loop {
+                match self.commands.recv().await {
+                    Ok(Command::ClientsChanged(_)) => {}
+                    other => return other,
+                }
+            }
+        }
+
+        /// True when nothing but client counts is queued.
+        fn no_command(&self) -> bool {
+            while let Ok(command) = self.commands.try_recv() {
+                if !matches!(command, Command::ClientsChanged(_)) {
+                    return false;
+                }
+            }
+            true
+        }
+
         fn pair_device(&self) -> (String, String) {
             let (device, token) = lock(&self.devices).issue("Phone", "a@b.c", "node").unwrap();
             (device.id, token)
@@ -1074,7 +1125,7 @@ mod tests {
         send_json(&mut ws, &hello(PROTO)).await;
         send_spawn(&mut ws).await;
         assert_unanswered(&mut ws).await;
-        assert!(fx.commands.try_recv().is_err());
+        assert!(fx.no_command());
     }
 
     #[tokio::test]
@@ -1086,7 +1137,7 @@ mod tests {
         assert!(fx.server.revoke(&id).unwrap());
         send_spawn(&mut ws).await;
         assert_unanswered(&mut ws).await;
-        assert!(fx.commands.try_recv().is_err());
+        assert!(fx.no_command());
     }
 
     /// A revoke that lands while `spawn_claude` is waiting must beat the next queued request.
@@ -1099,7 +1150,7 @@ mod tests {
             let mut ws = fx.welcomed(&token).await;
             send_spawn(&mut ws).await;
             let Ok(Command::SpawnClaude { reply, .. }) =
-                timeout(Duration::from_secs(5), fx.commands.recv())
+                timeout(Duration::from_secs(5), fx.next_command())
                     .await
                     .expect("the first spawn never reached the app")
             else {
@@ -1110,7 +1161,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let _ = reply.send(Ok(1));
             tokio::time::sleep(Duration::from_millis(100)).await;
-            assert!(fx.commands.try_recv().is_err());
+            assert!(fx.no_command());
         }
     }
 
@@ -1192,6 +1243,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_resolves_once_the_port_is_free() {
+        let fx = Fixture::new();
+        let (server, _) = Server::start(Config {
+            addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+            devices: fx.devices.clone(),
+            data_dir: fx.dir.clone(),
+            cli: None,
+            allow_loopback_for_tests: true,
+            name: "Test Mac".into(),
+            mux_socket: fx.mux.clone(),
+        })
+        .unwrap();
+        let addr = server.local_addrs()[0];
+        let _ = timeout(Duration::from_secs(5), server.shutdown())
+            .await
+            .expect("the server never finished stopping");
+        StdListener::bind(addr).expect("the port was still held");
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_a_welcomed_connection() {
+        let fx = Fixture::new();
+        let (server, _commands) = Server::start(Config {
+            addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+            devices: fx.devices.clone(),
+            data_dir: fx.dir.clone(),
+            cli: None,
+            allow_loopback_for_tests: true,
+            name: "Test Mac".into(),
+            mux_socket: fx.mux.clone(),
+        })
+        .unwrap();
+        let (_, token) = fx.pair_device();
+        let addr = server.local_addrs()[0];
+        let mut request = format!("ws://{addr}/v1/connect")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (mut ws, _) = client_async(request, stream).await.unwrap();
+        send_json(&mut ws, &hello(PROTO)).await;
+        assert!(matches!(next_msg(&mut ws).await, ServerMsg::Welcome { .. }));
+        let closed = server.shutdown();
+        let _ = timeout(Duration::from_secs(5), closed)
+            .await
+            .expect("the server never finished stopping");
+        let end = timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("the connection stayed open");
+        assert!(!matches!(end, Some(Ok(Message::Text(_)))), "{end:?}");
+    }
+
+    #[tokio::test]
     async fn origin_gets_403() {
         let fx = Fixture::new();
         let (_, token) = fx.pair_device();
@@ -1241,7 +1348,7 @@ mod tests {
             device,
             peer,
             reply,
-        }) = timeout(Duration::from_secs(5), fx.commands.recv())
+        }) = timeout(Duration::from_secs(5), fx.next_command())
             .await
             .unwrap()
         else {
@@ -1312,7 +1419,7 @@ mod tests {
             },
         )
         .await;
-        let Ok(Command::Pair { reply, .. }) = fx.commands.recv().await else {
+        let Ok(Command::Pair { reply, .. }) = fx.next_command().await else {
             panic!("expected a pair command");
         };
         reply.send(Verdict::Deny).unwrap();
@@ -1333,6 +1440,36 @@ mod tests {
         let mut ws = fx.connect(&token).await.unwrap();
         send_json(&mut ws, &hello(PROTO + 1)).await;
         assert_eq!(close_code(&mut ws).await, Some(CloseCode::Library(4001)));
+    }
+
+    #[tokio::test]
+    async fn the_app_hears_the_total_of_live_connections() {
+        let fx = Fixture::new();
+        let (_, token) = fx.pair_device();
+        let ws = fx.welcomed(&token).await;
+        let heard = timeout(Duration::from_secs(5), fx.commands.recv())
+            .await
+            .unwrap();
+        assert!(matches!(heard, Ok(Command::ClientsChanged(1))));
+        drop(ws);
+        let heard = timeout(Duration::from_secs(5), fx.commands.recv())
+            .await
+            .unwrap();
+        assert!(matches!(heard, Ok(Command::ClientsChanged(0))));
+    }
+
+    #[tokio::test]
+    async fn a_handshake_that_fails_before_welcome_is_not_counted() {
+        let fx = Fixture::new();
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.connect(&token).await.unwrap();
+        send_json(&mut ws, &hello(PROTO + 1)).await;
+        assert_eq!(
+            close_code(&mut ws).await,
+            Some(CloseCode::Library(VERSION_CLOSE))
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(fx.commands.try_recv().is_err());
     }
 
     #[tokio::test]
