@@ -24,11 +24,12 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
 use super::devices::{Device, Devices, PairingCode};
 use super::protocol::{
-    self, ClientMsg, DropReason, Kind, NoticeKind, PROTO, PairReply, PairRequest, Project,
-    ServerMsg, Session, Terminal, UsageProfile,
+    self, ClientMsg, DropReason, FEATURES, Kind, NoticeKind, PROTO, PairReply, PairRequest,
+    Project, ServerMsg, Session, Terminal, UsageProfile,
 };
 use super::stream::{Attachments, Out};
 use super::tailnet;
+use super::transcript_feed::Transcripts;
 use crate::ide::lock::{token, write_private};
 
 const MAX_HANDSHAKES: usize = 16;
@@ -61,6 +62,8 @@ pub struct Config {
     pub name: String,
     /// The session daemon's Unix socket, where attached panes are streamed from.
     pub mux_socket: PathBuf,
+    /// Where Claude's `.claude*` profile directories live.
+    pub home: Option<PathBuf>,
 }
 
 /// The answer to a pairing prompt.
@@ -122,6 +125,7 @@ struct Shared {
     pairing: Mutex<Option<PairingCode>>,
     cli: Option<PathBuf>,
     mux_socket: PathBuf,
+    home: Option<PathBuf>,
     allow_loopback: bool,
     commands: async_channel::Sender<Command>,
     snapshot: watch::Sender<Arc<Snapshot>>,
@@ -164,6 +168,7 @@ impl Server {
             pairing: Mutex::new(None),
             cli: config.cli,
             mux_socket: config.mux_socket,
+            home: config.home,
             allow_loopback: config.allow_loopback_for_tests,
             commands,
             snapshot: watch::channel(Arc::default()).0,
@@ -447,7 +452,7 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
                 server: shared.id.clone(),
                 name: shared.name.clone(),
                 app: env!("CARGO_PKG_VERSION").into(),
-                features: Vec::new(),
+                features: FEATURES.iter().map(|f| f.to_string()).collect(),
             };
             if !send(&mut ws, &welcome).await {
                 return None;
@@ -654,6 +659,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut next_snapshot = Instant::now();
     let mut seq = 0u64;
     let mut attachments = Attachments::new(shared.mux_socket.clone());
+    let mut transcripts = Transcripts::new(shared.home.clone());
     loop {
         tokio::select! {
             // Biased so a queued revoke wins over a request already readable on the socket.
@@ -713,14 +719,22 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 Some(spawn_claude(shared, &current, id, project).await)
                             }
                             ClientMsg::UsageRefresh { id } => Some(usage_refresh(shared, id).await),
-                            ClientMsg::TranscriptOpen { id, .. }
-                            | ClientMsg::TranscriptMore { id, .. }
-                            | ClientMsg::Prompt { id, .. }
+                            ClientMsg::TranscriptOpen { id, session, limit } => {
+                                let current = Arc::clone(&snapshot.borrow());
+                                Some(transcripts.open(&current, id, session, limit).await)
+                            }
+                            ClientMsg::TranscriptMore { id, session, before, limit } => {
+                                Some(transcripts.more(id, session, before, limit))
+                            }
+                            ClientMsg::TranscriptClose { session } => {
+                                transcripts.close(&session);
+                                None
+                            }
+                            ClientMsg::Prompt { id, .. }
                             | ClientMsg::Interrupt { id, .. } => Some(ServerMsg::Error {
                                 id: Some(id),
                                 message: "not supported".into(),
                             }),
-                            ClientMsg::TranscriptClose { .. } => None,
                         };
                         if let Some(reply) = reply && !send(&mut ws, &reply).await {
                             break;
@@ -795,6 +809,11 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                 }
             }
             () = tokio::time::sleep_until(last_pong + PONG_TIMEOUT) => break,
+            message = transcripts.next() => {
+                if !send(&mut ws, &message).await {
+                    break;
+                }
+            }
             // Last, so steady output cannot starve the ping and the pong deadline.
             out = attachments.next() => {
                 let sent = match out {
@@ -953,6 +972,7 @@ mod tests {
                 allow_loopback_for_tests: true,
                 name: "Test Mac".into(),
                 mux_socket: mux.clone(),
+                home: Some(dir.join("home")),
             })
             .unwrap();
             Self {
@@ -1313,6 +1333,7 @@ mod tests {
                 allow_loopback_for_tests: true,
                 name: "Test Mac".into(),
                 mux_socket: fx.mux.clone(),
+                home: Some(dir.join("home")),
             })
             .unwrap();
             server.id().to_string()
@@ -1344,6 +1365,7 @@ mod tests {
             allow_loopback_for_tests: true,
             name: "Test Mac".into(),
             mux_socket: fx.mux.clone(),
+            home: Some(fx.dir.join("home")),
         })
         .unwrap();
         let addr = server.local_addrs()[0];
@@ -1364,6 +1386,7 @@ mod tests {
             allow_loopback_for_tests: true,
             name: "Test Mac".into(),
             mux_socket: fx.mux.clone(),
+            home: Some(fx.dir.join("home")),
         })
         .unwrap();
         let (_, token) = fx.pair_device();
@@ -2143,5 +2166,264 @@ mod tests {
         assert!(same_owner(&device, Some(&peer("a@b.c"))));
         assert!(!same_owner(&device, Some(&peer("x@y.z"))));
         assert!(same_owner(&device, None));
+    }
+
+    fn known_session(id: &str) -> Session {
+        Session {
+            id: id.into(),
+            label: id.into(),
+            pane: None,
+            project: None,
+            cwd: "/work/app".into(),
+            main_root: "/work/app".into(),
+            branch: None,
+            state: protocol::SessionState::Idle,
+            unread: false,
+            todos: Vec::new(),
+            plan: None,
+            needs: None,
+            files: 0,
+            modified_ms: 0,
+        }
+    }
+
+    fn show_sessions(fx: &Fixture, ids: &[&str]) {
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            sessions: ids.iter().map(|id| known_session(id)).collect(),
+            ..Snapshot::default()
+        }));
+    }
+
+    fn transcript_path(fx: &Fixture, id: &str) -> PathBuf {
+        let dir = fx
+            .dir
+            .join("home/.claude/projects")
+            .join(crate::transcripts::project_folder(Path::new("/work/app")));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{id}.jsonl"))
+    }
+
+    fn reply_line(n: usize) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"uuid\":\"a{n}\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"reply {n}\"}}]}}}}\n"
+        )
+    }
+
+    fn write_replies(fx: &Fixture, id: &str, count: usize) -> PathBuf {
+        let path = transcript_path(fx, id);
+        std::fs::write(&path, (0..count).map(reply_line).collect::<String>()).unwrap();
+        path
+    }
+
+    fn append_reply(path: &Path, n: usize) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(reply_line(n).as_bytes()).unwrap();
+    }
+
+    async fn next_transcript(ws: &mut Ws) -> ServerMsg {
+        loop {
+            match next_msg(ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => return other,
+            }
+        }
+    }
+
+    async fn open_transcript(ws: &mut Ws, session: &str, limit: u32) -> ServerMsg {
+        let open = ClientMsg::TranscriptOpen {
+            id: "r5".into(),
+            session: session.into(),
+            limit,
+        };
+        send_json(ws, &open).await;
+        next_transcript(ws).await
+    }
+
+    fn texts(items: &[protocol::Item]) -> Vec<&str> {
+        items.iter().filter_map(|i| i.text.as_deref()).collect()
+    }
+
+    #[tokio::test]
+    async fn welcome_lists_the_transcript_feature_and_not_act() {
+        let fx = Fixture::new();
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.connect(&token).await.unwrap();
+        send_json(&mut ws, &hello(PROTO)).await;
+        let ServerMsg::Welcome { features, .. } = next_msg(&mut ws).await else {
+            panic!("expected a welcome");
+        };
+        assert!(features.iter().any(|f| f == "transcript"));
+        assert!(!features.iter().any(|f| f == "act"));
+    }
+
+    #[tokio::test]
+    async fn opening_a_session_that_is_not_in_the_snapshot_is_an_error() {
+        let fx = Fixture::new();
+        write_replies(&fx, "s1", 1);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let ServerMsg::Error { id, .. } = open_transcript(&mut ws, "s1", 10).await else {
+            panic!("expected an error");
+        };
+        assert_eq!(id.as_deref(), Some("r5"));
+    }
+
+    #[tokio::test]
+    async fn opening_a_transcript_answers_with_a_page() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        write_replies(&fx, "s1", 3);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let ServerMsg::Transcript {
+            session,
+            kind,
+            items,
+            before,
+        } = open_transcript(&mut ws, "s1", 10).await
+        else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(
+            (session.as_str(), kind),
+            ("s1", protocol::TranscriptKind::Page)
+        );
+        assert_eq!(texts(&items), ["reply 0", "reply 1", "reply 2"]);
+        assert_eq!(before, None);
+    }
+
+    #[tokio::test]
+    async fn a_line_written_to_an_open_transcript_is_appended() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let path = write_replies(&fx, "s1", 1);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        assert!(matches!(
+            open_transcript(&mut ws, "s1", 10).await,
+            ServerMsg::Transcript { .. }
+        ));
+        append_reply(&path, 1);
+        let started = StdInstant::now();
+        let ServerMsg::Transcript { kind, items, .. } = next_transcript(&mut ws).await else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(kind, protocol::TranscriptKind::Append);
+        assert_eq!(texts(&items), ["reply 1"]);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_shrunk_transcript_is_sent_again_as_a_page() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        write_replies(&fx, "s1", 3);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        write_replies(&fx, "s1", 1);
+        let ServerMsg::Transcript { kind, items, .. } = next_transcript(&mut ws).await else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(kind, protocol::TranscriptKind::Page);
+        assert_eq!(texts(&items), ["reply 0"]);
+    }
+
+    #[tokio::test]
+    async fn more_answers_with_the_older_items() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        write_replies(&fx, "s1", 5);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let ServerMsg::Transcript { items, before, .. } = open_transcript(&mut ws, "s1", 2).await
+        else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(texts(&items), ["reply 3", "reply 4"]);
+        let more = ClientMsg::TranscriptMore {
+            id: "r6".into(),
+            session: "s1".into(),
+            before: before.expect("older items remain"),
+            limit: 10,
+        };
+        send_json(&mut ws, &more).await;
+        let ServerMsg::Transcript {
+            kind,
+            items,
+            before,
+            ..
+        } = next_transcript(&mut ws).await
+        else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(kind, protocol::TranscriptKind::Older);
+        assert_eq!(texts(&items), ["reply 0", "reply 1", "reply 2"]);
+        assert_eq!(before, None);
+    }
+
+    #[tokio::test]
+    async fn more_for_a_transcript_that_is_not_open_is_an_error() {
+        let fx = Fixture::new();
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let more = ClientMsg::TranscriptMore {
+            id: "r6".into(),
+            session: "s1".into(),
+            before: 10,
+            limit: 10,
+        };
+        send_json(&mut ws, &more).await;
+        let ServerMsg::Error { id, .. } = next_transcript(&mut ws).await else {
+            panic!("expected an error");
+        };
+        assert_eq!(id.as_deref(), Some("r6"));
+    }
+
+    #[tokio::test]
+    async fn a_fifth_open_transcript_is_refused() {
+        let fx = Fixture::new();
+        let ids = ["s1", "s2", "s3", "s4", "s5"];
+        show_sessions(&fx, &ids);
+        for id in ids {
+            write_replies(&fx, id, 1);
+        }
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        for id in &ids[..4] {
+            assert!(matches!(
+                open_transcript(&mut ws, id, 10).await,
+                ServerMsg::Transcript { .. }
+            ));
+        }
+        assert!(matches!(
+            open_transcript(&mut ws, "s5", 10).await,
+            ServerMsg::Error { .. }
+        ));
+        assert!(matches!(
+            open_transcript(&mut ws, "s1", 10).await,
+            ServerMsg::Transcript { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_a_transcript_stops_its_appends() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let path = write_replies(&fx, "s1", 1);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::TranscriptClose {
+                session: "s1".into(),
+            },
+        )
+        .await;
+        append_reply(&path, 1);
+        let quiet = timeout(Duration::from_millis(1500), next_transcript(&mut ws)).await;
+        assert!(quiet.is_err(), "got {quiet:?} after the close");
     }
 }

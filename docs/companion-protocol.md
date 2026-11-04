@@ -15,7 +15,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Framing
 
-- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `act` and `usage`, and reads `terminal.dialog` only when it lists `dialog`.
+- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript and usage messages only when `welcome.features` lists `transcript` and `usage`, and reads `terminal.dialog` only when it lists `dialog`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
 
@@ -58,13 +58,13 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"refresh"}
 ```
 
-`transcript_open`: start following a session's conversation. The desktop answers with a `transcript` of kind `page` holding the newest `limit` items (at most 200), then sends `append` messages as the file grows. `session` must be an id in the latest snapshot, and a connection follows at most 4 sessions. Failures come back as `error` with the `id`.
+`transcript_open`: start following a session's conversation. The desktop answers with a `transcript` of kind `page` holding the newest `limit` items (at most 200), then sends `append` messages as the file grows. `session` must be an id in the latest snapshot, and a connection follows at most 4 sessions. Opening a session that is already followed sends a fresh `page`. Failures come back as `error` with the `id`.
 
 ```json
 {"type":"transcript_open","id":"r5","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","limit":60}
 ```
 
-`transcript_more`: load items older than `before`, a `pos` from an earlier `transcript`. The answer is a `transcript` of kind `older`. `limit` is at most 200.
+`transcript_more`: load items older than `before`, a `pos` from an earlier `transcript`. The answer is a `transcript` of kind `older`. `limit` is at most 200, and a session that is not followed gets an `error` with the `id`, and so does a request that arrives while the desktop is re-reading that file (`busy`).
 
 ```json
 {"type":"transcript_more","id":"r6","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","before":123456,"limit":60}
@@ -96,10 +96,10 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `act` for `prompt` and `interrupt`, `usage` for `snapshot.usage` and `usage_refresh`, `dialog` for `terminal.dialog`), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `dialog` for `terminal.dialog`), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","act","usage","dialog"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","dialog"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -109,7 +109,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 ```
 
 `terminal.dialog` is present only while the pane runs Claude in `needs_input` and the desktop recognised the dialog on its screen, and is omitted otherwise. The desktop reads the visible text only, so a dialog it does not recognise is omitted or sent as `unknown`, never guessed. See `design/protocol/snapshot_dialog.json`.
-- `kind` is `select` (a single `❯` list: permission prompt, plan approval, trust dialog), `question` (a list with an Other row, checkboxes or a tab header), `review` (the review screen before a question set is submitted) or `unknown` (it has a `❯` row and a footer but did not parse cleanly; show it read-only and offer "Open terminal"). A phone decoding an unrecognised `kind` treats it as `unknown`.
+- `kind` is `select` (a single `❯` list: permission prompt, plan approval, trust dialog), `question` (a list with an Other row, checkboxes or a tab header), `review` (the review screen before a question set is submitted) or `unknown` (it has a known footer and zero, several or unplaceable `❯` rows; show it read-only and offer "Open terminal"). A phone decoding an unrecognised `kind` treats it as `unknown`.
 - `key` is 8 hex characters of FNV-1a. With tabs it hashes the kind and the tab labels, otherwise the kind, title, prompt and option labels. It does not change when the highlight, a checkbox, the input text or the current tab moves.
 - `title`, `lines` (at most 12 of at most 200 characters) and `prompt` are the text above the rows. For a `question`, `title` is the question under the tab header, and `lines` and `prompt` are empty. For `select` and `review`, `prompt` is the last line ending in `?` above the rows and `lines` holds the rest.
 - `options` lists at most 12 rows, in screen order, with labels of at most 200 characters. `description` is the dim line under a row, and `checked` is present only on multi-select rows (`multi` is then true). `input` marks a row that takes typed text: the Other row (`label` is `Other`, `text` empty) and the `Yes, and don’t ask again for` row, whose `text` (at most 500 characters) is the prefix currently in the field.

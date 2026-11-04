@@ -6,7 +6,6 @@
   "app": "2.0.1",
   "features": [
     "transcript",
-    "act",
     "usage",
     "dialog"
   ]

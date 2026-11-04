@@ -55,6 +55,7 @@ pub(super) struct Windows {
     /// What each pane last asked, until it runs again or stops.
     companion_needs: HashMap<PaneId, String>,
     companion_dirty: bool,
+    usage_pushed: HashMap<(String, String), f32>,
     _companion_ticker: Option<Task<()>>,
     companion_closing: Option<futures::channel::oneshot::Receiver<()>>,
     /// Shared with every server so a device can be revoked while none runs.
@@ -119,6 +120,7 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         companion_clients: 0,
         companion_needs: HashMap::new(),
         companion_dirty: false,
+        usage_pushed: HashMap::new(),
         _companion_ticker: None,
         companion_closing: None,
         companion_devices: None,
@@ -248,6 +250,11 @@ pub(super) fn handles(cx: &App) -> Vec<WindowHandle<Shell>> {
         .iter()
         .map(|o| o.handle)
         .collect()
+}
+
+/// The usage level each profile's window last reached, shared so one crossing pushes once however many windows poll.
+pub(super) fn usage_pushed(cx: &mut App) -> &mut HashMap<(String, String), f32> {
+    &mut cx.global_mut::<Windows>().usage_pushed
 }
 
 /// The window commands from outside act on: the one last in use, else the first.
