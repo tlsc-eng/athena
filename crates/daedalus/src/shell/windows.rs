@@ -602,17 +602,35 @@ pub(super) fn set_companion(
     windows._companion_events = Some(task);
 }
 
-/// Closes the server and its connections but keeps the watch that may start it again.
-pub(super) fn drop_companion_server(cx: &mut App) {
+/// Takes the server out and resets the client count, leaving the watch that may start another.
+pub(super) fn take_companion(cx: &mut App) -> Option<companion_server::Server> {
     let windows = cx.global_mut::<Windows>();
     windows._companion_events = None;
-    windows.companion = None;
+    let server = windows.companion.take();
     set_companion_clients(0, cx);
+    server
+}
+
+/// Drops the server on a background thread, since that joins its thread; the receiver resolves once it is gone.
+pub(super) fn close_companion(
+    server: companion_server::Server,
+    cx: &App,
+) -> futures::channel::oneshot::Receiver<()> {
+    let (done, closed) = futures::channel::oneshot::channel();
+    cx.background_executor()
+        .spawn(async move {
+            drop(server);
+            let _ = done.send(());
+        })
+        .detach();
+    closed
 }
 
 pub(super) fn stop_companion(cx: &mut App) {
     cx.global_mut::<Windows>()._companion_watch = None;
-    drop_companion_server(cx);
+    if let Some(server) = take_companion(cx) {
+        drop(close_companion(server, cx));
+    }
 }
 
 fn set_companion_clients(count: usize, cx: &mut App) {

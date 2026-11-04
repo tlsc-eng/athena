@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui::{App, Context};
+use gpui::{App, AsyncApp, Context};
 
 use super::Shell;
 use super::windows;
@@ -33,9 +33,9 @@ impl Shell {
                 .background_executor()
                 .spawn(async { computer_name() })
                 .await;
-            let mut told = false;
+            let mut told = Told::default();
             loop {
-                let Ok(wait) = cx.update(|cx| step(&name, &mut told, cx)) else {
+                let Some(wait) = look(&name, &mut told, cx).await else {
                     return;
                 };
                 cx.background_executor().timer(wait).await;
@@ -45,42 +45,76 @@ impl Shell {
     }
 }
 
+/// Which notices the watch has shown, so a retry loop does not repeat them.
+#[derive(Default)]
+struct Told {
+    waiting: bool,
+    failed: bool,
+}
+
 /// Brings the server in line with the Tailscale addresses now, and says how long until the next look.
-fn step(name: &str, told: &mut bool, cx: &mut App) -> Duration {
-    let (v4, v6) = tailnet::pick(&tailnet::local_addrs());
-    let addrs = bind_addrs(v4, v6, PORT);
-    if let Some(running) = windows::companion(cx) {
-        if running.local_addrs() == addrs {
-            return RUNNING_POLL;
+/// Everything that blocks runs on the background executor; `None` means the app is gone.
+async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration> {
+    let background = cx.background_executor().clone();
+    let addrs = background
+        .spawn(async {
+            let (v4, v6) = tailnet::pick(&tailnet::local_addrs());
+            bind_addrs(v4, v6, PORT)
+        })
+        .await;
+    let running = cx
+        .update(|cx| windows::companion(cx).map(|server| server.local_addrs() == addrs))
+        .ok()?;
+    match running {
+        Some(true) => return Some(RUNNING_POLL),
+        // The old server holds the port until its thread is joined.
+        Some(false) => {
+            let closed = cx
+                .update(|cx| {
+                    windows::take_companion(cx).map(|server| windows::close_companion(server, cx))
+                })
+                .ok()?;
+            if let Some(closed) = closed {
+                let _ = closed.await;
+            }
         }
-        windows::drop_companion_server(cx);
+        None => {}
     }
     if addrs.is_empty() {
-        if !std::mem::replace(told, true) {
-            notice(
-                "Waiting for Tailscale",
-                "The phone companion starts when Tailscale is connected.".into(),
-                cx,
-            );
+        if !std::mem::replace(&mut told.waiting, true) {
+            cx.update(|cx| {
+                notice(
+                    "Waiting for Tailscale",
+                    "The phone companion starts when Tailscale is connected.".into(),
+                    cx,
+                )
+            })
+            .ok()?;
         }
-        return WAITING_POLL;
+        return Some(WAITING_POLL);
     }
-    match start(addrs, name) {
+    let name = name.to_string();
+    // If the setting goes off while this runs, the dropped watch cancels it and the server goes with it.
+    match background.spawn(async move { start(addrs, &name) }).await {
         Ok((server, commands)) => {
-            *told = false;
-            windows::set_companion(server, commands, cx);
-            RUNNING_POLL
+            told.failed = false;
+            cx.update(|cx| windows::set_companion(server, commands, cx))
+                .ok()?;
+            Some(RUNNING_POLL)
         }
         Err(e) => {
-            if !std::mem::replace(told, true) {
+            if !std::mem::replace(&mut told.failed, true) {
                 tracing::error!("could not start the phone companion: {e}");
-                notice(
-                    "Phone companion could not start",
-                    format!("{e}. Daedalus keeps trying."),
-                    cx,
-                );
+                cx.update(|cx| {
+                    notice(
+                        "Phone companion could not start",
+                        format!("{e}. Daedalus keeps trying."),
+                        cx,
+                    )
+                })
+                .ok()?;
             }
-            WAITING_POLL
+            Some(WAITING_POLL)
         }
     }
 }

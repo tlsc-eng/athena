@@ -119,6 +119,7 @@ struct Shared {
     snapshot: watch::Sender<Arc<Snapshot>>,
     notices: broadcast::Sender<Notice>,
     live: Mutex<HashMap<String, usize>>,
+    welcomed: Mutex<usize>,
     revoked: broadcast::Sender<String>,
     handshakes: Arc<Semaphore>,
     whois: WhoisCache,
@@ -160,6 +161,7 @@ impl Server {
             snapshot: watch::channel(Arc::default()).0,
             notices: broadcast::channel(64).0,
             live: Mutex::default(),
+            welcomed: Mutex::default(),
             revoked: broadcast::channel(16).0,
             handshakes: Arc::new(Semaphore::new(MAX_HANDSHAKES)),
             whois: WhoisCache::default(),
@@ -405,7 +407,7 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
             }
             Some(Opened::Pair(ws, device, whois))
         }
-        Route::Connect(slot) => {
+        Route::Connect(mut slot) => {
             let ClientMsg::Hello { proto, .. } = read_json(&mut ws).await? else {
                 return None;
             };
@@ -428,9 +430,11 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
                 name: shared.name.clone(),
                 app: env!("CARGO_PKG_VERSION").into(),
             };
-            send(&mut ws, &welcome)
-                .await
-                .then_some(Opened::Connect(ws, slot))
+            if !send(&mut ws, &welcome).await {
+                return None;
+            }
+            slot.welcome();
+            Some(Opened::Connect(ws, slot))
         }
     }
 }
@@ -501,6 +505,7 @@ struct Slot {
     shared: Arc<Shared>,
     device: String,
     revoked: broadcast::Receiver<String>,
+    welcomed: bool,
 }
 
 impl Slot {
@@ -515,12 +520,20 @@ impl Slot {
             return None;
         }
         *count += 1;
-        notify_clients(shared, &live);
         Some(Self {
             shared: shared.clone(),
             device: device.to_string(),
             revoked,
+            welcomed: false,
         })
+    }
+
+    /// Counts the connection for the app, which a handshake that fails before `welcome` must not.
+    fn welcome(&mut self) {
+        self.welcomed = true;
+        let mut total = lock(&self.shared.welcomed);
+        *total += 1;
+        notify_clients(&self.shared, *total);
     }
 }
 
@@ -532,16 +545,19 @@ impl Drop for Slot {
             if *count == 0 {
                 live.remove(&self.device);
             }
-            notify_clients(&self.shared, &live);
+        }
+        drop(live);
+        if self.welcomed {
+            let mut total = lock(&self.shared.welcomed);
+            *total -= 1;
+            notify_clients(&self.shared, *total);
         }
     }
 }
 
-/// Sends under the `live` lock so totals reach the app in the order they were counted.
-fn notify_clients(shared: &Shared, live: &HashMap<String, usize>) {
-    let _ = shared
-        .commands
-        .try_send(Command::ClientsChanged(live.values().sum()));
+/// Sends under the `welcomed` lock so totals reach the app in the order they were counted.
+fn notify_clients(shared: &Shared, total: usize) {
+    let _ = shared.commands.try_send(Command::ClientsChanged(total));
 }
 
 async fn pair(
@@ -1379,6 +1395,20 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(heard, Ok(Command::ClientsChanged(0))));
+    }
+
+    #[tokio::test]
+    async fn a_handshake_that_fails_before_welcome_is_not_counted() {
+        let fx = Fixture::new();
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.connect(&token).await.unwrap();
+        send_json(&mut ws, &hello(PROTO + 1)).await;
+        assert_eq!(
+            close_code(&mut ws).await,
+            Some(CloseCode::Library(VERSION_CLOSE))
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(fx.commands.try_recv().is_err());
     }
 
     #[tokio::test]
