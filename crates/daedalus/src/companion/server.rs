@@ -411,6 +411,10 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
                 .await;
                 return None;
             }
+            if !is_paired(shared, &slot.device) {
+                close(&mut ws, CloseCode::Policy, "device revoked").await;
+                return None;
+            }
             let welcome = ServerMsg::Welcome {
                 proto: PROTO,
                 server: shared.id.clone(),
@@ -598,6 +602,19 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut seq = 0u64;
     loop {
         tokio::select! {
+            // Biased so a queued revoke wins over a request already readable on the socket.
+            biased;
+            revoked = slot.revoked.recv() => {
+                let gone = match revoked {
+                    Ok(id) => id == slot.device,
+                    Err(broadcast::error::RecvError::Lagged(_)) => !is_paired(shared, &slot.device),
+                    Err(broadcast::error::RecvError::Closed) => true,
+                };
+                if gone {
+                    close(&mut ws, CloseCode::Policy, "device revoked").await;
+                    break;
+                }
+            }
             incoming = ws.next() => {
                 let Some(Ok(message)) = incoming else { break };
                 match message {
@@ -681,17 +698,6 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            revoked = slot.revoked.recv() => {
-                let gone = match revoked {
-                    Ok(id) => id == slot.device,
-                    Err(broadcast::error::RecvError::Lagged(_)) => !is_paired(shared, &slot.device),
-                    Err(broadcast::error::RecvError::Closed) => true,
-                };
-                if gone {
-                    close(&mut ws, CloseCode::Policy, "device revoked").await;
-                    break;
-                }
-            }
             _ = ping.tick() => {
                 if !is_paired(shared, &slot.device) {
                     close(&mut ws, CloseCode::Policy, "device revoked").await;
@@ -968,14 +974,77 @@ mod tests {
         assert_eq!(code, Some(CloseCode::Policy));
     }
 
+    fn open_project(fx: &Fixture) {
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            projects: vec![protocol::Project {
+                root: "/p".into(),
+                name: "p".into(),
+                window: 1,
+            }],
+            ..Snapshot::default()
+        }));
+    }
+
+    fn spawn_request() -> ClientMsg {
+        ClientMsg::SpawnClaude {
+            id: "r1".into(),
+            project: "/p".into(),
+        }
+    }
+
+    /// Drains the socket until it ends, failing on a reply to the request; a reset may swallow the close frame.
+    async fn assert_unanswered(ws: &mut Ws) {
+        loop {
+            match timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("timed out")
+            {
+                Some(Ok(Message::Text(text))) => {
+                    let message: ServerMsg = serde_json::from_str(text.as_str()).unwrap();
+                    assert!(
+                        !matches!(
+                            message,
+                            ServerMsg::Welcome { .. }
+                                | ServerMsg::Spawned { .. }
+                                | ServerMsg::Error { .. }
+                        ),
+                        "a revoked device was answered: {text}"
+                    );
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    }
+
+    async fn send_spawn(ws: &mut Ws) {
+        let text = serde_json::to_string(&spawn_request()).unwrap();
+        let _ = ws.send(Message::text(text)).await;
+    }
+
     #[tokio::test]
-    async fn a_revoke_after_subscribing_reaches_the_reserved_slot() {
+    async fn a_device_revoked_after_the_upgrade_gets_no_welcome_and_no_command() {
         let fx = Fixture::new();
-        let (id, _) = fx.pair_device();
-        let revoked = fx.server.shared.revoked.subscribe();
+        let (id, token) = fx.pair_device();
+        open_project(&fx);
+        let mut ws = fx.connect(&token).await.unwrap();
         assert!(fx.server.revoke(&id).unwrap());
-        let mut slot = Slot::reserve(&fx.server.shared, &id, revoked).unwrap();
-        assert_eq!(slot.revoked.try_recv(), Ok(id));
+        send_json(&mut ws, &hello(PROTO)).await;
+        send_spawn(&mut ws).await;
+        assert_unanswered(&mut ws).await;
+        assert!(fx.commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_request_sent_right_after_a_revoke_is_not_served() {
+        let fx = Fixture::new();
+        let (id, token) = fx.pair_device();
+        open_project(&fx);
+        let mut ws = fx.welcomed(&token).await;
+        assert!(fx.server.revoke(&id).unwrap());
+        send_spawn(&mut ws).await;
+        assert_unanswered(&mut ws).await;
+        assert!(fx.commands.try_recv().is_err());
     }
 
     #[tokio::test]
