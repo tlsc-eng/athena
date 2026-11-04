@@ -70,7 +70,7 @@ async fn look(name: &str, told: &mut Told, cx: &mut AsyncApp) -> Option<Duration
         .ok()?;
     match running {
         Some(true) => return Some(RUNNING_POLL),
-        // The old server holds the port until its thread is joined.
+        // The old server holds the port until its shutdown resolves.
         Some(false) => {
             if let Some(server) = cx.update(windows::take_companion).ok()? {
                 let _ = server.shutdown().await;

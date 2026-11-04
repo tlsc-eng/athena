@@ -1263,6 +1263,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_closes_a_welcomed_connection() {
+        let fx = Fixture::new();
+        let (server, _commands) = Server::start(Config {
+            addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+            devices: fx.devices.clone(),
+            data_dir: fx.dir.clone(),
+            cli: None,
+            allow_loopback_for_tests: true,
+            name: "Test Mac".into(),
+            mux_socket: fx.mux.clone(),
+        })
+        .unwrap();
+        let (_, token) = fx.pair_device();
+        let addr = server.local_addrs()[0];
+        let mut request = format!("ws://{addr}/v1/connect")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (mut ws, _) = client_async(request, stream).await.unwrap();
+        send_json(&mut ws, &hello(PROTO)).await;
+        assert!(matches!(next_msg(&mut ws).await, ServerMsg::Welcome { .. }));
+        let closed = server.shutdown();
+        let _ = timeout(Duration::from_secs(5), closed)
+            .await
+            .expect("the server never finished stopping");
+        let end = timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("the connection stayed open");
+        assert!(!matches!(end, Some(Ok(Message::Text(_)))), "{end:?}");
+    }
+
+    #[tokio::test]
     async fn origin_gets_403() {
         let fx = Fixture::new();
         let (_, token) = fx.pair_device();
