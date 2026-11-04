@@ -46,6 +46,23 @@ impl LiveSession {
     }
 }
 
+/// A live session with no transcript row yet is current, not the oldest; its bind time stands in
+/// for now so the value holds still between reads.
+fn modified_of(
+    row: Option<&SessionRow>,
+    running: bool,
+    bound_at: Option<SystemTime>,
+) -> SystemTime {
+    row.map_or_else(
+        || {
+            bound_at
+                .filter(|_| running)
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        },
+        |r| r.modified,
+    )
+}
+
 /// Whether a session waits on the user: asking, or finished and not yet looked at.
 fn needs_you(state: Option<ClaudeState>, unread: bool) -> bool {
     match state {
@@ -358,7 +375,6 @@ impl Shell {
             .keys()
             .copied()
             .chain(rows.keys().copied().filter(|id| !running.contains_key(id)));
-        let now = SystemTime::now();
         let mut out: Vec<LiveSession> = ids
             .map(|id| {
                 let term = running.get(id);
@@ -390,17 +406,7 @@ impl Shell {
                     unread: term.is_some_and(|t| unread(t.state, t.bell)),
                     todos: live.and_then(|l| todo_counts(&l.todos)),
                     files: row.map_or(0, |r| r.files.len()),
-                    // A live session with no transcript row yet is current, not the oldest.
-                    modified: row.map_or_else(
-                        || {
-                            if term.is_some() {
-                                now
-                            } else {
-                                SystemTime::UNIX_EPOCH
-                            }
-                        },
-                        |r| r.modified,
-                    ),
+                    modified: modified_of(row, term.is_some(), state.bound_at.get(id).copied()),
                 }
             })
             .collect();
@@ -831,6 +837,19 @@ mod tests {
     }
 
     #[test]
+    fn a_row_less_bound_session_keeps_its_modified_time_between_reads() {
+        let bound = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+        let first = modified_of(None, true, Some(bound));
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(first, modified_of(None, true, Some(bound)));
+        assert_eq!(first, bound);
+        assert_eq!(
+            modified_of(None, false, Some(bound)),
+            SystemTime::UNIX_EPOCH
+        );
+    }
+
+    #[test]
     fn moved_panes_take_their_sessions_and_leave_the_rest() {
         let plan = || LivePlan {
             todos: Vec::new(),
@@ -839,6 +858,8 @@ mod tests {
         let mut from = SessionsState::default();
         from.bind(1, "a".into());
         from.bind(2, "b".into());
+        let bound = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+        from.bound_at.insert("a".into(), bound);
         from.cwds.insert("a".into(), "/x".into());
         from.cwds.insert("b".into(), "/y".into());
         from.live.insert("a".into(), plan());
@@ -848,6 +869,7 @@ mod tests {
         assert_eq!(from.panes.len(), 1);
         assert_eq!(from.panes.get(&2).map(String::as_str), Some("b"));
         assert!(!from.cwds.contains_key("a") && from.cwds.contains_key("b"));
+        assert!(!from.bound_at.contains_key("a") && from.bound_at.contains_key("b"));
         assert!(!from.live.contains_key("a") && from.live.contains_key("b"));
 
         let mut parked = SessionsState::default();
@@ -856,6 +878,7 @@ mod tests {
         to.absorb(parked.split_off(&[1]));
         assert!(parked.panes.is_empty() && parked.cwds.is_empty() && parked.live.is_empty());
         assert_eq!(to.panes.get(&1).map(String::as_str), Some("a"));
+        assert_eq!(to.bound_at.get("a"), Some(&bound));
         assert_eq!(to.cwds.get("a"), Some(&PathBuf::from("/x")));
         assert!(to.live.contains_key("a") && to.panes.len() == 1);
     }

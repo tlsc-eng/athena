@@ -77,6 +77,8 @@ pub(super) struct SessionsState {
     live: HashMap<String, LivePlan>,
     /// The session each terminal runs, as its hooks said.
     panes: HashMap<PaneId, String>,
+    /// When each session was first bound to a pane here.
+    bound_at: HashMap<String, SystemTime>,
     /// Where each session started, as its SessionStart hook said.
     cwds: HashMap<String, PathBuf>,
     /// `live::locate` per cwd, read by a load in the background so drawing never touches the disk.
@@ -89,6 +91,7 @@ pub(super) struct SessionsState {
 #[derive(Default)]
 pub(super) struct Bindings {
     panes: HashMap<PaneId, String>,
+    bound_at: HashMap<String, SystemTime>,
     cwds: HashMap<String, PathBuf>,
     live: HashMap<String, LivePlan>,
 }
@@ -96,6 +99,7 @@ pub(super) struct Bindings {
 impl Bindings {
     pub(super) fn extend(&mut self, other: Bindings) {
         self.panes.extend(other.panes);
+        self.bound_at.extend(other.bound_at);
         self.cwds.extend(other.cwds);
         self.live.extend(other.live);
     }
@@ -108,6 +112,9 @@ impl SessionsState {
             return;
         }
         self.panes.retain(|p, s| *p == pane || *s != session);
+        self.bound_at
+            .entry(session.clone())
+            .or_insert_with(SystemTime::now);
         self.panes.insert(pane, session);
     }
 
@@ -118,6 +125,9 @@ impl SessionsState {
             let Some(session) = self.panes.remove(pane) else {
                 continue;
             };
+            if let Some(at) = self.bound_at.remove(&session) {
+                out.bound_at.insert(session.clone(), at);
+            }
             if let Some(cwd) = self.cwds.remove(&session) {
                 out.cwds.insert(session.clone(), cwd);
             }
@@ -130,6 +140,7 @@ impl SessionsState {
     }
 
     pub(super) fn absorb(&mut self, moved: Bindings) {
+        self.bound_at.extend(moved.bound_at);
         for (pane, session) in moved.panes {
             self.bind(pane, session);
         }
@@ -140,6 +151,7 @@ impl SessionsState {
     /// Forgets which pane runs `session`, as another window now does.
     pub(super) fn unbind(&mut self, session: &str) -> bool {
         let before = self.panes.len();
+        self.bound_at.remove(session);
         self.panes.retain(|_, s| s != session);
         self.panes.len() != before
     }
@@ -177,6 +189,12 @@ impl SessionsState {
     /// The session `pane` runs here.
     pub(super) fn session_of(&self, pane: PaneId) -> Option<&str> {
         self.panes.get(&pane).map(String::as_str)
+    }
+
+    /// The todos and plan `session`'s hooks last reported.
+    pub(super) fn plan_of(&self, session: &str) -> Option<(&[TodoInfo], Option<&str>)> {
+        let live = self.live.get(session)?;
+        Some((&live.todos, live.plan.as_deref()))
     }
 
     /// Where `session` started, as its SessionStart hook said.
@@ -577,7 +595,7 @@ impl Shell {
 
     /// Reads the lists again when they are stale, or a terminal now runs a session in a project
     /// they have not covered.
-    fn refresh_sessions(&mut self, root: &Path, cx: &mut Context<Self>) {
+    pub(super) fn refresh_sessions(&mut self, root: &Path, cx: &mut Context<Self>) {
         let state = &self.review.sessions;
         let stale = state.loaded_at.is_none_or(|at| at.elapsed() > STALE_AFTER);
         let idle = state.loading.is_none();
@@ -1110,6 +1128,18 @@ mod tests {
         let mut all: Vec<_> = state.panes.iter().map(|(p, s)| (*p, s.as_str())).collect();
         all.sort();
         all
+    }
+
+    #[test]
+    fn binding_again_keeps_the_first_bind_time() {
+        let mut state = SessionsState::default();
+        state.bind(1, "a".into());
+        let first = state.bound_at["a"];
+        state.bound_at.insert("a".into(), SystemTime::UNIX_EPOCH);
+        state.bind(1, "a".into());
+        state.bind(2, "a".into());
+        assert_ne!(first, SystemTime::UNIX_EPOCH);
+        assert_eq!(state.bound_at["a"], SystemTime::UNIX_EPOCH);
     }
 
     #[test]

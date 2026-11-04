@@ -5,8 +5,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
-use daedalus_proto::{AppMsg, AppReply, Notice, PaneId};
+use daedalus_proto::{AppMsg, AppReply, Notice, NoticeKind, PaneId};
 use daedalus_workspace::{ItemId, ItemKind, Project, WindowMode, WindowState, Workspace};
 use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, Context, Global, PromptLevel, Task, TitlebarOptions,
@@ -21,6 +22,7 @@ use super::item::ItemView;
 use super::lsp::{CONFIRMED, confirm_buttons};
 use super::notices::{self, Log};
 use crate::app_socket::Request;
+use crate::companion::protocol::NoticeKind as PushKind;
 use crate::companion::server::{self as companion_server, Command, Verdict};
 use crate::ide;
 
@@ -46,6 +48,10 @@ pub(super) struct Windows {
     _companion_events: Option<Task<()>>,
     _companion_watch: Option<Task<()>>,
     companion_clients: usize,
+    /// What each pane last asked, until it runs again or stops.
+    companion_needs: HashMap<PaneId, String>,
+    companion_dirty: bool,
+    _companion_ticker: Option<Task<()>>,
     companion_closing: Option<futures::channel::oneshot::Receiver<()>>,
     _tasks: Vec<Task<()>>,
 }
@@ -103,6 +109,9 @@ pub fn start(path: PathBuf, workspace: Workspace, folder: Option<PathBuf>, cx: &
         _companion_events: None,
         _companion_watch: None,
         companion_clients: 0,
+        companion_needs: HashMap::new(),
+        companion_dirty: false,
+        _companion_ticker: None,
         companion_closing: None,
         _tasks: Vec::new(),
     });
@@ -223,7 +232,7 @@ fn restore_bounds(saved: Option<WindowState>, cx: &App) -> WindowBounds {
 }
 
 /// The open windows, in the order they were opened.
-fn handles(cx: &App) -> Vec<WindowHandle<Shell>> {
+pub(super) fn handles(cx: &App) -> Vec<WindowHandle<Shell>> {
     cx.global::<Windows>()
         .open
         .iter()
@@ -599,16 +608,37 @@ pub(super) fn set_companion(
             }
         }
     });
+    let ticker = super::companion::tick_snapshots(cx);
     let windows = cx.global_mut::<Windows>();
     windows.companion = Some(server);
     windows._companion_events = Some(task);
+    windows._companion_ticker = Some(ticker);
+}
+
+pub(super) fn companion_needs(cx: &App) -> &HashMap<PaneId, String> {
+    &cx.global::<Windows>().companion_needs
+}
+
+/// Forgets the questions of panes no terminal shows any more.
+pub(super) fn prune_companion_needs(snapshot: &companion_server::Snapshot, cx: &mut App) {
+    cx.global_mut::<Windows>()
+        .companion_needs
+        .retain(|pane, _| snapshot.terminals.iter().any(|t| t.pane == *pane));
+}
+
+pub(super) fn take_companion_dirty(cx: &mut App) -> bool {
+    std::mem::take(&mut cx.global_mut::<Windows>().companion_dirty)
 }
 
 /// Takes the server out and resets the client count, leaving the watch that may start another.
 pub(super) fn take_companion(cx: &mut App) -> Option<companion_server::Server> {
     let windows = cx.global_mut::<Windows>();
     windows._companion_events = None;
+    windows._companion_ticker = None;
     let server = windows.companion.take();
+    if let Some(server) = &server {
+        server.set_snapshot(Arc::default());
+    }
     set_companion_clients(0, cx);
     server
 }
@@ -629,8 +659,16 @@ pub(super) fn take_companion_closing(
 
 fn set_companion_clients(count: usize, cx: &mut App) {
     let windows = cx.global_mut::<Windows>();
-    if std::mem::replace(&mut windows.companion_clients, count) == count {
+    let before = std::mem::replace(&mut windows.companion_clients, count);
+    if before == count {
         return;
+    }
+    if before == 0 {
+        super::companion::push_snapshot(cx);
+    } else if count == 0
+        && let Some(server) = companion(cx)
+    {
+        server.set_snapshot(Arc::default());
     }
     for handle in handles(cx) {
         let _ = handle.update(cx, |_, _, cx| cx.notify());
@@ -832,7 +870,40 @@ fn session_holder(session: PaneId, cx: &App) -> Option<WindowHandle<Shell>> {
         .find(|h| h.read(cx).is_ok_and(|s| s.find_session(session).is_some()))
 }
 
+/// Records what a Claude pane asked and tells connected phones about it or its stop.
+fn note_companion(notice: &Notice, cx: &mut App) {
+    let Some(pane) = notice.pane else {
+        return;
+    };
+    let windows = cx.global_mut::<Windows>();
+    let push = match &notice.kind {
+        NoticeKind::ClaudeNeedsInput { message } => {
+            windows.companion_needs.insert(pane, message.clone());
+            Some((PushKind::NeedsInput, message.clone()))
+        }
+        NoticeKind::ClaudeStopped => {
+            windows.companion_needs.remove(&pane);
+            Some((PushKind::Stopped, String::new()))
+        }
+        NoticeKind::ClaudeRunning => {
+            windows.companion_needs.remove(&pane);
+            None
+        }
+        _ => return,
+    };
+    windows.companion_dirty = true;
+    if let (Some((kind, message)), Some(server)) = (push, &windows.companion) {
+        server.push(companion_server::Notice {
+            pane,
+            kind,
+            message,
+            at: notice.at,
+        });
+    }
+}
+
 pub(super) fn route_notice(notice: Notice, cx: &mut App) {
+    note_companion(&notice, cx);
     let holder = notice.pane.and_then(|pane| session_holder(pane, cx));
     if let Some(handle) = holder.or_else(|| focused(cx)) {
         let _ = handle.update(cx, |shell, window, cx| shell.on_notice(notice, window, cx));
@@ -980,6 +1051,15 @@ fn serve_app_socket(cx: &mut App) -> Task<()> {
 }
 
 fn serve(request: Request, cx: &mut App) {
+    if matches!(
+        request.msg,
+        AppMsg::ClaudeTodos { .. }
+            | AppMsg::ClaudePlan { .. }
+            | AppMsg::ClaudeSession { .. }
+            | AppMsg::ClaudePrompt
+    ) {
+        cx.global_mut::<Windows>().companion_dirty = true;
+    }
     let windows = handles(cx);
     let Some(in_use) = focused(cx).and_then(|f| windows.iter().position(|h| *h == f)) else {
         let _ = request
