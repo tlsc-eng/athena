@@ -1123,6 +1123,23 @@ mod tests {
     }
 
     #[test]
+    fn a_foreground_agent_counts_from_its_file_not_from_the_reported_total() {
+        let steps = [
+            Step::Line(launch("toolu_1", "Agent", 1)),
+            Step::File(vec![agent_line("Read", 3), agent_line("Grep", 4)]),
+            Step::Line(result(
+                "toolu_1",
+                json!({"status": "completed", "agentId": "a1", "totalToolUseCount": 6}),
+                false,
+                4,
+            )),
+        ];
+        let (live, replayed) = live_and_replay("foreground-total", &steps);
+        assert_eq!(live, [(SubagentState::Done, 2, Some(millis_at(4)))]);
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
     fn a_foreground_agent_counts_from_its_file_and_a_resume_does_not_double_it() {
         let steps = [
             Step::Line(launch("toolu_1", "Agent", 1)),
