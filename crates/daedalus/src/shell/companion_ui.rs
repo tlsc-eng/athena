@@ -1,3 +1,4 @@
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -17,8 +18,6 @@ use crate::companion::tailnet;
 
 /// Shorter than the server's 60 s wait, so the phone is told no before it gives up.
 const ANSWER_FOR: Duration = Duration::from_secs(55);
-/// More than the server needs to save a paired device.
-const STORED_WITHIN: Duration = Duration::from_millis(500);
 const MODULE: f32 = 4.;
 const QUIET_MODULES: usize = 4;
 
@@ -36,18 +35,28 @@ struct Grid {
 
 /// The pairing modal's state; the code it shows is the one the server accepts while it is open.
 pub(super) struct Pairing {
-    code: String,
-    expires: Instant,
     ip: Option<Ipv4Addr>,
     port: u16,
     sid: String,
-    cli_missing: bool,
-    /// The MagicDNS lookup has finished, whether or not it found a name.
-    resolved: bool,
-    grid: Option<Grid>,
+    /// Set once the code is made and the MagicDNS lookup has finished, whether or not it found a name.
+    ready: Option<Ready>,
     focus: FocusHandle,
     restore: Option<FocusHandle>,
     _tasks: Vec<Task<()>>,
+}
+
+struct Ready {
+    code: String,
+    expires: Instant,
+    cli_missing: bool,
+    grid: Option<Grid>,
+}
+
+/// What the background lookup finds; the code and the CLI search touch the disk.
+struct Looked {
+    code: PairingCode,
+    cli_missing: bool,
+    host: Option<String>,
 }
 
 fn pair_url(host: Option<&str>, ip: Option<Ipv4Addr>, port: u16, code: &str, sid: &str) -> String {
@@ -152,14 +161,6 @@ impl Shell {
             );
             return;
         };
-        let code = match PairingCode::new(Instant::now()) {
-            Ok(code) => code,
-            Err(e) => {
-                self.transient_notice("Could not make a pairing code", e.to_string(), cx);
-                return;
-            }
-        };
-        let (expires, text) = (code.expires(), code.code().to_string());
         let addrs = server.local_addrs();
         let ip = addrs.iter().find_map(|a| match a {
             SocketAddr::V4(a) => Some(*a.ip()),
@@ -167,7 +168,6 @@ impl Shell {
         });
         let port = addrs.first().map_or(0, SocketAddr::port);
         let sid = server.id().to_string();
-        server.set_pairing_code(Some(code));
         // Another window's modal would otherwise clear this code when it closes.
         let previous = windows::pairing_window(cx).filter(|w| *w != self.window_handle);
         windows::set_pairing_window(Some(self.window_handle), cx);
@@ -177,18 +177,22 @@ impl Shell {
             });
         }
 
-        let cli = tailnet::cli();
-        let cli_missing = cli.is_none();
         let lookup = cx.spawn_in(window, async move |this, cx| {
-            let host = match cli {
-                Some(cli) => {
-                    cx.background_executor()
-                        .spawn(async move { tailnet::self_dns(&cli) })
-                        .await
-                }
-                None => None,
-            };
-            let _ = this.update(cx, |shell, cx| shell.pairing_resolved(host, cx));
+            let looked = cx
+                .background_executor()
+                .spawn(async {
+                    let code = PairingCode::new(Instant::now())?;
+                    let cli = tailnet::cli();
+                    Ok::<_, io::Error>(Looked {
+                        code,
+                        cli_missing: cli.is_none(),
+                        host: cli.and_then(|cli| tailnet::self_dns(&cli)),
+                    })
+                })
+                .await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.pairing_resolved(looked, window, cx)
+            });
         });
         let tick = cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -205,14 +209,10 @@ impl Shell {
         let restore = window.focused(cx);
         window.focus(&focus);
         self.pairing = Some(Pairing {
-            code: text,
-            expires,
             ip,
             port,
             sid,
-            cli_missing,
-            resolved: false,
-            grid: None,
+            ready: None,
             focus,
             restore,
             _tasks: vec![lookup, tick],
@@ -220,21 +220,50 @@ impl Shell {
         cx.notify();
     }
 
-    fn pairing_resolved(&mut self, host: Option<String>, cx: &mut Context<Self>) {
+    fn pairing_resolved(
+        &mut self,
+        looked: io::Result<Looked>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pairing.is_none() {
+            return;
+        }
+        let looked = match looked {
+            Ok(looked) => looked,
+            Err(e) => {
+                self.transient_notice("Could not make a pairing code", e.to_string(), cx);
+                self.close_pairing(window, cx);
+                return;
+            }
+        };
+        let Some(server) = windows::companion(cx) else {
+            self.close_pairing(window, cx);
+            return;
+        };
+        let (expires, text) = (looked.code.expires(), looked.code.code().to_string());
+        server.set_pairing_code(Some(looked.code));
         let Some(open) = self.pairing.as_mut() else {
             return;
         };
-        open.resolved = true;
-        if host.is_some() || open.ip.is_some() {
-            let url = pair_url(host.as_deref(), open.ip, open.port, &open.code, &open.sid);
-            open.grid = grid(&url);
-        }
+        let grid = (looked.host.is_some() || open.ip.is_some())
+            .then(|| {
+                let url = pair_url(looked.host.as_deref(), open.ip, open.port, &text, &open.sid);
+                grid(&url)
+            })
+            .flatten();
+        open.ready = Some(Ready {
+            code: text,
+            expires,
+            cli_missing: looked.cli_missing,
+            grid,
+        });
         cx.notify();
     }
 
     fn pairing_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.pairing {
-            Some(open) if Instant::now() >= open.expires => self.close_pairing(window, cx),
+        match self.pairing.as_ref().map(|open| open.ready.as_ref()) {
+            Some(Some(ready)) if Instant::now() >= ready.expires => self.close_pairing(window, cx),
             Some(_) => cx.notify(),
             None => {}
         }
@@ -284,10 +313,13 @@ impl Shell {
             };
             let _ = reply.send(verdict);
             let _ = this.update_in(cx, |shell, window, cx| shell.close_pairing(window, cx));
-            if allowed {
-                // The server stores the device right after it reads the verdict.
-                cx.background_executor().timer(STORED_WITHIN).await;
-                let _ = cx.update(|_, cx| super::companion::redraw_windows(cx));
+            // The sheet stays up after the timeout, and an answer to it pairs nothing.
+            if let Either::Right((_, late)) = choice
+                && late.await.is_ok()
+            {
+                let _ = this.update(cx, |shell, cx| {
+                    shell.transient_notice("Pairing request timed out", "Scan the code again.", cx)
+                });
             }
         })
         .detach();
@@ -296,11 +328,11 @@ impl Shell {
     pub(super) fn render_pairing(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let open = self.pairing.as_ref()?;
         let t = cx.theme().clone();
-        let left = open.expires.saturating_duration_since(Instant::now());
+        let ready = open.ready.as_ref();
         let module = px(MODULE);
         // The Camera app may not read an inverted code, so the dark theme still gets dark on light.
         let light = daedalus_ui::Theme::light(false).color;
-        let code = match &open.grid {
+        let code = match ready.and_then(|r| r.grid.as_ref()) {
             Some(grid) => div()
                 .p(px(QUIET_MODULES as f32 * MODULE))
                 .flex()
@@ -327,10 +359,10 @@ impl Shell {
                 .items_center()
                 .justify_center()
                 .text_color(t.color.content_muted)
-                .child(match (open.resolved, open.ip) {
-                    (false, _) => "Preparing the code…",
-                    (true, Some(_)) => "Could not draw the code.",
-                    (true, None) => "This Mac has no Tailscale IPv4 address to put in the code.",
+                .child(match (ready, open.ip) {
+                    (None, _) => "Preparing the code…",
+                    (Some(_), Some(_)) => "Could not draw the code.",
+                    (Some(_), None) => "This Mac has no Tailscale IPv4 address to put in the code.",
                 })
                 .into_any_element(),
         };
@@ -369,18 +401,19 @@ impl Shell {
                     .child("Scan this code with Daedalus on your iPhone."),
             )
             .child(code)
-            .child(
+            .children(ready.map(|r| {
                 div()
                     .font_family(t.typography.mono.clone())
                     .text_color(t.color.content)
-                    .child(open.code.clone()),
-            )
-            .child(
+                    .child(r.code.clone())
+            }))
+            .children(ready.map(|r| {
+                let left = r.expires.saturating_duration_since(Instant::now());
                 div()
                     .text_color(t.color.content_muted)
-                    .child(format!("Expires in {}", countdown(left))),
-            )
-            .when(open.cli_missing, |el| {
+                    .child(format!("Expires in {}", countdown(left)))
+            }))
+            .when(ready.is_some_and(|r| r.cli_missing), |el| {
                 el.child(
                     div()
                         .text_color(t.color.warning)

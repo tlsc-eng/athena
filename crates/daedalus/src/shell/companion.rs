@@ -278,7 +278,7 @@ fn start(
     })
 }
 
-fn notice(title: &str, body: String, cx: &mut App) {
+pub(super) fn notice(title: &str, body: String, cx: &mut App) {
     if let Some(window) = windows::focused(cx) {
         let _ = window.update(cx, |shell, _, cx| shell.transient_notice(title, body, cx));
     }

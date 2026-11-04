@@ -532,9 +532,9 @@ impl SettingsView {
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
                     .join(" · ");
-                let seen = match ago(device.last_seen_ms).as_str() {
-                    "now" => "Last seen now".to_string(),
-                    age => format!("Last seen {age} ago"),
+                let seen = match ago(device.created_ms).as_str() {
+                    "now" => "Paired now".to_string(),
+                    age => format!("Paired {age} ago"),
                 };
                 div()
                     .flex()

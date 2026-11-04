@@ -886,6 +886,8 @@ fn route_companion(command: Command, cx: &mut App) {
         } => super::companion_ui::ask_to_pair(device, peer, reply, cx),
         Command::SpawnClaude { root, reply } => spawn_claude_for_phone(&root, reply, cx),
         Command::ClientsChanged(count) => set_companion_clients(count, cx),
+        Command::Paired(Ok(())) => super::companion::redraw_windows(cx),
+        Command::Paired(Err(e)) => super::companion::notice("Couldn't save paired iPhone", e, cx),
     }
 }
 
