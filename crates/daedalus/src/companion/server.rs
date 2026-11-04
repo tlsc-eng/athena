@@ -411,6 +411,10 @@ async fn open(stream: TcpStream, ip: IpAddr, shared: &Arc<Shared>) -> Option<Ope
                 .await;
                 return None;
             }
+            if !is_paired(shared, &slot.device) {
+                close(&mut ws, CloseCode::Policy, "device revoked").await;
+                return None;
+            }
             let welcome = ServerMsg::Welcome {
                 proto: PROTO,
                 server: shared.id.clone(),
@@ -450,6 +454,8 @@ fn admit(
             Ok((response, Route::Pair))
         }
         "/v1/connect" => {
+            // Subscribed before the token check so a revoke after it cannot be missed.
+            let revoked = shared.revoked.subscribe();
             let token = header("authorization")
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .unwrap_or_default();
@@ -460,7 +466,7 @@ fn admit(
             if !same_owner(&device, whois) {
                 return Err(refuse(StatusCode::UNAUTHORIZED));
             }
-            let Some(slot) = Slot::reserve(shared, &device.id) else {
+            let Some(slot) = Slot::reserve(shared, &device.id, revoked) else {
                 return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
             };
             Ok((response, Route::Connect(slot)))
@@ -491,7 +497,11 @@ struct Slot {
 }
 
 impl Slot {
-    fn reserve(shared: &Arc<Shared>, device: &str) -> Option<Self> {
+    fn reserve(
+        shared: &Arc<Shared>,
+        device: &str,
+        revoked: broadcast::Receiver<String>,
+    ) -> Option<Self> {
         let mut live = lock(&shared.live);
         let count = live.entry(device.to_string()).or_default();
         if *count >= MAX_PER_DEVICE {
@@ -501,7 +511,7 @@ impl Slot {
         Some(Self {
             shared: shared.clone(),
             device: device.to_string(),
-            revoked: shared.revoked.subscribe(),
+            revoked,
         })
     }
 }
@@ -592,6 +602,19 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut seq = 0u64;
     loop {
         tokio::select! {
+            // Biased so a queued revoke wins over a request already readable on the socket.
+            biased;
+            revoked = slot.revoked.recv() => {
+                let gone = match revoked {
+                    Ok(id) => id == slot.device,
+                    Err(broadcast::error::RecvError::Lagged(_)) => !is_paired(shared, &slot.device),
+                    Err(broadcast::error::RecvError::Closed) => true,
+                };
+                if gone {
+                    close(&mut ws, CloseCode::Policy, "device revoked").await;
+                    break;
+                }
+            }
             incoming = ws.next() => {
                 let Some(Ok(message)) = incoming else { break };
                 match message {
@@ -675,17 +698,6 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            revoked = slot.revoked.recv() => {
-                let gone = match revoked {
-                    Ok(id) => id == slot.device,
-                    Err(broadcast::error::RecvError::Lagged(_)) => !is_paired(shared, &slot.device),
-                    Err(broadcast::error::RecvError::Closed) => true,
-                };
-                if gone {
-                    close(&mut ws, CloseCode::Policy, "device revoked").await;
-                    break;
-                }
-            }
             _ = ping.tick() => {
                 if !is_paired(shared, &slot.device) {
                     close(&mut ws, CloseCode::Policy, "device revoked").await;
@@ -960,6 +972,104 @@ mod tests {
             .await
             .expect("no close frame within a second of the revoke");
         assert_eq!(code, Some(CloseCode::Policy));
+    }
+
+    fn open_project(fx: &Fixture) {
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            projects: vec![protocol::Project {
+                root: "/p".into(),
+                name: "p".into(),
+                window: 1,
+            }],
+            ..Snapshot::default()
+        }));
+    }
+
+    fn spawn_request() -> ClientMsg {
+        ClientMsg::SpawnClaude {
+            id: "r1".into(),
+            project: "/p".into(),
+        }
+    }
+
+    /// Drains the socket until it ends, failing on a reply to the request; a reset may swallow the close frame.
+    async fn assert_unanswered(ws: &mut Ws) {
+        loop {
+            match timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("timed out")
+            {
+                Some(Ok(Message::Text(text))) => {
+                    let message: ServerMsg = serde_json::from_str(text.as_str()).unwrap();
+                    assert!(
+                        !matches!(
+                            message,
+                            ServerMsg::Welcome { .. }
+                                | ServerMsg::Spawned { .. }
+                                | ServerMsg::Error { .. }
+                        ),
+                        "a revoked device was answered: {text}"
+                    );
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    }
+
+    async fn send_spawn(ws: &mut Ws) {
+        let text = serde_json::to_string(&spawn_request()).unwrap();
+        let _ = ws.send(Message::text(text)).await;
+    }
+
+    #[tokio::test]
+    async fn a_device_revoked_after_the_upgrade_gets_no_welcome_and_no_command() {
+        let fx = Fixture::new();
+        let (id, token) = fx.pair_device();
+        open_project(&fx);
+        let mut ws = fx.connect(&token).await.unwrap();
+        assert!(fx.server.revoke(&id).unwrap());
+        send_json(&mut ws, &hello(PROTO)).await;
+        send_spawn(&mut ws).await;
+        assert_unanswered(&mut ws).await;
+        assert!(fx.commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_request_sent_right_after_a_revoke_is_not_served() {
+        let fx = Fixture::new();
+        let (id, token) = fx.pair_device();
+        open_project(&fx);
+        let mut ws = fx.welcomed(&token).await;
+        assert!(fx.server.revoke(&id).unwrap());
+        send_spawn(&mut ws).await;
+        assert_unanswered(&mut ws).await;
+        assert!(fx.commands.try_recv().is_err());
+    }
+
+    /// A revoke that lands while `spawn_claude` is waiting must beat the next queued request.
+    #[tokio::test]
+    async fn a_revoke_during_a_spawn_beats_the_next_queued_request() {
+        let fx = Fixture::new();
+        open_project(&fx);
+        for _ in 0..30 {
+            let (id, token) = fx.pair_device();
+            let mut ws = fx.welcomed(&token).await;
+            send_spawn(&mut ws).await;
+            let Ok(Command::SpawnClaude { reply, .. }) =
+                timeout(Duration::from_secs(5), fx.commands.recv())
+                    .await
+                    .expect("the first spawn never reached the app")
+            else {
+                panic!("expected a spawn command");
+            };
+            send_spawn(&mut ws).await;
+            assert!(fx.server.revoke(&id).unwrap());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = reply.send(Ok(1));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(fx.commands.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
