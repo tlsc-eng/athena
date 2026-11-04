@@ -178,7 +178,7 @@ impl Project {
 
     /// Two-letter rail label: initials of the first two words, else the first two letters.
     pub fn monogram(&self) -> String {
-        let name = self.name();
+        let name = self.name().to_uppercase();
         let words: Vec<&str> = name
             .split(['-', '_', ' ', '.'])
             .filter(|w| !w.is_empty())
@@ -191,7 +191,7 @@ impl Project {
                 .take(2)
                 .collect(),
         };
-        letters.to_uppercase()
+        letters
     }
 }
 
@@ -231,6 +231,12 @@ mod tests {
         assert_eq!(mono("/x/hestia-infra"), "HI");
         assert_eq!(mono("/x/pi_dashboard"), "PD");
         assert_eq!(mono("/x/a"), "A");
+    }
+
+    #[test]
+    fn monogram_uppercases_before_taking_two_characters() {
+        assert_eq!(mono("/x/ßa"), "SS");
+        assert_eq!(mono("/x/ß-a"), "SA");
     }
 
     #[test]
