@@ -46,6 +46,8 @@ pub struct Settings {
     pub eslint_fix_on_save: Option<bool>,
     /// `claude.hooks`: Daedalus's hooks in every Claude Code config folder; on unless turned off.
     pub claude_hooks: Option<bool>,
+    /// `companion.enabled`: lets a paired iPhone reach this Mac over Tailscale; off unless turned on.
+    pub companion_enabled: Option<bool>,
     /// `claude.profiles`: folder prefix (`/` or `~/`) to config folder name, such as `claude-tlsc`.
     pub claude_profiles: Vec<(String, String)>,
 }
@@ -228,6 +230,10 @@ fn code_actions_on_save(value: &Value) -> Result<(bool, bool), String> {
 impl Settings {
     pub fn claude_hooks(&self) -> bool {
         self.claude_hooks.unwrap_or(true)
+    }
+
+    pub fn companion_enabled(&self) -> bool {
+        self.companion_enabled.unwrap_or(false)
     }
 
     /// The Claude Code profile `claude.profiles` names for `root`; the longest matching folder wins.
@@ -504,6 +510,7 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
         ("window.zoom_level", s.zoom_level.take().is_some()),
         ("editor.font_size", s.editor.font_size.take().is_some()),
         ("claude.hooks", s.claude_hooks.take().is_some()),
+        ("companion.enabled", s.companion_enabled.take().is_some()),
         (
             "claude.profiles",
             !std::mem::take(&mut s.claude_profiles).is_empty(),
@@ -747,6 +754,17 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                           \"profiles\": {folder: profile}}"
                     .into()),
             },
+            "companion" => match value.as_object() {
+                Some(block) if !block.is_empty() => {
+                    block
+                        .iter()
+                        .try_for_each(|(name, value)| match name.as_str() {
+                            "enabled" => companion_enabled(&mut settings, value),
+                            _ => Err(format!("has no setting \"{name}\"")),
+                        })
+                }
+                _ => Err("must be {\"enabled\": true or false}".into()),
+            },
             k if k.len() > 2 && k.starts_with('[') && k.ends_with(']') => {
                 let lang = settings
                     .languages
@@ -785,6 +803,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 Some(("claude", "prices")) => Ok(()),
                 Some(("claude", "hooks")) => claude_hooks(&mut settings, value),
                 Some(("claude", "profiles")) => claude_profiles(&mut settings, value),
+                Some(("companion", "enabled")) => companion_enabled(&mut settings, value),
                 _ => Err("is not a setting".into()),
             },
         };
@@ -799,6 +818,13 @@ fn claude_hooks(settings: &mut Settings, value: &Value) -> Result<(), String> {
     value
         .as_bool()
         .map(|on| settings.claude_hooks = Some(on))
+        .ok_or_else(|| "must be true or false".to_string())
+}
+
+fn companion_enabled(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    value
+        .as_bool()
+        .map(|on| settings.companion_enabled = Some(on))
         .ok_or_else(|| "must be true or false".to_string())
 }
 
@@ -1586,6 +1612,28 @@ pub(crate) mod tests {
         ] {
             let (_, problems) = parse(bad).unwrap();
             assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
+        }
+    }
+
+    #[test]
+    fn the_companion_is_off_unless_enabled_in_either_spelling() {
+        assert!(!Settings::default().companion_enabled());
+        for on in [
+            r#"{"companion": {"enabled": true}}"#,
+            r#"{"companion.enabled": true}"#,
+        ] {
+            let (s, problems) = parse(on).unwrap();
+            assert!(problems.is_empty(), "{on}: {problems:?}");
+            assert!(s.companion_enabled(), "{on}");
+        }
+        for bad in [
+            r#"{"companion": {"enabled": "yes"}}"#,
+            r#"{"companion": {"port": 1}}"#,
+            r#"{"companion.enabled": 1}"#,
+        ] {
+            let (s, problems) = parse(bad).unwrap();
+            assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
+            assert!(!s.companion_enabled(), "{bad}");
         }
     }
 
@@ -2425,10 +2473,11 @@ pub(crate) mod tests {
                 "[go]": {"format_on_save": false},
                 "lsp": {"gopls": {"hints": {"assignVariableTypes": true}}},
                 "theme": "dark", "window.zoom_level": 2,
-                "claude": {"hooks": false}}"#,
+                "claude": {"hooks": false}, "companion.enabled": true}"#,
         )
         .unwrap();
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        assert_eq!(project.companion_enabled, None);
         assert_eq!(project.theme, None);
         assert_eq!(project.claude_hooks, None);
         let both = user.overlaid(&project);

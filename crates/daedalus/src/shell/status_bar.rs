@@ -290,6 +290,11 @@ impl Shell {
                 div()
                     .flex()
                     .h_full()
+                    .children((super::windows::companion_clients(cx) > 0).then(|| {
+                        item("status-phone", "Phone connected".into()).tooltip(|_, cx| {
+                            Tooltip::view("A paired iPhone is connected over Tailscale", cx)
+                        })
+                    }))
                     .child(self.render_problems_button(cx))
                     .child(self.render_usage_button(cx))
                     .children(right),

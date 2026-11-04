@@ -35,6 +35,7 @@
   // // "hooks": false keeps Daedalus's hooks out of Claude Code's settings.json, and its tabs
   // // without exact running / needs input / done states.
   // "claude": { "hooks": false },
+  // "companion": { "enabled": true },  // a paired iPhone sees Claude sessions and types in terminals over Tailscale
   // // The title bar's plan usage shows this profile for projects under each folder ("tlsc" is
   // // ~/.claude-tlsc; the deepest folder wins), else the profile of the project's newest session.
   // "claude.profiles": { "~/code/ai": "ai", "~/code": "tlsc" },
