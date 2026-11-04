@@ -341,7 +341,7 @@ impl Workspace {
         self.active.and_then(|i| self.projects.get(i))
     }
 
-    /// Rail labels; projects whose monograms collide get the first letter where their names differ.
+    /// Rail labels, pairwise distinct for distinct names: colliding projects get the letter where their names differ, else a free later letter.
     pub fn monograms(&self) -> Vec<String> {
         let base: Vec<String> = self.projects.iter().map(Project::monogram).collect();
         let names: Vec<Vec<char>> = self
@@ -349,19 +349,23 @@ impl Workspace {
             .iter()
             .map(|p| p.name().to_uppercase().chars().collect())
             .collect();
-        base.iter()
-            .enumerate()
-            .map(|(i, mono)| {
-                let rivals: Vec<usize> = (0..base.len())
-                    .filter(|&j| j != i && base[j] == *mono)
-                    .collect();
-                if rivals.is_empty() {
-                    return mono.clone();
+        let collides = |i: usize| (0..base.len()).any(|j| j != i && base[j] == base[i]);
+        let mut labels: Vec<String> = (0..base.len())
+            .filter(|&i| !collides(i))
+            .map(|i| base[i].clone())
+            .collect();
+        (0..base.len())
+            .map(|i| {
+                if !collides(i) {
+                    return base[i].clone();
                 }
                 let name = &names[i];
-                let split = rivals
-                    .iter()
-                    .map(|&j| {
+                let Some(first) = name.iter().find(|c| c.is_alphanumeric()) else {
+                    return base[i].clone();
+                };
+                let split = (0..base.len())
+                    .filter(|&j| j != i && base[j] == base[i])
+                    .map(|j| {
                         name.iter()
                             .zip(&names[j])
                             .take_while(|(a, b)| a == b)
@@ -370,10 +374,19 @@ impl Workspace {
                     .max()
                     .unwrap_or(1)
                     .max(1);
-                match name.get(split) {
-                    Some(c) => format!("{}{c}", name[0]),
-                    None => mono.clone(),
-                }
+                let divergence = name.get(split).filter(|c| c.is_alphanumeric());
+                let later = name.iter().filter(|c| c.is_alphanumeric()).skip(1);
+                let digits = '2'..='9';
+                let label = divergence
+                    .into_iter()
+                    .chain(later)
+                    .copied()
+                    .chain(digits)
+                    .map(|c| format!("{first}{c}"))
+                    .find(|l| !labels.contains(l))
+                    .unwrap_or_else(|| base[i].clone());
+                labels.push(label.clone());
+                label
             })
             .collect()
     }
@@ -623,6 +636,20 @@ mod tests {
     fn colliding_monograms_split_where_names_differ() {
         let w = ws(&["/n/hephaestus", "/n/hestia", "/n/athena"]);
         assert_eq!(w.monograms(), ["HP", "HS", "AT"]);
+    }
+
+    #[test]
+    fn a_resolved_monogram_never_takes_another_projects_label() {
+        let w = ws(&["/n/hephaestus", "/n/hestia", "/n/hephaestus-saas"]);
+        assert_eq!(w.monograms(), ["HP", "HE", "HS"]);
+    }
+
+    #[test]
+    fn the_same_folder_name_at_two_paths_still_gets_distinct_labels() {
+        let w = ws(&["/a/hestia", "/b/hestia"]);
+        let labels = w.monograms();
+        assert_ne!(labels[0], labels[1]);
+        assert!(labels.iter().all(|l| l.chars().count() <= 2));
     }
 
     #[test]
