@@ -123,6 +123,7 @@ fn start(
     let dir = daedalus_proto::data_dir()
         .map_err(io::Error::other)?
         .join("companion");
+    let mux_socket = daedalus_proto::socket_path().map_err(io::Error::other)?;
     Server::start(Config {
         addrs,
         devices: Arc::new(Mutex::new(Devices::load(&dir))),
@@ -130,6 +131,7 @@ fn start(
         cli: tailnet::cli(),
         allow_loopback_for_tests: false,
         name: name.to_string(),
+        mux_socket,
     })
 }
 
