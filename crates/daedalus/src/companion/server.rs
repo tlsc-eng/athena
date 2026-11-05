@@ -178,7 +178,7 @@ struct Shared {
     snapshot: watch::Sender<Arc<Snapshot>>,
     notices: broadcast::Sender<Notice>,
     live: Mutex<HashMap<String, usize>>,
-    lease_owners: Mutex<HashMap<u64, u64>>,
+    lease_owners: Arc<Mutex<HashMap<u64, u64>>>,
     next_connection: AtomicU64,
     welcomed: Mutex<usize>,
     revoked: broadcast::Sender<String>,
@@ -211,7 +211,7 @@ impl Server {
             .collect::<io::Result<Vec<_>>>()?;
         let (commands, rx) = async_channel::unbounded();
         let shared = Arc::new(Shared {
-            lease_owners: Mutex::new(HashMap::new()),
+            lease_owners: Arc::new(Mutex::new(HashMap::new())),
             next_connection: AtomicU64::new(0),
             id: load_or_create_id(&config.data_dir)?,
             name: config.name,
@@ -765,7 +765,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                             ClientMsg::Fit { id, pane, rows, cols } => {
                                 let current = Arc::clone(&snapshot.borrow());
                                 let busy = pending.len() >= MAX_IN_FLIGHT;
-                                let started = fit(shared, &current, id, pane, (rows, cols), busy).await;
+                                let started = fit(shared, me, &current, id, pane, (rows, cols), busy).await;
                                 if started.is_ok() {
                                     lock(&shared.lease_owners).insert(pane, me);
                                 }
@@ -1078,6 +1078,7 @@ async fn act(
 
 async fn fit(
     shared: &Shared,
+    connection: u64,
     snapshot: &Snapshot,
     id: String,
     pane: u64,
@@ -1107,6 +1108,7 @@ async fn fit(
     {
         return Err(failed(id, "could not reach the terminal"));
     }
+    let owners = Arc::clone(&shared.lease_owners);
     Ok(Box::pin(async move {
         match timeout(ACT_WAIT, answer).await {
             Ok(Ok(Ok((rows, cols)))) => ServerMsg::Fitted {
@@ -1115,10 +1117,16 @@ async fn fit(
                 rows,
                 cols,
             },
-            Ok(Ok(Err(message))) => ServerMsg::Error {
-                id: Some(id),
-                message,
-            },
+            Ok(Ok(Err(message))) => {
+                let mut owners = lock(&owners);
+                if owners.get(&pane) == Some(&connection) {
+                    owners.remove(&pane);
+                }
+                ServerMsg::Error {
+                    id: Some(id),
+                    message,
+                }
+            }
             _ => failed(id, "could not reach the terminal"),
         }
     }))
@@ -1655,12 +1663,10 @@ mod tests {
         let mut second = fx.welcomed(&token).await;
         fit_pane_7(&fx, &mut second).await;
         drop(first);
-        send_json(&mut second, &ClientMsg::Refresh).await;
-        loop {
-            if matches!(next_msg(&mut second).await, ServerMsg::Snapshot { .. }) {
-                break;
-            }
-        }
+        let heard = timeout(Duration::from_secs(5), fx.commands.recv())
+            .await
+            .unwrap();
+        assert!(matches!(heard, Ok(Command::ClientsChanged(1))));
         assert!(fx.no_command());
         send_json(&mut second, &ClientMsg::Unfit { pane: 7 }).await;
         assert_eq!(leased_command(&fx).await, (7, None));
