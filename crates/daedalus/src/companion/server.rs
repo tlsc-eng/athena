@@ -2144,7 +2144,13 @@ mod tests {
             .expect("the server never finished stopping");
         // A snapshot can already be in flight when shutdown runs.
         timeout(Duration::from_secs(5), async {
-            while let Some(Ok(Message::Text(_))) = ws.next().await {}
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(_) | Message::Ping(_))) => {}
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    other => panic!("{other:?}"),
+                }
+            }
         })
         .await
         .expect("the connection stayed open");
