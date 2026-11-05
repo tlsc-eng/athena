@@ -10,6 +10,7 @@ pub const FEATURES: &[&str] = &[
     "dialog",
     "answer",
     "subagents",
+    "fit",
     "tool_output",
 ];
 
@@ -101,6 +102,15 @@ pub enum ClientMsg {
     UsageRefresh {
         id: String,
     },
+    Fit {
+        id: String,
+        pane: u64,
+        rows: u16,
+        cols: u16,
+    },
+    Unfit {
+        pane: u64,
+    },
 }
 
 /// What a phone chose for one question; a plain select dialog takes the label alone.
@@ -134,6 +144,12 @@ pub enum ServerMsg {
         usage: Vec<UsageProfile>,
     },
     Attached {
+        pane: u64,
+        rows: u16,
+        cols: u16,
+    },
+    Fitted {
+        id: String,
         pane: u64,
         rows: u16,
         cols: u16,
@@ -413,6 +429,8 @@ pub struct Terminal {
     pub claude: Option<SessionState>,
     pub rows: u16,
     pub cols: u16,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fitted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialog: Option<Dialog>,
 }
@@ -740,6 +758,16 @@ mod tests {
         );
         golden("detach", &ClientMsg::Detach { pane: 123 });
         golden(
+            "fit",
+            &ClientMsg::Fit {
+                id: "r20".into(),
+                pane: 123,
+                rows: 44,
+                cols: 57,
+            },
+        );
+        golden("unfit", &ClientMsg::Unfit { pane: 123 });
+        golden(
             "spawn_claude",
             &ClientMsg::SpawnClaude {
                 id: "r1".into(),
@@ -836,6 +864,7 @@ mod tests {
                     claude: Some(SessionState::NeedsInput),
                     rows: 40,
                     cols: 120,
+                    fitted: false,
                     dialog: Some(question_dialog()),
                 }],
                 usage: Vec::new(),
@@ -953,6 +982,7 @@ mod tests {
                         claude: Some(SessionState::NeedsInput),
                         rows: 40,
                         cols: 120,
+                        fitted: true,
                         dialog: Some(bash_dialog()),
                     },
                     Terminal {
@@ -964,6 +994,7 @@ mod tests {
                         claude: None,
                         rows: 24,
                         cols: 80,
+                        fitted: false,
                         dialog: None,
                     },
                 ],
@@ -976,6 +1007,15 @@ mod tests {
                 pane: 123,
                 rows: 40,
                 cols: 120,
+            },
+        );
+        golden(
+            "fitted",
+            &ServerMsg::Fitted {
+                id: "r20".into(),
+                pane: 123,
+                rows: 44,
+                cols: 57,
             },
         );
         golden("replay_done", &ServerMsg::ReplayDone { pane: 123 });

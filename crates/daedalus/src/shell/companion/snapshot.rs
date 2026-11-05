@@ -143,6 +143,7 @@ fn terminal(input: &TerminalInput) -> Option<Terminal> {
         claude: input.claude.map(|state| state_of(Some(state))),
         rows: input.rows,
         cols: input.cols,
+        fitted: false,
         dialog: input.dialog.clone(),
     })
 }

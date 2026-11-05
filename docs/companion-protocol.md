@@ -47,6 +47,18 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"detach","pane":123}
 ```
 
+`fit`: size a pane's terminal to the phone, so the program redraws at the phone's width. `rows` is clamped to 8..=500 and `cols` to 20..=500. A pane that is not in the latest snapshot gets `pane is not open`. `id` is echoed in `fitted` or `error`. Send it only when `features` lists `fit`, because an unknown message closes the socket.
+
+```json
+{"type":"fit","id":"r20","pane":123,"rows":44,"cols":57}
+```
+
+`unfit`: end the phone's lease on a pane. The server sends nothing back. The lease also ends on `detach` of that pane and when the socket closes. The desk can end it too, which shows as `terminal.rows` and `terminal.cols` changing in the snapshot.
+
+```json
+{"type":"unfit","pane":123}
+```
+
 `spawn_claude`: start `claude` in an open project root. `project` must equal a root in the snapshot exactly, as a folder inside a project is refused. `id` is echoed in `spawned` or `error`, and the answer comes once the new pane is in a snapshot, so an `attach` can follow at once.
 
 ```json
@@ -113,10 +125,10 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `tool_output` for the output fields on tool items), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit` and `terminal.fitted`, `tool_output` for the output fields on tool items), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","tool_output"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -148,6 +160,12 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 ```json
 {"type":"attached","pane":123,"rows":40,"cols":120}
+```
+
+`fitted`: the pane has been resized, sent in answer to `fit`. `rows` and `cols` are the size that was applied, which can differ from the request after clamping. While a lease is held, `terminal.fitted` is `true` in the snapshot and `terminal.rows` and `terminal.cols` report the leased size.
+
+```json
+{"type":"fitted","id":"r20","pane":123,"rows":44,"cols":57}
 ```
 
 `replay_done`: the replay tail has been sent; later frames are live.
