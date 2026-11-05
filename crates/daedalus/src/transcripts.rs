@@ -29,6 +29,40 @@ pub struct Profile {
     pub dir: PathBuf,
 }
 
+/// Maps each pid in `pids` to the session id and folder Claude Code recorded for that process.
+pub fn running_sessions(home: &Path, pids: &[i32]) -> HashMap<i32, (String, PathBuf)> {
+    #[derive(Deserialize)]
+    struct Running {
+        pid: i32,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        cwd: PathBuf,
+        #[serde(default, rename = "startedAt")]
+        started_at: u64,
+    }
+    let mut out: HashMap<i32, (u64, String, PathBuf)> = HashMap::new();
+    for profile in profiles(home) {
+        for &pid in pids {
+            let path = profile.dir.join("sessions").join(format!("{pid}.json"));
+            let Some(found) = fs::read(path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Running>(&b).ok())
+            else {
+                continue;
+            };
+            if found.pid != pid || !crate::snapshots::valid_session(&found.session_id) {
+                continue;
+            }
+            if out.get(&pid).is_none_or(|(at, ..)| found.started_at >= *at) {
+                out.insert(pid, (found.started_at, found.session_id, found.cwd));
+            }
+        }
+    }
+    out.into_iter()
+        .map(|(pid, (_, id, cwd))| (pid, (id, cwd)))
+        .collect()
+}
+
 /// Config folders under `home` that hold transcripts.
 pub fn profiles(home: &Path) -> Vec<Profile> {
     let mut out = Vec::new();
@@ -558,6 +592,51 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn write_pid_file(home: &Path, profile: &str, pid: i32, body: &str) {
+        let dir = home.join(profile).join("sessions");
+        fs::create_dir_all(home.join(profile).join("projects")).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{pid}.json")), body).unwrap();
+    }
+
+    const SID: &str = "0b6c1e3a-1f2d-4c1b-9d55-1f0d2c3b4a5e";
+
+    #[test]
+    fn running_sessions_reads_a_non_default_profile() {
+        let home = temp("running");
+        let body = format!(r#"{{"pid":123,"sessionId":"{SID}","cwd":"/work/app","extra":1}}"#);
+        write_pid_file(&home, ".claude-tlsc", 123, &body);
+        let found = running_sessions(&home, &[123, 456]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[&123], (SID.to_string(), PathBuf::from("/work/app")));
+    }
+
+    #[test]
+    fn running_sessions_skips_a_mismatched_pid_an_invalid_id_and_a_missing_file() {
+        let home = temp("running-bad");
+        let wrong_pid = format!(r#"{{"pid":999,"sessionId":"{SID}","cwd":"/a"}}"#);
+        write_pid_file(&home, ".claude-tlsc", 1, &wrong_pid);
+        write_pid_file(
+            &home,
+            ".claude-tlsc",
+            2,
+            r#"{"pid":2,"sessionId":"../x","cwd":"/a"}"#,
+        );
+        write_pid_file(&home, ".claude-tlsc", 3, "not json");
+        assert!(running_sessions(&home, &[1, 2, 3, 4]).is_empty());
+    }
+
+    #[test]
+    fn running_sessions_prefers_the_latest_start_across_profiles() {
+        let home = temp("running-latest");
+        let newer = "1c7d2f4b-2a3e-4d2c-8e66-2a1e3d4c5b6f";
+        let old = format!(r#"{{"pid":7,"sessionId":"{SID}","cwd":"/a","startedAt":10}}"#);
+        let new = format!(r#"{{"pid":7,"sessionId":"{newer}","cwd":"/b","startedAt":20}}"#);
+        write_pid_file(&home, ".claude", 7, &old);
+        write_pid_file(&home, ".claude-work", 7, &new);
+        assert_eq!(running_sessions(&home, &[7])[&7].0, newer);
     }
 
     #[test]
