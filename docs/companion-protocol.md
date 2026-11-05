@@ -113,10 +113,10 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `tool_output` for the output fields on tool items), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","tool_output"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -210,6 +210,13 @@ An item has `id`, `pos` (byte offset in the file), `at` (epoch milliseconds) and
 | `detail` | The first 1 KiB of an error result. |
 | `questions` | On a `question` item: each has `question`, `header`, `multi` and `options` (`label`, `description`). |
 | `answer` | On a `question` item: the result text, cut to 1 KiB. |
+| `output` | On a finished `tool` item that did not fail: the first 6 non-empty lines of its output, each cut to 200 characters and 1 KiB in all, with ANSI escape sequences and control characters removed. Not sent for `Read`, `Agent`, `Task`, `TodoWrite` or `AskUserQuestion`. |
+| `lines` | The line count of the whole output. For `Read` it is the number of lines read. |
+| `files` | The files the call changed, at most 5. Each has `path` (relative to the session's cwd, at most 200 characters), `added`, `removed` and `created` (omitted unless `true`). |
+| `more_files` | The number of changed files beyond `files`. |
+| `permission` | How the call was allowed or refused: `auto`, `mode`, `rule`, `user`, `denied_auto`, `denied_hook` or `denied`. Omitted when unknown. |
+
+`output`, `lines`, `files`, `more_files` and `permission` come from fields Claude Code writes to the transcript but does not document (`toolUseResult` and `permissionDecision`), so any of them can be absent.
 
 `subagents`: the sub-agents Claude launched in a session with an open transcript, as the desktop reads them from the transcript and the agents' own files. The list is complete, so each message replaces the phone's copy for that session, and a `transcript` message of kind `page` clears it. It carries no prompt or result text, only the call's short `description` and tool names.
 

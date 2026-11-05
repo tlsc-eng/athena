@@ -327,6 +327,12 @@ mod tests {
             detail: None,
             questions: Vec::new(),
             answer: None,
+            output: None,
+            lines: None,
+            files: Vec::new(),
+            more_files: None,
+            permission: None,
+            result_pos: None,
         }
     }
 

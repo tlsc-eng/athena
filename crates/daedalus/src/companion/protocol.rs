@@ -10,6 +10,7 @@ pub const FEATURES: &[&str] = &[
     "dialog",
     "answer",
     "subagents",
+    "tool_output",
 ];
 
 /// Largest payload of one binary frame.
@@ -314,6 +315,42 @@ pub struct Item {
     pub questions: Vec<Question>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more_files: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<Permission>,
+    /// Byte offset of the result line, kept for fetching the full output later.
+    #[serde(skip)]
+    pub result_pos: Option<u64>,
+}
+
+/// One file a tool call changed, with its added and removed line counts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub added: u32,
+    pub removed: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub created: bool,
+}
+
+/// How Claude Code decided whether a tool call could run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    Auto,
+    Mode,
+    Rule,
+    User,
+    DeniedAuto,
+    DeniedHook,
+    Denied,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +617,12 @@ mod tests {
             detail: None,
             questions: Vec::new(),
             answer: None,
+            output: None,
+            lines: None,
+            files: Vec::new(),
+            more_files: None,
+            permission: None,
+            result_pos: None,
         }
     }
 
@@ -601,6 +644,23 @@ mod tests {
                 status: Some(ItemStatus::Error),
                 detail: Some("error[E0432]: unresolved import".into()),
                 ..item("t1", 1_800, ItemKind::Tool)
+            },
+            Item {
+                tool: Some("Bash".into()),
+                tool_id: Some("toolu_02abc".into()),
+                summary: Some("cargo build".into()),
+                status: Some(ItemStatus::Ok),
+                output: Some("Compiling daedalus\nFinished dev profile".into()),
+                lines: Some(42),
+                files: vec![FileChange {
+                    path: "src/main.rs".into(),
+                    added: 3,
+                    removed: 1,
+                    created: true,
+                }],
+                more_files: Some(2),
+                permission: Some(Permission::Auto),
+                ..item("t2", 2_000, ItemKind::Tool)
             },
             Item {
                 tool: Some("AskUserQuestion".into()),
