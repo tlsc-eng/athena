@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::protocol::{Item, ItemKind, ItemStatus, Question, QuestionOption, Subagent};
+use super::protocol::{
+    FileChange, Item, ItemKind, ItemStatus, Permission, Question, QuestionOption, Subagent,
+};
 use super::subagents::Fleet;
 use crate::transcripts::{Typed, next_line, typed_text};
 
@@ -16,6 +18,10 @@ const ASSISTANT_CAP: usize = 24 << 10;
 const USER_CAP: usize = 8 << 10;
 const DETAIL_CAP: usize = 1 << 10;
 pub(super) const SUMMARY_CHARS: usize = 200;
+const OUTPUT_LINES: usize = 6;
+const OUTPUT_LINE_CHARS: usize = 200;
+const MAX_FILES: usize = 5;
+const NO_PREVIEW: [&str; 5] = ["Read", "Agent", "Task", "TodoWrite", "AskUserQuestion"];
 
 /// One transcript file, parsed into items as far as it has been read.
 #[derive(Debug)]
@@ -178,7 +184,7 @@ impl Feed {
         }
         if let Some(results) = content.as_array() {
             for block in results.iter().filter(|b| b["type"] == "tool_result") {
-                self.tool_result(block, changed);
+                self.tool_result(block, line, pos, changed);
             }
         }
         let id = format!("{uuid}#0");
@@ -246,11 +252,17 @@ impl Feed {
             detail: None,
             questions,
             answer: None,
+            output: None,
+            lines: None,
+            files: Vec::new(),
+            more_files: None,
+            permission: None,
+            result_pos: None,
         };
         self.push(item, changed);
     }
 
-    fn tool_result(&mut self, block: &Value, changed: &mut Vec<usize>) {
+    fn tool_result(&mut self, block: &Value, line: &Value, pos: u64, changed: &mut Vec<usize>) {
         let Some(&idx) = block["tool_use_id"]
             .as_str()
             .and_then(|id| self.tools.get(id))
@@ -269,7 +281,26 @@ impl Feed {
             item.answer = Some(text);
         } else if failed {
             item.detail = Some(text);
+        } else {
+            let tool = item.tool.as_deref().unwrap_or_default();
+            let result = &line["toolUseResult"];
+            if !NO_PREVIEW.contains(&tool) {
+                let (output, lines) = output_preview(&output_source(result, &block["content"]));
+                item.output = (!output.is_empty()).then_some(output);
+                item.lines = (lines > 0).then_some(lines);
+            }
+            if tool == "Read" {
+                item.lines = result["file"]["numLines"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok());
+            }
+            let cwd = line["cwd"].as_str().map(Path::new);
+            let (files, more) = file_changes(result, cwd);
+            item.more_files = (more > 0).then_some(more);
+            item.files = files;
         }
+        item.permission = permission(line);
+        item.result_pos = Some(pos);
         item.cut |= cut;
         changed.push(idx);
     }
@@ -319,6 +350,12 @@ fn text_item(id: String, pos: u64, at: u64, kind: ItemKind, text: &str) -> Item 
         detail: None,
         questions: Vec::new(),
         answer: None,
+        output: None,
+        lines: None,
+        files: Vec::new(),
+        more_files: None,
+        permission: None,
+        result_pos: None,
     }
 }
 
@@ -376,6 +413,163 @@ fn questions(input: &Value) -> (Vec<Question>, bool) {
         })
         .collect();
     (questions, cut.get())
+}
+
+fn output_source(result: &Value, content: &Value) -> String {
+    let Some(stdout) = result["stdout"].as_str() else {
+        return result_text(content);
+    };
+    let stderr = result["stderr"].as_str().unwrap_or_default();
+    [stdout, stderr]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The first few non-empty lines of `text` within the preview budget, and the line count of the whole text.
+fn output_preview(text: &str) -> (String, u32) {
+    let text = strip_ansi(text);
+    let total = text.trim_end().lines().count();
+    let mut preview = String::new();
+    for line in text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(OUTPUT_LINES)
+    {
+        let (line, _) = clip_chars(line, OUTPUT_LINE_CHARS);
+        let sep = usize::from(!preview.is_empty());
+        let room = DETAIL_CAP.saturating_sub(preview.len() + sep);
+        let (line, cut) = clip(&line, room);
+        if line.is_empty() {
+            break;
+        }
+        if sep == 1 {
+            preview.push('\n');
+        }
+        preview.push_str(&line);
+        if cut {
+            break;
+        }
+    }
+    (preview, u32::try_from(total).unwrap_or(u32::MAX))
+}
+
+/// Drops CSI and OSC escape sequences and C0 controls other than tab and newline.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    for n in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' {
+                            break;
+                        }
+                        if n == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(' '..='/') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            '\t' | '\n' => out.push(c),
+            c if c.is_control() && (c as u32) < 0x20 => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn file_changes(result: &Value, cwd: Option<&Path>) -> (Vec<FileChange>, u32) {
+    let diff = &result["bashEditDiff"];
+    let mut changes: Vec<FileChange> = if let Some(files) = diff["files"].as_array() {
+        files
+            .iter()
+            .filter_map(|f| {
+                let hunks = f["hunks"].as_array().map_or(&[][..], Vec::as_slice);
+                Some(change(f["filePath"].as_str()?, hunks, false, cwd))
+            })
+            .collect()
+    } else if let Some(path) = result["filePath"]
+        .as_str()
+        .filter(|_| result["structuredPatch"].is_array() || result["type"] == "create")
+    {
+        let hunks = result["structuredPatch"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let created = result["type"] == "create";
+        let mut file = change(path, hunks, created, cwd);
+        if created && file.added == 0 {
+            let lines = result["content"]
+                .as_str()
+                .unwrap_or_default()
+                .lines()
+                .count();
+            file.added = u32::try_from(lines).unwrap_or(u32::MAX);
+        }
+        vec![file]
+    } else {
+        Vec::new()
+    };
+    let moved = diff["moreFiles"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    let rest = u32::try_from(changes.len().saturating_sub(MAX_FILES)).unwrap_or(u32::MAX);
+    changes.truncate(MAX_FILES);
+    (changes, rest.saturating_add(moved))
+}
+
+fn change(path: &str, hunks: &[Value], created: bool, cwd: Option<&Path>) -> FileChange {
+    let path = Path::new(path);
+    let shown = cwd.and_then(|c| path.strip_prefix(c).ok()).unwrap_or(path);
+    let (path, _) = clip_chars(&shown.to_string_lossy(), SUMMARY_CHARS);
+    let (mut added, mut removed) = (0u32, 0u32);
+    for text in hunks.iter().filter_map(|h| h["lines"].as_array()).flatten() {
+        match text.as_str().and_then(|t| t.chars().next()) {
+            Some('+') => added = added.saturating_add(1),
+            Some('-') => removed = removed.saturating_add(1),
+            _ => {}
+        }
+    }
+    FileChange {
+        path,
+        added,
+        removed,
+        created,
+    }
+}
+
+fn permission(line: &Value) -> Option<Permission> {
+    let decision = &line["permissionDecision"];
+    let source = decision["source"].as_str().unwrap_or_default();
+    let reason = decision["reasonType"].as_str().unwrap_or_default();
+    match decision["decision"].as_str()? {
+        "reject" if source == "hook" => Some(Permission::DeniedHook),
+        "reject" if reason == "classifier" => Some(Permission::DeniedAuto),
+        "reject" => Some(Permission::Denied),
+        "accept" if source.starts_with("user") => Some(Permission::User),
+        "accept" => match reason {
+            "classifier" => Some(Permission::Auto),
+            "mode" => Some(Permission::Mode),
+            "rule" => Some(Permission::Rule),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn result_text(content: &Value) -> String {
@@ -746,5 +940,170 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("def-2.jsonl"), "").unwrap();
         assert_eq!(find(&home, &long, "def-2"), Some(dir.join("def-2.jsonl")));
+    }
+
+    fn tool_feed(name: &str, result: Value, extra: Value) -> Item {
+        let mut done = user(
+            "u2",
+            json!([{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "fallback" }]),
+        );
+        done["toolUseResult"] = result;
+        if let Some(extra) = extra.as_object() {
+            for (k, v) in extra {
+                done[k] = v.clone();
+            }
+        }
+        let (mut feed, _) = feed(&[
+            assistant(
+                "a1",
+                json!([{ "type": "tool_use", "id": "toolu_1", "name": name, "input": {} }]),
+            ),
+            done,
+        ]);
+        feed.read_on();
+        feed.items()[0].clone()
+    }
+
+    #[test]
+    fn a_long_bash_output_gives_a_short_preview_and_a_line_count() {
+        let stdout: String = (0..160)
+            .map(|n| format!("line {n} {}\n", "x".repeat(300)))
+            .collect();
+        let item = tool_feed("Bash", json!({ "stdout": stdout, "stderr": "" }), json!({}));
+        let output = item.output.unwrap();
+        assert_eq!(output.lines().count(), 6);
+        assert!(output.len() <= 1 << 10, "{}", output.len());
+        assert_eq!(item.lines, Some(160));
+        assert!(item.result_pos.is_some());
+    }
+
+    #[test]
+    fn stderr_follows_stdout_and_content_is_the_fallback() {
+        let both = tool_feed(
+            "Bash",
+            json!({ "stdout": "out", "stderr": "err" }),
+            json!({}),
+        );
+        assert_eq!(both.output.as_deref(), Some("out\nerr"));
+        assert_eq!(both.lines, Some(2));
+        let only_err = tool_feed("Bash", json!({ "stdout": "", "stderr": "err" }), json!({}));
+        assert_eq!(only_err.lines, Some(1));
+        let plain = tool_feed("Grep", json!(["odd"]), json!({}));
+        assert_eq!(plain.output.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn ansi_sequences_and_controls_are_stripped() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(strip_ansi("a\x1b]0;title\x07b\x08\tc\r"), "ab\tc");
+        assert_eq!(strip_ansi("\x1b(Bplain"), "plain");
+    }
+
+    #[test]
+    fn bash_edit_diff_files_are_counted_and_capped() {
+        let files: Vec<Value> = (0..7)
+            .map(|n| {
+                json!({ "filePath": format!("/work/app/f{n}.rs"),
+                    "hunks": [{ "lines": [" ctx", "-old", "+new", "+more"] }] })
+            })
+            .collect();
+        let result = json!({ "stdout": "", "bashEditDiff": { "files": files, "moreFiles": 3 } });
+        let item = tool_feed("Bash", result, json!({}));
+        assert_eq!(item.files.len(), 5);
+        assert_eq!(item.more_files, Some(5));
+        assert_eq!(item.files[0].path, "f0.rs");
+        assert_eq!((item.files[0].added, item.files[0].removed), (2, 1));
+        assert_eq!(item.output, None);
+    }
+
+    #[test]
+    fn edit_and_write_patches_give_one_file() {
+        let edit = json!({ "filePath": "/work/app/a.rs",
+            "structuredPatch": [{ "lines": ["-x", "+y"] }] });
+        let item = tool_feed("Edit", edit, json!({}));
+        assert_eq!(item.files.len(), 1);
+        assert!(!item.files[0].created);
+        let write = json!({ "type": "create", "filePath": "/work/app/b.rs",
+            "structuredPatch": [], "content": "a\nb\nc\n" });
+        let item = tool_feed("Write", write, json!({}));
+        assert!(item.files[0].created);
+        assert_eq!((item.files[0].added, item.files[0].removed), (3, 0));
+        let bare = json!({ "type": "create", "filePath": "/work/app/c.rs",
+            "content": "a\nb\nc\n" });
+        let item = tool_feed("Write", bare, json!({}));
+        assert_eq!(item.files.len(), 1);
+        assert_eq!((item.files[0].added, item.files[0].removed), (3, 0));
+    }
+
+    #[test]
+    fn permission_decisions_map_to_the_enum() {
+        let of = |d: Value| permission(&json!({ "permissionDecision": d }));
+        let accept = |reason: &str| json!({ "decision": "accept", "source": "config", "reasonType": reason });
+        assert_eq!(of(accept("classifier")), Some(Permission::Auto));
+        assert_eq!(of(accept("mode")), Some(Permission::Mode));
+        assert_eq!(of(accept("rule")), Some(Permission::Rule));
+        assert_eq!(of(accept("other")), None);
+        assert_eq!(
+            of(json!({ "decision": "accept", "source": "user_temporary" })),
+            Some(Permission::User)
+        );
+        assert_eq!(
+            of(json!({ "decision": "reject", "source": "hook", "reasonType": "hook" })),
+            Some(Permission::DeniedHook)
+        );
+        assert_eq!(
+            of(json!({ "decision": "reject", "source": "config", "reasonType": "classifier" })),
+            Some(Permission::DeniedAuto)
+        );
+        assert_eq!(permission(&json!({})), None);
+    }
+
+    #[test]
+    fn an_error_keeps_its_detail_and_has_no_output() {
+        let (mut feed, _) = feed(&[
+            assistant(
+                "a1",
+                json!([{ "type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {} }]),
+            ),
+            {
+                let mut line = user(
+                    "u2",
+                    json!([{ "type": "tool_result", "tool_use_id": "toolu_1",
+                    "is_error": true, "content": "boom" }]),
+                );
+                line["toolUseResult"] = json!({ "stdout": "noise" });
+                line
+            },
+        ]);
+        feed.read_on();
+        let item = &feed.items()[0];
+        assert_eq!(item.detail.as_deref(), Some("boom"));
+        assert_eq!(item.output, None);
+    }
+
+    #[test]
+    fn a_result_without_tool_use_result_has_no_extra_fields() {
+        let (mut feed, _) = feed(&[
+            assistant(
+                "a1",
+                json!([{ "type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {} }]),
+            ),
+            user(
+                "u2",
+                json!([{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "" }]),
+            ),
+        ]);
+        feed.read_on();
+        let item = &feed.items()[0];
+        assert_eq!(item.status, Some(ItemStatus::Ok));
+        assert!(item.output.is_none() && item.lines.is_none() && item.files.is_empty());
+        assert!(item.permission.is_none());
+    }
+
+    #[test]
+    fn read_keeps_its_line_count_without_a_preview() {
+        let item = tool_feed("Read", json!({ "file": { "numLines": 88 } }), json!({}));
+        assert_eq!(item.lines, Some(88));
+        assert_eq!(item.output, None);
     }
 }

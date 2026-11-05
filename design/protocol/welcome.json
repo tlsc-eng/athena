@@ -11,6 +11,7 @@
     "dialog",
     "answer",
     "subagents",
-    "fit"
+    "fit",
+    "tool_output"
   ]
 }

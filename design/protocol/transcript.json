@@ -30,6 +30,28 @@
       "detail": "error[E0432]: unresolved import"
     },
     {
+      "id": "t2",
+      "pos": 2000,
+      "at": 1767225600000,
+      "kind": "tool",
+      "tool": "Bash",
+      "tool_id": "toolu_02abc",
+      "summary": "cargo build",
+      "status": "ok",
+      "output": "Compiling daedalus\nFinished dev profile",
+      "lines": 42,
+      "files": [
+        {
+          "path": "src/main.rs",
+          "added": 3,
+          "removed": 1,
+          "created": true
+        }
+      ],
+      "more_files": 2,
+      "permission": "auto"
+    },
+    {
       "id": "q1",
       "pos": 2400,
       "at": 1767225600000,

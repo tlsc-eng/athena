@@ -17,8 +17,12 @@ const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(60);
 /// its terminal's foreground group. A nested `claude -p` has its own group or no terminal, and
 /// the polled foreground program lags a launcher, so neither is asked.
 pub(super) fn hook_claude_holds_terminal(lineage: &[i32]) -> bool {
-    crate::procinfo::groups(&lineage[..lineage.len().min(3)])
-        .is_some_and(|groups| runs_hook_of(&groups))
+    let holds = crate::procinfo::groups(&lineage[..lineage.len().min(3)])
+        .is_some_and(|groups| runs_hook_of(&groups));
+    if !holds {
+        tracing::debug!("hook dropped: its claude is not in the foreground group ({lineage:?})");
+    }
+    holds
 }
 
 fn runs_hook_of(lineage: &[(i32, i32, i32)]) -> bool {
@@ -149,8 +153,14 @@ impl Shell {
         cx: &gpui::App,
     ) -> Option<PaneId> {
         let session = claimed?;
-        let foreground = self.foreground_pid(session, cx)?;
-        lineage.contains(&foreground).then_some(session)
+        let foreground = self.foreground_pid(session, cx);
+        let verified = foreground.is_some_and(|pid| lineage.contains(&pid));
+        if !verified {
+            tracing::debug!(
+                "caller rejected: pane {session} foreground {foreground:?} not in {lineage:?}"
+            );
+        }
+        verified.then_some(session)
     }
 
     fn foreground_pid(&self, session: PaneId, cx: &gpui::App) -> Option<i32> {
