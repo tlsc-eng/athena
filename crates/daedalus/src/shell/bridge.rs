@@ -157,7 +157,7 @@ impl Shell {
         let verified = foreground.is_some_and(|pid| lineage.contains(&pid));
         if !verified {
             tracing::debug!(
-                "hook dropped: pane {session} foreground {foreground:?} not in {lineage:?}"
+                "caller rejected: pane {session} foreground {foreground:?} not in {lineage:?}"
             );
         }
         verified.then_some(session)

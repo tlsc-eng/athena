@@ -105,6 +105,19 @@ impl Bindings {
     }
 }
 
+/// The terminals still worth adopting at apply time: unbound, and on the process seen at collect.
+fn still_adoptable(
+    collected: &[(PaneId, i32)],
+    current: &[(PaneId, i32)],
+    bound: &HashMap<PaneId, String>,
+) -> Vec<(PaneId, i32)> {
+    current
+        .iter()
+        .filter(|t| collected.contains(t) && !bound.contains_key(&t.0))
+        .copied()
+        .collect()
+}
+
 impl SessionsState {
     /// Makes `session` the one `pane` runs; a session lives in one pane, the latest to claim it.
     pub(super) fn bind(&mut self, pane: PaneId, session: String) {
@@ -123,19 +136,19 @@ impl SessionsState {
         &mut self,
         found: &HashMap<i32, (String, PathBuf)>,
         terminals: &[(PaneId, i32)],
+        held_elsewhere: &HashSet<String>,
     ) -> bool {
         let mut bound = false;
         for (pane, pid) in terminals {
             let Some((id, cwd)) = found.get(pid) else {
                 continue;
             };
-            if self.panes.contains_key(pane) || self.panes.values().any(|s| s == id) {
+            let held = self.panes.values().any(|s| s == id) || held_elsewhere.contains(id);
+            if self.panes.contains_key(pane) || held || !cwd.is_absolute() {
                 continue;
             }
             self.bind(*pane, id.clone());
-            if cwd.is_absolute() {
-                self.cwds.insert(id.clone(), cwd.clone());
-            }
+            self.cwds.insert(id.clone(), cwd.clone());
             bound = true;
         }
         bound
@@ -611,12 +624,10 @@ impl Shell {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let still: Vec<(PaneId, i32)> = this
-                    .unbound_claude_terminals(cx)
-                    .into_iter()
-                    .filter(|t| unbound.contains(t))
-                    .collect();
-                if this.review.sessions.adopt(&found, &still) {
+                let current = this.unbound_claude_terminals(cx);
+                let still = still_adoptable(&unbound, &current, &this.review.sessions.panes);
+                let held = super::windows::sessions_held_elsewhere(this.window_handle, cx);
+                if this.review.sessions.adopt(&found, &still, &held) {
                     this.claude_sessions_stale(cx);
                 }
                 let state = &mut this.review.sessions;
@@ -1191,7 +1202,7 @@ mod tests {
     #[test]
     fn adopt_binds_an_unbound_claude_pane() {
         let mut state = SessionsState::default();
-        assert!(state.adopt(&found(&[(10, "a")]), &[(1, 10)]));
+        assert!(state.adopt(&found(&[(10, "a")]), &[(1, 10)], &HashSet::new()));
         assert_eq!(bound(&state), [(1, "a")]);
         assert_eq!(state.cwds["a"], PathBuf::from("/work/app"));
     }
@@ -1200,7 +1211,7 @@ mod tests {
     fn adopt_never_overrides_a_hook_binding() {
         let mut state = SessionsState::default();
         state.bind(1, "hooked".into());
-        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)]));
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)], &HashSet::new()));
         assert_eq!(bound(&state), [(1, "hooked")]);
     }
 
@@ -1208,15 +1219,46 @@ mod tests {
     fn adopt_skips_a_session_another_pane_holds() {
         let mut state = SessionsState::default();
         state.bind(2, "a".into());
-        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)]));
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)], &HashSet::new()));
         assert_eq!(bound(&state), [(2, "a")]);
     }
 
     #[test]
     fn adopt_skips_a_pid_it_could_not_resolve() {
         let mut state = SessionsState::default();
-        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 11)]));
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 11)], &HashSet::new()));
         assert!(bound(&state).is_empty());
+    }
+
+    #[test]
+    fn adopt_skips_a_session_another_window_holds() {
+        let mut state = SessionsState::default();
+        let held = HashSet::from(["a".to_string()]);
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)], &held));
+        assert!(bound(&state).is_empty());
+    }
+
+    #[test]
+    fn adopt_skips_a_relative_or_empty_cwd() {
+        for cwd in ["app", ""] {
+            let mut state = SessionsState::default();
+            let found = HashMap::from([(10, ("a".to_string(), PathBuf::from(cwd)))]);
+            assert!(!state.adopt(&found, &[(1, 10)], &HashSet::new()));
+            assert!(bound(&state).is_empty());
+        }
+    }
+
+    #[test]
+    fn apply_skips_a_pid_that_changed_since_collect() {
+        let bound = HashMap::new();
+        assert!(still_adoptable(&[(1, 10)], &[(1, 11)], &bound).is_empty());
+        assert_eq!(still_adoptable(&[(1, 10)], &[(1, 10)], &bound), [(1, 10)]);
+    }
+
+    #[test]
+    fn apply_skips_a_pane_a_hook_bound_meanwhile() {
+        let bound = HashMap::from([(1, "hooked".to_string())]);
+        assert!(still_adoptable(&[(1, 10)], &[(1, 10)], &bound).is_empty());
     }
 
     #[test]

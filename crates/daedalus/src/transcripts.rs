@@ -36,6 +36,7 @@ pub fn running_sessions(home: &Path, pids: &[i32]) -> HashMap<i32, (String, Path
         pid: i32,
         #[serde(rename = "sessionId")]
         session_id: String,
+        #[serde(default)]
         cwd: PathBuf,
         #[serde(default, rename = "startedAt")]
         started_at: u64,
@@ -629,13 +630,25 @@ mod tests {
     }
 
     #[test]
+    fn running_sessions_parses_a_pid_file_without_a_cwd() {
+        let home = temp("running-nocwd");
+        write_pid_file(
+            &home,
+            ".claude",
+            5,
+            &format!(r#"{{"pid":5,"sessionId":"{SID}"}}"#),
+        );
+        assert_eq!(running_sessions(&home, &[5])[&5].1, PathBuf::new());
+    }
+
+    #[test]
     fn running_sessions_prefers_the_latest_start_across_profiles() {
         let home = temp("running-latest");
         let newer = "1c7d2f4b-2a3e-4d2c-8e66-2a1e3d4c5b6f";
         let old = format!(r#"{{"pid":7,"sessionId":"{SID}","cwd":"/a","startedAt":10}}"#);
         let new = format!(r#"{{"pid":7,"sessionId":"{newer}","cwd":"/b","startedAt":20}}"#);
-        write_pid_file(&home, ".claude", 7, &old);
-        write_pid_file(&home, ".claude-work", 7, &new);
+        write_pid_file(&home, ".claude", 7, &new);
+        write_pid_file(&home, ".claude-work", 7, &old);
         assert_eq!(running_sessions(&home, &[7])[&7].0, newer);
     }
 
