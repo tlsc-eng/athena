@@ -52,6 +52,8 @@ pub struct Settings {
     pub companion_push_url: Option<String>,
     /// `claude.profiles`: folder prefix (`/` or `~/`) to config folder name, such as `claude-tlsc`.
     pub claude_profiles: Vec<(String, String)>,
+    /// `claude.usage_order`: config folder names the usage list shows first, in this order.
+    pub usage_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -525,6 +527,10 @@ pub fn parse_project(text: &str) -> Result<(Settings, Vec<String>), String> {
             "claude.profiles",
             !std::mem::take(&mut s.claude_profiles).is_empty(),
         ),
+        (
+            "claude.usage_order",
+            !std::mem::take(&mut s.usage_order).is_empty(),
+        ),
     ];
     for (key, set) in app_wide {
         if set {
@@ -757,11 +763,12 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                             "prices" => Ok(()),
                             "hooks" => claude_hooks(&mut settings, value),
                             "profiles" => claude_profiles(&mut settings, value),
+                            "usage_order" => usage_order(&mut settings, value),
                             _ => Err(format!("has no setting \"{name}\"")),
                         })
                 }
                 _ => Err("must be {\"hooks\": true or false, \
-                          \"profiles\": {folder: profile}}"
+                          \"profiles\": {folder: profile}, \"usage_order\": [profile]}"
                     .into()),
             },
             "companion" => match value.as_object() {
@@ -817,6 +824,7 @@ pub fn parse(text: &str) -> Result<(Settings, Vec<String>), String> {
                 Some(("claude", "prices")) => Ok(()),
                 Some(("claude", "hooks")) => claude_hooks(&mut settings, value),
                 Some(("claude", "profiles")) => claude_profiles(&mut settings, value),
+                Some(("claude", "usage_order")) => usage_order(&mut settings, value),
                 Some(("companion", "enabled")) => companion_enabled(&mut settings, value),
                 Some(("companion", "push_url")) => companion_push_url(&mut settings, value),
                 _ => Err("is not a setting".into()),
@@ -859,21 +867,37 @@ fn claude_profiles(settings: &mut Settings, value: &Value) -> Result<(), String>
         if !(folder.starts_with('/') || folder.starts_with("~/")) {
             return Err(format!("\"{folder}\" must start with / or ~/"));
         }
-        let name = profile
-            .as_str()
-            .map(|p| p.trim().trim_start_matches("~/").trim_start_matches('.'))
-            .filter(|p| !p.is_empty() && !p.contains('/'))
-            .ok_or(format!(
-                "\"{folder}\" must name a profile, such as \"tlsc\" for ~/.claude-tlsc"
-            ))?;
-        let name = if name == "claude" || name.starts_with("claude-") {
-            name.to_string()
-        } else {
-            format!("claude-{name}")
-        };
+        let name = profile_name(profile).ok_or(format!(
+            "\"{folder}\" must name a profile, such as \"tlsc\" for ~/.claude-tlsc"
+        ))?;
         settings.claude_profiles.retain(|(f, _)| f != folder);
         settings.claude_profiles.push((folder.clone(), name));
     }
+    Ok(())
+}
+
+fn profile_name(value: &Value) -> Option<String> {
+    let name = value
+        .as_str()
+        .map(|p| p.trim().trim_start_matches("~/").trim_start_matches('.'))
+        .filter(|p| !p.is_empty() && !p.contains('/'))?;
+    Some(if name == "claude" || name.starts_with("claude-") {
+        name.to_string()
+    } else {
+        format!("claude-{name}")
+    })
+}
+
+fn usage_order(settings: &mut Settings, value: &Value) -> Result<(), String> {
+    let names = value.as_array().ok_or("must be a list of profiles")?;
+    settings.usage_order = names
+        .iter()
+        .map(|name| {
+            profile_name(name).ok_or(format!(
+                "{name} must name a profile, such as \"tlsc\" for ~/.claude-tlsc"
+            ))
+        })
+        .collect::<Result<_, _>>()?;
     Ok(())
 }
 
@@ -1712,6 +1736,33 @@ pub(crate) mod tests {
             parse_project(r#"{"claude": {"profiles": {"/code": "tlsc"}}}"#).unwrap();
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(project.claude_profiles.is_empty());
+    }
+
+    #[test]
+    fn usage_order_names_profiles_like_claude_profiles() {
+        let (s, problems) = parse(
+            r#"{"claude": {"usage_order": ["tlsc", "claude-ai", "~/.claude-work", "claude"]}}"#,
+        )
+        .unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            s.usage_order,
+            ["claude-tlsc", "claude-ai", "claude-work", "claude"]
+        );
+        let (dotted, _) = parse(r#"{"claude.usage_order": ["tlsc"]}"#).unwrap();
+        assert_eq!(dotted.usage_order, ["claude-tlsc"]);
+        for bad in [
+            r#"{"claude": {"usage_order": "tlsc"}}"#,
+            r#"{"claude": {"usage_order": [1]}}"#,
+            r#"{"claude": {"usage_order": ["a/b"]}}"#,
+        ] {
+            let (_, problems) = parse(bad).unwrap();
+            assert_eq!(problems.len(), 1, "{bad}");
+        }
+        let (project, problems) =
+            parse_project(r#"{"claude": {"usage_order": ["tlsc"]}}"#).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(project.usage_order.is_empty());
     }
 
     #[test]

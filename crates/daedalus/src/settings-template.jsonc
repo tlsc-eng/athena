@@ -40,6 +40,8 @@
   // // The title bar's plan usage shows this profile for projects under each folder ("tlsc" is
   // // ~/.claude-tlsc; the deepest folder wins), else the profile of the project's newest session.
   // "claude.profiles": { "~/code/ai": "ai", "~/code": "tlsc" },
+  // // These profiles come first in the usage list, here and on the phone; the rest follow alphabetically.
+  // "claude.usage_order": ["tlsc"],
   // "lsp": {
   //   // Sent to each server as it starts and whenever this file changes.
   //   // gopls runs with GOTOOLCHAIN=local unless its "env" names another toolchain.

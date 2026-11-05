@@ -175,19 +175,21 @@ impl Shell {
         self._usage = Some(cx.spawn_in(window, async move |this, cx| {
             let mut fresh = fresh;
             loop {
-                let Ok(roots) = this.update(cx, |this, _| {
-                    this.workspace
+                let Ok((roots, order)) = this.update(cx, |this, _| {
+                    let roots = this
+                        .workspace
                         .projects
                         .iter()
                         .map(|p| p.root.clone())
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    (roots, this.settings.file.usage_order.clone())
                 }) else {
                     return;
                 };
                 let (readings, latest) = cx
                     .background_executor()
                     .spawn(async move {
-                        let readings = usage::profiles(fresh)
+                        let readings = usage::ordered(usage::profiles(fresh), &order)
                             .into_iter()
                             .map(|p| {
                                 let s = usage::fetch(&p);

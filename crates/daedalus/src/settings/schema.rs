@@ -150,6 +150,7 @@ impl Setting {
                         .collect(),
                 )
             }),
+            ["claude", "usage_order"] => (!s.usage_order.is_empty()).then(|| json!(s.usage_order)),
             ["lsp"] => (!s.lsp.is_empty()).then(|| {
                 Value::Object(s.lsp.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             }),
@@ -549,6 +550,20 @@ pub static SETTINGS: &[Setting] = &[
             schema: r#"{"type": "object", "propertyNames": {"pattern": "^(/|~/)"},
                 "additionalProperties": {"type": "string", "minLength": 1}}"#,
             example: r#"{"~/code/ai": "ai", "~/code": "tlsc"}"#,
+        },
+        user_only: true,
+        also: None,
+    },
+    Setting {
+        keys: &["claude", "usage_order"],
+        aliases: &[],
+        title: "Usage Order",
+        description: "Profiles the usage list shows first, on the Mac and the phone, in this \
+                      order; the rest follow alphabetically. \"tlsc\" names ~/.claude-tlsc.",
+        group: Group::Claude,
+        kind: Kind::Json {
+            schema: r#"{"type": "array", "items": {"type": "string", "minLength": 1}}"#,
+            example: r#"["tlsc"]"#,
         },
         user_only: true,
         also: None,

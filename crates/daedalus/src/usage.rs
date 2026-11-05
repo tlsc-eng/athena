@@ -102,6 +102,17 @@ fn security(service: &str, want_secret: bool) -> std::io::Result<std::process::O
     cmd.stdin(Stdio::null()).output()
 }
 
+/// Moves the profiles `order` names to the front, in that order; the rest keep their relative order.
+pub fn ordered(mut list: Vec<Profile>, order: &[String]) -> Vec<Profile> {
+    list.sort_by_key(|p| {
+        order
+            .iter()
+            .position(|n| *n == p.name)
+            .unwrap_or(order.len())
+    });
+    list
+}
+
 /// Profiles with a stored Claude Code sign-in, cached for `PROFILE_TTL` unless `fresh`.
 /// Checking existence does not reveal the secret.
 pub fn profiles(fresh: bool) -> Vec<Profile> {
@@ -367,6 +378,32 @@ pub fn parse(v: &Value) -> Vec<Window> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ordered_puts_listed_profiles_first_and_keeps_the_rest_alphabetical() {
+        let names = |order: &[&str]| {
+            let order: Vec<String> = order.iter().map(|s| s.to_string()).collect();
+            let list = ["claude", "claude-ai", "claude-tlsc", "claude-work"]
+                .map(Profile::named)
+                .to_vec();
+            super::ordered(list, &order)
+                .into_iter()
+                .map(|p| p.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&["claude-work", "claude-tlsc"]),
+            ["claude-work", "claude-tlsc", "claude", "claude-ai"]
+        );
+        assert_eq!(
+            names(&["claude-gone", "claude-tlsc"]),
+            ["claude-tlsc", "claude", "claude-ai", "claude-work"]
+        );
+        assert_eq!(
+            names(&[]),
+            ["claude", "claude-ai", "claude-tlsc", "claude-work"]
+        );
+    }
+
     use serde_json::json;
 
     use super::*;

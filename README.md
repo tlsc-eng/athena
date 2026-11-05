@@ -981,6 +981,13 @@ A project under none of those folders shows the profile of its newest Claude ses
 each refresh. Folders are matched as written, without resolving symlinks, so a worktree outside
 the listed folders also goes by its newest session. With neither, it shows the busiest profile.
 
+`claude.usage_order` lists the profiles the usage list shows first, here and on the phone; the
+rest follow alphabetically:
+
+```json
+"claude.usage_order": ["tlsc"]
+```
+
 ## Keyboard shortcuts
 
 Keys use GPUI's binding syntax as written in the source. `1…9` means each digit from 1 to 9.
