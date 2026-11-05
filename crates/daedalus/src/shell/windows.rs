@@ -747,6 +747,17 @@ pub(super) fn claude_root_elsewhere(
         .find_map(|h| h.read(cx).ok()?.claude_terminal(pid, cx).map(|(r, _)| r))
 }
 
+/// The session ids bound to panes in every window but `except`.
+pub(super) fn sessions_held_elsewhere(except: AnyWindowHandle, cx: &App) -> HashSet<String> {
+    handles(cx)
+        .into_iter()
+        .filter(|h| AnyWindowHandle::from(*h) != except)
+        .filter_map(|h| h.read(cx).ok())
+        .flat_map(|s| s.review.sessions.bound_sessions())
+        .map(|(id, _)| id)
+        .collect()
+}
+
 /// Drops `session` from the panes every window but `except` has bound, as it runs in one terminal.
 pub(super) fn unbind_elsewhere(session: String, except: AnyWindowHandle, cx: &mut App) {
     for handle in handles(cx) {
@@ -1381,7 +1392,10 @@ fn serve(request: Request, cx: &mut App) {
     let (caller_at, caller) = request
         .claimed
         .and_then(|claimed| {
-            let at = holder(claimed)?;
+            let Some(at) = holder(claimed) else {
+                tracing::debug!("caller rejected: pane {claimed} held by no window");
+                return None;
+            };
             let shell = windows[at].read(cx).ok()?;
             Some((
                 Some(at),

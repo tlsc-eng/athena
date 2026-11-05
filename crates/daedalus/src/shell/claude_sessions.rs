@@ -105,6 +105,19 @@ impl Bindings {
     }
 }
 
+/// The terminals still worth adopting at apply time: unbound, and on the process seen at collect.
+fn still_adoptable(
+    collected: &[(PaneId, i32)],
+    current: &[(PaneId, i32)],
+    bound: &HashMap<PaneId, String>,
+) -> Vec<(PaneId, i32)> {
+    current
+        .iter()
+        .filter(|t| collected.contains(t) && !bound.contains_key(&t.0))
+        .copied()
+        .collect()
+}
+
 impl SessionsState {
     /// Makes `session` the one `pane` runs; a session lives in one pane, the latest to claim it.
     pub(super) fn bind(&mut self, pane: PaneId, session: String) {
@@ -116,6 +129,29 @@ impl SessionsState {
             .entry(session.clone())
             .or_insert_with(SystemTime::now);
         self.panes.insert(pane, session);
+    }
+
+    /// Binds each unbound pane to the session Claude recorded for its process; hooks always win.
+    pub(super) fn adopt(
+        &mut self,
+        found: &HashMap<i32, (String, PathBuf)>,
+        terminals: &[(PaneId, i32)],
+        held_elsewhere: &HashSet<String>,
+    ) -> bool {
+        let mut bound = false;
+        for (pane, pid) in terminals {
+            let Some((id, cwd)) = found.get(pid) else {
+                continue;
+            };
+            let held = self.panes.values().any(|s| s == id) || held_elsewhere.contains(id);
+            if self.panes.contains_key(pane) || held || !cwd.is_absolute() {
+                continue;
+            }
+            self.bind(*pane, id.clone());
+            self.cwds.insert(id.clone(), cwd.clone());
+            bound = true;
+        }
+        bound
     }
 
     /// Takes out what is known of the sessions the `moved` panes run.
@@ -530,6 +566,22 @@ impl Shell {
         })
     }
 
+    /// Claude terminals in any project that no hook has bound, with their foreground pid.
+    fn unbound_claude_terminals(&self, cx: &Context<Self>) -> Vec<(PaneId, i32)> {
+        self.items
+            .values()
+            .filter_map(|view| {
+                let ItemView::Terminal(view) = view else {
+                    return None;
+                };
+                let view = view.read(cx);
+                let pane = view.session().filter(|_| view.is_claude())?;
+                let pid = view.foreground_pid()?;
+                (!self.review.sessions.panes.contains_key(&pane)).then_some((pane, pid))
+            })
+            .collect()
+    }
+
     /// Reads the sessions of `root` and of every other project a terminal here runs a session in.
     fn load_claude_sessions(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let mut roots = self.session_row_roots();
@@ -553,8 +605,11 @@ impl Shell {
         let (Some(home), Ok(store)) = (std::env::home_dir(), snapshots::store()) else {
             return;
         };
+        let unbound = self.unbound_claude_terminals(cx);
+        let pids: Vec<i32> = unbound.iter().map(|(_, pid)| *pid).collect();
+        let state = &mut self.review.sessions;
         state.loading = Some(cx.spawn(async move |this, cx| {
-            let (loaded, places, hooks_on) = cx
+            let (loaded, places, hooks_on, found) = cx
                 .background_executor()
                 .spawn(async move {
                     let loaded: Vec<SessionRow> =
@@ -564,10 +619,17 @@ impl Shell {
                         loaded,
                         live::locate_all(&cwds),
                         hooks.iter().any(|p| crate::claude_hooks::enabled(p)),
+                        crate::transcripts::running_sessions(&home, &pids),
                     )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let current = this.unbound_claude_terminals(cx);
+                let still = still_adoptable(&unbound, &current, &this.review.sessions.panes);
+                let held = super::windows::sessions_held_elsewhere(this.window_handle, cx);
+                if this.review.sessions.adopt(&found, &still, &held) {
+                    this.claude_sessions_stale(cx);
+                }
                 let state = &mut this.review.sessions;
                 if state.root.as_ref() == Some(&root) {
                     let (rows, elsewhere): (Vec<_>, Vec<_>) =
@@ -1128,6 +1190,75 @@ mod tests {
         let mut all: Vec<_> = state.panes.iter().map(|(p, s)| (*p, s.as_str())).collect();
         all.sort();
         all
+    }
+
+    fn found(entries: &[(i32, &str)]) -> HashMap<i32, (String, PathBuf)> {
+        entries
+            .iter()
+            .map(|(pid, id)| (*pid, (id.to_string(), PathBuf::from("/work/app"))))
+            .collect()
+    }
+
+    #[test]
+    fn adopt_binds_an_unbound_claude_pane() {
+        let mut state = SessionsState::default();
+        assert!(state.adopt(&found(&[(10, "a")]), &[(1, 10)], &HashSet::new()));
+        assert_eq!(bound(&state), [(1, "a")]);
+        assert_eq!(state.cwds["a"], PathBuf::from("/work/app"));
+    }
+
+    #[test]
+    fn adopt_never_overrides_a_hook_binding() {
+        let mut state = SessionsState::default();
+        state.bind(1, "hooked".into());
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)], &HashSet::new()));
+        assert_eq!(bound(&state), [(1, "hooked")]);
+    }
+
+    #[test]
+    fn adopt_skips_a_session_another_pane_holds() {
+        let mut state = SessionsState::default();
+        state.bind(2, "a".into());
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)], &HashSet::new()));
+        assert_eq!(bound(&state), [(2, "a")]);
+    }
+
+    #[test]
+    fn adopt_skips_a_pid_it_could_not_resolve() {
+        let mut state = SessionsState::default();
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 11)], &HashSet::new()));
+        assert!(bound(&state).is_empty());
+    }
+
+    #[test]
+    fn adopt_skips_a_session_another_window_holds() {
+        let mut state = SessionsState::default();
+        let held = HashSet::from(["a".to_string()]);
+        assert!(!state.adopt(&found(&[(10, "a")]), &[(1, 10)], &held));
+        assert!(bound(&state).is_empty());
+    }
+
+    #[test]
+    fn adopt_skips_a_relative_or_empty_cwd() {
+        for cwd in ["app", ""] {
+            let mut state = SessionsState::default();
+            let found = HashMap::from([(10, ("a".to_string(), PathBuf::from(cwd)))]);
+            assert!(!state.adopt(&found, &[(1, 10)], &HashSet::new()));
+            assert!(bound(&state).is_empty());
+        }
+    }
+
+    #[test]
+    fn apply_skips_a_pid_that_changed_since_collect() {
+        let bound = HashMap::new();
+        assert!(still_adoptable(&[(1, 10)], &[(1, 11)], &bound).is_empty());
+        assert_eq!(still_adoptable(&[(1, 10)], &[(1, 10)], &bound), [(1, 10)]);
+    }
+
+    #[test]
+    fn apply_skips_a_pane_a_hook_bound_meanwhile() {
+        let bound = HashMap::from([(1, "hooked".to_string())]);
+        assert!(still_adoptable(&[(1, 10)], &[(1, 10)], &bound).is_empty());
     }
 
     #[test]
