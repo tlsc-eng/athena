@@ -10,6 +10,7 @@
     "act",
     "dialog",
     "answer",
-    "subagents"
+    "subagents",
+    "fit"
   ]
 }

@@ -907,6 +907,9 @@ fn route_companion(command: Command, cx: &mut App) {
             action,
             reply,
         } => act_for_phone(pane, action, reply, cx),
+        Command::Fit { reply, .. } => {
+            let _ = reply.send(Err("not supported".into()));
+        }
         Command::UsageRefresh { reply } => refresh_usage_for_phone(reply, cx),
         Command::ClientsChanged(count) => set_companion_clients(count, cx),
         Command::Paired(Ok(())) => super::companion::redraw_windows(cx),

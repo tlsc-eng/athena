@@ -46,6 +46,7 @@
       "claude": "needs_input",
       "rows": 40,
       "cols": 120,
+      "fitted": true,
       "dialog": {
         "key": "d41c9a07",
         "kind": "select",
