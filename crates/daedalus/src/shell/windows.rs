@@ -918,9 +918,12 @@ fn route_companion(command: Command, cx: &mut App) {
             action,
             reply,
         } => act_for_phone(pane, action, reply, cx),
-        Command::Fit { reply, .. } => {
-            let _ = reply.send(Err("not supported".into()));
-        }
+        Command::Fit {
+            pane,
+            size,
+            generation,
+            reply,
+        } => fit_for_phone(pane, size, generation, reply, cx),
         Command::UsageRefresh { reply } => refresh_usage_for_phone(reply, cx),
         Command::ClientsChanged(count) => set_companion_clients(count, cx),
         Command::Paired(Ok(())) => super::companion::redraw_windows(cx),
@@ -941,6 +944,30 @@ fn refresh_usage_for_phone(reply: tokio::sync::oneshot::Sender<Result<(), String
         None => Err("usage indicator is off".to_string()),
     };
     let _ = reply.send(answer);
+}
+
+/// Sizes a terminal to the phone's grid, or gives it back to the desk layout when `size` is `None`.
+fn fit_for_phone(
+    pane: PaneId,
+    size: Option<(u16, u16)>,
+    generation: u64,
+    reply: tokio::sync::oneshot::Sender<Result<(u16, u16), String>>,
+    cx: &mut App,
+) {
+    let view = session_holder(pane, cx).and_then(|handle| {
+        let shell = handle.read(cx).ok()?;
+        match shell.items.get(&shell.find_session(pane)?) {
+            Some(ItemView::Terminal(t)) => Some(t.clone()),
+            _ => None,
+        }
+    });
+    let Some(view) = view.filter(|v| v.read(cx).is_attached()) else {
+        let _ = reply.send(Err("pane is not open".into()));
+        return;
+    };
+    let applied = view.update(cx, |v, cx| v.set_lease(size, generation, cx));
+    super::companion::push_snapshot(cx);
+    let _ = reply.send(Ok(applied));
 }
 
 fn act_refusal(
