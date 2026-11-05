@@ -104,13 +104,24 @@ fn security(service: &str, want_secret: bool) -> std::io::Result<std::process::O
 
 /// Moves the profiles `order` names to the front, in that order; the rest keep their relative order.
 pub fn ordered(mut list: Vec<Profile>, order: &[String]) -> Vec<Profile> {
-    list.sort_by_key(|p| {
-        order
-            .iter()
-            .position(|n| *n == p.name)
-            .unwrap_or(order.len())
-    });
+    list.sort_by_key(|p| rank(p, order));
     list
+}
+
+/// `ordered` for readings, so both lists follow one rule.
+pub fn ordered_readings(
+    mut list: Vec<(Profile, Status)>,
+    order: &[String],
+) -> Vec<(Profile, Status)> {
+    list.sort_by_key(|(p, _)| rank(p, order));
+    list
+}
+
+fn rank(profile: &Profile, order: &[String]) -> usize {
+    order
+        .iter()
+        .position(|n| *n == profile.name)
+        .unwrap_or(order.len())
 }
 
 /// Profiles with a stored Claude Code sign-in, cached for `PROFILE_TTL` unless `fresh`.
