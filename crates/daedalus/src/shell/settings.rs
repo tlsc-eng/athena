@@ -270,6 +270,9 @@ impl Shell {
         if old.exclude_git_ignore() != self.settings.file.exclude_git_ignore() {
             self.tree.invalidate();
         }
+        if old.usage_order != self.settings.file.usage_order {
+            self.reorder_usage(cx);
+        }
         let before = self.workspace.preferences();
         let mut now = self.settings.file.over(self.settings.fallback);
         self.settings.unapplied = window.is_none();

@@ -53,8 +53,10 @@ fn choose<'a>(
         .iter()
         .find(|(p, _)| Some(p.name.as_str()) == preferred)
         .or_else(|| {
+            // `max_by` keeps the last of equal peaks, so walk backwards to favour the list's first.
             readings
                 .iter()
+                .rev()
                 .filter(|(_, s)| matches!(s, Status::Windows(w) if !w.is_empty()))
                 .max_by(|(_, a), (_, b)| peak(a).total_cmp(&peak(b)))
         })
@@ -175,19 +177,21 @@ impl Shell {
         self._usage = Some(cx.spawn_in(window, async move |this, cx| {
             let mut fresh = fresh;
             loop {
-                let Ok(roots) = this.update(cx, |this, _| {
-                    this.workspace
+                let Ok((roots, order)) = this.update(cx, |this, _| {
+                    let roots = this
+                        .workspace
                         .projects
                         .iter()
                         .map(|p| p.root.clone())
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    (roots, this.settings.file.usage_order.clone())
                 }) else {
                     return;
                 };
                 let (readings, latest) = cx
                     .background_executor()
                     .spawn(async move {
-                        let readings = usage::profiles(fresh)
+                        let readings = usage::ordered(usage::profiles(fresh), &order)
                             .into_iter()
                             .map(|p| {
                                 let s = usage::fetch(&p);
@@ -287,6 +291,15 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Applies a changed `claude.usage_order` to the readings already fetched.
+    pub(super) fn reorder_usage(&mut self, cx: &mut Context<Self>) {
+        let order = &self.settings.file.usage_order;
+        self.usage.readings =
+            usage::ordered_readings(std::mem::take(&mut self.usage.readings), order);
+        windows::mark_companion_dirty(cx);
+        cx.notify();
     }
 
     /// The readings the phone may see, none while the indicator is off.
@@ -627,6 +640,18 @@ mod tests {
             None => Status::Stale,
         };
         (Profile::named(name), status)
+    }
+
+    #[test]
+    fn equal_peaks_go_to_the_first_in_list_order() {
+        let readings = [
+            reading("claude-tlsc", Some(40.)),
+            reading("claude-ai", Some(40.)),
+        ];
+        assert_eq!(
+            choose(&readings, None).map(|(p, _)| p.name.as_str()),
+            Some("claude-tlsc")
+        );
     }
 
     #[test]
