@@ -2142,10 +2142,12 @@ mod tests {
         let _ = timeout(Duration::from_secs(5), closed)
             .await
             .expect("the server never finished stopping");
-        let end = timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("the connection stayed open");
-        assert!(!matches!(end, Some(Ok(Message::Text(_)))), "{end:?}");
+        // A snapshot can already be in flight when shutdown runs.
+        timeout(Duration::from_secs(5), async {
+            while let Some(Ok(Message::Text(_))) = ws.next().await {}
+        })
+        .await
+        .expect("the connection stayed open");
     }
 
     #[tokio::test]
