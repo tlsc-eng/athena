@@ -219,7 +219,8 @@ impl Server {
         let shared = Arc::new(Shared {
             lease_owners: Arc::new(Mutex::new(HashMap::new())),
             next_lease: AtomicU64::new(0),
-            lease_ends: broadcast::channel(16).0,
+            // A lag would drop a lease_ended silently.
+            lease_ends: broadcast::channel(256).0,
             next_connection: AtomicU64::new(0),
             id: load_or_create_id(&config.data_dir)?,
             name: config.name,
@@ -1808,6 +1809,33 @@ mod tests {
         assert_eq!(lock(&fx.server.shared.lease_owners).len(), 1);
         fx.server.set_snapshot(Arc::new(Snapshot::default()));
         assert!(lock(&fx.server.shared.lease_owners).is_empty());
+        let ended = loop {
+            let msg = next_msg(&mut ws).await;
+            if !matches!(msg, ServerMsg::Snapshot { .. }) {
+                break msg;
+            }
+        };
+        assert!(matches!(ended, ServerMsg::LeaseEnded { pane: 7 }));
+    }
+
+    #[tokio::test]
+    async fn the_phone_unfitting_or_detaching_does_not_tell_it_the_lease_ended() {
+        for msg in [ClientMsg::Unfit { pane: 7 }, ClientMsg::Detach { pane: 7 }] {
+            let fx = Fixture::new();
+            open_pane(&fx, 7);
+            let (_, token) = fx.pair_device();
+            let mut ws = fx.welcomed(&token).await;
+            fit_pane_7(&fx, &mut ws).await;
+            send_json(&mut ws, &msg).await;
+            send_json(&mut ws, &ClientMsg::Refresh).await;
+            loop {
+                match next_msg(&mut ws).await {
+                    ServerMsg::Snapshot { .. } => break,
+                    ServerMsg::LeaseEnded { .. } => panic!("the phone's own release echoed back"),
+                    _ => {}
+                }
+            }
+        }
     }
 
     #[tokio::test]
