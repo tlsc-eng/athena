@@ -1028,6 +1028,11 @@ mod tests {
         let item = tool_feed("Write", write, json!({}));
         assert!(item.files[0].created);
         assert_eq!((item.files[0].added, item.files[0].removed), (3, 0));
+        let bare = json!({ "type": "create", "filePath": "/work/app/c.rs",
+            "content": "a\nb\nc\n" });
+        let item = tool_feed("Write", bare, json!({}));
+        assert_eq!(item.files.len(), 1);
+        assert_eq!((item.files[0].added, item.files[0].removed), (3, 0));
     }
 
     #[test]
