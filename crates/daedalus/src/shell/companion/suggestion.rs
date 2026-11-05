@@ -6,6 +6,7 @@ const MARKERS: [char; 2] = ['❯', '>'];
 const MAX_CHARS: usize = 500;
 const MIN_RULE: usize = 20;
 const EXAMPLE_PREFIX: &str = "Try \"";
+const HINT_PREFIXES: [&str; 3] = ["Press up to ", "Press Enter to edit ", "Message @"];
 
 pub(super) fn parse(rows: &[Vec<StyledCell>]) -> Option<String> {
     let at = rows.iter().rposition(|row| marker_col(row).is_some())?;
@@ -47,7 +48,9 @@ pub(super) fn parse(rows: &[Vec<StyledCell>]) -> Option<String> {
     let rejected = text.is_empty()
         || text.chars().count() > MAX_CHARS
         || text.chars().any(char::is_control)
-        || text.starts_with(EXAMPLE_PREFIX);
+        || text.ends_with('…')
+        || text.starts_with(EXAMPLE_PREFIX)
+        || HINT_PREFIXES.iter().any(|p| text.starts_with(p));
     (!rejected).then(|| text.to_string())
 }
 
@@ -100,7 +103,7 @@ mod tests {
 
     fn screen(prompt: &str) -> String {
         let rule = "─".repeat(40);
-        format!("{rule}\n{prompt}\n{rule}\n  ? for shortcuts")
+        format!("{rule}\n{prompt}\n{rule}\n  {{? for shortcuts}}")
     }
 
     fn parsed(prompt: &str) -> Option<String> {
@@ -177,5 +180,26 @@ mod tests {
     #[test]
     fn a_suggestion_over_the_limit_is_dropped() {
         assert_eq!(parsed(&format!("❯ {{{}}}", "a".repeat(501))), None);
+    }
+
+    #[test]
+    fn grey_input_hints_are_not_suggestions() {
+        for prompt in [
+            "❯ [M]{essage @researcher…}",
+            "❯ [P]{ress up to edit queued messages}",
+            "❯ [P]{ress Enter to edit the selected message, or up again for…}",
+            "❯ [r]{un the tests and…}",
+        ] {
+            assert_eq!(parsed(prompt), None, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_dim_row_directly_below_the_prompt_is_dropped() {
+        let rule = "─".repeat(40);
+        let got = parse(&rows(&format!(
+            "{rule}\n❯ {{run the tests}}\n  {{? for shortcuts}}\n{rule}"
+        )));
+        assert_eq!(got, None);
     }
 }
