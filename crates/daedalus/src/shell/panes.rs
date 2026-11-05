@@ -239,6 +239,13 @@ impl Shell {
                             }
                             return;
                         }
+                        TerminalEvent::LeaseEnded(pane) => {
+                            if let Some(server) = super::windows::companion(cx) {
+                                server.lease_ended(*pane);
+                            }
+                            super::windows::mark_companion_dirty(cx);
+                            return;
+                        }
                         TerminalEvent::Seen => {
                             if let Some(session) = view.read(cx).session() {
                                 this.resolve_notices(session, cx);

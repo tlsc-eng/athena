@@ -292,9 +292,16 @@ impl Server {
             if **current == *snapshot {
                 return false;
             }
+            lock(&self.shared.lease_owners)
+                .retain(|pane, _| snapshot.terminals.iter().any(|t| t.pane == *pane));
             *current = snapshot;
             true
         });
+    }
+
+    /// Forgets who leased `pane` once the desk ended the lease itself, so a later `unfit` sends nothing.
+    pub fn lease_ended(&self, pane: u64) {
+        lock(&self.shared.lease_owners).remove(&pane);
     }
 
     /// Removes a paired device and closes its live connections at once.
@@ -1686,6 +1693,61 @@ mod tests {
             }
         }
         assert!(fx.no_command());
+    }
+
+    async fn settle(ws: &mut Ws) {
+        send_json(ws, &ClientMsg::Refresh).await;
+        loop {
+            if matches!(next_msg(ws).await, ServerMsg::Snapshot { .. }) {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_fit_errors_and_leaves_no_owner_to_release() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &fit_msg(7, 44, 57)).await;
+        let Ok(Command::Fit { reply, .. }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("the fit never reached the app")
+        else {
+            panic!("expected a fit command");
+        };
+        let _ = reply.send(Err("pane is not open".into()));
+        expect_error(&mut ws, "r20", "pane is not open").await;
+        assert!(lock(&fx.server.shared.lease_owners).is_empty());
+        send_json(&mut ws, &ClientMsg::Unfit { pane: 7 }).await;
+        settle(&mut ws).await;
+        assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn a_lease_the_desk_ended_is_not_released_again() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut ws).await;
+        fx.server.lease_ended(7);
+        send_json(&mut ws, &ClientMsg::Unfit { pane: 7 }).await;
+        settle(&mut ws).await;
+        assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn a_pane_that_leaves_the_snapshot_drops_its_owner() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut ws).await;
+        assert_eq!(lock(&fx.server.shared.lease_owners).len(), 1);
+        fx.server.set_snapshot(Arc::new(Snapshot::default()));
+        assert!(lock(&fx.server.shared.lease_owners).is_empty());
     }
 
     #[tokio::test]
