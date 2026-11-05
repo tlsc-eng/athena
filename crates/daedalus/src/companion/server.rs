@@ -806,6 +806,9 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                             ClientMsg::TranscriptMore { id, session, before, limit } => {
                                 Some(transcripts.more(id, session, before, limit))
                             }
+                            ClientMsg::ToolOutput { id, session, tool_id } => {
+                                Some(transcripts.output(id, session, tool_id).await)
+                            }
                             ClientMsg::TranscriptClose { session } => {
                                 transcripts.close(&session);
                                 None
@@ -3446,6 +3449,94 @@ mod tests {
             panic!("expected an error");
         };
         assert_eq!(id.as_deref(), Some("r6"));
+    }
+
+    fn bash_lines(stdout: &str) -> [serde_json::Value; 2] {
+        [
+            serde_json::json!({
+                "type": "assistant", "uuid": "a1", "timestamp": "2026-01-01T00:00:00Z",
+                "message": { "content": [{ "type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"} }] }
+            }),
+            serde_json::json!({
+                "type": "user", "uuid": "u1", "timestamp": "2026-01-01T00:00:01Z",
+                "message": { "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "fallback" }] },
+                "toolUseResult": { "stdout": stdout, "stderr": "" }
+            }),
+        ]
+    }
+
+    async fn ask_output(ws: &mut Ws, session: &str, tool_id: &str) -> ServerMsg {
+        let ask = ClientMsg::ToolOutput {
+            id: "r7".into(),
+            session: session.into(),
+            tool_id: tool_id.into(),
+        };
+        send_json(ws, &ask).await;
+        next_transcript(ws).await
+    }
+
+    #[tokio::test]
+    async fn tool_output_returns_the_full_text_and_errors_otherwise() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let path = transcript_path(&fx, "s1");
+        append_lines(&path, &bash_lines("\u{1b}[31mred\u{1b}[0m\nsecond\n"));
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+
+        let ServerMsg::Error { id, message } = ask_output(&mut ws, "s1", "toolu_1").await else {
+            panic!("expected an error");
+        };
+        assert_eq!(
+            (id.as_deref(), message.as_str()),
+            (Some("r7"), "transcript is not open")
+        );
+
+        open_transcript(&mut ws, "s1", 10).await;
+        let ServerMsg::ToolOutput {
+            id,
+            tool_id,
+            text,
+            lines,
+            cut,
+            ..
+        } = ask_output(&mut ws, "s1", "toolu_1").await
+        else {
+            panic!("expected tool output");
+        };
+        assert_eq!((id.as_str(), tool_id.as_str()), ("r7", "toolu_1"));
+        assert_eq!((text.as_str(), lines, cut), ("red\nsecond\n", 2, false));
+
+        let ServerMsg::Error { message, .. } = ask_output(&mut ws, "s1", "toolu_9").await else {
+            panic!("expected an error");
+        };
+        assert_eq!(message, "no such tool call");
+
+        std::fs::write(&path, "").unwrap();
+        let ServerMsg::Error { message, .. } = ask_output(&mut ws, "s1", "toolu_1").await else {
+            panic!("expected an error");
+        };
+        assert_eq!(message, "output is not available");
+    }
+
+    #[tokio::test]
+    async fn tool_output_over_64_kib_is_cut() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let path = transcript_path(&fx, "s1");
+        let stdout = "x".repeat(99) + "\n";
+        append_lines(&path, &bash_lines(&stdout.repeat(1_024)));
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        let ServerMsg::ToolOutput {
+            text, lines, cut, ..
+        } = ask_output(&mut ws, "s1", "toolu_1").await
+        else {
+            panic!("expected tool output");
+        };
+        assert!(cut);
+        assert_eq!((text.len(), lines), (64 << 10, 1_024));
     }
 
     #[tokio::test]

@@ -83,6 +83,16 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"transcript_more","id":"r6","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","before":123456,"limit":60}
 ```
 
+`tool_output`: the full output of one finished tool call, for when the preview on the item is not enough. `tool_id` is the item's `tool_id`. It needs the `tool_output` feature. The answer is a `tool_output` message with the `text` (ANSI stripped, at most 64 KiB, `cut` when it was longer), the `lines` of the whole output and the same `id`. The desktop reads it from the transcript file and keeps nothing. An `error` with the `id` answers a session that is not followed, an unknown `tool_id` (`no such tool call`), a call that has not finished, a file that changed since (`output is not available`), and a request that arrives while the desktop is re-reading that file (`busy`).
+
+```json
+{"type":"tool_output","id":"r7","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","tool_id":"toolu_01"}
+```
+
+```json
+{"type":"tool_output","id":"r7","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","tool_id":"toolu_01","text":"Already up to date.\n","lines":1}
+```
+
 `transcript_close`: stop following a session. The server sends nothing back.
 
 ```json

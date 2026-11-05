@@ -21,6 +21,7 @@ pub(super) const SUMMARY_CHARS: usize = 200;
 const OUTPUT_LINES: usize = 6;
 const OUTPUT_LINE_CHARS: usize = 200;
 const MAX_FILES: usize = 5;
+const FULL_OUTPUT_CAP: usize = 64 << 10;
 const NO_PREVIEW: [&str; 5] = ["Read", "Agent", "Task", "TodoWrite", "AskUserQuestion"];
 
 /// One transcript file, parsed into items as far as it has been read.
@@ -425,6 +426,34 @@ fn output_source(result: &Value, content: &Value) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The whole output of tool call `tool_id` from the result line at `result_pos`, cut to 64 KiB, with its line count and whether it was cut.
+///
+/// `None` when the file changed under `result_pos` or the line holds no such result.
+pub(crate) fn full_output(
+    path: &Path,
+    result_pos: u64,
+    tool_id: &str,
+) -> Option<(String, u32, bool)> {
+    let mut input = BufReader::new(File::open(path).ok()?);
+    input.seek(SeekFrom::Start(result_pos)).ok()?;
+    let mut buf = Vec::new();
+    next_line(&mut input, &mut buf)?;
+    let line: Value = serde_json::from_slice(&buf).ok()?;
+    let block = line["message"]["content"]
+        .as_array()?
+        .iter()
+        .find(|b| b["type"] == "tool_result" && b["tool_use_id"] == tool_id)?;
+    let text = if flag(block, "is_error") {
+        result_text(&block["content"])
+    } else {
+        output_source(&line["toolUseResult"], &block["content"])
+    };
+    let text = strip_ansi(&text);
+    let lines = u32::try_from(text.trim_end().lines().count()).unwrap_or(u32::MAX);
+    let (text, cut) = clip(&text, FULL_OUTPUT_CAP);
+    Some((text, lines, cut))
 }
 
 /// The first few non-empty lines of `text` within the preview budget, and the line count of the whole text.

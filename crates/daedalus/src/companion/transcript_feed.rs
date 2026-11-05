@@ -10,7 +10,7 @@ use tokio::time::{Interval, MissedTickBehavior};
 
 use super::protocol::{Item, ServerMsg, Subagent, TranscriptKind};
 use super::server::Snapshot;
-use super::transcript::{Feed, Read};
+use super::transcript::{Feed, Read, full_output};
 use crate::transcripts;
 
 const MAX_OPEN: usize = 4;
@@ -139,6 +139,46 @@ impl Transcripts {
             kind: TranscriptKind::Older,
             items,
             before: older,
+        }
+    }
+
+    /// The full output of one finished tool call, read from the file on demand.
+    pub(super) async fn output(&self, id: String, session: String, tool_id: String) -> ServerMsg {
+        let Some(open) = self.open.get(&session) else {
+            return error(id, "transcript is not open");
+        };
+        let found = {
+            let feed = match open.feed.try_lock() {
+                Ok(feed) => feed,
+                Err(TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(TryLockError::WouldBlock) => return error(id, "busy"),
+            };
+            feed.items()
+                .iter()
+                .find(|i| i.tool_id.as_deref() == Some(&tool_id))
+                .map(|i| i.result_pos)
+        };
+        let Some(found) = found else {
+            return error(id, "no such tool call");
+        };
+        let Some(result_pos) = found else {
+            return error(id, "tool call has no output yet");
+        };
+        let (path, wanted) = (open.path.clone(), tool_id.clone());
+        let read = tokio::task::spawn_blocking(move || full_output(&path, result_pos, &wanted))
+            .await
+            .ok()
+            .flatten();
+        match read {
+            Some((text, lines, cut)) => ServerMsg::ToolOutput {
+                id,
+                session,
+                tool_id,
+                text,
+                lines,
+                cut,
+            },
+            None => error(id, "output is not available"),
         }
     }
 
