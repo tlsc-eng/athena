@@ -101,6 +101,8 @@ pub enum TerminalEvent {
     Attached(PaneId),
     /// Label, bell or Claude state changed; tab strips and the project rail should redraw.
     Changed,
+    /// The desk ended a phone lease on this pane by typing or Restore.
+    LeaseEnded(PaneId, u64),
     /// The user looked at the tab while it was marked, so its notifications are dealt with.
     Seen,
     /// The right-click menu opened or closed; it is drawn in-window, under native web views.
@@ -206,6 +208,9 @@ pub struct TerminalView {
     /// Typed into the shell once it is ready, for tabs opened to run a command.
     pending_input: Option<Vec<u8>>,
     grid: GridSize,
+    /// A phone's rows and columns, which the PTY and emulator use instead of the layout's.
+    lease: Option<(u16, u16)>,
+    lease_generation: u64,
     scroll_remainder: f32,
     find: Option<FindBar>,
     find_opening: Option<Opening>,
@@ -258,6 +263,8 @@ impl TerminalView {
             prompt_cleared: None,
             empty_before_question: None,
             pending_input: None,
+            lease: None,
+            lease_generation: 0,
             scroll_remainder: 0.,
             find: None,
             find_opening: None,
@@ -305,9 +312,49 @@ impl TerminalView {
         self.claude_state
     }
 
-    /// The grid's rows and columns as the shell last sized it.
+    /// The grid's rows and columns as the shell last sized it, or the phone's while leased.
     pub fn grid_size(&self) -> (u16, u16) {
-        (self.grid.rows, self.grid.cols)
+        let grid = self.applied();
+        (grid.rows, grid.cols)
+    }
+
+    pub fn is_leased(&self) -> bool {
+        self.lease.is_some()
+    }
+
+    fn applied(&self) -> GridSize {
+        leased(self.grid, self.lease)
+    }
+
+    /// Sizes the terminal to a phone, or back to the layout when `size` is `None`; returns the applied grid.
+    pub fn set_lease(
+        &mut self,
+        size: Option<(u16, u16)>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> (u16, u16) {
+        self.lease = size;
+        self.lease_generation = generation;
+        let grid = self.applied();
+        if let Some(terminal) = self.terminal.as_mut()
+            && !terminal.replaying
+        {
+            terminal.resize(grid);
+            self.schedule_search(cx);
+        }
+        cx.notify();
+        (grid.rows, grid.cols)
+    }
+
+    fn end_lease(&mut self, cx: &mut Context<Self>) {
+        if self.lease.is_none() {
+            return;
+        }
+        let generation = self.lease_generation;
+        self.set_lease(None, generation, cx);
+        if let Some(pane) = self.pane {
+            cx.emit(TerminalEvent::LeaseEnded(pane, generation));
+        }
     }
 
     /// A bell rang since the user last looked at this terminal.
@@ -523,8 +570,10 @@ impl TerminalView {
     }
 
     pub(crate) fn resize(&mut self, grid: GridSize, cx: &mut Context<Self>) {
-        let reflow = (grid.cols, grid.rows) != (self.grid.cols, self.grid.rows);
+        let before = self.applied();
         self.grid = grid;
+        let grid = self.applied();
+        let reflow = (grid.cols, grid.rows) != (before.cols, before.rows);
         if let Some(terminal) = self.terminal.as_mut()
             && !terminal.replaying
         {
@@ -832,9 +881,10 @@ impl TerminalView {
                     if std::mem::take(&mut self.session_lost) {
                         terminal.handle(PaneEvent::Output(SESSION_LOST.to_vec()), &palette);
                     }
-                    let unchanged = (terminal.size().rows, terminal.size().cols)
-                        == (self.grid.rows, self.grid.cols);
-                    terminal.resize(self.grid);
+                    let grid = leased(self.grid, self.lease);
+                    let unchanged =
+                        (terminal.size().rows, terminal.size().cols) == (grid.rows, grid.cols);
+                    terminal.resize(grid);
                     if unchanged {
                         terminal.force_redraw();
                     }
@@ -848,6 +898,7 @@ impl TerminalView {
             ServerMsg::Error {
                 kind: ErrorKind::NoSuchPane(_),
             } if !self.closed => {
+                self.end_lease(cx);
                 self.pane = None;
                 self.session_lost = true;
                 self.send(self.spawn_msg());
@@ -870,6 +921,7 @@ impl TerminalView {
     }
 
     fn restart(&mut self, cx: &mut Context<Self>) {
+        self.end_lease(cx);
         self.kill();
         self.closed = false;
         self.terminal = None;
@@ -886,7 +938,7 @@ impl TerminalView {
         if !self.focus.is_focused(window) {
             return;
         }
-        let Some(terminal) = self.terminal.as_mut() else {
+        let Some(terminal) = self.terminal.as_ref() else {
             return;
         };
         if terminal.exit.is_some() {
@@ -896,7 +948,12 @@ impl TerminalView {
             }
             return;
         }
-        if let Some(bytes) = keys::to_esc(&event.keystroke, terminal.mode()) {
+        let Some(bytes) = keys::to_esc(&event.keystroke, terminal.mode()) else {
+            return;
+        };
+        // Before the key is written, so the program redraws at desk width.
+        self.end_lease(cx);
+        if let Some(terminal) = self.terminal.as_mut() {
             terminal.clear_selection();
             terminal.input(bytes);
             cx.stop_propagation();
@@ -1185,6 +1242,11 @@ impl TerminalView {
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let text = cx.read_from_clipboard().and_then(|item| item.text());
+        if let Some(text) = &text
+            && desk_text_ends_lease(self.terminal.is_some(), text)
+        {
+            self.end_lease(cx);
+        }
         if let (Some(text), Some(terminal)) = (text, self.terminal.as_mut()) {
             terminal.paste(&text);
             cx.notify();
@@ -1581,6 +1643,33 @@ impl TerminalView {
         )
     }
 
+    fn render_lease(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.lease?;
+        let t = cx.theme().clone();
+        Some(
+            div()
+                .flex_none()
+                .h(px(28.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .border_t_1()
+                .border_color(t.color.border)
+                .text_size(t.typography.caption)
+                .text_color(t.color.content_muted)
+                .child("Sized for iPhone")
+                .child(
+                    daedalus_ui::Button::new(
+                        "terminal-restore-lease",
+                        "Restore",
+                        ButtonKind::Ghost,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.end_lease(cx))),
+                ),
+        )
+    }
+
     fn render_status(&self, cx: &App) -> Option<impl IntoElement> {
         let code = self.terminal.as_ref()?.exit?;
         let t = cx.theme();
@@ -1601,6 +1690,22 @@ impl TerminalView {
                 .text_color(t.color.content_muted)
                 .child(label),
         )
+    }
+}
+
+/// Printable keys reach the shell as text rather than through `keys::to_esc`, so they need their own check.
+fn desk_text_ends_lease(has_terminal: bool, text: &str) -> bool {
+    has_terminal && !text.is_empty()
+}
+
+fn leased(layout: GridSize, lease: Option<(u16, u16)>) -> GridSize {
+    match lease {
+        Some((rows, cols)) => GridSize {
+            rows,
+            cols,
+            ..layout
+        },
+        None => layout,
     }
 }
 
@@ -1718,6 +1823,7 @@ impl Render for TerminalView {
                 .child(TerminalElement::new(cx.entity(), focused)),
         )
         .children(self.render_status(cx))
+        .children(self.render_lease(cx))
         .children(self.render_find(cx))
         .children(self.context_menu.as_ref().map(|(menu, _)| menu.clone()))
     }
@@ -1839,6 +1945,9 @@ impl gpui::EntityInputHandler for TerminalView {
         cx: &mut Context<Self>,
     ) {
         self.marked.clear();
+        if desk_text_ends_lease(self.terminal.is_some(), text) {
+            self.end_lease(cx);
+        }
         if let Some(terminal) = self.terminal.as_mut()
             && !text.is_empty()
         {
@@ -2016,11 +2125,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_text_that_reaches_a_live_terminal_ends_a_lease() {
+        assert!(desk_text_ends_lease(true, "a"));
+        assert!(!desk_text_ends_lease(true, ""));
+        assert!(!desk_text_ends_lease(false, "a"));
+    }
+
+    #[test]
     fn find_toggles_leave_option_letters_to_the_query() {
         for binding in find_toggle_bindings() {
             let m = binding.keystrokes()[0].modifiers();
             assert!(m.platform && m.alt, "{:?}", binding.keystrokes());
         }
+    }
+
+    fn layout() -> GridSize {
+        GridSize {
+            cols: 120,
+            rows: 40,
+            cell_width: 8.,
+            cell_height: 18.,
+        }
+    }
+
+    #[test]
+    fn a_lease_replaces_the_rows_and_columns_but_keeps_the_cell_size() {
+        let grid = leased(layout(), Some((44, 57)));
+        assert_eq!((grid.rows, grid.cols), (44, 57));
+        assert_eq!((grid.cell_width, grid.cell_height), (8., 18.));
+    }
+
+    #[test]
+    fn without_a_lease_the_layout_grid_is_used() {
+        let grid = leased(layout(), None);
+        assert_eq!((grid.rows, grid.cols), (40, 120));
     }
 
     fn secs(s: f32) -> Duration {

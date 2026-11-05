@@ -38,6 +38,7 @@ pub(super) struct TerminalInput {
     pub claude: Option<ClaudeState>,
     pub rows: u16,
     pub cols: u16,
+    pub fitted: bool,
     pub dialog: Option<Dialog>,
     pub suggestion: Option<String>,
 }
@@ -146,7 +147,7 @@ fn terminal(input: &TerminalInput) -> Option<Terminal> {
         claude: input.claude.map(|state| state_of(Some(state))),
         rows: input.rows,
         cols: input.cols,
-        fitted: false,
+        fitted: input.fitted,
         dialog: input.dialog.clone(),
         suggestion: input.suggestion.clone(),
     })
@@ -270,6 +271,7 @@ impl Shell {
                     claude,
                     rows,
                     cols,
+                    fitted: view.is_leased(),
                     dialog,
                     suggestion,
                 }
@@ -345,6 +347,7 @@ mod tests {
             claude: None,
             rows: 24,
             cols: 80,
+            fitted: false,
             dialog: None,
             suggestion: None,
         }
@@ -392,6 +395,15 @@ mod tests {
         let got = to_snapshot(vec![window(Vec::new(), vec![running, term(Some(2))])]);
         assert_eq!(got.terminals[0].claude, Some(SessionState::Running));
         assert_eq!(got.terminals[1].claude, None);
+    }
+
+    #[test]
+    fn a_leased_terminal_is_reported_fitted_at_the_leased_grid() {
+        let mut leased = term(Some(1));
+        (leased.rows, leased.cols, leased.fitted) = (44, 57, true);
+        let got = to_snapshot(vec![window(Vec::new(), vec![leased, term(Some(2))])]);
+        assert!(got.terminals[0].fitted && !got.terminals[1].fitted);
+        assert_eq!((got.terminals[0].rows, got.terminals[0].cols), (44, 57));
     }
 
     #[test]
