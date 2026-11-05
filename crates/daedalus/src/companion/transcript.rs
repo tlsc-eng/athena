@@ -419,10 +419,12 @@ fn output_source(result: &Value, content: &Value) -> String {
     let Some(stdout) = result["stdout"].as_str() else {
         return result_text(content);
     };
-    match result["stderr"].as_str().filter(|e| !e.is_empty()) {
-        Some(stderr) => format!("{stdout}\n{stderr}"),
-        None => stdout.to_string(),
-    }
+    let stderr = result["stderr"].as_str().unwrap_or_default();
+    [stdout, stderr]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The first few non-empty lines of `text` within the preview budget, and the line count of the whole text.
@@ -478,6 +480,9 @@ fn strip_ansi(text: &str) -> String {
                         }
                     }
                 }
+                Some(' '..='/') => {
+                    chars.next();
+                }
                 _ => {}
             },
             '\t' | '\n' => out.push(c),
@@ -498,11 +503,24 @@ fn file_changes(result: &Value, cwd: Option<&Path>) -> (Vec<FileChange>, u32) {
                 Some(change(f["filePath"].as_str()?, hunks, false, cwd))
             })
             .collect()
-    } else if let (Some(path), Some(hunks)) = (
-        result["filePath"].as_str(),
-        result["structuredPatch"].as_array(),
-    ) {
-        vec![change(path, hunks, result["type"] == "create", cwd)]
+    } else if let Some(path) = result["filePath"]
+        .as_str()
+        .filter(|_| result["structuredPatch"].is_array() || result["type"] == "create")
+    {
+        let hunks = result["structuredPatch"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        let created = result["type"] == "create";
+        let mut file = change(path, hunks, created, cwd);
+        if created && file.added == 0 {
+            let lines = result["content"]
+                .as_str()
+                .unwrap_or_default()
+                .lines()
+                .count();
+            file.added = u32::try_from(lines).unwrap_or(u32::MAX);
+        }
+        vec![file]
     } else {
         Vec::new()
     };
@@ -968,6 +986,8 @@ mod tests {
         );
         assert_eq!(both.output.as_deref(), Some("out\nerr"));
         assert_eq!(both.lines, Some(2));
+        let only_err = tool_feed("Bash", json!({ "stdout": "", "stderr": "err" }), json!({}));
+        assert_eq!(only_err.lines, Some(1));
         let plain = tool_feed("Grep", json!(["odd"]), json!({}));
         assert_eq!(plain.output.as_deref(), Some("fallback"));
     }
@@ -976,6 +996,7 @@ mod tests {
     fn ansi_sequences_and_controls_are_stripped() {
         assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
         assert_eq!(strip_ansi("a\x1b]0;title\x07b\x08\tc\r"), "ab\tc");
+        assert_eq!(strip_ansi("\x1b(Bplain"), "plain");
     }
 
     #[test]
@@ -1003,9 +1024,10 @@ mod tests {
         assert_eq!(item.files.len(), 1);
         assert!(!item.files[0].created);
         let write = json!({ "type": "create", "filePath": "/work/app/b.rs",
-            "structuredPatch": [] });
+            "structuredPatch": [], "content": "a\nb\nc\n" });
         let item = tool_feed("Write", write, json!({}));
         assert!(item.files[0].created);
+        assert_eq!((item.files[0].added, item.files[0].removed), (3, 0));
     }
 
     #[test]
