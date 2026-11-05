@@ -53,7 +53,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"fit","id":"r20","pane":123,"rows":44,"cols":57}
 ```
 
-`unfit`: end the phone's lease on a pane. The server sends nothing back. The lease also ends on `detach` of that pane and when the socket closes. The desk can end it too, which shows as `terminal.rows` and `terminal.cols` changing in the snapshot.
+`unfit`: end the phone's lease on a pane. The server sends nothing back. The lease also ends on `detach` of that pane and when the socket closes. The desk can end it too, which sends `lease_ended` and shows as `terminal.rows` and `terminal.cols` changing in the snapshot.
 
 ```json
 {"type":"unfit","pane":123}
@@ -125,7 +125,7 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit` and `terminal.fitted`, `tool_output` for the output fields on tool items), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit`, `lease_ended` and `terminal.fitted`, `tool_output` for the output fields on tool items), and is omitted when empty.
 
 ```json
 {"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output"]}
@@ -166,6 +166,12 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 ```json
 {"type":"fitted","id":"r20","pane":123,"rows":44,"cols":57}
+```
+
+`lease_ended`: the desk ended this connection's lease on a pane, by typing, pasting, restarting or closing it. Sent only to the connection that holds the lease, and not after the phone's own `unfit`, `detach` or disconnect. Part of the `fit` feature.
+
+```json
+{"type":"lease_ended","pane":123}
 ```
 
 `replay_done`: the replay tail has been sent; later frames are live.

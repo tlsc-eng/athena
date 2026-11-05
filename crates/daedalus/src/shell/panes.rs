@@ -239,9 +239,9 @@ impl Shell {
                             }
                             return;
                         }
-                        TerminalEvent::LeaseEnded(pane) => {
+                        TerminalEvent::LeaseEnded(pane, generation) => {
                             if let Some(server) = super::windows::companion(cx) {
-                                server.lease_ended(*pane);
+                                server.lease_ended(*pane, *generation);
                             }
                             super::windows::mark_companion_dirty(cx);
                             return;

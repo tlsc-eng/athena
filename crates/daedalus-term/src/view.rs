@@ -101,7 +101,7 @@ pub enum TerminalEvent {
     /// Label, bell or Claude state changed; tab strips and the project rail should redraw.
     Changed,
     /// The desk ended a phone lease on this pane by typing or Restore.
-    LeaseEnded(PaneId),
+    LeaseEnded(PaneId, u64),
     /// The user looked at the tab while it was marked, so its notifications are dealt with.
     Seen,
     /// The right-click menu opened or closed; it is drawn in-window, under native web views.
@@ -209,6 +209,7 @@ pub struct TerminalView {
     grid: GridSize,
     /// A phone's rows and columns, which the PTY and emulator use instead of the layout's.
     lease: Option<(u16, u16)>,
+    lease_generation: u64,
     scroll_remainder: f32,
     find: Option<FindBar>,
     find_opening: Option<Opening>,
@@ -262,6 +263,7 @@ impl TerminalView {
             empty_before_question: None,
             pending_input: None,
             lease: None,
+            lease_generation: 0,
             scroll_remainder: 0.,
             find: None,
             find_opening: None,
@@ -324,8 +326,14 @@ impl TerminalView {
     }
 
     /// Sizes the terminal to a phone, or back to the layout when `size` is `None`; returns the applied grid.
-    pub fn set_lease(&mut self, size: Option<(u16, u16)>, cx: &mut Context<Self>) -> (u16, u16) {
+    pub fn set_lease(
+        &mut self,
+        size: Option<(u16, u16)>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> (u16, u16) {
         self.lease = size;
+        self.lease_generation = generation;
         let grid = self.applied();
         if let Some(terminal) = self.terminal.as_mut()
             && !terminal.replaying
@@ -341,9 +349,10 @@ impl TerminalView {
         if self.lease.is_none() {
             return;
         }
-        self.set_lease(None, cx);
+        let generation = self.lease_generation;
+        self.set_lease(None, generation, cx);
         if let Some(pane) = self.pane {
-            cx.emit(TerminalEvent::LeaseEnded(pane));
+            cx.emit(TerminalEvent::LeaseEnded(pane, generation));
         }
     }
 
@@ -881,6 +890,7 @@ impl TerminalView {
             ServerMsg::Error {
                 kind: ErrorKind::NoSuchPane(_),
             } if !self.closed => {
+                self.end_lease(cx);
                 self.pane = None;
                 self.session_lost = true;
                 self.send(self.spawn_msg());
@@ -903,6 +913,7 @@ impl TerminalView {
     }
 
     fn restart(&mut self, cx: &mut Context<Self>) {
+        self.end_lease(cx);
         self.kill();
         self.closed = false;
         self.terminal = None;
@@ -1223,6 +1234,11 @@ impl TerminalView {
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let text = cx.read_from_clipboard().and_then(|item| item.text());
+        if let Some(text) = &text
+            && desk_text_ends_lease(self.terminal.is_some(), text)
+        {
+            self.end_lease(cx);
+        }
         if let (Some(text), Some(terminal)) = (text, self.terminal.as_mut()) {
             terminal.paste(&text);
             cx.notify();
@@ -1669,6 +1685,11 @@ impl TerminalView {
     }
 }
 
+/// Printable keys reach the shell as text rather than through `keys::to_esc`, so they need their own check.
+fn desk_text_ends_lease(has_terminal: bool, text: &str) -> bool {
+    has_terminal && !text.is_empty()
+}
+
 fn leased(layout: GridSize, lease: Option<(u16, u16)>) -> GridSize {
     match lease {
         Some((rows, cols)) => GridSize {
@@ -1916,6 +1937,9 @@ impl gpui::EntityInputHandler for TerminalView {
         cx: &mut Context<Self>,
     ) {
         self.marked.clear();
+        if desk_text_ends_lease(self.terminal.is_some(), text) {
+            self.end_lease(cx);
+        }
         if let Some(terminal) = self.terminal.as_mut()
             && !text.is_empty()
         {
@@ -2091,6 +2115,13 @@ impl TerminalView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_text_that_reaches_a_live_terminal_ends_a_lease() {
+        assert!(desk_text_ends_lease(true, "a"));
+        assert!(!desk_text_ends_lease(true, ""));
+        assert!(!desk_text_ends_lease(false, "a"));
+    }
 
     #[test]
     fn find_toggles_leave_option_letters_to_the_query() {

@@ -154,6 +154,9 @@ pub enum ServerMsg {
         rows: u16,
         cols: u16,
     },
+    LeaseEnded {
+        pane: u64,
+    },
     ReplayDone {
         pane: u64,
     },
@@ -1018,6 +1021,7 @@ mod tests {
                 cols: 57,
             },
         );
+        golden("lease_ended", &ServerMsg::LeaseEnded { pane: 123 });
         golden("replay_done", &ServerMsg::ReplayDone { pane: 123 });
         golden(
             "exited",

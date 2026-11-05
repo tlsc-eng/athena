@@ -136,6 +136,8 @@ pub enum Command {
     Fit {
         pane: u64,
         size: Option<(u16, u16)>,
+        /// Tells this lease from a later one, so a stale end cannot clear a newer owner.
+        generation: u64,
         reply: oneshot::Sender<Result<(u16, u16), String>>,
     },
     /// Fetch the plan limits again unless the last fetch is recent.
@@ -178,7 +180,11 @@ struct Shared {
     snapshot: watch::Sender<Arc<Snapshot>>,
     notices: broadcast::Sender<Notice>,
     live: Mutex<HashMap<String, usize>>,
-    lease_owners: Arc<Mutex<HashMap<u64, u64>>>,
+    /// Pane to the connection that leased it and the lease's generation.
+    lease_owners: Arc<Mutex<HashMap<u64, (u64, u64)>>>,
+    next_lease: AtomicU64,
+    /// Connection and pane of a lease the desk ended.
+    lease_ends: broadcast::Sender<(u64, u64)>,
     next_connection: AtomicU64,
     welcomed: Mutex<usize>,
     revoked: broadcast::Sender<String>,
@@ -212,6 +218,8 @@ impl Server {
         let (commands, rx) = async_channel::unbounded();
         let shared = Arc::new(Shared {
             lease_owners: Arc::new(Mutex::new(HashMap::new())),
+            next_lease: AtomicU64::new(0),
+            lease_ends: broadcast::channel(16).0,
             next_connection: AtomicU64::new(0),
             id: load_or_create_id(&config.data_dir)?,
             name: config.name,
@@ -292,16 +300,27 @@ impl Server {
             if **current == *snapshot {
                 return false;
             }
-            lock(&self.shared.lease_owners)
-                .retain(|pane, _| snapshot.terminals.iter().any(|t| t.pane == *pane));
+            lock(&self.shared.lease_owners).retain(|pane, (owner, _)| {
+                let open = snapshot.terminals.iter().any(|t| t.pane == *pane);
+                if !open {
+                    let _ = self.shared.lease_ends.send((*owner, *pane));
+                }
+                open
+            });
             *current = snapshot;
             true
         });
     }
 
-    /// Forgets who leased `pane` once the desk ended the lease itself, so a later `unfit` sends nothing.
-    pub fn lease_ended(&self, pane: u64) {
-        lock(&self.shared.lease_owners).remove(&pane);
+    /// Tells the owner of `pane`'s lease that the desk ended it, unless a newer lease has replaced `generation`.
+    pub fn lease_ended(&self, pane: u64, generation: u64) {
+        let mut owners = lock(&self.shared.lease_owners);
+        if let Some(&(owner, current)) = owners.get(&pane)
+            && current == generation
+        {
+            owners.remove(&pane);
+            let _ = self.shared.lease_ends.send((owner, pane));
+        }
     }
 
     /// Removes a paired device and closes its live connections at once.
@@ -727,6 +746,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut pending = FuturesUnordered::<Queued>::new();
     let mut acting = HashSet::<u64>::new();
     let me = shared.next_connection.fetch_add(1, Ordering::Relaxed);
+    let mut lease_ends = shared.lease_ends.subscribe();
     loop {
         tokio::select! {
             // Biased so a queued revoke wins over a request already readable on the socket.
@@ -773,9 +793,6 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let current = Arc::clone(&snapshot.borrow());
                                 let busy = pending.len() >= MAX_IN_FLIGHT;
                                 let started = fit(shared, me, &current, id, pane, (rows, cols), busy).await;
-                                if started.is_ok() {
-                                    lock(&shared.lease_owners).insert(pane, me);
-                                }
                                 queue(&mut pending, &mut acting, None, started)
                             }
                             ClientMsg::Unfit { pane } => {
@@ -900,6 +917,15 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            ended = lease_ends.recv() => match ended {
+                Ok((owner, pane)) if owner == me => {
+                    if !send(&mut ws, &ServerMsg::LeaseEnded { pane }).await {
+                        break;
+                    }
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             Some((pane, reply)) = pending.next(), if !pending.is_empty() => {
                 if let Some(pane) = pane {
                     acting.remove(&pane);
@@ -937,7 +963,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     }
     let held: Vec<u64> = lock(&shared.lease_owners)
         .iter()
-        .filter(|(_, owner)| **owner == me)
+        .filter(|(_, (owner, _))| *owner == me)
         .map(|(pane, _)| *pane)
         .collect();
     for pane in held {
@@ -947,17 +973,21 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
 
 /// Only the newest `fit`'s connection may end a lease, so a stale socket dying later cannot clear a live one.
 fn release_lease(shared: &Shared, connection: u64, pane: u64) {
-    {
+    let generation = {
         let mut owners = lock(&shared.lease_owners);
-        if owners.get(&pane) != Some(&connection) {
-            return;
+        match owners.get(&pane) {
+            Some(&(owner, generation)) if owner == connection => {
+                owners.remove(&pane);
+                generation
+            }
+            _ => return,
         }
-        owners.remove(&pane);
-    }
+    };
     let (reply, _) = oneshot::channel();
     let _ = shared.commands.try_send(Command::Fit {
         pane,
         size: None,
+        generation,
         reply,
     });
 }
@@ -1103,16 +1133,20 @@ async fn fit(
         cols.clamp(*FIT_COLS.start(), *FIT_COLS.end()),
     );
     let (reply, answer) = oneshot::channel();
+    let generation = shared.next_lease.fetch_add(1, Ordering::Relaxed);
+    lock(&shared.lease_owners).insert(pane, (connection, generation));
     if shared
         .commands
         .send(Command::Fit {
             pane,
             size: Some(size),
+            generation,
             reply,
         })
         .await
         .is_err()
     {
+        lock(&shared.lease_owners).remove(&pane);
         return Err(failed(id, "could not reach the terminal"));
     }
     let owners = Arc::clone(&shared.lease_owners);
@@ -1126,7 +1160,7 @@ async fn fit(
             },
             Ok(Ok(Err(message))) => {
                 let mut owners = lock(&owners);
-                if owners.get(&pane) == Some(&connection) {
+                if owners.get(&pane) == Some(&(connection, generation)) {
                     owners.remove(&pane);
                 }
                 ServerMsg::Error {
@@ -1565,9 +1599,11 @@ mod tests {
         (pane, size)
     }
 
-    async fn fit_pane_7(fx: &Fixture, ws: &mut Ws) {
+    async fn fit_pane_7(fx: &Fixture, ws: &mut Ws) -> u64 {
         send_json(ws, &fit_msg(7, 44, 57)).await;
-        let Ok(Command::Fit { reply, .. }) = timeout(Duration::from_secs(5), fx.next_command())
+        let Ok(Command::Fit {
+            reply, generation, ..
+        }) = timeout(Duration::from_secs(5), fx.next_command())
             .await
             .expect("the fit never reached the app")
         else {
@@ -1579,6 +1615,7 @@ mod tests {
                 break;
             }
         }
+        generation
     }
 
     #[tokio::test]
@@ -1588,10 +1625,11 @@ mod tests {
         let (_, token) = fx.pair_device();
         let mut ws = fx.welcomed(&token).await;
         send_json(&mut ws, &fit_msg(7, 2, 9_000)).await;
-        let Ok(Command::Fit { pane, size, reply }) =
-            timeout(Duration::from_secs(5), fx.next_command())
-                .await
-                .expect("the fit never reached the app")
+        let Ok(Command::Fit {
+            pane, size, reply, ..
+        }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("the fit never reached the app")
         else {
             panic!("expected a fit command");
         };
@@ -1731,11 +1769,33 @@ mod tests {
         open_pane(&fx, 7);
         let (_, token) = fx.pair_device();
         let mut ws = fx.welcomed(&token).await;
-        fit_pane_7(&fx, &mut ws).await;
-        fx.server.lease_ended(7);
+        let generation = fit_pane_7(&fx, &mut ws).await;
+        fx.server.lease_ended(7, generation);
+        let ended = loop {
+            let msg = next_msg(&mut ws).await;
+            if !matches!(msg, ServerMsg::Snapshot { .. }) {
+                break msg;
+            }
+        };
+        assert!(matches!(ended, ServerMsg::LeaseEnded { pane: 7 }));
         send_json(&mut ws, &ClientMsg::Unfit { pane: 7 }).await;
         settle(&mut ws).await;
         assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn an_old_generation_ending_after_a_newer_fit_keeps_the_new_owner() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let old = fit_pane_7(&fx, &mut ws).await;
+        let new = fit_pane_7(&fx, &mut ws).await;
+        assert_ne!(old, new);
+        fx.server.lease_ended(7, old);
+        assert_eq!(lock(&fx.server.shared.lease_owners).len(), 1);
+        send_json(&mut ws, &ClientMsg::Unfit { pane: 7 }).await;
+        assert_eq!(leased_command(&fx).await, (7, None));
     }
 
     #[tokio::test]
