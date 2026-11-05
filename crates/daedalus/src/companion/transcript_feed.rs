@@ -310,7 +310,7 @@ fn chunks<'a>(items: impl Iterator<Item = &'a Item>, budget: usize) -> Vec<Vec<I
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::companion::protocol::ItemKind;
+    use crate::companion::protocol::{FileChange, ItemKind};
 
     fn item(n: u64, text: &str) -> Item {
         Item {
@@ -327,6 +327,12 @@ mod tests {
             detail: None,
             questions: Vec::new(),
             answer: None,
+            output: None,
+            lines: None,
+            files: Vec::new(),
+            more_files: None,
+            permission: None,
+            result_pos: None,
         }
     }
 
@@ -352,7 +358,27 @@ mod tests {
     #[test]
     fn a_full_chunk_serializes_within_the_message_cap() {
         let session = "s".repeat(128);
-        let items: Vec<Item> = (0..400).map(|n| item(n, &"x".repeat(2_000))).collect();
+        let items: Vec<Item> = (0..400)
+            .map(|n| Item {
+                kind: ItemKind::Tool,
+                text: None,
+                tool: Some("Bash".into()),
+                tool_id: Some(format!("toolu_{n}")),
+                summary: Some("x".repeat(200)),
+                output: Some("x".repeat(1_024)),
+                lines: Some(u32::MAX),
+                files: (0..5)
+                    .map(|_| FileChange {
+                        path: "x".repeat(200),
+                        added: u32::MAX,
+                        removed: u32::MAX,
+                        created: true,
+                    })
+                    .collect(),
+                more_files: Some(u32::MAX),
+                ..item(n, "")
+            })
+            .collect();
         let first = chunks(items.iter(), budget(&session, TranscriptKind::Append))
             .into_iter()
             .next()
