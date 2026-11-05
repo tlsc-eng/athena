@@ -26,7 +26,8 @@ use crate::links;
 use crate::mouse::{self, MouseEvent};
 use crate::search::{Search, Span};
 use crate::terminal::{
-    GridSize, Link, NoOutput, PaneEvent, SCROLLBACK_LINES, Terminal, Transport, submitted_cleanly,
+    GridSize, Link, NoOutput, PaneEvent, SCROLLBACK_LINES, StyledCell, Terminal, Transport,
+    submitted_cleanly,
 };
 
 actions!(
@@ -318,6 +319,13 @@ impl TerminalView {
         self.terminal
             .as_ref()
             .map(|t| t.text_lines(count))
+            .unwrap_or_default()
+    }
+
+    pub fn styled_rows(&self, count: usize) -> Vec<Vec<StyledCell>> {
+        self.terminal
+            .as_ref()
+            .map(|t| t.styled_rows(count))
             .unwrap_or_default()
     }
 

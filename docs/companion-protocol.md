@@ -15,7 +15,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ## Framing
 
-- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`, and reads `terminal.dialog` only when it lists `dialog`, and sends `answer` only when it lists `answer`.
+- Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`, reads `terminal.dialog` only when it lists `dialog`, reads `terminal.suggestion` only when it lists `suggestion`, and sends `answer` only when it lists `answer`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
 - Replies to `spawn_claude`, `prompt`, `interrupt`, `answer` and `usage_refresh` come when the desktop has finished, not in request order, and `snapshot` and ping frames keep flowing in between. The phone matches a reply to its request by `id`. The desktop holds at most 8 such requests per connection and answers a ninth at once with `error` `busy`, without acting on it.
@@ -125,10 +125,10 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit` and `terminal.fitted`, `tool_output` for the output fields on tool items), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit` and `terminal.fitted`, `tool_output` for the output fields on tool items, `suggestion` for `terminal.suggestion`), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output","suggestion"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -298,3 +298,5 @@ daedalus://pair?host=mac.tail1234.ts.net&ip=100.64.1.2&port=47123&code=012345678
 | `sid` | The server id from `welcome`: 16 lowercase hex characters. |
 
 `host` or `ip` may be omitted but never both. Values are percent-encoded.
+
+`terminal.suggestion` is present only while the pane runs Claude in `finished` and the desktop read Claude Code's grey suggested prompt on the input line, and is omitted otherwise. The phone accepts it by sending the text as a `prompt`, which Claude Code counts as accepting the suggestion; there is no separate message. A suggestion that wraps, or that Claude Code does not show (setting off, plan mode, cold cache), is omitted. See `design/protocol/snapshot_suggestion.json`.
