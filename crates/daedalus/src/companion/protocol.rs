@@ -12,6 +12,7 @@ pub const FEATURES: &[&str] = &[
     "subagents",
     "fit",
     "tool_output",
+    "suggestion",
 ];
 
 /// Largest payload of one binary frame.
@@ -450,6 +451,8 @@ pub struct Terminal {
     pub fitted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialog: Option<Dialog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -891,6 +894,33 @@ mod tests {
                     cols: 120,
                     fitted: false,
                     dialog: Some(question_dialog()),
+                    suggestion: None,
+                }],
+                usage: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn a_snapshot_with_a_suggestion_matches_its_fixture() {
+        golden(
+            "snapshot_suggestion",
+            &ServerMsg::Snapshot {
+                seq: 10,
+                projects: Vec::new(),
+                sessions: Vec::new(),
+                terminals: vec![Terminal {
+                    pane: 123,
+                    project: "/Users/jason/code/daedalus".into(),
+                    title: "claude".into(),
+                    program: Some("claude".into()),
+                    cwd: None,
+                    claude: Some(SessionState::Finished),
+                    rows: 40,
+                    cols: 120,
+                    fitted: false,
+                    dialog: None,
+                    suggestion: Some("run the tests and commit".into()),
                 }],
                 usage: Vec::new(),
             },
@@ -1020,6 +1050,7 @@ mod tests {
                         cols: 120,
                         fitted: true,
                         dialog: Some(bash_dialog()),
+                        suggestion: None,
                     },
                     Terminal {
                         pane: 124,
@@ -1032,6 +1063,7 @@ mod tests {
                         cols: 80,
                         fitted: false,
                         dialog: None,
+                        suggestion: None,
                     },
                 ],
                 usage: Vec::new(),

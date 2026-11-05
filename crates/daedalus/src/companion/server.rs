@@ -1446,6 +1446,7 @@ mod tests {
             cols: 80,
             fitted: false,
             dialog: None,
+            suggestion: None,
         }
     }
 

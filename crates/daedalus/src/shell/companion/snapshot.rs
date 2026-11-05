@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use daedalus_proto::{PaneId, TodoInfo};
-use daedalus_term::ClaudeState;
+use daedalus_term::{ClaudeState, StyledCell};
 use gpui::App;
 
-use super::dialog;
+use super::{dialog, suggestion};
 use crate::companion::protocol::{
     Dialog, Project, Session, SessionState, Terminal, Todo, UsageProfile, UsageStatus, UsageWindow,
 };
@@ -16,6 +16,8 @@ use crate::shell::claude_sessions::live::LiveSession;
 use crate::shell::item::ItemView;
 use crate::shell::windows;
 use crate::usage::{Profile, Status};
+
+const SUGGESTION_ROWS: usize = 24;
 
 /// What one window shows, read from memory so the main thread never waits on the disk.
 pub(super) struct WindowInput {
@@ -38,6 +40,7 @@ pub(super) struct TerminalInput {
     pub cols: u16,
     pub fitted: bool,
     pub dialog: Option<Dialog>,
+    pub suggestion: Option<String>,
 }
 
 pub(super) struct SessionInput {
@@ -146,6 +149,7 @@ fn terminal(input: &TerminalInput) -> Option<Terminal> {
         cols: input.cols,
         fitted: input.fitted,
         dialog: input.dialog.clone(),
+        suggestion: input.suggestion.clone(),
     })
 }
 
@@ -158,6 +162,17 @@ fn open_dialog(
         return None;
     }
     dialog::parse(&screen())
+}
+
+/// Reads the screen only after a finished turn, so a running pane never pays for it.
+fn open_suggestion(
+    claude: Option<ClaudeState>,
+    rows: impl FnOnce() -> Vec<Vec<StyledCell>>,
+) -> Option<String> {
+    if claude != Some(ClaudeState::Finished) {
+        return None;
+    }
+    suggestion::parse(&rows())
 }
 
 fn session(input: SessionInput, roots: &[&Path]) -> Session {
@@ -246,6 +261,7 @@ impl Shell {
                 let (rows, cols) = view.grid_size();
                 let claude = view.claude_state();
                 let dialog = open_dialog(claude, || view.text_lines(rows as usize));
+                let suggestion = open_suggestion(claude, || view.styled_rows(SUGGESTION_ROWS));
                 TerminalInput {
                     pane: view.session(),
                     project: root.clone(),
@@ -257,6 +273,7 @@ impl Shell {
                     cols,
                     fitted: view.is_leased(),
                     dialog,
+                    suggestion,
                 }
             })
             .collect();
@@ -332,6 +349,7 @@ mod tests {
             cols: 80,
             fitted: false,
             dialog: None,
+            suggestion: None,
         }
     }
 
@@ -408,6 +426,46 @@ mod tests {
         let dialog = got.terminals[0].dialog.as_ref().expect("a dialog");
         assert_eq!(dialog.options.len(), 2);
         assert!(got.terminals[1].dialog.is_none() && got.terminals[2].dialog.is_none());
+    }
+
+    #[test]
+    fn only_a_finished_terminal_carries_a_suggestion() {
+        let rule = "─".repeat(40);
+        let screen = || {
+            let dim = |c: char| StyledCell {
+                c,
+                dim: true,
+                inverse: false,
+            };
+            let plain = |c: char| StyledCell {
+                c,
+                dim: false,
+                inverse: false,
+            };
+            vec![
+                rule.chars().map(plain).collect(),
+                "❯ run it"
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| if i < 2 { plain(c) } else { dim(c) })
+                    .collect(),
+                rule.chars().map(plain).collect(),
+            ]
+        };
+        let mut done = term(Some(1));
+        done.claude = Some(ClaudeState::Finished);
+        done.suggestion = open_suggestion(done.claude, screen);
+        let mut running = term(Some(2));
+        running.claude = Some(ClaudeState::Running);
+        running.suggestion =
+            open_suggestion(running.claude, || panic!("a running pane is not read"));
+        let mut waiting = term(Some(3));
+        waiting.claude = Some(ClaudeState::NeedsInput);
+        waiting.suggestion =
+            open_suggestion(waiting.claude, || panic!("a waiting pane is not read"));
+        let got = to_snapshot(vec![window(Vec::new(), vec![done, running, waiting])]);
+        assert_eq!(got.terminals[0].suggestion.as_deref(), Some("run it"));
+        assert!(got.terminals[1].suggestion.is_none() && got.terminals[2].suggestion.is_none());
     }
 
     #[test]

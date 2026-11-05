@@ -18,6 +18,7 @@ pub(super) mod act;
 pub(super) mod answer;
 mod dialog;
 mod snapshot;
+mod suggestion;
 
 const PORT: u16 = 47123;
 const WAITING_POLL: Duration = Duration::from_secs(10);

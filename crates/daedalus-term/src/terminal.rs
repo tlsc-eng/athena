@@ -53,6 +53,14 @@ pub enum PaneEvent {
     Exited(Option<i32>),
 }
 
+/// One screen cell reduced to what the suggestion reader needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StyledCell {
+    pub c: char,
+    pub dim: bool,
+    pub inverse: bool,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct GridSize {
     pub cols: u16,
@@ -628,6 +636,42 @@ impl Terminal {
         }
         let skip = lines.len().saturating_sub(count);
         lines.split_off(skip)
+    }
+
+    /// The last `count` rows of the live screen with dim and inverse marks, trailing blank rows dropped.
+    pub fn styled_rows(&self, count: usize) -> Vec<Vec<StyledCell>> {
+        let grid = self.term.grid();
+        let cols = self.term.columns();
+        let mut rows: Vec<Vec<StyledCell>> = (0..self.term.screen_lines() as i32)
+            .map(|l| {
+                let row = &grid[Line(l)];
+                let mut cells: Vec<StyledCell> = (0..cols)
+                    .map(|c| &row[Column(c)])
+                    .filter(|cell| {
+                        !cell
+                            .flags
+                            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    })
+                    .map(|cell| StyledCell {
+                        c: cell.c,
+                        dim: cell.flags.contains(Flags::DIM),
+                        inverse: cell.flags.contains(Flags::INVERSE),
+                    })
+                    .collect();
+                while cells
+                    .last()
+                    .is_some_and(|cell| cell.c == ' ' && !cell.dim && !cell.inverse)
+                {
+                    cells.pop();
+                }
+                cells
+            })
+            .collect();
+        while rows.last().is_some_and(Vec::is_empty) {
+            rows.pop();
+        }
+        let skip = rows.len().saturating_sub(count);
+        rows.split_off(skip)
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -1321,5 +1365,29 @@ mod tests {
         feed(&mut t, PROMPT);
         feed(&mut t, b"ls\r\nx\r\n\x1b]133;D;0\x07");
         assert_eq!(t.last_output(), Err(NoOutput::Unmarked));
+    }
+
+    #[test]
+    fn styled_rows_marks_dim_and_inverse_cells() {
+        let (mut t, _) = terminal();
+        feed(&mut t, b"\x1b[7mr\x1b[27m\x1b[2mun it\x1b[22m");
+        let rows = t.styled_rows(5);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 6);
+        assert!(rows[0][0].inverse && !rows[0][0].dim);
+        assert!(rows[0][1..].iter().all(|c| c.dim && !c.inverse));
+    }
+
+    #[test]
+    fn styled_rows_drops_trailing_blank_rows_and_keeps_the_last_count() {
+        let (mut t, _) = terminal();
+        feed(&mut t, b"one\r\ntwo\r\nthree");
+        let text = |rows: Vec<Vec<StyledCell>>| -> Vec<String> {
+            rows.iter()
+                .map(|r| r.iter().map(|c| c.c).collect())
+                .collect()
+        };
+        assert_eq!(text(t.styled_rows(2)), ["two", "three"]);
+        assert_eq!(text(t.styled_rows(9)), ["one", "two", "three"]);
     }
 }

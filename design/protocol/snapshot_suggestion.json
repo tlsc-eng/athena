@@ -1,0 +1,18 @@
+{
+  "type": "snapshot",
+  "seq": 10,
+  "projects": [],
+  "sessions": [],
+  "terminals": [
+    {
+      "pane": 123,
+      "project": "/Users/jason/code/daedalus",
+      "title": "claude",
+      "program": "claude",
+      "claude": "finished",
+      "rows": 40,
+      "cols": 120,
+      "suggestion": "run the tests and commit"
+    }
+  ]
+}
