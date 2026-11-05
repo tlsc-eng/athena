@@ -3540,6 +3540,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_output_cut_lands_on_a_char_boundary() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let path = transcript_path(&fx, "s1");
+        let stdout = "x".repeat((64 << 10) - 1) + &"é".repeat(10);
+        append_lines(&path, &bash_lines(&stdout));
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        let ServerMsg::ToolOutput { text, cut, .. } = ask_output(&mut ws, "s1", "toolu_1").await
+        else {
+            panic!("expected tool output");
+        };
+        assert!(cut);
+        assert!(text.len() <= 64 << 10);
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+        assert!(text.is_char_boundary(text.len()));
+    }
+
+    #[tokio::test]
+    async fn tool_output_of_a_pending_call_is_an_error() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let path = transcript_path(&fx, "s1");
+        append_lines(&path, &bash_lines("out")[..1]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        let ServerMsg::Error { message, .. } = ask_output(&mut ws, "s1", "toolu_1").await else {
+            panic!("expected an error");
+        };
+        assert_eq!(message, "tool call has no output yet");
+    }
+
+    #[tokio::test]
     async fn a_fifth_open_transcript_is_refused() {
         let fx = Fixture::new();
         let ids = ["s1", "s2", "s3", "s4", "s5"];
