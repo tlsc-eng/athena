@@ -8,6 +8,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener as StdListener};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -177,6 +178,8 @@ struct Shared {
     snapshot: watch::Sender<Arc<Snapshot>>,
     notices: broadcast::Sender<Notice>,
     live: Mutex<HashMap<String, usize>>,
+    lease_owners: Mutex<HashMap<u64, u64>>,
+    next_connection: AtomicU64,
     welcomed: Mutex<usize>,
     revoked: broadcast::Sender<String>,
     handshakes: Arc<Semaphore>,
@@ -208,6 +211,8 @@ impl Server {
             .collect::<io::Result<Vec<_>>>()?;
         let (commands, rx) = async_channel::unbounded();
         let shared = Arc::new(Shared {
+            lease_owners: Mutex::new(HashMap::new()),
+            next_connection: AtomicU64::new(0),
             id: load_or_create_id(&config.data_dir)?,
             name: config.name,
             devices: config.devices,
@@ -714,7 +719,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut transcripts = Transcripts::new(shared.home.clone());
     let mut pending = FuturesUnordered::<Queued>::new();
     let mut acting = HashSet::<u64>::new();
-    let mut leases = HashSet::<u64>::new();
+    let me = shared.next_connection.fetch_add(1, Ordering::Relaxed);
     loop {
         tokio::select! {
             // Biased so a queued revoke wins over a request already readable on the socket.
@@ -754,9 +759,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                             }
                             ClientMsg::Detach { pane } => {
                                 attachments.detach(pane);
-                                if leases.remove(&pane) {
-                                    release_lease(shared, pane);
-                                }
+                                release_lease(shared, me, pane);
                                 None
                             }
                             ClientMsg::Fit { id, pane, rows, cols } => {
@@ -764,14 +767,12 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let busy = pending.len() >= MAX_IN_FLIGHT;
                                 let started = fit(shared, &current, id, pane, (rows, cols), busy).await;
                                 if started.is_ok() {
-                                    leases.insert(pane);
+                                    lock(&shared.lease_owners).insert(pane, me);
                                 }
                                 queue(&mut pending, &mut acting, None, started)
                             }
                             ClientMsg::Unfit { pane } => {
-                                if leases.remove(&pane) {
-                                    release_lease(shared, pane);
-                                }
+                                release_lease(shared, me, pane);
                                 None
                             }
                             ClientMsg::Attach { pane, tail } => {
@@ -927,12 +928,25 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
             }
         }
     }
-    for pane in leases {
-        release_lease(shared, pane);
+    let held: Vec<u64> = lock(&shared.lease_owners)
+        .iter()
+        .filter(|(_, owner)| **owner == me)
+        .map(|(pane, _)| *pane)
+        .collect();
+    for pane in held {
+        release_lease(shared, me, pane);
     }
 }
 
-fn release_lease(shared: &Shared, pane: u64) {
+/// Only the newest `fit`'s connection may end a lease, so a stale socket dying later cannot clear a live one.
+fn release_lease(shared: &Shared, connection: u64, pane: u64) {
+    {
+        let mut owners = lock(&shared.lease_owners);
+        if owners.get(&pane) != Some(&connection) {
+            return;
+        }
+        owners.remove(&pane);
+    }
     let (reply, _) = oneshot::channel();
     let _ = shared.commands.try_send(Command::Fit {
         pane,
@@ -1628,6 +1642,27 @@ mod tests {
         let mut ws = fx.welcomed(&token).await;
         fit_pane_7(&fx, &mut ws).await;
         drop(ws);
+        assert_eq!(leased_command(&fx).await, (7, None));
+    }
+
+    #[tokio::test]
+    async fn a_stale_connection_closing_does_not_end_a_newer_lease() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut first = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut first).await;
+        let mut second = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut second).await;
+        drop(first);
+        send_json(&mut second, &ClientMsg::Refresh).await;
+        loop {
+            if matches!(next_msg(&mut second).await, ServerMsg::Snapshot { .. }) {
+                break;
+            }
+        }
+        assert!(fx.no_command());
+        send_json(&mut second, &ClientMsg::Unfit { pane: 7 }).await;
         assert_eq!(leased_command(&fx).await, (7, None));
     }
 
