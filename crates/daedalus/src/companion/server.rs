@@ -8,6 +8,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener as StdListener};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -52,6 +53,8 @@ const USAGE_WAIT: Duration = Duration::from_secs(5);
 const ACT_WAIT: Duration = Duration::from_secs(10);
 const ANSWER_WAIT: Duration = Duration::from_secs(30);
 const MAX_IN_FLIGHT: usize = 8;
+const FIT_ROWS: std::ops::RangeInclusive<u16> = 8..=500;
+const FIT_COLS: std::ops::RangeInclusive<u16> = 20..=500;
 const BUSY: &str = "busy";
 const MAX_PROMPT: usize = 16 * 1024;
 const MAX_ANSWERS: usize = 8;
@@ -129,6 +132,12 @@ pub enum Command {
         action: Action,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Size a pane to the phone, or end the lease when `size` is `None`.
+    Fit {
+        pane: u64,
+        size: Option<(u16, u16)>,
+        reply: oneshot::Sender<Result<(u16, u16), String>>,
+    },
     /// Fetch the plan limits again unless the last fetch is recent.
     UsageRefresh {
         reply: oneshot::Sender<Result<(), String>>,
@@ -169,6 +178,8 @@ struct Shared {
     snapshot: watch::Sender<Arc<Snapshot>>,
     notices: broadcast::Sender<Notice>,
     live: Mutex<HashMap<String, usize>>,
+    lease_owners: Arc<Mutex<HashMap<u64, u64>>>,
+    next_connection: AtomicU64,
     welcomed: Mutex<usize>,
     revoked: broadcast::Sender<String>,
     handshakes: Arc<Semaphore>,
@@ -200,6 +211,8 @@ impl Server {
             .collect::<io::Result<Vec<_>>>()?;
         let (commands, rx) = async_channel::unbounded();
         let shared = Arc::new(Shared {
+            lease_owners: Arc::new(Mutex::new(HashMap::new())),
+            next_connection: AtomicU64::new(0),
             id: load_or_create_id(&config.data_dir)?,
             name: config.name,
             devices: config.devices,
@@ -706,6 +719,7 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
     let mut transcripts = Transcripts::new(shared.home.clone());
     let mut pending = FuturesUnordered::<Queued>::new();
     let mut acting = HashSet::<u64>::new();
+    let me = shared.next_connection.fetch_add(1, Ordering::Relaxed);
     loop {
         tokio::select! {
             // Biased so a queued revoke wins over a request already readable on the socket.
@@ -745,6 +759,20 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                             }
                             ClientMsg::Detach { pane } => {
                                 attachments.detach(pane);
+                                release_lease(shared, me, pane);
+                                None
+                            }
+                            ClientMsg::Fit { id, pane, rows, cols } => {
+                                let current = Arc::clone(&snapshot.borrow());
+                                let busy = pending.len() >= MAX_IN_FLIGHT;
+                                let started = fit(shared, me, &current, id, pane, (rows, cols), busy).await;
+                                if started.is_ok() {
+                                    lock(&shared.lease_owners).insert(pane, me);
+                                }
+                                queue(&mut pending, &mut acting, None, started)
+                            }
+                            ClientMsg::Unfit { pane } => {
+                                release_lease(shared, me, pane);
                                 None
                             }
                             ClientMsg::Attach { pane, tail } => {
@@ -900,6 +928,31 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
             }
         }
     }
+    let held: Vec<u64> = lock(&shared.lease_owners)
+        .iter()
+        .filter(|(_, owner)| **owner == me)
+        .map(|(pane, _)| *pane)
+        .collect();
+    for pane in held {
+        release_lease(shared, me, pane);
+    }
+}
+
+/// Only the newest `fit`'s connection may end a lease, so a stale socket dying later cannot clear a live one.
+fn release_lease(shared: &Shared, connection: u64, pane: u64) {
+    {
+        let mut owners = lock(&shared.lease_owners);
+        if owners.get(&pane) != Some(&connection) {
+            return;
+        }
+        owners.remove(&pane);
+    }
+    let (reply, _) = oneshot::channel();
+    let _ = shared.commands.try_send(Command::Fit {
+        pane,
+        size: None,
+        reply,
+    });
 }
 
 fn is_paired(shared: &Shared, device: &str) -> bool {
@@ -1018,6 +1071,62 @@ async fn act(
                 id: Some(id),
                 message,
             },
+            _ => failed(id, "could not reach the terminal"),
+        }
+    }))
+}
+
+async fn fit(
+    shared: &Shared,
+    connection: u64,
+    snapshot: &Snapshot,
+    id: String,
+    pane: u64,
+    (rows, cols): (u16, u16),
+    busy: bool,
+) -> Result<Pending, ServerMsg> {
+    if !snapshot.terminals.iter().any(|t| t.pane == pane) {
+        return Err(failed(id, "pane is not open"));
+    }
+    if busy {
+        return Err(failed(id, BUSY));
+    }
+    let size = (
+        rows.clamp(*FIT_ROWS.start(), *FIT_ROWS.end()),
+        cols.clamp(*FIT_COLS.start(), *FIT_COLS.end()),
+    );
+    let (reply, answer) = oneshot::channel();
+    if shared
+        .commands
+        .send(Command::Fit {
+            pane,
+            size: Some(size),
+            reply,
+        })
+        .await
+        .is_err()
+    {
+        return Err(failed(id, "could not reach the terminal"));
+    }
+    let owners = Arc::clone(&shared.lease_owners);
+    Ok(Box::pin(async move {
+        match timeout(ACT_WAIT, answer).await {
+            Ok(Ok(Ok((rows, cols)))) => ServerMsg::Fitted {
+                id,
+                pane,
+                rows,
+                cols,
+            },
+            Ok(Ok(Err(message))) => {
+                let mut owners = lock(&owners);
+                if owners.get(&pane) == Some(&connection) {
+                    owners.remove(&pane);
+                }
+                ServerMsg::Error {
+                    id: Some(id),
+                    message,
+                }
+            }
             _ => failed(id, "could not reach the terminal"),
         }
     }))
@@ -1290,6 +1399,7 @@ mod tests {
             claude: None,
             rows: 24,
             cols: 80,
+            fitted: false,
             dialog: None,
         }
     }
@@ -1426,6 +1536,156 @@ mod tests {
             terminals: panes.iter().map(|&pane| terminal(pane)).collect(),
             ..Snapshot::default()
         }));
+    }
+
+    fn fit_msg(pane: u64, rows: u16, cols: u16) -> ClientMsg {
+        ClientMsg::Fit {
+            id: "r20".into(),
+            pane,
+            rows,
+            cols,
+        }
+    }
+
+    async fn leased_command(fx: &Fixture) -> (u64, Option<(u16, u16)>) {
+        let Ok(Command::Fit { pane, size, .. }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("no fit command reached the app")
+        else {
+            panic!("expected a fit command");
+        };
+        (pane, size)
+    }
+
+    async fn fit_pane_7(fx: &Fixture, ws: &mut Ws) {
+        send_json(ws, &fit_msg(7, 44, 57)).await;
+        let Ok(Command::Fit { reply, .. }) = timeout(Duration::from_secs(5), fx.next_command())
+            .await
+            .expect("the fit never reached the app")
+        else {
+            panic!("expected a fit command");
+        };
+        let _ = reply.send(Ok((44, 57)));
+        loop {
+            if !matches!(next_msg(ws).await, ServerMsg::Snapshot { .. }) {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fit_reaches_the_app_clamped_and_answers_with_the_applied_size() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &fit_msg(7, 2, 9_000)).await;
+        let Ok(Command::Fit { pane, size, reply }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the fit never reached the app")
+        else {
+            panic!("expected a fit command");
+        };
+        assert_eq!((pane, size), (7, Some((8, 500))));
+        let _ = reply.send(Ok((8, 500)));
+        loop {
+            match next_msg(&mut ws).await {
+                ServerMsg::Snapshot { .. } => {}
+                other => {
+                    assert_eq!(
+                        other,
+                        ServerMsg::Fitted {
+                            id: "r20".into(),
+                            pane: 7,
+                            rows: 8,
+                            cols: 500
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fit_for_a_pane_that_is_not_open_is_refused_without_reaching_the_app() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &fit_msg(8, 44, 57)).await;
+        expect_error(&mut ws, "r20", "pane is not open").await;
+        assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn an_unfit_releases_the_lease() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut ws).await;
+        send_json(&mut ws, &ClientMsg::Unfit { pane: 7 }).await;
+        assert_eq!(leased_command(&fx).await, (7, None));
+    }
+
+    #[tokio::test]
+    async fn a_detach_of_a_leased_pane_releases_the_lease() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut ws).await;
+        send_json(&mut ws, &ClientMsg::Detach { pane: 7 }).await;
+        assert_eq!(leased_command(&fx).await, (7, None));
+    }
+
+    #[tokio::test]
+    async fn closing_the_socket_releases_the_lease() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut ws).await;
+        drop(ws);
+        assert_eq!(leased_command(&fx).await, (7, None));
+    }
+
+    #[tokio::test]
+    async fn a_stale_connection_closing_does_not_end_a_newer_lease() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut first = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut first).await;
+        let mut second = fx.welcomed(&token).await;
+        fit_pane_7(&fx, &mut second).await;
+        drop(first);
+        let heard = timeout(Duration::from_secs(5), fx.commands.recv())
+            .await
+            .unwrap();
+        assert!(matches!(heard, Ok(Command::ClientsChanged(1))));
+        assert!(fx.no_command());
+        send_json(&mut second, &ClientMsg::Unfit { pane: 7 }).await;
+        assert_eq!(leased_command(&fx).await, (7, None));
+    }
+
+    #[tokio::test]
+    async fn an_unfit_without_a_lease_sends_nothing() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &ClientMsg::Unfit { pane: 7 }).await;
+        send_json(&mut ws, &ClientMsg::Refresh).await;
+        loop {
+            if matches!(next_msg(&mut ws).await, ServerMsg::Snapshot { .. }) {
+                break;
+            }
+        }
+        assert!(fx.no_command());
     }
 
     #[tokio::test]
