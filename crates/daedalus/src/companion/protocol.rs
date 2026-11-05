@@ -84,6 +84,11 @@ pub enum ClientMsg {
     TranscriptClose {
         session: String,
     },
+    ToolOutput {
+        id: String,
+        session: String,
+        tool_id: String,
+    },
     Prompt {
         id: String,
         pane: u64,
@@ -197,6 +202,15 @@ pub enum ServerMsg {
     Subagents {
         session: String,
         agents: Vec<Subagent>,
+    },
+    ToolOutput {
+        id: String,
+        session: String,
+        tool_id: String,
+        text: String,
+        lines: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cut: bool,
     },
 }
 
@@ -796,6 +810,14 @@ mod tests {
             },
         );
         golden(
+            "tool_output",
+            &ClientMsg::ToolOutput {
+                id: "r7".into(),
+                session: SESSION_ID.into(),
+                tool_id: "toolu_01".into(),
+            },
+        );
+        golden(
             "transcript_close",
             &ClientMsg::TranscriptClose {
                 session: SESSION_ID.into(),
@@ -921,6 +943,17 @@ mod tests {
                 name: "Jason's Mac".into(),
                 app: "2.0.1".into(),
                 features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            },
+        );
+        golden(
+            "tool_output_reply",
+            &ServerMsg::ToolOutput {
+                id: "r7".into(),
+                session: SESSION_ID.into(),
+                tool_id: "toolu_01".into(),
+                text: "Already up to date.\n".into(),
+                lines: 1,
+                cut: false,
             },
         );
         golden(
