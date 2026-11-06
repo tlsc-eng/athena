@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use daedalus_ui::{ActiveTheme, Button, ButtonKind, Ellipsis, Tooltip, empty_state};
 use daedalus_workspace::{Item, ItemId, ItemKind, Layout, PaneId, Panel};
@@ -180,7 +180,24 @@ impl Shell {
         let Some(root) = self.active_root() else {
             return;
         };
-        let Some(panel) = self.panel_mut() else {
+        self.close_panel_terminal_in(root, id, window, cx);
+    }
+
+    /// Hangs up a terminal of the panel of the project at `root`, which need not be the active one.
+    pub(super) fn close_panel_terminal_in(
+        &mut self,
+        root: PathBuf,
+        id: ItemId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = self
+            .workspace
+            .projects
+            .iter_mut()
+            .find(|p| p.root == root)
+            .map(|p| &mut p.panel)
+        else {
             return;
         };
         let Some(item) = panel.take(id) else {
@@ -188,14 +205,18 @@ impl Shell {
         };
         let emptied = panel.is_empty();
         self.item_menus.remove(&(root.clone(), id));
-        match self.items.remove(&(root, id)) {
+        match self.items.remove(&(root.clone(), id)) {
             Some(view) => view.close(cx),
             None => {
                 daedalus_term::kill_sessions(super::panes::unviewed_sessions([&item], |_| false))
             }
         }
         self.schedule_save(cx);
-        self.after_panel_change(emptied, window, cx);
+        if self.active_root().as_deref() == Some(root.as_path()) {
+            self.after_panel_change(emptied, window, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn after_panel_change(&mut self, emptied: bool, window: &mut Window, cx: &mut Context<Self>) {

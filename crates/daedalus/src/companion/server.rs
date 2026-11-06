@@ -109,6 +109,7 @@ fn strip_controls(text: &str) -> String {
 pub enum Action {
     Prompt(String),
     Interrupt,
+    Close,
     Answer {
         key: String,
         answers: Vec<AnswerPick>,
@@ -850,6 +851,12 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let started = act(shared, &current, id, pane, Action::Interrupt, busy).await;
                                 queue(&mut pending, &mut acting, Some(pane), started)
                             }
+                            ClientMsg::Close { id, pane } => {
+                                let current = Arc::clone(&snapshot.borrow());
+                                let busy = pending.len() >= MAX_IN_FLIGHT || acting.contains(&pane);
+                                let started = act(shared, &current, id, pane, Action::Close, busy).await;
+                                queue(&mut pending, &mut acting, Some(pane), started)
+                            }
                             ClientMsg::Answer { id, pane, key, answers } => {
                                 let current = Arc::clone(&snapshot.borrow());
                                 let action = Action::Answer { key, answers };
@@ -1078,6 +1085,7 @@ async fn act(
     let action = match action {
         Action::Prompt(text) => Action::Prompt(strip_controls(&text)),
         Action::Interrupt => Action::Interrupt,
+        Action::Close => Action::Close,
         Action::Answer { key, answers } => {
             if let Some(why) = answer_refusal(&key, &answers) {
                 return Err(failed(id, why));
@@ -1090,7 +1098,7 @@ async fn act(
     }
     let wait = match action {
         Action::Answer { .. } => ANSWER_WAIT,
-        Action::Prompt(_) | Action::Interrupt => ACT_WAIT,
+        Action::Prompt(_) | Action::Interrupt | Action::Close => ACT_WAIT,
     };
     let (reply, answer) = oneshot::channel();
     if shared
@@ -2345,6 +2353,74 @@ mod tests {
             }
         }
         assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn close_for_a_missing_pane_is_refused() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Close {
+                id: "r11".into(),
+                pane: 8,
+            },
+        )
+        .await;
+        expect_error(&mut ws, "r11", "pane is not open").await;
+        assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn close_is_forwarded_as_a_close_action() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Close {
+                id: "r11".into(),
+                pane: 7,
+            },
+        )
+        .await;
+        let Ok(Command::Act { action, reply, .. }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the close never reached the app")
+        else {
+            panic!("expected an act command");
+        };
+        assert!(action == Action::Close);
+        let _ = reply.send(Ok(()));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Sent { id: "r11".into() }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_close_while_the_pane_is_acting_is_busy() {
+        let fx = Fixture::new();
+        open_pane(&fx, 7);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &prompt_msg("first", 7)).await;
+        let first = next_act_reply(&fx).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Close {
+                id: "bye".into(),
+                pane: 7,
+            },
+        )
+        .await;
+        expect_error(&mut ws, "bye", "busy").await;
+        assert!(fx.no_command());
+        let _ = first.send(Ok(()));
     }
 
     #[tokio::test]

@@ -1107,6 +1107,25 @@ impl Shell {
         }
     }
 
+    /// Closes the tab holding a Claude pane, as Cmd+W would; false when no tab holds it.
+    pub(super) fn close_session_tab(
+        &mut self,
+        pane: daedalus_proto::PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((root, item)) = self.find_session(pane) else {
+            return false;
+        };
+        if Panel::holds(item) {
+            self.close_panel_terminal_in(root, item, window, cx);
+        } else {
+            self.remove_item_from(&root, item, window, cx);
+        }
+        self.claude_sessions_stale(cx);
+        true
+    }
+
     fn remove_item(&mut self, item: ItemId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(root) = self.active_root() {
             self.remove_item_from(&root, item, window, cx);

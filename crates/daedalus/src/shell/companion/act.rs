@@ -22,6 +22,13 @@ pub(in crate::shell) fn gate(
                 Err("Claude is not running")
             }
         },
+        Action::Close => {
+            if is_claude {
+                Ok(())
+            } else {
+                Err("this is not a Claude session")
+            }
+        }
         Action::Answer { .. } => match (is_claude, state) {
             (false, _) => Err("this is not a Claude session"),
             (true, Some(ClaudeState::NeedsInput)) => Ok(()),
@@ -65,6 +72,14 @@ mod tests {
                 let asking = is_claude && state == Some(ClaudeState::NeedsInput);
                 assert_eq!(gate(is_claude, state, &answer).is_ok(), asking);
             }
+        }
+    }
+
+    #[test]
+    fn close_needs_a_claude_pane() {
+        for state in STATES {
+            assert!(gate(false, state, &Action::Close).is_err());
+            assert!(gate(true, state, &Action::Close).is_ok());
         }
     }
 

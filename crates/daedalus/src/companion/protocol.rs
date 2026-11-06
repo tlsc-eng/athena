@@ -13,6 +13,7 @@ pub const FEATURES: &[&str] = &[
     "fit",
     "tool_output",
     "suggestion",
+    "close",
 ];
 
 /// Largest payload of one binary frame.
@@ -96,6 +97,11 @@ pub enum ClientMsg {
         text: String,
     },
     Interrupt {
+        id: String,
+        pane: u64,
+    },
+    /// Closes the tab holding a Claude pane, as closing it on the Mac does.
+    Close {
         id: String,
         pane: u64,
     },
@@ -840,6 +846,17 @@ mod tests {
             "interrupt",
             &ClientMsg::Interrupt {
                 id: "r10".into(),
+                pane: 123,
+            },
+        );
+    }
+
+    #[test]
+    fn a_close_matches_its_fixture() {
+        golden(
+            "close",
+            &ClientMsg::Close {
+                id: "r11".into(),
                 pane: 123,
             },
         );
