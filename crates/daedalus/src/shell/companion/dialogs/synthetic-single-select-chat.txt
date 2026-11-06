@@ -1,0 +1,14 @@
+ ────────────────────────────────────────────────────────────
+ ☐ Colour
+
+ Which colour?
+
+ ❯ 1. Red
+      The warm one
+   2. Blue
+      The cool one
+   3. Type something.
+ ────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel

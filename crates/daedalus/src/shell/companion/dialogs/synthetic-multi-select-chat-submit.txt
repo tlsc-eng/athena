@@ -1,0 +1,13 @@
+ ←  ☐ Sizes   ✔ Submit  →
+
+ Which sizes?
+
+   1. [ ] A
+   2. [✔] B
+   3. [ ] Other
+
+ ❯   Submit
+ ────────────────────────────────────────────────────────────
+   4. Chat about this
+
+ Enter to select · ↑/↓ to navigate · Esc to cancel
