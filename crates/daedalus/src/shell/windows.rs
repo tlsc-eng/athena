@@ -982,7 +982,7 @@ fn act_refusal(
     act::gate(v.is_claude(), v.claude_state(), action)
 }
 
-/// Types a phone's prompt into a terminal, or presses Esc in it, and answers once the keys are written.
+/// Types a phone's prompt into a terminal, presses Esc in it, or closes its tab, and answers once the keys are written.
 fn act_for_phone(
     pane: PaneId,
     action: Action,
@@ -1011,6 +1011,10 @@ fn act_for_phone(
             let _ = reply.send(Ok(()));
         }
         Action::Close => {
+            if cx.global::<Windows>().companion_answering.contains(&pane) {
+                let _ = reply.send(Err("Already answering".into()));
+                return;
+            }
             let closed = holder
                 .and_then(|h| {
                     h.update(cx, |shell, window, cx| {

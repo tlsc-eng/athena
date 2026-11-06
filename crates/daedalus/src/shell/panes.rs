@@ -1117,10 +1117,18 @@ impl Shell {
         let Some((root, item)) = self.find_session(pane) else {
             return false;
         };
+        let prev = window.focused(cx);
+        let had_focus = self
+            .items
+            .get(&(root.clone(), item))
+            .is_some_and(|v| v.focus_handle(cx).contains_focused(window, cx));
         if Panel::holds(item) {
             self.close_panel_terminal_in(root, item, window, cx);
         } else {
             self.remove_item_from(&root, item, window, cx);
+        }
+        if !had_focus && let Some(prev) = prev {
+            window.focus(&prev);
         }
         self.claude_sessions_stale(cx);
         true

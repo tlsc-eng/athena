@@ -285,7 +285,7 @@ The optional fields are omitted when absent. The list holds at most 20 agents: r
 
 The desktop sends `subagents` after the `page` of a `transcript_open` and after a reset page when the list is not empty, and whenever the list changes while the transcript is open, even to empty. At most one is queued per session, and a newer one replaces it. The phone sends nothing new.
 
-`sent`: answer to `prompt`, `interrupt`, `close` or `answer` once the keys have been written to the pane, and to `usage_refresh` once the desktop has handled it.
+`sent`: answer to `prompt`, `interrupt`, `close` or `answer` once the keys have been written to the pane or the tab closed, and to `usage_refresh` once the desktop has handled it.
 
 ```json
 {"type":"sent","id":"r7"}

@@ -1,4 +1,4 @@
-//! Whether a phone's prompt, interrupt or answer may reach a pane in its current state.
+//! Whether a phone's prompt, interrupt, answer or close may reach a pane in its current state.
 
 use daedalus_term::ClaudeState;
 
