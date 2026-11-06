@@ -575,6 +575,7 @@ mod tests {
     const SINGLE: &str = include_str!("dialogs/synthetic-single-select.txt");
     const MULTI: &str = include_str!("dialogs/synthetic-multi-select.txt");
     const TABS: &str = include_str!("dialogs/synthetic-tabs.txt");
+    const SINGLE_CHAT: &str = include_str!("dialogs/synthetic-single-select-chat.txt");
     const REVIEW: &str = include_str!("dialogs/synthetic-review.txt");
 
     const DOWN: &[u8] = b"\x1b[B";
@@ -1183,6 +1184,24 @@ mod tests {
         let g = goal(&d, vec![pick(Some("Which colour?"), &["Red"], None)]);
         let (keys, end) = play(g, vec![Some(d), None], false);
         assert_eq!(keys, [ENTER]);
+        assert_done(end);
+    }
+
+    #[test]
+    fn a_lone_question_with_the_chat_row_ends_when_the_dialog_is_gone() {
+        let d = parse(SINGLE_CHAT);
+        let g = goal(&d, vec![pick(Some("Which colour?"), &["Red"], None)]);
+        let (keys, end) = play(g, vec![Some(d), None], false);
+        assert_eq!(keys, [ENTER]);
+        assert_done(end);
+    }
+
+    #[test]
+    fn a_lone_question_with_the_chat_row_moves_then_enters() {
+        let d = parse(SINGLE_CHAT);
+        let g = goal(&d, vec![pick(Some("Which colour?"), &["Blue"], None)]);
+        let (keys, end) = play(g, vec![Some(d.clone()), Some(at(d, 1)), None], false);
+        assert_eq!(keys, [DOWN, ENTER]);
         assert_done(end);
     }
 

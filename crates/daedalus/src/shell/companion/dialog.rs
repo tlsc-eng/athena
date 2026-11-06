@@ -32,7 +32,8 @@ pub(super) fn parse(lines: &[String]) -> Option<Dialog> {
     let footer = lines
         .iter()
         .rposition(|line| FOOTERS.iter().any(|f| line.contains(f)))?;
-    let screen: Vec<Line> = lines[..footer].iter().map(|l| normalise(l)).collect();
+    let mut screen: Vec<Line> = lines[..footer].iter().map(|l| normalise(l)).collect();
+    drop_chat_row(&mut screen);
     let (start, end) = block_bounds(&screen);
     let block = &screen[start..end];
     let pointers: Vec<usize> = block
@@ -321,6 +322,10 @@ fn ask_again_text(label: &str) -> Option<&str> {
 
 /// Removes and parses the `←  ☒ Color   ☐ Size   ✔ Submit  →` header from the head lines.
 fn take_tabs(head: &mut Vec<String>) -> Vec<DialogTab> {
+    if let Some(chip) = head.iter().position(|l| is_lone_chip(l)) {
+        head.remove(chip);
+        return Vec::new();
+    }
     let Some(at) = head
         .iter()
         .position(|l| (l.contains('☐') || l.contains('☒')) && l.contains("Submit"))
@@ -332,6 +337,16 @@ fn take_tabs(head: &mut Vec<String>) -> Vec<DialogTab> {
     };
     head.remove(at);
     tabs
+}
+
+/// The header of a lone single-select question: one `☐ Header` chip and no Submit tab.
+fn is_lone_chip(line: &str) -> bool {
+    let line = line.trim();
+    let marks = line
+        .chars()
+        .filter(|c| matches!(c, '☐' | '☒' | '✔'))
+        .count();
+    marks == 1 && (line.starts_with('☐') || line.starts_with('☒'))
 }
 
 fn parse_tabs(header: &str) -> Option<Vec<DialogTab>> {
@@ -528,6 +543,31 @@ fn normalise(line: &str) -> Line {
     chars
 }
 
+const CHAT: &str = "Chat about this";
+
+/// Cuts a trailing `Chat about this` row and the rule above it, which would otherwise start the block below the options.
+fn drop_chat_row(screen: &mut Vec<Line>) {
+    let Some(last) = screen.iter().rposition(|l| !is_blank(l)) else {
+        return;
+    };
+    let text = clean(&screen[last]);
+    // A cursor on the row means the user moved there at the desk, so the dialog stays unknown.
+    if text.starts_with(POINTER) {
+        return;
+    }
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    let label = text[digits..].strip_prefix(". ").unwrap_or(&text);
+    if digits == 0 || label != CHAT {
+        return;
+    }
+    let Some(rule) = screen[..last].iter().rposition(|l| !is_blank(l)) else {
+        return;
+    };
+    if is_rule(&screen[rule]) {
+        screen.truncate(rule);
+    }
+}
+
 /// The dialog starts after the nearest horizontal rule above its last content line, else at the top.
 fn block_bounds(screen: &[Line]) -> (usize, usize) {
     let mut end = screen.len();
@@ -570,7 +610,7 @@ fn cap(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    // TODO: every `synthetic-*.txt` fixture is derived from the Claude Code 2.1.318 UI code, not captured; replace each with a real capture.
+    // TODO: every `synthetic-*.txt` fixture is derived from the Claude Code 2.1.318 UI code (the `-chat` ones from 2.1.319), not captured; replace each with a real capture.
     const TRUST: &str = include_str!("dialogs/real-trust.txt");
     const BASH: &str = include_str!("dialogs/synthetic-bash.txt");
     const EDIT: &str = include_str!("dialogs/synthetic-edit.txt");
@@ -579,6 +619,9 @@ mod tests {
     const MULTI: &str = include_str!("dialogs/synthetic-multi-select.txt");
     const MULTI_SUBMIT: &str = include_str!("dialogs/synthetic-multi-select-submit.txt");
     const TABS: &str = include_str!("dialogs/synthetic-tabs.txt");
+    const SINGLE_CHAT: &str = include_str!("dialogs/synthetic-single-select-chat.txt");
+    const TABS_CHAT: &str = include_str!("dialogs/synthetic-tabs-chat.txt");
+    const CHAT_FOCUSED: &str = include_str!("dialogs/synthetic-chat-focused.txt");
     const REVIEW: &str = include_str!("dialogs/synthetic-review.txt");
     const SCROLLED: &str = include_str!("dialogs/synthetic-scrolled.txt");
 
@@ -588,6 +631,53 @@ mod tests {
 
     fn labels(d: &Dialog) -> Vec<&str> {
         d.options.iter().map(|o| o.label.as_str()).collect()
+    }
+
+    #[test]
+    fn a_lone_question_with_the_chat_row_is_a_question() {
+        let d = dialog(SINGLE_CHAT);
+        assert_eq!(d.kind, DialogKind::Question);
+        assert_eq!(d.title.as_deref(), Some("Which colour?"));
+        assert!(d.tabs.is_empty());
+        assert_eq!(d.options.len(), 3);
+        assert!(d.options[2].input);
+        assert_eq!(d.highlight, Some(0));
+        assert!(!d.partial);
+    }
+
+    #[test]
+    fn the_chat_row_is_not_an_option() {
+        for screen in [SINGLE_CHAT, TABS_CHAT] {
+            assert!(
+                !labels(&dialog(screen))
+                    .iter()
+                    .any(|l| l.contains("Chat about this"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_tabbed_form_with_the_chat_row_keeps_its_tabs() {
+        let (with, without) = (dialog(TABS_CHAT), dialog(TABS));
+        assert_eq!(with.tabs, without.tabs);
+        assert_eq!(with.title, without.title);
+        assert_eq!(labels(&with), labels(&without));
+    }
+
+    #[test]
+    fn the_cursor_on_the_chat_row_is_unknown() {
+        let d = dialog(CHAT_FOCUSED);
+        assert_eq!(d.kind, DialogKind::Unknown);
+        assert!(d.partial);
+    }
+
+    #[test]
+    fn the_lone_chip_is_not_the_title() {
+        let rule = "─".repeat(60);
+        let screen = SINGLE_CHAT.replace(&format!(" {rule}\n   4. Chat about this\n"), "");
+        let d = dialog(&screen);
+        assert_eq!(d.title.as_deref(), Some("Which colour?"));
+        assert!(d.tabs.is_empty());
     }
 
     #[test]
