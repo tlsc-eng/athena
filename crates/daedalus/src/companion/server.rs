@@ -3516,6 +3516,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_a_session_with_no_transcript_yet_answers_with_an_empty_page() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        let ServerMsg::Transcript {
+            kind,
+            items,
+            before,
+            ..
+        } = open_transcript(&mut ws, "s1", 10).await
+        else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(kind, protocol::TranscriptKind::Page);
+        assert!(items.is_empty());
+        assert_eq!(before, None);
+    }
+
+    #[tokio::test]
+    async fn a_transcript_written_after_opening_arrives_as_appends() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        assert!(matches!(
+            open_transcript(&mut ws, "s1", 10).await,
+            ServerMsg::Transcript { .. }
+        ));
+        write_replies(&fx, "s1", 2);
+        let started = StdInstant::now();
+        let ServerMsg::Transcript { kind, items, .. } = next_transcript(&mut ws).await else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(kind, protocol::TranscriptKind::Append);
+        assert_eq!(texts(&items), ["reply 0", "reply 1"]);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_waiting_transcript_counts_toward_the_open_limit() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1", "s2", "s3", "s4", "s5"]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        for id in ["s1", "s2", "s3", "s4"] {
+            assert!(matches!(
+                open_transcript(&mut ws, id, 10).await,
+                ServerMsg::Transcript { .. }
+            ));
+        }
+        let ServerMsg::Error { message, .. } = open_transcript(&mut ws, "s5", 10).await else {
+            panic!("expected an error");
+        };
+        assert_eq!(message, "too many transcripts open");
+    }
+
+    #[tokio::test]
     async fn a_line_written_to_an_open_transcript_is_appended() {
         let fx = Fixture::new();
         show_sessions(&fx, &["s1"]);

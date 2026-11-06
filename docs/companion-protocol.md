@@ -71,7 +71,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"refresh"}
 ```
 
-`transcript_open`: start following a session's conversation. The desktop answers with a `transcript` of kind `page` holding the newest `limit` items (at most 200), then sends `append` messages as the file grows. `session` must be an id in the latest snapshot, and a connection follows at most 4 sessions. Opening a session that is already followed sends a fresh `page`. Failures come back as `error` with the `id`.
+`transcript_open`: start following a session's conversation. The desktop answers with a `transcript` of kind `page` holding the newest `limit` items (at most 200), then sends `append` messages as the file grows. `session` must be an id in the latest snapshot, and a connection follows at most 4 sessions. Opening a session that is already followed sends a fresh `page`. A session whose transcript file does not exist yet (Claude writes it with the first prompt) answers with an empty `page`, then gets `append`s once the file appears. Failures come back as `error` with the `id`.
 
 ```json
 {"type":"transcript_open","id":"r5","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10","limit":60}
