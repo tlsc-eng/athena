@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -251,6 +251,7 @@ pub(super) fn gather(cx: &App) -> Vec<WindowInput> {
 
 impl Shell {
     fn companion_input(&self, id: u64, needs: &HashMap<PaneId, String>, cx: &App) -> WindowInput {
+        let mut claude_panes = HashSet::new();
         let terminals = self
             .items
             .iter()
@@ -259,6 +260,9 @@ impl Shell {
                 _ => None,
             })
             .map(|(root, view)| {
+                if view.is_claude() {
+                    claude_panes.extend(view.session());
+                }
                 let foreground = view.foreground();
                 let (rows, cols) = view.grid_size();
                 let claude = view.claude_state();
@@ -283,6 +287,7 @@ impl Shell {
         let sessions = self
             .live_sessions(cx)
             .into_iter()
+            .map(|live| detach_exited(live, &claude_panes))
             .map(|live| {
                 let plan = self.review.sessions.plan_of(&live.id);
                 SessionInput {
@@ -306,6 +311,15 @@ impl Shell {
             usage: self.usage_readings(),
         }
     }
+}
+
+/// A pane whose Claude exited keeps its shell and binding, but the phone must not type prompts into it.
+fn detach_exited(mut live: LiveSession, claude: &HashSet<PaneId>) -> LiveSession {
+    if live.pane.is_some_and(|pane| !claude.contains(&pane)) {
+        live.pane = None;
+        live.state = None;
+    }
+    live
 }
 
 #[cfg(test)]
@@ -639,5 +653,25 @@ mod tests {
                 .usage
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_session_whose_claude_exited_is_sent_without_its_pane() {
+        let got = detach_exited(live("a", Some(ClaudeState::Running)), &HashSet::new());
+        assert_eq!((got.pane, got.state), (None, None));
+    }
+
+    #[test]
+    fn a_session_still_running_claude_keeps_its_pane() {
+        let got = detach_exited(live("a", Some(ClaudeState::Running)), &HashSet::from([7]));
+        assert_eq!((got.pane, got.state), (Some(7), Some(ClaudeState::Running)));
+    }
+
+    #[test]
+    fn a_history_row_is_unchanged() {
+        let mut past = live("a", None);
+        past.pane = None;
+        let got = detach_exited(past, &HashSet::from([7]));
+        assert_eq!((got.pane, got.state), (None, None));
     }
 }
