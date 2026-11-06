@@ -557,6 +557,25 @@ impl Shell {
             })
     }
 
+    pub(super) fn shell_wait_expired(&mut self, pane: Option<Session>, cx: &mut Context<Self>) {
+        let notice = Notice {
+            pane,
+            kind: NoticeKind::Message {
+                title: "Shell has been idling too long".into(),
+                body: "Claude is still waiting on a background shell after 60 min".into(),
+            },
+            at: now_ms(),
+        };
+        let handle = self.window_handle;
+        // Emitted from inside the terminal view's own update, so the window cannot be re-entered.
+        cx.spawn(async move |this, cx| {
+            let _ = cx.update_window(handle, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| this.on_notice(notice, window, cx));
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn on_notice(
         &mut self,
         notice: Notice,

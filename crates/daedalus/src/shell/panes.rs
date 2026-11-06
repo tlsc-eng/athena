@@ -252,6 +252,9 @@ impl Shell {
                             }
                             return;
                         }
+                        TerminalEvent::ShellWaitExpired => {
+                            return this.shell_wait_expired(view.read(cx).session(), cx);
+                        }
                         TerminalEvent::Notice { title, body } => {
                             return this.transient_notice(title.clone(), body.clone(), cx);
                         }

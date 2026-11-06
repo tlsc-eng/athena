@@ -494,6 +494,7 @@ impl Shell {
         &mut self,
         session: String,
         cwd: PathBuf,
+        source: &str,
         caller: Option<PaneId>,
         cx: &mut Context<Self>,
     ) {
@@ -504,6 +505,15 @@ impl Shell {
                 self.review.sessions.cwds.insert(session.clone(), cwd);
             }
             self.bind_session(pane, session, cx);
+            // /compact keeps the session, and with it the background tasks it waits on.
+            if source != "compact"
+                && let Some(ItemView::Terminal(view)) = self
+                    .find_session(pane)
+                    .and_then(|k| self.items.get(&k))
+                    .cloned()
+            {
+                view.update(cx, |v, _| v.clear_claude_hold());
+            }
             self.deliver_pending(cx);
             cx.notify();
         }

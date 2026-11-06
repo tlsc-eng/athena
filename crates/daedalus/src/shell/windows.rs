@@ -1338,6 +1338,7 @@ fn target(
         | AppMsg::ClaudePlan { .. }
         | AppMsg::ClaudeSession { .. }
         | AppMsg::ClaudePrompt
+        | AppMsg::ClaudeWaiting { .. }
         | AppMsg::RunTests { .. }
         | AppMsg::TestResults
         | AppMsg::DebugState => Target::Window(caller.unwrap_or(focused)),
@@ -1401,6 +1402,7 @@ fn serve(request: Request, cx: &mut App) {
             | AppMsg::ClaudePlan { .. }
             | AppMsg::ClaudeSession { .. }
             | AppMsg::ClaudePrompt
+            | AppMsg::ClaudeWaiting { .. }
     ) {
         cx.global_mut::<Windows>().companion_dirty = true;
     }
@@ -1437,6 +1439,7 @@ fn serve(request: Request, cx: &mut App) {
         request.msg,
         AppMsg::ClaudeSession { .. }
             | AppMsg::ClaudePrompt
+            | AppMsg::ClaudeWaiting { .. }
             | AppMsg::ClaudeEdited { .. }
             | AppMsg::ClaudeTodos { .. }
             | AppMsg::ClaudePlan { .. }

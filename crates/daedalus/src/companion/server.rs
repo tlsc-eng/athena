@@ -1447,6 +1447,7 @@ mod tests {
             fitted: false,
             dialog: None,
             suggestion: None,
+            background: None,
         }
     }
 

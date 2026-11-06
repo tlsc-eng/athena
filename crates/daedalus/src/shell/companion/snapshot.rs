@@ -41,6 +41,7 @@ pub(super) struct TerminalInput {
     pub fitted: bool,
     pub dialog: Option<Dialog>,
     pub suggestion: Option<String>,
+    pub background: Option<u16>,
 }
 
 pub(super) struct SessionInput {
@@ -150,6 +151,7 @@ fn terminal(input: &TerminalInput) -> Option<Terminal> {
         fitted: input.fitted,
         dialog: input.dialog.clone(),
         suggestion: input.suggestion.clone(),
+        background: input.background,
     })
 }
 
@@ -274,6 +276,7 @@ impl Shell {
                     fitted: view.is_leased(),
                     dialog,
                     suggestion,
+                    background: view.claude_waiting(),
                 }
             })
             .collect();
@@ -350,6 +353,7 @@ mod tests {
             fitted: false,
             dialog: None,
             suggestion: None,
+            background: None,
         }
     }
 

@@ -162,6 +162,8 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 `terminal.suggestion` is present only while the pane runs Claude in `finished` and the desktop read Claude Code's grey suggested prompt on the input line, and is omitted otherwise. The phone accepts it by sending the text as a `prompt`, which Claude Code counts as accepting the suggestion; there is no separate message. A suggestion that wraps or is truncated, hint text such as `Press up to edit queued messages`, and anything that Claude Code does not show (setting off, plan mode, cold cache), is omitted. See `design/protocol/snapshot_suggestion.json`.
 
+`terminal.background` is the number of background tasks (shells, monitors, agents, workflows) Claude ended its turn waiting on, and is omitted when there are none. The pane's `claude` stays `running` meanwhile; a hold of only shells and monitors is dropped after 60 minutes. The phone may ignore it; no feature flag lists it.
+
 `snapshot.usage` lists the Claude plan limits, one entry per Claude sign-in on the Mac, and is omitted when the Mac's usage indicator is off or nothing has been fetched yet. `status` is `ok`, `stale` (the saved sign-in expired), `no_access` (the Keychain refused), `rate_limited` or `unavailable`. `windows` holds the figures and is empty unless `status` is `ok`. A window has a `label` (`5h`, `7d` or a model name), `used` (percent, 0 to 100) and `resets_at` (epoch seconds, omitted when unknown). `message` is present only for `unavailable`. See `design/protocol/snapshot_usage.json`.
 
 ```json

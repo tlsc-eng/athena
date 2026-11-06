@@ -453,6 +453,8 @@ pub struct Terminal {
     pub dialog: Option<Dialog>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -895,6 +897,7 @@ mod tests {
                     fitted: false,
                     dialog: Some(question_dialog()),
                     suggestion: None,
+                    background: None,
                 }],
                 usage: Vec::new(),
             },
@@ -921,6 +924,7 @@ mod tests {
                     fitted: false,
                     dialog: None,
                     suggestion: Some("run the tests and commit".into()),
+                    background: None,
                 }],
                 usage: Vec::new(),
             },
@@ -1051,6 +1055,7 @@ mod tests {
                         fitted: true,
                         dialog: Some(bash_dialog()),
                         suggestion: None,
+                        background: None,
                     },
                     Terminal {
                         pane: 124,
@@ -1064,6 +1069,7 @@ mod tests {
                         fitted: false,
                         dialog: None,
                         suggestion: None,
+                        background: None,
                     },
                 ],
                 usage: Vec::new(),
@@ -1217,6 +1223,29 @@ mod tests {
         assert_eq!(parse(&[1, 0, 0, 0, 0, 0, 0, 0]), None);
         assert_eq!(parse(&[0, 0, 0, 0, 0, 0, 0, 0, 1]), None);
         assert_eq!(parse(&[3, 0, 0, 0, 0, 0, 0, 0, 1]), None);
+    }
+
+    #[test]
+    fn a_terminal_background_count_is_omitted_when_none_and_round_trips() {
+        let terminal = |background| Terminal {
+            pane: 1,
+            project: "/p".into(),
+            title: "claude".into(),
+            program: None,
+            cwd: None,
+            claude: Some(SessionState::Running),
+            rows: 40,
+            cols: 120,
+            fitted: false,
+            dialog: None,
+            suggestion: None,
+            background,
+        };
+        let none = serde_json::to_string(&terminal(None)).unwrap();
+        assert!(!none.contains("background"));
+        let some = serde_json::to_string(&terminal(Some(3))).unwrap();
+        let back: Terminal = serde_json::from_str(&some).unwrap();
+        assert_eq!(back.background, Some(3));
     }
 
     #[test]

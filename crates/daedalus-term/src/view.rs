@@ -107,6 +107,8 @@ pub enum TerminalEvent {
     Seen,
     /// The right-click menu opened or closed; it is drawn in-window, under native web views.
     ContextMenu { open: bool },
+    /// A hold on background shells ran out while Claude was still waiting on them.
+    ShellWaitExpired,
     /// Something the user asked for could not be done, worth a toast.
     Notice { title: String, body: String },
     /// Cmd+click on a file named in the output, with its one-based line and column if given;
@@ -122,6 +124,8 @@ pub enum TerminalEvent {
 const CLAUDE_IDLE: Duration = Duration::from_secs(3);
 /// Claude redraws its spinner while it works, so a running session this silent was interrupted.
 const CLAUDE_STALL: Duration = Duration::from_secs(10);
+/// A dev server or watcher may never end, so a hold made only of shells and monitors gives up.
+const CLAUDE_SHELL_WAIT: Duration = Duration::from_secs(60 * 60);
 /// Output that keeps coming this long after the user answers a prompt means Claude went on.
 const CLAUDE_ANSWERED: Duration = Duration::from_millis(1500);
 
@@ -200,6 +204,8 @@ pub struct TerminalView {
     claude_state: Option<ClaudeState>,
     /// What Claude Code's own hooks last reported, and when; trusted over the output guess.
     claude_hook: Option<(ClaudeState, Instant)>,
+    /// Set when Claude ended a turn with background tasks pending; keeps it running while silent.
+    claude_hold: Option<Hold>,
     /// When Claude's prompt box was last known empty: a prompt was submitted, or a question the
     /// user was typing an answer to was answered. `None` means unknown.
     prompt_cleared: Option<Instant>,
@@ -260,6 +266,7 @@ impl TerminalView {
             selecting: false,
             claude_state: None,
             claude_hook: None,
+            claude_hold: None,
             prompt_cleared: None,
             empty_before_question: None,
             pending_input: None,
@@ -455,6 +462,7 @@ impl TerminalView {
     /// A UserPromptSubmit hook reported; the box is marked empty only if nothing was typed
     /// after the Enter that submitted it.
     pub fn note_prompt_submit(&mut self, cx: &mut Context<Self>) {
+        self.claude_hold = None;
         let enter = self.terminal.as_ref().and_then(|t| t.last_enter);
         if !submitted_cleanly(enter, self.last_input()) {
             return;
@@ -462,6 +470,27 @@ impl TerminalView {
         self.prompt_cleared = Some(Instant::now());
         cx.emit(TerminalEvent::Changed);
         cx.notify();
+    }
+
+    /// Claude ended its turn with `tasks` background tasks pending, so it still counts as running.
+    pub fn set_claude_waiting(&mut self, tasks: u16, only_shells: bool, cx: &mut Context<Self>) {
+        self.claude_hold = Some(Hold {
+            since: Instant::now(),
+            tasks,
+            capped: only_shells,
+        });
+        self.set_claude_hook(ClaudeState::Running, cx);
+    }
+
+    /// Drops the hold, as when a new Claude session starts in this terminal.
+    pub fn clear_claude_hold(&mut self) {
+        self.claude_hold = None;
+    }
+
+    /// How many background tasks Claude is waiting on, while it shows as running because of them.
+    pub fn claude_waiting(&self) -> Option<u16> {
+        let hold = self.claude_hold.filter(|h| h.active(Instant::now()))?;
+        (self.claude_state == Some(ClaudeState::Running)).then_some(hold.tasks)
     }
 
     /// The state Claude's last hook reported, however long ago.
@@ -490,6 +519,9 @@ impl TerminalView {
         };
         let news =
             !matches!(self.claude_hook, Some((last, at)) if last == state && !typed_since(at));
+        if state == ClaudeState::Finished {
+            self.claude_hold = None;
+        }
         let empty_now = !self.prompt_may_have_text();
         let before = self.claude_hook_state();
         let (asked, cleared) = hook_question(before, state, self.empty_before_question, empty_now);
@@ -525,16 +557,25 @@ impl TerminalView {
             return None;
         }
         let terminal = self.terminal.as_ref()?;
+        let now = Instant::now();
         claude_state(
             self.claude_hook,
             terminal.last_input,
             terminal.last_activity,
-            Instant::now(),
+            now,
+            self.claude_hold.is_some_and(|h| h.active(now)),
         )
     }
 
     /// Recomputes Claude state now, and while it is running again later so it can lapse.
     fn refresh_claude(&mut self, cx: &mut Context<Self>) {
+        if self
+            .claude_hold
+            .is_some_and(|h| h.capped && !h.active(Instant::now()))
+        {
+            self.claude_hold = None;
+            cx.emit(TerminalEvent::ShellWaitExpired);
+        }
         let state = self.current_claude_state();
         if state != self.claude_state {
             self.claude_state = state;
@@ -864,6 +905,7 @@ impl TerminalView {
                 self.foreground = process;
                 if !self.is_claude() {
                     self.claude_hook = None;
+                    self.claude_hold = None;
                     self.empty_before_question = None;
                 }
                 if !self.is_claude() || was.is_some() && was != self.foreground_pid() {
@@ -1855,6 +1897,19 @@ fn hook_question(
     }
 }
 
+#[derive(Clone, Copy)]
+struct Hold {
+    since: Instant,
+    tasks: u16,
+    capped: bool,
+}
+
+impl Hold {
+    fn active(self, now: Instant) -> bool {
+        !self.capped || now.saturating_duration_since(self.since) < CLAUDE_SHELL_WAIT
+    }
+}
+
 /// What a Claude Code tab shows, from its last hook report and when the user last typed and the
 /// program last drew something other than that typing's echo.
 fn claude_state(
@@ -1862,9 +1917,10 @@ fn claude_state(
     last_input: Option<Instant>,
     last_activity: Instant,
     now: Instant,
+    held: bool,
 ) -> Option<ClaudeState> {
     let quiet = now.saturating_duration_since(last_activity);
-    let lapsed = |limit| (quiet < limit).then_some(ClaudeState::Running);
+    let lapsed = |limit| (held || quiet < limit).then_some(ClaudeState::Running);
     match hook {
         // Approving a prompt fires no hook until the tool finishes; the spinner coming back does.
         Some((ClaudeState::NeedsInput, at))
@@ -2168,8 +2224,9 @@ mod tests {
     #[test]
     fn without_hooks_claude_runs_only_while_it_draws() {
         let t0 = Instant::now();
-        let state =
-            |active: f32, now: f32| claude_state(None, None, t0 + secs(active), t0 + secs(now));
+        let state = |active: f32, now: f32| {
+            claude_state(None, None, t0 + secs(active), t0 + secs(now), false)
+        };
         assert_eq!(state(0., 1.), Some(ClaudeState::Running));
         assert_eq!(state(0., 4.), None, "silence is not a question");
     }
@@ -2180,24 +2237,54 @@ mod tests {
         let hook = |s| Some((s, t0));
         let later = t0 + secs(60.);
         assert_eq!(
-            claude_state(hook(ClaudeState::NeedsInput), None, t0, later),
+            claude_state(hook(ClaudeState::NeedsInput), None, t0, later, false),
             Some(ClaudeState::NeedsInput)
         );
         assert_eq!(
-            claude_state(hook(ClaudeState::Finished), None, t0, later),
+            claude_state(hook(ClaudeState::Finished), None, t0, later, false),
             Some(ClaudeState::Finished)
         );
         assert_eq!(
-            claude_state(hook(ClaudeState::Running), None, t0 + secs(55.), later),
+            claude_state(
+                hook(ClaudeState::Running),
+                None,
+                t0 + secs(55.),
+                later,
+                false
+            ),
             Some(ClaudeState::Running)
         );
+    }
+
+    #[test]
+    fn a_held_running_session_does_not_lapse_when_silent() {
+        let t0 = Instant::now();
+        let running = Some((ClaudeState::Running, t0));
+        assert_eq!(
+            claude_state(running, None, t0, t0 + secs(600.), true),
+            Some(ClaudeState::Running)
+        );
+    }
+
+    #[test]
+    fn only_a_shell_hold_runs_out() {
+        let since = Instant::now();
+        let hold = |capped| Hold {
+            since,
+            tasks: 1,
+            capped,
+        };
+        let old = since + CLAUDE_SHELL_WAIT + secs(1.);
+        assert!(!hold(true).active(old));
+        assert!(hold(false).active(old));
+        assert!(hold(true).active(since + secs(60.)));
     }
 
     #[test]
     fn a_running_session_that_falls_silent_was_interrupted() {
         let t0 = Instant::now();
         let running = Some((ClaudeState::Running, t0));
-        assert_eq!(claude_state(running, None, t0, t0 + secs(11.)), None);
+        assert_eq!(claude_state(running, None, t0, t0 + secs(11.), false), None);
     }
 
     #[test]
@@ -2206,12 +2293,12 @@ mod tests {
         let asked = Some((ClaudeState::NeedsInput, t0));
         let key = Some(t0 + secs(5.));
         assert_eq!(
-            claude_state(asked, key, t0 + secs(5.5), t0 + secs(6.)),
+            claude_state(asked, key, t0 + secs(5.5), t0 + secs(6.), false),
             Some(ClaudeState::NeedsInput),
             "moving through the dialog only redraws it"
         );
         assert_eq!(
-            claude_state(asked, key, t0 + secs(7.), t0 + secs(7.)),
+            claude_state(asked, key, t0 + secs(7.), t0 + secs(7.), false),
             Some(ClaudeState::Running)
         );
     }
@@ -2222,7 +2309,7 @@ mod tests {
         let asked = Some((ClaudeState::NeedsInput, t0 + secs(10.)));
         let key = Some(t0 + secs(1.));
         assert_eq!(
-            claude_state(asked, key, t0 + secs(10.), t0 + secs(10.)),
+            claude_state(asked, key, t0 + secs(10.), t0 + secs(10.), false),
             Some(ClaudeState::NeedsInput)
         );
     }
