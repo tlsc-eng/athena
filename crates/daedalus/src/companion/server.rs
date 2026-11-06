@@ -3556,6 +3556,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_transcript_written_after_closing_a_waiting_one_is_not_sent() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        open_transcript(&mut ws, "s1", 10).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::TranscriptClose {
+                session: "s1".into(),
+            },
+        )
+        .await;
+        write_replies(&fx, "s1", 2);
+        let quiet = timeout(Duration::from_millis(1500), next_transcript(&mut ws)).await;
+        assert!(quiet.is_err(), "got {quiet:?} after the close");
+    }
+
+    #[tokio::test]
+    async fn reopening_a_waiting_transcript_sends_the_items_once() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["s1"]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        for _ in 0..2 {
+            let ServerMsg::Transcript { kind, items, .. } =
+                open_transcript(&mut ws, "s1", 10).await
+            else {
+                panic!("expected a transcript");
+            };
+            assert_eq!(kind, protocol::TranscriptKind::Page);
+            assert!(items.is_empty());
+        }
+        write_replies(&fx, "s1", 2);
+        let ServerMsg::Transcript { kind, items, .. } = next_transcript(&mut ws).await else {
+            panic!("expected a transcript");
+        };
+        assert_eq!(kind, protocol::TranscriptKind::Append);
+        assert_eq!(texts(&items), ["reply 0", "reply 1"]);
+        let extra = timeout(Duration::from_millis(1500), next_transcript(&mut ws)).await;
+        assert!(extra.is_err(), "got {extra:?} after the append");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_session_id_in_the_snapshot_cannot_be_opened() {
+        let fx = Fixture::new();
+        show_sessions(&fx, &["../x"]);
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        assert!(matches!(
+            open_transcript(&mut ws, "../x", 10).await,
+            ServerMsg::Error { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn a_waiting_transcript_counts_toward_the_open_limit() {
         let fx = Fixture::new();
         show_sessions(&fx, &["s1", "s2", "s3", "s4", "s5"]);

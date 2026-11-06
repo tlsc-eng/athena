@@ -283,8 +283,11 @@ impl Transcripts {
             .waiting
             .iter()
             .filter_map(|(session, w)| {
-                let path = transcripts::find(home, &w.cwd, session)
-                    .or_else(|| transcripts::find(home, &w.root, session))?;
+                let path = transcripts::find(home, &w.cwd, session).or_else(|| {
+                    (w.root != w.cwd)
+                        .then(|| transcripts::find(home, &w.root, session))
+                        .flatten()
+                })?;
                 Some((session.clone(), path))
             })
             .collect();
