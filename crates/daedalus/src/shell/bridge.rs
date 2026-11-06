@@ -120,8 +120,12 @@ impl Shell {
                 session: caller,
                 project: caller.and_then(|s| self.session_root(s)),
             },
-            AppMsg::ClaudeSession { session, cwd, .. } => {
-                self.claude_session_started(session, cwd, caller, cx);
+            AppMsg::ClaudeSession {
+                session,
+                cwd,
+                source,
+            } => {
+                self.claude_session_started(session, cwd, &source, caller, cx);
                 self.sync_review_columns(cx);
                 AppReply::Ok
             }

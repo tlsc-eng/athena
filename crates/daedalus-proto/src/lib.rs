@@ -136,11 +136,11 @@ pub enum AppMsg {
         cwd: PathBuf,
         source: String,
     },
-    /// The user submitted a prompt in the caller's Claude Code terminal. Last in the enum
-    /// because postcard encodes variants by position and older clients outlive an update.
+    /// The user submitted a prompt in the caller's Claude Code terminal. New variants go
+    /// last because postcard encodes variants by position and older clients outlive an update.
     ClaudePrompt,
     /// Claude ended its turn with `tasks` background tasks pending; `only_shells` is true when
-    /// every one is a shell or monitor. Last in the enum for the same reason as `ClaudePrompt`.
+    /// every one is a shell or monitor. New variants go last, as with `ClaudePrompt`.
     ClaudeWaiting {
         tasks: u16,
         only_shells: bool,
