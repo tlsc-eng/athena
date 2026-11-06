@@ -127,6 +127,10 @@ pub enum Command {
         root: PathBuf,
         reply: oneshot::Sender<Result<u64, String>>,
     },
+    ResumeClaude {
+        session: String,
+        reply: oneshot::Sender<Result<u64, String>>,
+    },
     /// Type into or interrupt a terminal pane.
     Act {
         pane: u64,
@@ -820,6 +824,12 @@ async fn connect(mut ws: Ws, mut slot: Slot, shared: &Shared) {
                                 let started = spawn_claude(shared, &current, id, project, busy).await;
                                 queue(&mut pending, &mut acting, None, started)
                             }
+                            ClientMsg::ResumeClaude { id, session } => {
+                                let current = Arc::clone(&snapshot.borrow());
+                                let busy = pending.len() >= MAX_IN_FLIGHT;
+                                let started = resume_claude(shared, &current, id, session, busy).await;
+                                queue(&mut pending, &mut acting, None, started)
+                            }
                             ClientMsg::UsageRefresh { id } => {
                                 let busy = pending.len() >= MAX_IN_FLIGHT;
                                 let started = usage_refresh(shared, id, busy).await;
@@ -1064,6 +1074,42 @@ async fn spawn_claude(
                 message,
             },
             _ => failed(id, "could not start claude"),
+        }
+    }))
+}
+
+async fn resume_claude(
+    shared: &Shared,
+    snapshot: &Snapshot,
+    id: String,
+    session: String,
+    busy: bool,
+) -> Result<Pending, ServerMsg> {
+    match snapshot.sessions.iter().find(|s| s.id == session) {
+        None => return Err(failed(id, "session is not listed")),
+        Some(s) if s.pane.is_some() => return Err(failed(id, "session is already open")),
+        Some(_) => {}
+    }
+    if busy {
+        return Err(failed(id, BUSY));
+    }
+    let (reply, answer) = oneshot::channel();
+    if shared
+        .commands
+        .send(Command::ResumeClaude { session, reply })
+        .await
+        .is_err()
+    {
+        return Err(failed(id, "could not resume claude"));
+    }
+    Ok(Box::pin(async move {
+        match timeout(SPAWN_WAIT, answer).await {
+            Ok(Ok(Ok(pane))) => ServerMsg::Spawned { id, pane },
+            Ok(Ok(Err(message))) => ServerMsg::Error {
+                id: Some(id),
+                message,
+            },
+            _ => failed(id, "could not resume claude"),
         }
     }))
 }
@@ -2353,6 +2399,84 @@ mod tests {
             }
         }
         assert!(fx.no_command());
+    }
+
+    fn listed_session(pane: Option<u64>) -> protocol::Session {
+        protocol::Session {
+            id: "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10".into(),
+            label: "s".into(),
+            pane,
+            project: Some("/p".into()),
+            cwd: "/p".into(),
+            main_root: "/p".into(),
+            branch: None,
+            state: protocol::SessionState::Idle,
+            unread: false,
+            todos: vec![],
+            plan: None,
+            needs: None,
+            files: 0,
+            modified_ms: 0,
+        }
+    }
+
+    fn resume_request() -> ClientMsg {
+        ClientMsg::ResumeClaude {
+            id: "r12".into(),
+            session: "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_of_an_unlisted_session_is_refused() {
+        let fx = Fixture::new();
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &resume_request()).await;
+        expect_error(&mut ws, "r12", "session is not listed").await;
+        assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn resume_of_an_open_session_is_refused() {
+        let fx = Fixture::new();
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            sessions: vec![listed_session(Some(7))],
+            ..Snapshot::default()
+        }));
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &resume_request()).await;
+        expect_error(&mut ws, "r12", "session is already open").await;
+        assert!(fx.no_command());
+    }
+
+    #[tokio::test]
+    async fn resume_is_forwarded_and_answers_spawned() {
+        let fx = Fixture::new();
+        fx.server.set_snapshot(Arc::new(Snapshot {
+            sessions: vec![listed_session(None)],
+            ..Snapshot::default()
+        }));
+        let (_, token) = fx.pair_device();
+        let mut ws = fx.welcomed(&token).await;
+        send_json(&mut ws, &resume_request()).await;
+        let Ok(Command::ResumeClaude { session, reply }) =
+            timeout(Duration::from_secs(5), fx.next_command())
+                .await
+                .expect("the resume never reached the app")
+        else {
+            panic!("expected a resume command");
+        };
+        assert_eq!(session, "5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10");
+        let _ = reply.send(Ok(456));
+        assert_eq!(
+            next_non_snapshot(&mut ws).await,
+            ServerMsg::Spawned {
+                id: "r12".into(),
+                pane: 456
+            }
+        );
     }
 
     #[tokio::test]

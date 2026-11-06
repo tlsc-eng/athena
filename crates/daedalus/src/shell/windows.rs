@@ -913,6 +913,7 @@ fn route_companion(command: Command, cx: &mut App) {
             reply,
         } => super::companion_ui::ask_to_pair(device, peer, reply, cx),
         Command::SpawnClaude { root, reply } => spawn_claude_for_phone(&root, reply, cx),
+        Command::ResumeClaude { session, reply } => resume_claude_for_phone(session, reply, cx),
         Command::Act {
             pane,
             action,
@@ -1178,6 +1179,17 @@ fn spawn_claude_for_phone(
         let _ = reply.send(Err("could not open a terminal".into()));
         return;
     };
+    reply_when_started(handle, root, item, reply, cx);
+}
+
+/// Answers `reply` with the pane of a new tab once phones can attach it.
+fn reply_when_started(
+    handle: WindowHandle<Shell>,
+    root: PathBuf,
+    item: ItemId,
+    reply: tokio::sync::oneshot::Sender<Result<u64, String>>,
+    cx: &mut App,
+) {
     cx.spawn(async move |cx| {
         let mut waited = Duration::ZERO;
         while waited < SPAWN_SESSION_WAIT {
@@ -1208,6 +1220,33 @@ fn spawn_claude_for_phone(
         let _ = reply.send(Err("claude did not start".into()));
     })
     .detach();
+}
+
+/// Resumes a listed past session in a new tab of its project.
+fn resume_claude_for_phone(
+    session: String,
+    reply: tokio::sync::oneshot::Sender<Result<u64, String>>,
+    cx: &mut App,
+) {
+    let found = handles(cx)
+        .into_iter()
+        .find(|h| h.read(cx).is_ok_and(|s| s.lists_session(&session)));
+    let Some(handle) = found else {
+        let _ = reply.send(Err("session is not listed".into()));
+        return;
+    };
+    let opened = handle.update(cx, |shell, window, cx| {
+        shell.resume_for_phone(&session, window, cx)
+    });
+    match opened {
+        Ok(Ok((root, item))) => reply_when_started(handle, root, item, reply, cx),
+        Ok(Err(message)) => {
+            let _ = reply.send(Err(message.into()));
+        }
+        Err(_) => {
+            let _ = reply.send(Err("could not open a terminal".into()));
+        }
+    }
 }
 
 /// The window and project index whose root is exactly `root`; a folder inside a project is not a match.

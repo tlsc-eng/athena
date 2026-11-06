@@ -18,7 +18,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 - Text frames carry one JSON object with a snake_case `"type"`. An unknown `type` from the phone makes the desktop close the socket, and the phone skips a message from the desktop whose `type` it does not know. The phone sends the transcript, act and usage messages only when `welcome.features` lists `transcript`, `usage` and `act`, reads `terminal.dialog` only when it lists `dialog`, reads `terminal.suggestion` only when it lists `suggestion`, and sends `answer` only when it lists `answer`.
 - Binary frames carry terminal bytes: `[kind u8][pane u64 big-endian][payload]`. Kind `1` is output (desktop to phone), kind `2` is input (phone to desktop). The payload is at most 64 KiB, and a frame with a shorter header, an unknown kind or a larger payload is invalid.
 - Optional fields are omitted when absent.
-- Replies to `spawn_claude`, `prompt`, `interrupt`, `answer` and `usage_refresh` come when the desktop has finished, not in request order, and `snapshot` and ping frames keep flowing in between. The phone matches a reply to its request by `id`. The desktop holds at most 8 such requests per connection and answers a ninth at once with `error` `busy`, without acting on it.
+- Replies to `spawn_claude`, `resume_claude`, `prompt`, `interrupt`, `answer` and `usage_refresh` come when the desktop has finished, not in request order, and `snapshot` and ping frames keep flowing in between. The phone matches a reply to its request by `id`. The desktop holds at most 8 such requests per connection and answers a ninth at once with `error` `busy`, without acting on it.
 
 ## Session flow
 
@@ -63,6 +63,12 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 
 ```json
 {"type":"spawn_claude","id":"r1","project":"/Users/jason/code/daedalus"}
+```
+
+`resume_claude`: resume a past session in a new terminal tab of its project. `session` must be in the latest snapshot with no pane; a session that is already open, or running in another terminal app, is refused. `id` is echoed in `spawned` or `error`, and the answer comes once the pane is in a snapshot. Claude keeps the session id, so the session reappears with that pane once Claude starts. Send it only when `features` lists `resume`.
+
+```json
+{"type":"resume_claude","id":"r12","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10"}
 ```
 
 `refresh`: ask for a fresh `snapshot`.
@@ -141,10 +147,10 @@ One `prompt`, `interrupt` or `close` per pane at a time: a second one for a pane
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `close` for `close`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit`, `lease_ended` and `terminal.fitted`, `tool_output` for the output fields on tool items and the `tool_output` request, `suggestion` for `terminal.suggestion`), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `close` for `close`, `resume` for `resume_claude`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit`, `lease_ended` and `terminal.fitted`, `tool_output` for the output fields on tool items and the `tool_output` request, `suggestion` for `terminal.suggestion`), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output","suggestion","close"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output","suggestion","close","resume"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -212,7 +218,7 @@ One `prompt`, `interrupt` or `close` per pane at a time: a second one for a pane
 {"type":"dropped","pane":123,"reason":"lagging"}
 ```
 
-`spawned`: answer to `spawn_claude`.
+`spawned`: answer to `spawn_claude` or `resume_claude`.
 
 ```json
 {"type":"spawned","id":"r1","pane":456}

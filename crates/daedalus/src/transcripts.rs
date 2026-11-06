@@ -64,6 +64,38 @@ pub fn running_sessions(home: &Path, pids: &[i32]) -> HashMap<i32, (String, Path
         .collect()
 }
 
+/// Pids with a `<pid>.json` in `sessions_dir` whose process is alive.
+pub(crate) fn live_session_pids(sessions_dir: &Path) -> Vec<i32> {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension()? != "json" {
+                return None;
+            }
+            path.file_stem()?.to_str()?.parse::<i32>().ok()
+        })
+        .filter(|&pid| {
+            // EPERM means the process exists but belongs to someone else.
+            pid > 0
+                && (unsafe { libc::kill(pid, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+        })
+        .collect()
+}
+
+/// Whether a live Claude process under any profile of `home` runs session `id`.
+pub(crate) fn session_running_elsewhere(home: &Path, id: &str) -> bool {
+    let pids: Vec<i32> = profiles(home)
+        .iter()
+        .flat_map(|profile| live_session_pids(&profile.dir.join("sessions")))
+        .collect();
+    running_sessions(home, &pids).values().any(|(s, _)| s == id)
+}
+
 /// Config folders under `home` that hold transcripts.
 pub fn profiles(home: &Path) -> Vec<Profile> {
     let mut out = Vec::new();
@@ -603,6 +635,7 @@ mod tests {
     }
 
     const SID: &str = "0b6c1e3a-1f2d-4c1b-9d55-1f0d2c3b4a5e";
+    const OTHER: &str = "2d8e3a5c-3b4f-4e3d-9f77-3b2f4e5d6c7a";
 
     #[test]
     fn running_sessions_reads_a_non_default_profile() {
@@ -627,6 +660,32 @@ mod tests {
         );
         write_pid_file(&home, ".claude-tlsc", 3, "not json");
         assert!(running_sessions(&home, &[1, 2, 3, 4]).is_empty());
+    }
+
+    #[test]
+    fn live_session_pids_keeps_only_live_numeric_pid_files() {
+        let home = temp("live-pids");
+        let own = std::process::id() as i32;
+        write_pid_file(&home, ".claude", own, "{}");
+        write_pid_file(&home, ".claude", 999_999_999, "{}");
+        write_pid_file(&home, ".claude", 0, "{}");
+        let dir = home.join(".claude/sessions");
+        fs::write(dir.join("notapid.json"), "{}").unwrap();
+        fs::write(dir.join(format!("{own}.txt")), "").unwrap();
+        assert_eq!(live_session_pids(&dir), vec![own]);
+        assert!(live_session_pids(&home.join("missing")).is_empty());
+    }
+
+    #[test]
+    fn a_live_process_holding_the_session_is_running_elsewhere() {
+        let home = temp("elsewhere");
+        let own = std::process::id() as i32;
+        let body = format!(r#"{{"pid":{own},"sessionId":"{SID}","cwd":"/a"}}"#);
+        write_pid_file(&home, ".claude", own, &body);
+        let dead = format!(r#"{{"pid":999999999,"sessionId":"{OTHER}","cwd":"/a"}}"#);
+        write_pid_file(&home, ".claude", 999_999_999, &dead);
+        assert!(session_running_elsewhere(&home, SID));
+        assert!(!session_running_elsewhere(&home, OTHER));
     }
 
     #[test]
