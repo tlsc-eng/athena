@@ -14,6 +14,7 @@ pub const FEATURES: &[&str] = &[
     "tool_output",
     "suggestion",
     "close",
+    "resume",
 ];
 
 /// Largest payload of one binary frame.
@@ -70,6 +71,10 @@ pub enum ClientMsg {
     SpawnClaude {
         id: String,
         project: String,
+    },
+    ResumeClaude {
+        id: String,
+        session: String,
     },
     Refresh,
     TranscriptOpen {
@@ -800,6 +805,13 @@ mod tests {
             &ClientMsg::SpawnClaude {
                 id: "r1".into(),
                 project: "/Users/jason/code/daedalus".into(),
+            },
+        );
+        golden(
+            "resume_claude",
+            &ClientMsg::ResumeClaude {
+                id: "r12".into(),
+                session: SESSION_ID.into(),
             },
         );
         golden("refresh", &ClientMsg::Refresh);

@@ -8,7 +8,7 @@ use daedalus_editor::{EditorView, diff};
 use daedalus_proto::{AppMsg, PaneId, TodoInfo};
 use daedalus_ui::motion::{Closing, Opening};
 use daedalus_ui::{ButtonKind, DotState, Ellipsis, MenuItem, Space, Theme, Tooltip};
-use daedalus_workspace::{DiffBase, SideMode};
+use daedalus_workspace::{DiffBase, ItemId, SideMode};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, MouseButton, MouseDownEvent, PromptLevel,
     Task, Window, actions, div, prelude::*,
@@ -675,6 +675,43 @@ impl Shell {
         if state.root.as_deref() != Some(root) || (reload && idle) {
             self.load_claude_sessions(root.to_path_buf(), cx);
         }
+    }
+
+    pub(super) fn lists_session(&self, id: &str) -> bool {
+        self.review.sessions.row(id).is_some()
+    }
+
+    /// Opens a new tab resuming `id` from its row's project, for a phone that asked to.
+    pub(super) fn resume_for_phone(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(PathBuf, ItemId), &'static str> {
+        if self.session_running(id, cx) {
+            return Err("session is already open");
+        }
+        if std::env::home_dir()
+            .is_some_and(|home| transcripts::session_running_elsewhere(&home, id))
+        {
+            return Err("session is running elsewhere");
+        }
+        let row = self
+            .review
+            .sessions
+            .row(id)
+            .ok_or("session is not listed")?;
+        let profile = row.profile.as_ref().ok_or("session has no transcript")?;
+        let command =
+            resume_command(id, profile.config_dir.as_deref()).ok_or("session cannot be resumed")?;
+        let root = row.root.clone();
+        // Claude finds a session by the folder it ran in, so a worktree's is resumed from there.
+        let index = self.workspace.projects.iter().position(|p| p.root == root);
+        if let Some(index) = index.filter(|i| Some(*i) != self.workspace.active) {
+            self.switch_to(index, cx);
+        }
+        self.run_in_new_terminal_tab(command, window, cx)
+            .ok_or("could not open a terminal")
     }
 
     pub(super) fn resume_claude_session(
