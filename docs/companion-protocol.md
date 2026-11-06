@@ -111,7 +111,13 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 {"type":"interrupt","id":"r10","pane":123}
 ```
 
-One `prompt` or `interrupt` per pane at a time: a second one for a pane whose first has no reply yet gets `error` `busy`, without acting on it.
+`close`: close the tab holding a Claude pane, as closing it on the Mac does; Claude is stopped mid-turn. `pane is not open` / `this is not a Claude session`. `id` is echoed in `sent` or `error`.
+
+```json
+{"type":"close","id":"r11","pane":123}
+```
+
+One `prompt`, `interrupt` or `close` per pane at a time: a second one for a pane whose first has no reply yet gets `error` `busy`, without acting on it.
 
 `answer`: answer the dialog open in a Claude pane, one verified key at a time. `key` is the `terminal.dialog.key` the phone showed. The pane must be in the latest snapshot and Claude must be in `needs_input` (`this is not a Claude session` or `Claude is not asking anything` otherwise), and a second answer for the same pane while one runs gets `Already answering`.
 - A `select` dialog takes `answers: [{"pick":["<label>"]}]`; a `review` dialog takes `answers: []` and presses "Submit answers".
@@ -135,10 +141,10 @@ One `prompt` or `interrupt` per pane at a time: a second one for a pane whose fi
 
 ## Desktop to phone (`/v1/connect`)
 
-`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit`, `lease_ended` and `terminal.fitted`, `tool_output` for the output fields on tool items and the `tool_output` request, `suggestion` for `terminal.suggestion`), and is omitted when empty.
+`welcome`: answer to `hello`. `server` is the server id: 16 lowercase hex characters, generated once and stored in the Daedalus data directory, so it stays the same across restarts. Phones key their pairing by it. `features` lists the optional message groups the desktop handles (`transcript` for the transcript messages, `usage` for `snapshot.usage` and `usage_refresh`, `act` for `prompt` and `interrupt`, `close` for `close`, `dialog` for `terminal.dialog`, `answer` for `answer`, `subagents` for `subagents`, `fit` for `fit`, `unfit`, `lease_ended` and `terminal.fitted`, `tool_output` for the output fields on tool items and the `tool_output` request, `suggestion` for `terminal.suggestion`), and is omitted when empty.
 
 ```json
-{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output","suggestion"]}
+{"type":"welcome","proto":1,"server":"a1b2c3d4e5f60718","name":"Jason's Mac","app":"2.0.1","features":["transcript","usage","act","dialog","answer","subagents","fit","tool_output","suggestion","close"]}
 ```
 
 `snapshot`: the whole state. `session.unread` is a boolean and `session.files` is the count of changed files. `session.state` and `terminal.claude` are `running`, `needs_input`, `finished` or `idle`. The desktop omits `terminal.claude` when no Claude session runs in the pane, and never sends `idle` there. See `design/protocol/snapshot.json` for a full example with every optional field set.
@@ -279,7 +285,7 @@ The optional fields are omitted when absent. The list holds at most 20 agents: r
 
 The desktop sends `subagents` after the `page` of a `transcript_open` and after a reset page when the list is not empty, and whenever the list changes while the transcript is open, even to empty. At most one is queued per session, and a newer one replaces it. The phone sends nothing new.
 
-`sent`: answer to `prompt`, `interrupt` or `answer` once the keys have been written to the pane, and to `usage_refresh` once the desktop has handled it.
+`sent`: answer to `prompt`, `interrupt`, `close` or `answer` once the keys have been written to the pane or the tab closed, and to `usage_refresh` once the desktop has handled it.
 
 ```json
 {"type":"sent","id":"r7"}

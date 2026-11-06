@@ -13,6 +13,7 @@
     "subagents",
     "fit",
     "tool_output",
-    "suggestion"
+    "suggestion",
+    "close"
   ]
 }

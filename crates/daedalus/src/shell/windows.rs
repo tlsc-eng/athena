@@ -982,14 +982,15 @@ fn act_refusal(
     act::gate(v.is_claude(), v.claude_state(), action)
 }
 
-/// Types a phone's prompt into a terminal, or presses Esc in it, and answers once the keys are written.
+/// Types a phone's prompt into a terminal, presses Esc in it, or closes its tab, and answers once the keys are written.
 fn act_for_phone(
     pane: PaneId,
     action: Action,
     reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     cx: &mut App,
 ) {
-    let view = session_holder(pane, cx).and_then(|handle| {
+    let holder = session_holder(pane, cx);
+    let view = holder.as_ref().and_then(|handle| {
         let shell = handle.read(cx).ok()?;
         match shell.items.get(&shell.find_session(pane)?) {
             Some(ItemView::Terminal(t)) => Some(t.clone()),
@@ -1008,6 +1009,27 @@ fn act_for_phone(
         Action::Interrupt => {
             view.update(cx, |v, cx| v.type_text(b"\x1b".to_vec(), cx));
             let _ = reply.send(Ok(()));
+        }
+        Action::Close => {
+            if cx.global::<Windows>().companion_answering.contains(&pane) {
+                let _ = reply.send(Err("Already answering".into()));
+                return;
+            }
+            let closed = holder
+                .and_then(|h| {
+                    h.update(cx, |shell, window, cx| {
+                        shell.close_session_tab(pane, window, cx)
+                    })
+                    .ok()
+                })
+                .unwrap_or(false);
+            if closed {
+                cx.global_mut::<Windows>().companion_dirty = true;
+                super::companion::push_snapshot(cx);
+                let _ = reply.send(Ok(()));
+            } else {
+                let _ = reply.send(Err("pane is not open".into()));
+            }
         }
         Action::Answer { key, answers } => {
             let goal = Goal {
