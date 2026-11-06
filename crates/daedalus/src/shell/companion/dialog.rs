@@ -620,6 +620,8 @@ mod tests {
     const MULTI_SUBMIT: &str = include_str!("dialogs/synthetic-multi-select-submit.txt");
     const TABS: &str = include_str!("dialogs/synthetic-tabs.txt");
     const SINGLE_CHAT: &str = include_str!("dialogs/synthetic-single-select-chat.txt");
+    const MULTI_CHAT: &str = include_str!("dialogs/synthetic-multi-select-chat.txt");
+    const MULTI_CHAT_SUBMIT: &str = include_str!("dialogs/synthetic-multi-select-chat-submit.txt");
     const TABS_CHAT: &str = include_str!("dialogs/synthetic-tabs-chat.txt");
     const CHAT_FOCUSED: &str = include_str!("dialogs/synthetic-chat-focused.txt");
     const REVIEW: &str = include_str!("dialogs/synthetic-review.txt");
@@ -657,6 +659,20 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_select_with_the_chat_row_is_a_question() {
+        for (screen, highlight) in [(MULTI_CHAT, 0), (MULTI_CHAT_SUBMIT, 3)] {
+            let d = dialog(screen);
+            assert_eq!(d.kind, DialogKind::Question);
+            assert_eq!(d.tabs.len(), 1);
+            assert_eq!(d.tabs[0].label, "Sizes");
+            assert_eq!(labels(&d), ["A", "B", "Other"]);
+            assert_eq!(d.highlight, Some(highlight));
+            assert_eq!(d.submit.as_deref(), Some("Submit"));
+            assert!(!d.partial);
+        }
+    }
+
+    #[test]
     fn a_tabbed_form_with_the_chat_row_keeps_its_tabs() {
         let (with, without) = (dialog(TABS_CHAT), dialog(TABS));
         assert_eq!(with.tabs, without.tabs);
@@ -675,6 +691,7 @@ mod tests {
     fn the_lone_chip_is_not_the_title() {
         let rule = "─".repeat(60);
         let screen = SINGLE_CHAT.replace(&format!(" {rule}\n   4. Chat about this\n"), "");
+        assert_ne!(screen, SINGLE_CHAT);
         let d = dialog(&screen);
         assert_eq!(d.title.as_deref(), Some("Which colour?"));
         assert!(d.tabs.is_empty());
