@@ -706,8 +706,13 @@ impl Shell {
             resume_command(id, profile.config_dir.as_deref()).ok_or("session cannot be resumed")?;
         let root = row.root.clone();
         // Claude finds a session by the folder it ran in, so a worktree's is resumed from there.
-        let index = self.workspace.projects.iter().position(|p| p.root == root);
-        if let Some(index) = index.filter(|i| Some(*i) != self.workspace.active) {
+        let index = self
+            .workspace
+            .projects
+            .iter()
+            .position(|p| p.root == root)
+            .ok_or("project is not open")?;
+        if Some(index) != self.workspace.active {
             self.switch_to(index, cx);
         }
         self.run_in_new_terminal_tab(command, window, cx)

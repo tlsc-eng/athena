@@ -89,10 +89,11 @@ pub(crate) fn live_session_pids(sessions_dir: &Path) -> Vec<i32> {
 
 /// Whether a live Claude process under any profile of `home` runs session `id`.
 pub(crate) fn session_running_elsewhere(home: &Path, id: &str) -> bool {
-    profiles(home).iter().any(|profile| {
-        let pids = live_session_pids(&profile.dir.join("sessions"));
-        running_sessions(home, &pids).values().any(|(s, _)| s == id)
-    })
+    let pids: Vec<i32> = profiles(home)
+        .iter()
+        .flat_map(|profile| live_session_pids(&profile.dir.join("sessions")))
+        .collect();
+    running_sessions(home, &pids).values().any(|(s, _)| s == id)
 }
 
 /// Config folders under `home` that hold transcripts.

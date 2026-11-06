@@ -68,7 +68,7 @@ A request with an `Origin` header is refused with 403. The server pings every 20
 `resume_claude`: resume a past session in a new terminal tab of its project. `session` must be in the latest snapshot with no pane; a session that is already open, or running in another terminal app, is refused. `id` is echoed in `spawned` or `error`, and the answer comes once the pane is in a snapshot. Claude keeps the session id, so the session reappears with that pane once Claude starts. Send it only when `features` lists `resume`.
 
 ```json
-{"type":"resume_claude","id":"r12","session":"9f3c2a1e-4b5d-4c6e-8f70-1a2b3c4d5e6f"}
+{"type":"resume_claude","id":"r12","session":"5d1f0c2e-8a47-4b9e-9c1a-3f6e2b7a9d10"}
 ```
 
 `refresh`: ask for a fresh `snapshot`.
