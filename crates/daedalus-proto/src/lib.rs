@@ -139,6 +139,12 @@ pub enum AppMsg {
     /// The user submitted a prompt in the caller's Claude Code terminal. Last in the enum
     /// because postcard encodes variants by position and older clients outlive an update.
     ClaudePrompt,
+    /// Claude ended its turn with `tasks` background tasks pending; `only_shells` is true when
+    /// every one is a shell or monitor. Last in the enum for the same reason as `ClaudePrompt`.
+    ClaudeWaiting {
+        tasks: u16,
+        only_shells: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

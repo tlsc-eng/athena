@@ -129,6 +129,10 @@ impl Shell {
                 self.claude_prompt_submitted(caller, cx);
                 AppReply::Ok
             }
+            AppMsg::ClaudeWaiting { tasks, only_shells } => {
+                self.claude_waiting(caller, tasks, only_shells, cx);
+                AppReply::Ok
+            }
             msg @ (AppMsg::ClaudeTodos { .. } | AppMsg::ClaudePlan { .. }) => {
                 self.claude_plan_event(msg, caller, cx);
                 AppReply::Ok

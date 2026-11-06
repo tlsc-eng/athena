@@ -504,6 +504,13 @@ impl Shell {
                 self.review.sessions.cwds.insert(session.clone(), cwd);
             }
             self.bind_session(pane, session, cx);
+            if let Some(ItemView::Terminal(view)) = self
+                .find_session(pane)
+                .and_then(|k| self.items.get(&k))
+                .cloned()
+            {
+                view.update(cx, |v, _| v.clear_claude_hold());
+            }
             self.deliver_pending(cx);
             cx.notify();
         }

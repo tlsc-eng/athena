@@ -473,6 +473,20 @@ impl Shell {
             view.update(cx, |v, cx| v.note_prompt_submit(cx));
         }
     }
+
+    /// A Stop hook came from `pane`'s Claude with background tasks still pending.
+    pub(in crate::shell) fn claude_waiting(
+        &mut self,
+        pane: Option<PaneId>,
+        tasks: u16,
+        only_shells: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let key = pane.and_then(|p| self.find_session(p));
+        if let Some(ItemView::Terminal(view)) = key.and_then(|k| self.items.get(&k)).cloned() {
+            view.update(cx, |v, cx| v.set_claude_waiting(tasks, only_shells, cx));
+        }
+    }
 }
 
 #[cfg(test)]

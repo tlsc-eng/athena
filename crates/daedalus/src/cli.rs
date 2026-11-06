@@ -95,18 +95,18 @@ fn tool_notice(tool: Option<&str>) -> NoticeKind {
     }
 }
 
-/// Claude stops between turns while its background agents work; it resumes when they report.
-/// Shells and monitors are left out, as a dev server or watcher may never end.
-fn stop_notice(input: &HookInput) -> NoticeKind {
-    if input
-        .background_tasks
-        .iter()
-        .any(|t| matches!(t.kind.as_str(), "subagent" | "workflow"))
-    {
-        NoticeKind::ClaudeRunning
-    } else {
-        NoticeKind::ClaudeStopped
+/// Claude stops between turns while its background tasks work; it resumes when they report.
+fn waiting_message(input: &HookInput) -> Option<AppMsg> {
+    let tasks = &input.background_tasks;
+    if tasks.is_empty() {
+        return None;
     }
+    Some(AppMsg::ClaudeWaiting {
+        tasks: u16::try_from(tasks.len()).unwrap_or(u16::MAX),
+        only_shells: tasks
+            .iter()
+            .all(|t| matches!(t.kind.as_str(), "shell" | "monitor")),
+    })
 }
 
 /// What a SessionStart hook tells the window; a `source` Claude adds later is passed on as is.
@@ -246,6 +246,12 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
         let _ = tell_window(AppMsg::ClaudePrompt);
         return Ok(());
     }
+    if event.as_deref() == Some("claude-stop")
+        && let Some(msg) = waiting_message(&hook_input())
+    {
+        let _ = tell_window(msg);
+        return Ok(());
+    }
     if event.as_deref() == Some("claude-session") {
         if let Some(msg) = session_message(hook_input()) {
             let _ = tell_window(msg);
@@ -265,7 +271,7 @@ fn notify(args: &[&str]) -> anyhow::Result<()> {
         return Ok(());
     }
     let kind = match (event.as_deref(), flag("--title")) {
-        (Some("claude-stop"), _) => stop_notice(&hook_input()),
+        (Some("claude-stop"), _) => NoticeKind::ClaudeStopped,
         (Some("claude-running"), _) => NoticeKind::ClaudeRunning,
         (Some("claude-tool"), _) => tool_notice(hook_input().tool_name.as_deref()),
         (Some("claude-needs-input"), _) => NoticeKind::ClaudeNeedsInput {
@@ -472,23 +478,32 @@ mod tests {
     }
 
     #[test]
-    fn claude_finishes_only_once_its_background_agents_are_done() {
-        let stop = |tasks: serde_json::Value| {
-            stop_notice(&hook_input(serde_json::json!({
+    fn waiting_message() {
+        let msg = |tasks: serde_json::Value| {
+            super::waiting_message(&hook_input(serde_json::json!({
                 "session_id": "s",
                 "background_tasks": tasks,
             })))
         };
-        let task =
-            |kind: &str| serde_json::json!([{ "id": "t1", "type": kind, "status": "running" }]);
-        assert_eq!(stop(task("subagent")), NoticeKind::ClaudeRunning);
-        assert_eq!(stop(task("workflow")), NoticeKind::ClaudeRunning);
-        assert_eq!(stop(task("shell")), NoticeKind::ClaudeStopped);
-        assert_eq!(stop(task("monitor")), NoticeKind::ClaudeStopped);
-        assert_eq!(stop(serde_json::json!([])), NoticeKind::ClaudeStopped);
+        let task = |kind: &str| serde_json::json!({ "id": "t", "type": kind, "status": "running" });
+        let waiting = |tasks, only_shells| Some(AppMsg::ClaudeWaiting { tasks, only_shells });
+        for kind in ["subagent", "workflow", "teammate", "other"] {
+            assert_eq!(msg(serde_json::json!([task(kind)])), waiting(1, false));
+        }
+        assert_eq!(msg(serde_json::json!([task("shell")])), waiting(1, true));
+        assert_eq!(msg(serde_json::json!([task("monitor")])), waiting(1, true));
         assert_eq!(
-            stop_notice(&hook_input(serde_json::json!({ "session_id": "s" }))),
-            NoticeKind::ClaudeStopped
+            msg(serde_json::json!([task("shell"), task("monitor")])),
+            waiting(2, true)
+        );
+        assert_eq!(
+            msg(serde_json::json!([task("shell"), task("subagent")])),
+            waiting(2, false)
+        );
+        assert_eq!(msg(serde_json::json!([])), None);
+        assert_eq!(
+            super::waiting_message(&hook_input(serde_json::json!({ "session_id": "s" }))),
+            None
         );
     }
 
