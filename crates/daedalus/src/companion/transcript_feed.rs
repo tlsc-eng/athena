@@ -34,10 +34,19 @@ struct Open {
     sent: Vec<Subagent>,
 }
 
+/// A session in the snapshot whose transcript file Claude has not written yet.
+struct Waiting {
+    epoch: u64,
+    cwd: PathBuf,
+    root: PathBuf,
+    limit: usize,
+}
+
 /// Up to four transcripts of one connection, polled for growth every half second.
 pub(super) struct Transcripts {
     home: Option<PathBuf>,
     open: HashMap<String, Open>,
+    waiting: HashMap<String, Waiting>,
     epoch: u64,
     reading: Option<JoinHandle<Reads>>,
     ready: VecDeque<ServerMsg>,
@@ -51,6 +60,7 @@ impl Transcripts {
         Self {
             home,
             open: HashMap::new(),
+            waiting: HashMap::new(),
             epoch: 0,
             reading: None,
             ready: VecDeque::new(),
@@ -69,7 +79,12 @@ impl Transcripts {
         let Some(known) = snapshot.sessions.iter().find(|s| s.id == session) else {
             return error(id, "session is not open");
         };
-        if !self.open.contains_key(&session) && self.open.len() >= MAX_OPEN {
+        if !crate::snapshots::valid_session(&session) {
+            return error(id, "transcript not found");
+        }
+        let held = self.open.len() + self.waiting.len();
+        let known_here = self.open.contains_key(&session) || self.waiting.contains_key(&session);
+        if held - usize::from(known_here) >= MAX_OPEN {
             return error(id, "too many transcripts open");
         }
         let Some(home) = self.home.clone() else {
@@ -77,6 +92,7 @@ impl Transcripts {
         };
         let (cwd, root) = (PathBuf::from(&known.cwd), PathBuf::from(&known.main_root));
         let wanted = session.clone();
+        let (wait_cwd, wait_root) = (cwd.clone(), root.clone());
         let loaded = tokio::task::spawn_blocking(move || {
             let path = transcripts::find(&home, &cwd, &wanted)
                 .or_else(|| transcripts::find(&home, &root, &wanted))?;
@@ -88,10 +104,26 @@ impl Transcripts {
         .await
         .ok()
         .flatten();
-        let Some((path, stamp, mut feed)) = loaded else {
-            return error(id, "transcript not found");
-        };
         let limit = clamp(limit);
+        let Some((path, stamp, mut feed)) = loaded else {
+            self.forget(&session);
+            self.epoch += 1;
+            self.waiting.insert(
+                session.clone(),
+                Waiting {
+                    epoch: self.epoch,
+                    cwd: wait_cwd,
+                    root: wait_root,
+                    limit,
+                },
+            );
+            return ServerMsg::Transcript {
+                session,
+                kind: TranscriptKind::Page,
+                items: Vec::new(),
+                before: None,
+            };
+        };
         let page = page_message(&session, &feed, limit);
         let agents = feed.subagents();
         feed.take_subagents_changed();
@@ -200,7 +232,7 @@ impl Transcripts {
                 }
                 continue;
             }
-            if self.open.is_empty() {
+            if self.open.is_empty() && self.waiting.is_empty() {
                 std::future::pending::<()>().await;
             }
             self.tick.tick().await;
@@ -210,12 +242,14 @@ impl Transcripts {
 
     fn forget(&mut self, session: &str) {
         self.open.remove(session);
+        self.waiting.remove(session);
         self.ready.retain(|m| {
             !matches!(m, ServerMsg::Transcript { session: s, .. } | ServerMsg::Subagents { session: s, .. } if s == session)
         });
     }
 
     fn start_reading(&mut self) {
+        self.promote_waiting();
         let changed: Vec<_> = self
             .open
             .iter_mut()
@@ -239,6 +273,41 @@ impl Transcripts {
                 })
                 .collect()
         }));
+    }
+
+    fn promote_waiting(&mut self) {
+        let Some(home) = self.home.as_deref() else {
+            return;
+        };
+        let found: Vec<_> = self
+            .waiting
+            .iter()
+            .filter_map(|(session, w)| {
+                let path = transcripts::find(home, &w.cwd, session).or_else(|| {
+                    (w.root != w.cwd)
+                        .then(|| transcripts::find(home, &w.root, session))
+                        .flatten()
+                })?;
+                Some((session.clone(), path))
+            })
+            .collect();
+        for (session, path) in found {
+            let Some(w) = self.waiting.remove(&session) else {
+                continue;
+            };
+            self.open.insert(
+                session,
+                Open {
+                    epoch: w.epoch,
+                    feed: Arc::new(Mutex::new(Feed::new(path.clone()))),
+                    path,
+                    stamp: None,
+                    limit: w.limit,
+                    agents: false,
+                    sent: Vec::new(),
+                },
+            );
+        }
     }
 
     fn deliver(&mut self, session: &str, epoch: u64, read: Read) {
