@@ -1,0 +1,15 @@
+❯ Call the AskUserQuestion tool now with exactly one question: header Sizes, question 'Which
+  sizes?', multiSelect true, options A and B. Do nothing else.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Sizes  ✔ Submit  →
+
+Review your answers
+
+ ● Which sizes?
+   → A
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel

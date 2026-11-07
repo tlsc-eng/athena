@@ -27,12 +27,14 @@ struct Row {
     text: String,
 }
 
-/// Parses the screen lines into a dialog, or `None` when no dialog footer is on screen.
+/// Parses the screen lines into a dialog, or `None` when neither a dialog footer nor a review screen is on screen.
 pub(super) fn parse(lines: &[String]) -> Option<Dialog> {
-    let footer = lines
-        .iter()
-        .rposition(|line| FOOTERS.iter().any(|f| line.contains(f)))?;
-    let mut screen: Vec<Line> = lines[..footer].iter().map(|l| normalise(l)).collect();
+    let end = review_end(lines).or_else(|| {
+        lines
+            .iter()
+            .rposition(|line| FOOTERS.iter().any(|f| line.contains(f)))
+    })?;
+    let mut screen: Vec<Line> = lines[..end].iter().map(|l| normalise(l)).collect();
     drop_chat_row(&mut screen);
     let (start, end) = block_bounds(&screen);
     let block = &screen[start..end];
@@ -47,6 +49,29 @@ pub(super) fn parse(lines: &[String]) -> Option<Dialog> {
     };
     let pc = pointer_col(&block[anchor]).unwrap_or_default();
     Some(read(block, anchor, pc))
+}
+
+const REVIEW_PROMPT: &str = "Ready to submit your answers?";
+
+/// The review screen draws no key-hint footer, so it ends at its last row when only rows follow its prompt.
+fn review_end(lines: &[String]) -> Option<usize> {
+    let screen: Vec<Line> = lines.iter().map(|l| normalise(l)).collect();
+    let last = screen.iter().rposition(|l| !is_blank(l))?;
+    let prompt = screen[..last]
+        .iter()
+        .rposition(|l| clean(l) == REVIEW_PROMPT)?;
+    screen[prompt + 1..=last]
+        .iter()
+        .filter(|l| !is_blank(l))
+        .all(|l| numbered(l))
+        .then_some(last + 1)
+}
+
+fn numbered(line: &[char]) -> bool {
+    let text = clean(line);
+    let text = text.trim_start_matches(POINTER).trim_start();
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    (1..=3).contains(&digits) && text[digits..].starts_with(". ")
 }
 
 fn read(block: &[Line], anchor: usize, pc: usize) -> Dialog {
@@ -626,6 +651,12 @@ mod tests {
     const CHAT_FOCUSED: &str = include_str!("dialogs/synthetic-chat-focused.txt");
     const REVIEW: &str = include_str!("dialogs/synthetic-review.txt");
     const SCROLLED: &str = include_str!("dialogs/synthetic-scrolled.txt");
+    const REAL_REVIEW: &str = include_str!("dialogs/real-review.txt");
+    const REAL_REVIEW_UNANSWERED: &str = include_str!("dialogs/real-review-unanswered.txt");
+    const REAL_REVIEW_MULTI: &str = include_str!("dialogs/real-review-multi-select.txt");
+    const REAL_TABS_FIRST: &str = include_str!("dialogs/real-tabs-first.txt");
+    const REAL_TABS: &str = include_str!("dialogs/real-tabs.txt");
+    const REAL_MULTI: &str = include_str!("dialogs/real-multi-select.txt");
 
     fn dialog(screen: &str) -> Dialog {
         parse(&screen.lines().map(str::to_string).collect::<Vec<_>>()).expect("a dialog")
@@ -836,6 +867,59 @@ mod tests {
         );
         assert_eq!(labels(&d), ["Submit answers", "Cancel"]);
         assert_eq!(d.tabs.len(), 2);
+    }
+
+    #[test]
+    fn the_real_review_has_no_footer_and_still_reads_as_a_review() {
+        let d = dialog(REAL_REVIEW);
+        assert_eq!(d.kind, DialogKind::Review);
+        assert_eq!(d.title.as_deref(), Some("Review your answers"));
+        assert_eq!(
+            d.lines,
+            ["● Which colour?", "→ Red", "● Which size?", "→ Small"]
+        );
+        assert_eq!(labels(&d), ["Submit answers", "Cancel"]);
+        assert_eq!(d.tabs.len(), 2);
+        assert!(d.tabs.iter().all(|t| t.answered));
+        assert_eq!(d.highlight, Some(0));
+        assert!(!d.partial);
+    }
+
+    #[test]
+    fn the_real_unanswered_review_keeps_its_warning() {
+        let d = dialog(REAL_REVIEW_UNANSWERED);
+        assert_eq!(d.kind, DialogKind::Review);
+        assert_eq!(d.lines[0], "⚠ You have not answered all questions");
+    }
+
+    #[test]
+    fn a_lone_multi_select_ends_on_a_review_with_its_one_tab() {
+        let d = dialog(REAL_REVIEW_MULTI);
+        assert_eq!(d.kind, DialogKind::Review);
+        assert_eq!(d.tabs.len(), 1);
+        assert_eq!(d.tabs[0].label, "Sizes");
+    }
+
+    #[test]
+    fn a_review_prompt_followed_by_other_text_is_not_a_dialog() {
+        let mut lines: Vec<String> = REAL_REVIEW.lines().map(str::to_string).collect();
+        lines.push("auto-continue in 5s · any key to stay".into());
+        assert!(parse(&lines).is_none());
+    }
+
+    #[test]
+    fn rows_without_the_review_prompt_are_not_a_dialog() {
+        let lines: Vec<String> = ["Pick one", "", "❯ 1. Submit answers", "  2. Cancel"]
+            .map(str::to_string)
+            .into();
+        assert!(parse(&lines).is_none());
+    }
+
+    #[test]
+    fn the_real_question_screens_parse_as_questions() {
+        for screen in [REAL_TABS_FIRST, REAL_TABS, REAL_MULTI] {
+            assert_eq!(dialog(screen).kind, DialogKind::Question);
+        }
     }
 
     #[test]
