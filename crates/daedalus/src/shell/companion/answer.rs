@@ -577,6 +577,12 @@ mod tests {
     const TABS: &str = include_str!("dialogs/synthetic-tabs.txt");
     const SINGLE_CHAT: &str = include_str!("dialogs/synthetic-single-select-chat.txt");
     const REVIEW: &str = include_str!("dialogs/synthetic-review.txt");
+    const REAL_TABS_FIRST: &str = include_str!("dialogs/real-tabs-first.txt");
+    const REAL_TABS: &str = include_str!("dialogs/real-tabs.txt");
+    const REAL_MULTI: &str = include_str!("dialogs/real-multi-select.txt");
+    const REAL_REVIEW: &str = include_str!("dialogs/real-review.txt");
+    const REAL_REVIEW_UNANSWERED: &str = include_str!("dialogs/real-review-unanswered.txt");
+    const REAL_REVIEW_MULTI: &str = include_str!("dialogs/real-review-multi-select.txt");
 
     const DOWN: &[u8] = b"\x1b[B";
     const UP: &[u8] = b"\x1b[A";
@@ -1153,6 +1159,65 @@ mod tests {
     #[test]
     fn a_review_that_warns_about_unanswered_questions_aborts() {
         let d = parse(REVIEW);
+        let g = goal(&d, Vec::new());
+        let (keys, end) = play(g, vec![Some(d)], false);
+        assert!(keys.is_empty());
+        assert_aborted(end, "not every question");
+    }
+
+    #[test]
+    fn a_real_two_question_form_submits_through_the_footerless_review() {
+        let first = parse(REAL_TABS_FIRST);
+        let g = goal(
+            &first,
+            vec![
+                pick(Some("Which colour?"), &["Red"], None),
+                pick(Some("Which size?"), &["Small"], None),
+            ],
+        );
+        let screens = vec![
+            Some(first),
+            Some(parse(REAL_TABS)),
+            Some(parse(REAL_REVIEW)),
+            None,
+        ];
+        let (keys, end) = play(g, screens, false);
+        assert_eq!(keys, [ENTER, ENTER, ENTER]);
+        assert_done(end);
+    }
+
+    #[test]
+    fn a_real_multi_select_submits_through_the_footerless_review() {
+        let m = parse(REAL_MULTI);
+        let g = goal(&m, vec![pick(Some("Which sizes?"), &["A"], None)]);
+        let on = checked(m.clone(), &[true, false, false]);
+        let screens = vec![
+            Some(m.clone()),
+            Some(on.clone()),
+            Some(at(on.clone(), 1)),
+            Some(at(on.clone(), 2)),
+            Some(at(on, 3)),
+            Some(parse(REAL_REVIEW_MULTI)),
+            None,
+        ];
+        let (keys, end) = play(g, screens, false);
+        assert_eq!(
+            keys,
+            [
+                b" ".to_vec(),
+                DOWN.to_vec(),
+                DOWN.to_vec(),
+                DOWN.to_vec(),
+                ENTER.to_vec(),
+                ENTER.to_vec()
+            ]
+        );
+        assert_done(end);
+    }
+
+    #[test]
+    fn a_real_unanswered_review_aborts() {
+        let d = parse(REAL_REVIEW_UNANSWERED);
         let g = goal(&d, Vec::new());
         let (keys, end) = play(g, vec![Some(d)], false);
         assert!(keys.is_empty());

@@ -1,0 +1,18 @@
+❯ Call the AskUserQuestion tool now with exactly two questions. Q1 header Color, question 'Which
+  colour?', options Red and Blue. Q2 header Size, question 'Which size?', options Small and Large.
+  Single-select both. Do nothing else.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Color  ☒ Size  ✔ Submit  →
+
+Review your answers
+
+ ● Which colour?
+   → Red
+ ● Which size?
+   → Small
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
